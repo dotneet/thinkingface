@@ -491,6 +491,32 @@ func keyTestHandler(rec *fakeRecorder, st *keyStorage) *Handler {
 	return h
 }
 
+func TestMaxSignedURLTTL(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		max  time.Duration
+		want time.Duration
+	}{
+		{"a ceiling below the signing limit is the answer", 12 * time.Hour, 12 * time.Hour},
+		{"no ceiling falls back to what GCS will sign", 0, signingLimit},
+		{"a negative ceiling is no ceiling", -time.Hour, signingLimit},
+		{"a ceiling above the signing limit is unreachable", 30 * 24 * time.Hour, signingLimit},
+		{"exactly the signing limit", signingLimit, signingLimit},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MaxSignedURLTTL(tt.max)
+			if got != tt.want {
+				t.Fatalf("MaxSignedURLTTL(%v) = %v, want %v", tt.max, got, tt.want)
+			}
+			// The contract callers rely on: no transfer, however large, can
+			// produce a URL that outlives this.
+			if ttl := TTLFor(time.Hour, tt.max, math.MaxInt64); ttl > got {
+				t.Fatalf("TTLFor produced %v, above the %v this reports as the maximum", ttl, got)
+			}
+		})
+	}
+}
+
 func TestTTLFor(t *testing.T) {
 	const (
 		base = time.Hour

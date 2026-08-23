@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/dotneet/thinkingface/backend/internal/lfs"
 	"github.com/dotneet/thinkingface/backend/internal/storage"
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
@@ -246,6 +248,36 @@ func stagingObject(key string, age time.Duration) storage.ObjectInfo {
 		Key:     key,
 		Size:    int64(len(key)),
 		Updated: time.Now().Add(-age),
+	}
+}
+
+// A zero TF_SIGNED_URL_MAX_TTL means "no ceiling", which makes signed URLs
+// live *longer* -- up to GCS's 7-day signing limit -- not shorter. Reading the
+// config value literally would hand back the 24h floor and have gc deleting
+// staging objects whose upload URL is still valid for days.
+func TestStagingGraceOutlastsEveryURLItCanFace(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		maxTTL time.Duration
+	}{
+		{"no ceiling configured", 0},
+		{"negative ceiling", -time.Hour},
+		{"ceiling above what GCS will sign", 30 * 24 * time.Hour},
+		{"shipped default", 12 * time.Hour},
+		{"tiny ceiling", time.Minute},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// Measured against TTLFor itself, not against the helper
+			// stagingGrace uses: asking the same function the implementation
+			// asks would move both sides together and assert nothing. An
+			// unbounded transfer is what pins the longest lifetime the
+			// signing path can ever hand out for this ceiling.
+			longestURL := lfs.TTLFor(time.Hour, tt.maxTTL, math.MaxInt64)
+			if got := stagingGrace(tt.maxTTL); got <= longestURL {
+				t.Fatalf("stagingGrace(%v) = %v, which does not outlast the %v a signed URL can live",
+					tt.maxTTL, got, longestURL)
+			}
+		})
 	}
 }
 

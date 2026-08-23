@@ -133,6 +133,22 @@ const maxTTLSeconds = int64(math.MaxInt64) / int64(time.Second)
 // for this hub.
 const signingLimit = 7 * 24 * time.Hour
 
+// MaxSignedURLTTL returns the longest lifetime TTLFor can hand out for a given
+// configured ceiling: the ceiling itself, or signingLimit when there is none
+// (max <= 0) or when the configured one is above what GCS will sign.
+//
+// It exists so that nothing has to re-derive that answer from the config value
+// alone. `thinkingface gc` needs it -- its staging window has to outlast every
+// URL still in flight -- and reading TF_SIGNED_URL_MAX_TTL as if it were the
+// effective maximum gets the no-ceiling case exactly backwards: zero means
+// URLs live *longer* (up to 7 days), not shorter.
+func MaxSignedURLTTL(max time.Duration) time.Duration {
+	if max <= 0 || max > signingLimit {
+		return signingLimit
+	}
+	return max
+}
+
 // TTLFor returns how long a signed URL for a transfer of n bytes must live:
 // the base lifetime plus the time n bytes take at minTransferBytesPerSecond,
 // clamped to max.

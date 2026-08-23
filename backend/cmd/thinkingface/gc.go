@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/dotneet/thinkingface/backend/internal/lfs"
 	"github.com/dotneet/thinkingface/backend/internal/storage"
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
@@ -31,15 +32,19 @@ const minStagingGrace = 24 * time.Hour
 // blobs/.
 //
 // The floor that inference has to clear is the longest a signed PUT URL can
-// legitimately still be in use, which is exactly what TF_SIGNED_URL_MAX_TTL
-// configures. It is *derived* from that value rather than written down next
-// to it, because the two drifting apart is silent and expensive: raise the
-// ceiling to 48h against a hardcoded 24h grace here and gc starts deleting
-// uploads that are still being written. Doubling it leaves room for an upload
-// that started just before its URL's nominal expiry, plus clock skew between
-// whichever machine signed the URL and whichever machine runs gc.
+// legitimately still be in use. That is *not* TF_SIGNED_URL_MAX_TTL read
+// literally: lfs.MaxSignedURLTTL is the authority, because a zero (no
+// ceiling) means URLs live up to GCS's 7-day signing limit rather than
+// expiring sooner. Deriving it there rather than restating it here is the
+// point -- the two drifting apart is silent and expensive in both directions:
+// a hardcoded 24h against a raised ceiling has gc deleting uploads that are
+// still being written.
+//
+// Doubling leaves room for an upload that started just before its URL's
+// nominal expiry, plus clock skew between whichever machine signed the URL and
+// whichever machine runs gc.
 func stagingGrace(signedURLMaxTTL time.Duration) time.Duration {
-	if grace := 2 * signedURLMaxTTL; grace > minStagingGrace {
+	if grace := 2 * lfs.MaxSignedURLTTL(signedURLMaxTTL); grace > minStagingGrace {
 		return grace
 	}
 	return minStagingGrace
