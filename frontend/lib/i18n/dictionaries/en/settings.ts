@@ -74,7 +74,7 @@ export const settings = {
   sshKeys: {
     title: "SSH keys",
     // The `ssh://git@host:2222/<namespace>/<name>.git` sample is rendered between these two halves.
-    descriptionPrefix: "Register a public key to clone and push private repositories over SSH (",
+    descriptionPrefix: "Register a public key to clone and push over SSH without a token (",
     descriptionSuffix: "). The key material is public; never paste a private key here.",
     titleLabel: "Title",
     titlePlaceholder: "e.g. work laptop",
@@ -95,7 +95,7 @@ export const settings = {
     loadFailed: "Failed to load SSH keys",
     loadFailedHint: "The backend API may be unreachable. Try reloading the page.",
     emptyTitle: "No SSH keys",
-    emptyDescription: "Add one to clone and push private repositories over SSH.",
+    emptyDescription: "Add one to clone and push over SSH without a token.",
     colTitle: "Title",
     colType: "Type",
     colFingerprint: "Fingerprint",
@@ -227,7 +227,7 @@ export const settings = {
     leave: "Leave",
     leaving: "Leaving…",
     confirmLeaveTitle: "Leave {name}?",
-    confirmLeave: "Leave {name}? You lose access to its private repositories.",
+    confirmLeave: "Leave {name}? You lose the ability to push to its repositories.",
     membersOne: "{count} member",
     membersOther: "{count} members",
     reposOne: "{count} repository",

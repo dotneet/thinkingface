@@ -130,12 +130,14 @@ export const org = {
       remove: "Remove",
       removing: "Removing…",
       confirmRemoveTitle: "Remove {username}?",
-      confirmRemove: "Remove {username} from {org}? They lose access to its private repositories.",
+      confirmRemove:
+        "Remove {username} from {org}? They lose membership and the ability to push to its repositories.",
       emptyTitle: "No members",
       emptyDescription: "Add someone by username to give them access.",
       loadFailed: "Failed to load members",
       loadFailedHint: "The backend API may be unreachable. Try reloading the page.",
-      roleHint: "Read sees private repositories, write pushes, admin manages the organization.",
+      roleHint:
+        "Read grants membership only, write can push to the organization's repositories, and admin also manages members and settings.",
     },
     webhooks: {
       title: "Webhooks",

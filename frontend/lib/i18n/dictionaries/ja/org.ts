@@ -124,12 +124,13 @@ export const org = {
       removing: "削除中…",
       confirmRemoveTitle: "{username} をメンバーから削除しますか？",
       confirmRemove:
-        "{username} を {org} から削除しますか？ private リポジトリへのアクセスを失います。",
+        "{username} を {org} から削除しますか？ メンバーシップを失い、リポジトリへの push ができなくなります。",
       emptyTitle: "メンバーがいません",
       emptyDescription: "ユーザー名を指定してメンバーを追加してください。",
       loadFailed: "メンバーを読み込めませんでした",
       loadFailedHint: "バックエンド API に接続できない可能性があります。再読み込みしてください。",
-      roleHint: "read は private リポジトリの閲覧、write は push、admin は組織の管理ができます。",
+      roleHint:
+        "read はメンバーシップのみ、write は組織のリポジトリへの push、admin はさらにメンバーと設定の管理ができます。",
     },
     webhooks: {
       title: "Webhook",

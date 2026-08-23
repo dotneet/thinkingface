@@ -74,8 +74,7 @@ export const settings = {
   },
   sshKeys: {
     title: "SSH キー",
-    descriptionPrefix:
-      "公開鍵を登録すると、プライベートリポジトリを SSH で clone / push できます（",
+    descriptionPrefix: "公開鍵を登録すると、トークンなしで SSH の clone / push ができます（",
     descriptionSuffix: "）。登録するのは公開鍵です。秘密鍵は絶対に貼り付けないでください。",
     titleLabel: "タイトル",
     titlePlaceholder: "例: 仕事用ノート PC",
@@ -99,7 +98,7 @@ export const settings = {
     loadFailedHint:
       "バックエンド API に接続できない可能性があります。ページを再読み込みしてください。",
     emptyTitle: "SSH キーはありません",
-    emptyDescription: "SSH でプライベートリポジトリを clone / push するにはキーを追加します。",
+    emptyDescription: "トークンなしで SSH の clone / push を行うにはキーを追加します。",
     colTitle: "タイトル",
     colType: "種類",
     colFingerprint: "フィンガープリント",
@@ -237,7 +236,7 @@ export const settings = {
     leave: "離脱",
     leaving: "離脱中…",
     confirmLeaveTitle: "{name} から離脱しますか？",
-    confirmLeave: "{name} から離脱しますか？ private リポジトリへのアクセスを失います。",
+    confirmLeave: "{name} から離脱しますか？ リポジトリへの push ができなくなります。",
     membersOne: "メンバー {count} 人",
     membersOther: "メンバー {count} 人",
     reposOne: "リポジトリ {count} 件",
