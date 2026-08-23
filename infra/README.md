@@ -76,7 +76,7 @@ domain strategy for your environment.
 | min/max instances | 1 / `var.api_max_instances` (default 4; always 1 when `database_backend = "sqlite"`) | min=1 keeps the cache warm and avoids cold starts; max is also pinned to 1 for sqlite since Litestream assumes a single writer |
 | Request timeout | 3600s | For large clones |
 | `GIT_ROOT` | `/tmp/git` | tmpfs. **A warm cache, not the source of truth** — the source of truth is the WAL in GCS |
-| `TF_VIEWER_CACHE_DIR` | `/tmp/cache` | tmpfs. Serves the same role as the old `emptyDir` |
+| `TF_VIEWER_CACHE_DIR` | `/tmp/cache` | tmpfs. Scratch space for WAL compaction only — the parquet viewer no longer caches to disk (it reads via storage range requests, see `TF_VIEWER_METADATA_CACHE_BYTES`) |
 
 ### Why Direct VPC egress (instead of a Serverless VPC Connector / Cloud SQL Auth Proxy sidecar)
 
@@ -228,7 +228,11 @@ between requests or instances; that's expected and safe, since the actual
 source of truth for git data is the WAL in GCS
 (`docs/dev/continuity-design.md` §2/§9), not local disk. `TF_GIT_CACHE_BYTES`
 (default 2 GiB, see `backend/internal/config`) bounds how much of that
-budget the git repo LRU cache is allowed to use.
+budget the git repo LRU cache is allowed to use. `TF_VIEWER_CACHE_DIR` itself
+is only used as WAL compaction's working directory now — the parquet viewer
+reads objects from storage via range requests instead of caching them to
+disk, so its budget (`TF_VIEWER_METADATA_CACHE_BYTES`, default 256 MiB) is a
+small in-process heap allocation, not part of this tmpfs sizing.
 
 ## Validating without a GCP project
 

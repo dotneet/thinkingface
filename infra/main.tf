@@ -409,7 +409,7 @@ locals {
   api_env = merge(
     {
       GIT_ROOT            = "/tmp/git"   # tmpfs cache, not the source of truth (WAL in GCS is)
-      TF_VIEWER_CACHE_DIR = "/tmp/cache" # tmpfs, existing emptyDir-equivalent
+      TF_VIEWER_CACHE_DIR = "/tmp/cache" # tmpfs; WAL compaction's scratch dir only -- the parquet viewer no longer caches to disk here
       STORAGE_DRIVER      = "gcs"
       GCS_BUCKET          = google_storage_bucket.main.name
       GCS_PREFIX          = ""
@@ -421,11 +421,14 @@ locals {
       TF_ADMIN_EMAIL      = "admin@example.com"
       TF_WAL_MODE         = "authoritative"
       TF_GIT_HOOKS_PATH   = "/opt/thinkingface/hooks" # baked into the image, see backend/Dockerfile
-      # Both caches live on the memory-backed filesystem and share the 8 GiB
-      # instance memory with the git/pack-objects processes: budget explicitly
-      # (2 GiB each) instead of trusting the binary's defaults (2 + 4 GiB).
-      TF_GIT_CACHE_BYTES    = "2147483648"
-      TF_VIEWER_CACHE_BYTES = "2147483648"
+      # The materialised-repository cache lives on the memory-backed
+      # filesystem and shares the 8 GiB instance memory with the
+      # git/pack-objects processes: budget it explicitly (2 GiB) instead of
+      # trusting the binary's default. The parquet viewer's metadata cache is
+      # a small heap allocation, not tmpfs, so it stays at the binary's
+      # default (256 MiB) rather than being sized against the tmpfs budget.
+      TF_GIT_CACHE_BYTES             = "2147483648"
+      TF_VIEWER_METADATA_CACHE_BYTES = "268435456"
     },
     var.database_backend == "sqlite" ? {
       DATABASE_URL              = local.sqlite_database_url
@@ -481,7 +484,7 @@ resource "google_cloud_run_v2_service" "api" {
       resources {
         limits = {
           cpu    = "2"
-          memory = "8Gi" # tmpfs GIT_ROOT/TF_VIEWER_CACHE_DIR share this budget with the git/pack-objects processes
+          memory = "8Gi" # tmpfs GIT_ROOT (materialised-repository cache) and the git/pack-objects processes share this budget; the parquet viewer's metadata cache is a small heap allocation, not tmpfs, so it no longer figures into this sizing
         }
         cpu_idle = false # CPU always allocated: syncer/webhook workers run in-process outside request handling
       }

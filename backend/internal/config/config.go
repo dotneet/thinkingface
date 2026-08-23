@@ -50,10 +50,11 @@ type Config struct {
 	// GitCacheBytes bounds the materialised-repository cache under GitRoot
 	// when the WAL is authoritative (§9). Zero disables eviction.
 	GitCacheBytes int64
-	// ViewerCacheBytes bounds the parquet viewer's local cache. On Cloud Run
-	// both caches live on the memory-backed filesystem and share the
-	// instance's memory limit, so both must be explicitly budgeted (§12).
-	ViewerCacheBytes int64
+	// ViewerMetadataCacheBytes bounds the parquet viewer's in-process footer
+	// (metadata) cache. The viewer reads parquet objects directly from
+	// storage via range requests rather than downloading them, so this is a
+	// budget on the server process's *heap*, not on tmpfs/disk space (§12).
+	ViewerMetadataCacheBytes int64
 
 	SignedURLTTL time.Duration
 
@@ -66,7 +67,12 @@ type Config struct {
 	// or "admin" for site admins only (docs/dev/organization-design.md §4.1).
 	OrgCreation string
 
-	SessionSecret  string
+	SessionSecret string
+	// ViewerCacheDir is a scratch directory on the memory-backed filesystem
+	// (tmpfs on Cloud Run). The parquet viewer no longer uses it — it now
+	// reads objects via range requests instead of caching them to disk — but
+	// WAL compaction (backend/cmd/thinkingface/walops.go) still uses it as
+	// its working directory for materialising repositories during compaction.
 	ViewerCacheDir string
 	SyncWorkers    int
 	AllowSignup    bool
@@ -140,18 +146,18 @@ func Load() (*Config, error) {
 		GitHooksPath:  env("TF_GIT_HOOKS_PATH", ""),
 		GitCacheBytes: envInt64("TF_GIT_CACHE_BYTES", 2<<30),
 
-		ViewerCacheBytes: envInt64("TF_VIEWER_CACHE_BYTES", 4<<30),
-		SignedURLTTL:     envDuration("TF_SIGNED_URL_TTL", time.Hour),
-		AdminUsername:    env("TF_ADMIN_USERNAME", "admin"),
-		AdminPassword:    env("TF_ADMIN_PASSWORD", DefaultAdminPassword),
-		AdminEmail:       env("TF_ADMIN_EMAIL", "admin@example.com"),
-		OrgCreation:      env("TF_ORG_CREATION", "anyone"),
-		SessionSecret:    env("TF_SESSION_SECRET", DefaultSessionSecret),
-		SessionTTL:       envDuration("TF_SESSION_TTL", 7*24*time.Hour),
-		ViewerCacheDir:   env("TF_VIEWER_CACHE_DIR", "/data/cache"),
-		SyncWorkers:      envInt("TF_SYNC_WORKERS", 2),
-		AllowSignup:      envBool("TF_ALLOW_SIGNUP", true),
-		ExpFlushInterval: envDuration("TF_EXP_FLUSH_INTERVAL", time.Minute),
+		ViewerMetadataCacheBytes: envInt64("TF_VIEWER_METADATA_CACHE_BYTES", 256<<20),
+		SignedURLTTL:             envDuration("TF_SIGNED_URL_TTL", time.Hour),
+		AdminUsername:            env("TF_ADMIN_USERNAME", "admin"),
+		AdminPassword:            env("TF_ADMIN_PASSWORD", DefaultAdminPassword),
+		AdminEmail:               env("TF_ADMIN_EMAIL", "admin@example.com"),
+		OrgCreation:              env("TF_ORG_CREATION", "anyone"),
+		SessionSecret:            env("TF_SESSION_SECRET", DefaultSessionSecret),
+		SessionTTL:               envDuration("TF_SESSION_TTL", 7*24*time.Hour),
+		ViewerCacheDir:           env("TF_VIEWER_CACHE_DIR", "/data/cache"),
+		SyncWorkers:              envInt("TF_SYNC_WORKERS", 2),
+		AllowSignup:              envBool("TF_ALLOW_SIGNUP", true),
+		ExpFlushInterval:         envDuration("TF_EXP_FLUSH_INTERVAL", time.Minute),
 
 		SSHEnabled:     envBool("TF_SSH_ENABLED", false),
 		SSHAddr:        env("TF_SSH_ADDR", ":2222"),

@@ -187,7 +187,7 @@ func newHarness(t *testing.T) *harness {
 
 	git := gitrepo.NewManager(t.TempDir())
 	obj := newMemStorage()
-	parquet := viewer.New(obj, t.TempDir(), 0)
+	parquet := viewer.New(obj, 8<<20)
 	indexer := experiments.NewIndexer(st, git, obj, parquet)
 	syn := New(st, git, obj, parquet, indexer, nil, 1)
 

@@ -138,7 +138,7 @@ var _ storage.Storage = (*memStorage)(nil)
 
 func newTestReader(t *testing.T, st storage.Storage) *Reader {
 	t.Helper()
-	return New(st, t.TempDir(), 0)
+	return New(st, 8<<20)
 }
 
 func buildParquet[T any](t *testing.T, rows []T) []byte {
