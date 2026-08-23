@@ -326,6 +326,122 @@ type SSHKeyItem = {
   key alone, the same key can't be shared across two accounts.
 - `last_used_at` is the time the key was used to authenticate an SSH session.
 
+### 1.3 Passwords and site administration
+
+`TF_ADMIN_PASSWORD` only ever applies to the *first* boot of an empty instance (`seedAdmin`
+returns immediately once `CountUsers() > 0`), so these endpoints are the only way to change a
+password after that — and the only way to appoint a second site administrator.
+
+```ts
+type AdminUser = {
+  id: number
+  username: string
+  email: string
+  is_admin: boolean        // the instance-wide flag, not an organization role
+  created_at: string
+}
+```
+
+`AdminUser` deliberately has no password field of any kind. The stored bcrypt hash lives on
+`store.User` and is never copied onto a wire type.
+
+#### `PATCH /api/v1/me/password`
+
+Write scope required. req `{"current_password": string, "new_password": string}` → **204**.
+
+- `current_password` is always verified, even though the caller is already authenticated:
+  holding a session is not on its own permission to replace the credential it was minted from.
+  A wrong one is **401** (`unauthorized`), and the failure counts against the same per-address
+  and per-username buckets as the login form.
+- `new_password` is validated by exactly the rule sign-up uses — at least 8 bytes, at most
+  `auth.MaxPasswordBytes` (72). Both call the same `validatePassword` helper, so a password
+  that could not be registered cannot be reached by changing to it either. **400** otherwise.
+- On success every session is revoked (`BumpSessionEpoch`) **and the calling browser's
+  `tf_session` cookie is re-issued at the new epoch**, so changing your password does not sign
+  you out of the tab you changed it in. A token-authenticated caller holds no cookie and is
+  issued none.
+- **Access tokens are deliberately *not* revoked.** A token is an independent credential with
+  its own lifecycle and its own revocation UI (§1 "Token management"); a password change is
+  evidence about the password, not about any token minted from the account. Revoking every
+  token on a routine rotation would break unattended clients (CI, `git`, the `tf` CLI) for a
+  threat the change does not address — someone who wants a token gone deletes that token.
+
+#### `GET /api/v1/admin/users`
+
+Site administrators only (`users.is_admin`); **403** for anyone else, said out loud rather than
+hidden behind a 404. Reading is enough — a read-scoped token works.
+
+Query: `search` (case-insensitive substring of the username *or* the email), `limit` (default
+50, capped at 200), `offset`. res 200:
+
+```json
+{ "items": [ /* AdminUser */ ], "total": 12 }
+```
+
+`total` counts every account matching `search`, ignoring the page window.
+
+#### `POST /api/v1/admin/users`
+
+Site administrators only, write scope. req:
+
+```json
+{ "username": "dana", "email": "dana@example.com", "password": "…", "is_admin": false }
+```
+
+res **201** `{"user": AdminUser}`.
+
+- **`TF_ALLOW_SIGNUP` is deliberately not consulted.** That flag closes the public
+  `/api/v1/auth/signup` form; an instance run that way still has to be able to gain accounts,
+  and this is the route that does it. Gating it on the same flag would make
+  `TF_ALLOW_SIGNUP=false` a one-way door with no way to add a colleague short of editing the
+  database.
+- Validation is shared with `handleSignup` down to the helper: `validateNamespaceName` (an
+  account is also a namespace, so the reserved list of `docs/dev/organization-design.md` §6.3
+  applies — a reserved name answers 400 `reserved_name`), `validatePassword`, `validateEmail`.
+  All of it runs before `CreateUser`, so a rejected request creates neither an account nor a
+  namespace.
+- `is_admin` is optional and defaults to false. Setting it is how an instance gets its second
+  site administrator without a two-step create-then-promote.
+- A username already held by an account **or an organization** is 409 `conflict` —
+  `CreateUser` inserts the user and its namespace in one transaction.
+- **No session cookie is issued.** `handleSignup` mints one because the caller *is* the new
+  account; here the caller is somebody else, and replacing the administrator's own session with
+  the new user's would sign them out of their own browser.
+- There is no email round trip and no invitation flow: the administrator hands the password
+  over out of band, and the new user changes it at `PATCH /api/v1/me/password`.
+
+#### `PATCH /api/v1/admin/users/{username}`
+
+Site administrators only, write scope. req — both fields optional, an absent one is left
+unchanged:
+
+```json
+{ "password": "…", "is_admin": true }
+```
+
+res 200 `{"user": AdminUser}`. Errors:
+
+| Status | Type | When |
+|---|---|---|
+| 400 | `bad_request` | Neither field set (a body that changes nothing is refused rather than answered 200), or an invalid `password` |
+| 400 | `self_demote` | An attempt to clear **your own** `is_admin`. Its own type so the UI can translate it; the web UI leaves the control off your own row, so it answers a race or a hand-made request |
+| 403 | `forbidden` | The caller is not a site administrator, or holds a read-only token |
+| 404 | `not_found` | No account with that username |
+| 409 | `last_admin` | Clearing `is_admin` would leave the instance with no site administrator |
+
+Both fields are validated before either is applied, so a request carrying an impossible
+password cannot still have granted administrator rights on its way to the 400.
+
+Setting `password` revokes the *target's* sessions (their tokens, again, survive). The
+self-demotion 400 makes the 409 unreachable through this endpoint in practice — any other
+account the caller could demote implies a second administrator exists — so `store.ErrLastSiteAdmin`
+is a guard against a concurrent demotion rather than an everyday answer.
+
+**Audit**: there is no site-wide audit table. `org_audit_log` is keyed by namespace and these
+actions have none, and three verbs do not justify a migration, so every account created, every
+password reset and every `is_admin` change is recorded as a structured `slog.Info` line naming
+the actor, the target, and what changed — never the password itself, in either direction.
+
 ---
 
 ## 2. Repositories

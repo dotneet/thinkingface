@@ -46,7 +46,7 @@ a variable is unset.
 | Variable | What it does | Default | Notes |
 |---|---|---|---|
 | `TF_ADMIN_USERNAME` | Username seeded for the first account, only when the users table is empty. | `admin` | |
-| `TF_ADMIN_PASSWORD` | Password for that seeded account. | `admin` | **Change this.** Well-known default; startup is refused under `https://` `TF_PUBLIC_URL` while it is unset. |
+| `TF_ADMIN_PASSWORD` | Password for that seeded account. | `admin` | **Change this.** Well-known default; startup is refused under `https://` `TF_PUBLIC_URL` while it is unset. **First boot only** — see the note below. |
 | `TF_ADMIN_EMAIL` | Email address for the seeded account. | `admin@example.com` | |
 | `TF_SESSION_SECRET` | HMAC-SHA256 key signing session cookies (`tf_session`) and LFS transfer URLs. | `dev-insecure-session-secret` | **Change this.** Must be at least 32 bytes once `TF_PUBLIC_URL` is `https://`, and cannot be left at the default in that case either. |
 | `TF_SESSION_TTL` | How long an issued session cookie stays valid. | `168h` (7 days) | Also invalidated early on logout or password change. |
@@ -54,8 +54,21 @@ a variable is unset.
 | `TF_ALLOWED_ORIGINS` | Comma-separated browser origins allowed for credentialed CORS. | *(inferred: `TF_PUBLIC_URL`'s origin, plus `http://localhost:3000` / `http://127.0.0.1:3000` when not `https`)* | Set this explicitly in production if the web UI is served from a different host than the API — an origin outside the allowlist gets no CORS headers and its state-changing cookie-authenticated requests are rejected with 403. `huggingface_hub`, `git`, and `curl` send no `Origin` header and are unaffected either way. |
 | `TF_AUTH_RATE_LIMIT_PER_MIN` | Failed password attempts allowed per client IP per minute (half that per username). `0` disables it. | `10` | Applies to both the login endpoint and HTTP Basic auth (accepted on every route). Counted per process — with multiple replicas, the limit applies per replica, not globally. |
 | `TF_TRUST_PROXY_IPS` | Read the client IP from the leftmost `X-Forwarded-For` entry for rate limiting. | `false` | Only enable this when a proxy you control overwrites that header; otherwise a client can pick its own rate-limit bucket. |
-| `TF_ALLOW_SIGNUP` | Whether self-service account creation is open. | `true` | Set to `false` to make the seeded admin the only account (others can still be added by an admin). |
+| `TF_ALLOW_SIGNUP` | Whether self-service account creation is open. | `true` | Set to `false` to close the public **Sign up** tab. Not a one-way door: a site administrator can still add accounts at **Settings → Users** (`/settings/admin/users`), which ignores this flag by design. |
 | `TF_ORG_CREATION` | Who can create organizations: `anyone` or `admin`. | `anyone` | Any other value fails startup. |
+
+!!! warning "`TF_ADMIN_PASSWORD` only applies to the first boot"
+    The three `TF_ADMIN_*` variables seed the initial account and are read **only while the
+    users table is empty**. Once any account exists the seeding step returns immediately, so
+    editing `TF_ADMIN_PASSWORD` and restarting changes nothing.
+
+    After first boot, accounts and passwords are managed in the web UI: each user changes their
+    own password at **Settings → Account** (`/settings/account`), and a site administrator can
+    add an account, reset anyone's password, or appoint a second administrator at
+    **Settings → Users** (`/settings/admin/users`). See
+    [Authentication](../reference/authentication.md#changing-your-password). Appointing a second
+    administrator early is worth doing: it is what keeps the instance recoverable if the seeded
+    one loses its password.
 
 ## SSH
 

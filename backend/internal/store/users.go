@@ -91,6 +91,129 @@ func (s *Store) CountUsers(ctx context.Context) (int64, error) {
 	return n, err
 }
 
+// ListUsers is the site administrator's account directory: every user,
+// optionally narrowed by a case-insensitive substring of the username or the
+// email address, plus the total ignoring the page window.
+//
+// The password hash is deliberately not selected. Nothing above this layer
+// needs it for a listing, and a column that is never read cannot leak.
+func (s *Store) ListUsers(ctx context.Context, search string, limit, offset int) ([]User, int64, error) {
+	limit, offset = pageWindow(limit, offset)
+
+	// ILIKE is rewritten to LIKE for SQLite (dialect.go), whose LIKE is
+	// already case-insensitive for ASCII -- the same compromise the
+	// repository and organisation listings make.
+	where := ""
+	var countArgs []any
+	countBind := binder(&countArgs)
+	if search != "" {
+		p := countBind("%" + search + "%")
+		where = ` WHERE (username ILIKE ` + p + ` OR email ILIKE ` + p + `)`
+	}
+
+	var total int64
+	if err := s.db.QueryRow(ctx, `SELECT count(*) FROM users`+where, countArgs...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	var args []any
+	bind := binder(&args)
+	listWhere := ""
+	if search != "" {
+		p := bind("%" + search + "%")
+		listWhere = ` WHERE (username ILIKE ` + p + ` OR email ILIKE ` + p + `)`
+	}
+	limitP, offsetP := bind(limit), bind(offset)
+
+	rows, err := s.db.Query(ctx,
+		`SELECT id, username, email, is_admin, created_at FROM users`+listWhere+
+			` ORDER BY username LIMIT `+limitP+` OFFSET `+offsetP, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	out := []User{}
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.IsAdmin, &u.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, u)
+	}
+	return out, total, rows.Err()
+}
+
+// pageWindow clamps an offset-based page request. A limit outside the range
+// falls back to the default rather than erroring, matching ListOrgs.
+func pageWindow(limit, offset int) (int, int) {
+	if limit <= 0 || limit > maxUserPageSize {
+		limit = defaultUserPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
+const (
+	defaultUserPageSize = 50
+	maxUserPageSize     = 200
+)
+
+// UpdateUserPassword replaces the stored bcrypt hash. It does not touch
+// session_epoch: revoking the outstanding sessions is a separate decision the
+// caller makes (the API layer bumps the epoch and, for a self-service change,
+// re-issues the caller's own cookie), and access tokens are unaffected either
+// way -- they are an independent credential (docs/dev/api-contract.md §1.3).
+func (s *Store) UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) error {
+	n, err := s.db.Exec(ctx, `UPDATE users SET password_hash = $2 WHERE id = $1`, userID, passwordHash)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetUserAdmin grants or revokes instance-wide administrator rights.
+// Revoking it from the last remaining administrator is ErrLastSiteAdmin: the
+// flag is the only thing that can hand it back, so an instance that loses its
+// last administrator can only be repaired from the database.
+//
+// The read-modify-write runs under an advisory lock rather than a row lock:
+// the rule is about the *count* of administrators, so two concurrent
+// demotions of two different accounts must not both observe two.
+func (s *Store) SetUserAdmin(ctx context.Context, userID int64, isAdmin bool) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+
+	if err := s.d.advisoryXactLock(ctx, tx, "site-admins", 0); err != nil {
+		return err
+	}
+	var current bool
+	if err := tx.QueryRow(ctx, `SELECT is_admin FROM users WHERE id = $1`, userID).Scan(&current); err != nil {
+		return norm(err)
+	}
+	if current && !isAdmin {
+		var admins int64
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM users WHERE is_admin`).Scan(&admins); err != nil {
+			return err
+		}
+		if admins <= 1 {
+			return ErrLastSiteAdmin
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE users SET is_admin = $2 WHERE id = $1`, userID, isAdmin); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *Store) CreateToken(ctx context.Context, userID int64, name, scope, tokenHash string) (*AccessToken, error) {
 	t := &AccessToken{}
 	err := s.db.QueryRow(ctx,

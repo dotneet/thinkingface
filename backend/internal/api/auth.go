@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -359,15 +360,8 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		writeNamespaceNameError(w, "username", err)
 		return
 	}
-	if len(req.Password) < 8 {
-		badRequest(w, "password must be at least 8 characters")
-		return
-	}
-	// bcrypt refuses anything longer, and without this the refusal arrives as
-	// a 500 from HashPassword. A Japanese passphrase reaches 72 bytes at
-	// around 24 characters, so this is reachable by ordinary use, not abuse.
-	if len(req.Password) > auth.MaxPasswordBytes {
-		badRequest(w, fmt.Sprintf("password must be at most %d bytes", auth.MaxPasswordBytes))
+	if err := validatePassword(req.Password); err != nil {
+		badRequest(w, err.Error())
 		return
 	}
 	if err := validateEmail(req.Email); err != nil {
@@ -377,18 +371,8 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	// Signup mints an account and a session, so it is as much an
 	// unauthenticated bcrypt trigger as login is.
 	addrKey := s.clientAddrKey(r)
-	if wait := s.authGuard.retryAfter(addrKey); wait > 0 {
-		tooManyAttempts(w, wait)
-		return
-	}
-	if !s.authGuard.acquireBcrypt() {
-		tooManyAttempts(w, bcryptWait)
-		return
-	}
-	hash, err := auth.HashPassword(req.Password)
-	s.authGuard.releaseBcrypt()
-	if err != nil {
-		internalError(w, "hash password", err)
+	hash, ok := s.hashNewPassword(w, r, req.Password)
+	if !ok {
 		return
 	}
 	user, err := s.store.CreateUser(r.Context(), req.Username, req.Email, hash, false)
@@ -399,6 +383,130 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setSessionCookie(w, user)
 	writeJSON(w, http.StatusOK, apitypes.UserResponse{User: s.userResponse(r.Context(), user)})
+}
+
+// minPasswordBytes is the shortest password this instance accepts. It is
+// counted in bytes rather than runes, deliberately on the strict side: a
+// short multi-byte passphrase is refused rather than let through under a
+// rune count that bcrypt's 72-byte ceiling would then contradict.
+const minPasswordBytes = 8
+
+// validatePassword is the one password policy this server has. Sign-up, the
+// self-service change (PATCH /api/v1/me/password) and an administrator's
+// reset (PATCH /api/v1/admin/users/{username}) all call it, so a password
+// that could not be registered cannot be reached by changing to it either.
+// The returned error is written straight back to the caller.
+func validatePassword(password string) error {
+	if len(password) < minPasswordBytes {
+		return fmt.Errorf("password must be at least %d characters", minPasswordBytes)
+	}
+	// bcrypt refuses anything longer, and without this the refusal arrives as
+	// a 500 from HashPassword. A Japanese passphrase reaches 72 bytes at
+	// around 24 characters, so this is reachable by ordinary use, not abuse.
+	if len(password) > auth.MaxPasswordBytes {
+		return fmt.Errorf("password must be at most %d bytes", auth.MaxPasswordBytes)
+	}
+	return nil
+}
+
+// hashNewPassword runs the bcrypt hash behind the same two guards login and
+// sign-up use -- the per-address failure budget and the process-wide
+// concurrency cap -- and writes the error response itself when either bites.
+// Every route that turns a plaintext password into a stored hash goes through
+// here so no endpoint becomes the cheap way to spend the server's CPU.
+func (s *Server) hashNewPassword(w http.ResponseWriter, r *http.Request, password string) (string, bool) {
+	if wait := s.authGuard.retryAfter(s.clientAddrKey(r)); wait > 0 {
+		tooManyAttempts(w, wait)
+		return "", false
+	}
+	if !s.authGuard.acquireBcrypt() {
+		tooManyAttempts(w, bcryptWait)
+		return "", false
+	}
+	hash, err := auth.HashPassword(password)
+	s.authGuard.releaseBcrypt()
+	if err != nil {
+		internalError(w, "hash password", err)
+		return "", false
+	}
+	return hash, true
+}
+
+// handleChangeMyPassword answers PATCH /api/v1/me/password: the caller
+// replaces their own password, proving they hold the current one first.
+//
+// Two things deliberately do *not* happen here. Access tokens are left alone
+// -- a token is an independent credential, and a password change is not
+// evidence that any of them leaked (docs/dev/api-contract.md §1.3). And while
+// every session is revoked, the caller's own cookie is re-issued at the new
+// epoch, so changing a password does not log you out of the tab you changed
+// it in. A token-authenticated caller holds no cookie to re-issue and gets
+// none.
+func (s *Server) handleChangeMyPassword(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.requireWrite(w, r)
+	if !ok {
+		return
+	}
+	var req apitypes.PasswordChangeRequest
+	if !decodeJSON(w, r, maxAuthBody, &req,
+		"request body must be JSON with current_password and new_password") {
+		return
+	}
+	// Shape first: refusing an impossible new password costs nothing, while
+	// verifying the current one costs a bcrypt comparison.
+	if err := validatePassword(req.NewPassword); err != nil {
+		badRequest(w, err.Error())
+		return
+	}
+	addrKey := s.clientAddrKey(r)
+	if wait := s.authGuard.retryAfter(addrKey); wait > 0 {
+		tooManyAttempts(w, wait)
+		return
+	}
+	// checkPassword applies the username bucket and the bcrypt cap, exactly
+	// as the login form does -- holding a session is not a reason to let
+	// someone brute-force the current password for free.
+	switch _, outcome := s.checkPassword(r.Context(), user.Username, req.CurrentPassword); outcome {
+	case passwordThrottled:
+		tooManyAttempts(w, s.authGuard.retryAfter(usernameKey(user.Username)))
+		return
+	case passwordOverloaded:
+		serviceOverloaded(w, bcryptWait)
+		return
+	case passwordWrong:
+		s.authGuard.penalize(addrKey)
+		// writeError rather than unauthorized(): this is a form submitted by
+		// the web UI, and the WWW-Authenticate header the latter sets can
+		// make a browser pop its own credential dialog over the page.
+		// handleLogin answers a wrong password the same way.
+		writeError(w, http.StatusUnauthorized, "unauthorized", "current password is incorrect")
+		return
+	}
+	hash, ok := s.hashNewPassword(w, r, req.NewPassword)
+	if !ok {
+		return
+	}
+	if err := s.store.UpdateUserPassword(r.Context(), user.ID, hash); err != nil {
+		handleStoreError(w, "update password", err)
+		return
+	}
+	if err := s.store.BumpSessionEpoch(r.Context(), user.ID); err != nil {
+		internalError(w, "revoke sessions", err)
+		return
+	}
+	if cookieAuthenticated(r.Context()) {
+		// Re-read so the cookie carries the epoch the bump just wrote;
+		// signing the stale one would revoke the caller along with everyone
+		// else.
+		fresh, err := s.store.GetUserByID(r.Context(), user.ID)
+		if err != nil {
+			internalError(w, "reload account", err)
+			return
+		}
+		s.setSessionCookie(w, fresh)
+	}
+	slog.Info("password changed", "username", user.Username, "user_id", user.ID, "actor", "self")
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleLogout clears the cookie and, when the caller was actually holding a

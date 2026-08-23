@@ -190,6 +190,12 @@ func (s *Server) Handler() http.Handler {
 		r.Post("/auth/logout", s.handleLogout)
 		r.Get("/me", s.handleMe)
 		r.Patch("/me/profile", s.handleUpdateMyProfile)
+		r.Patch("/me/password", s.handleChangeMyPassword)
+
+		// Site administration (users.is_admin only).
+		r.Get("/admin/users", s.handleAdminListUsers)
+		r.Post("/admin/users", s.handleAdminCreateUser)
+		r.Patch("/admin/users/{username}", s.handleAdminUpdateUser)
 
 		r.Get("/tokens", s.handleListTokens)
 		r.Post("/tokens", s.handleCreateToken)
