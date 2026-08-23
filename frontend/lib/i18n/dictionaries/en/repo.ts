@@ -222,6 +222,48 @@ export const repo = {
       "Files over 512KB can't be loaded into the web editor. Edit it locally and push instead.",
     notText: "This file isn't plain text and can't be edited from the web UI.",
   },
+  // Adding files from the browser: the "Add file" menu on the tree, the
+  // new-file path prompt, and the upload dialog.
+  upload: {
+    menuLabel: "Add file",
+    menuNewFile: "Create a new file",
+    menuUpload: "Upload files",
+    newFileTitle: "Create a new file",
+    newFileBody: "The path is relative to the repository root. Use / to place it in a directory.",
+    newFilePathLabel: "File path",
+    newFilePathPlaceholder: "notes.md",
+    newFileConfirm: "Create file",
+    title: "Upload files",
+    dropLabel: "Drop files here, or click to choose",
+    dropHint: "They will be committed to {dir} on {rev}.",
+    browseHint: "Choose files to upload",
+    selectedOne: "{count} file",
+    selectedOther: "{count} files",
+    totalSize: "{size} in total",
+    remove: "Remove {file}",
+    emptyTitle: "No files chosen yet",
+    emptyDescription: "Nothing is uploaded until you choose at least one file.",
+    commitMessageLabel: "Commit message",
+    commitMessagePlaceholder: "Upload files",
+    submit: "Upload",
+    uploading: "Uploading…",
+    progressLabel: "Upload progress",
+    progressCount: "{done} of {total} sent",
+    tooMany: "You can upload at most {count} files at once.",
+    lfsNote: "Large files and known binary formats are stored with Git LFS automatically.",
+  },
+  // Deleting a file from the file view. Destructive, so it always goes
+  // through ConfirmDialog.
+  deleteFile: {
+    action: "Delete",
+    title: "Delete this file?",
+    body: "{file} will be removed from {rev} in a new commit. Earlier commits still contain it.",
+    lfsNote:
+      "The stored LFS object itself is kept until nothing references it any more and garbage collection reclaims it.",
+    confirm: "Delete file",
+    deleting: "Deleting…",
+    cancel: "Cancel",
+  },
   editor: {
     conflict:
       "This file changed while you were editing. Reload the page and reapply your changes — your edit is still here in the meantime.",

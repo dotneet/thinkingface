@@ -16,7 +16,7 @@ If you have not created an access token yet, start with the
 | The `hf` CLI | One file, from a shell, when the Hugging Face client is already installed |
 | The `tf` CLI | Registering a whole directory as a repository in a single command |
 | `git push` | Repositories you clone and work in, and anything where you want history |
-| The web UI | Small edits to Markdown or text files that already exist |
+| The web UI | Adding a handful of files, creating or editing a text file, or deleting one, without leaving the browser |
 
 All of them need an access token with the **write** scope. See
 [Authentication](../reference/authentication.md) for how scopes and roles interact.
@@ -185,11 +185,41 @@ This is the one route where *your* local `.gitattributes` and `git lfs track` se
 what goes to LFS, rather than the server. [Working with Git](git.md) covers credentials, LFS
 setup, SSH and branches in full.
 
+## Upload files from the browser
+
+Open a repository's **Files** tab and choose **Add file → Upload files**. Drop files onto the
+dialog or click it to pick them, write a commit message, and press **Upload**. Everything
+chosen in one dialog lands in a **single commit**, in whichever directory you were browsing.
+
+- Files are routed to Git LFS by the same `.gitattributes` rules as every other route (see
+  [below](#how-files-are-routed-to-git-lfs)). There is no `git lfs track` to run first and
+  nothing to install — the server does the routing and the object upload for you.
+- A progress bar reports how much has been sent, so a large file is not a dialog that appears
+  to have frozen.
+- At most **64 files per upload** and **10GB per file**. Larger or longer sets belong to
+  `git push` or `huggingface_hub`, which transfer in parallel and can resume.
+- **Add file → Create a new file** asks for a path and opens the browser editor there with an
+  empty document — the way to write a `README.md` into a repository that is still empty.
+
+The menu appears only when you are signed in with write access and are looking at a branch,
+and never on an archived repository. See [Browsing the Web UI](web-ui.md) for the screens.
+
+## Delete a file in the browser
+
+Open the file and press **Delete**, then confirm. The file is removed in a commit of its own;
+every commit before it still contains the file, so nothing disappears from the history.
+
+LFS-tracked files can be deleted this way too, even though they cannot be edited. Deleting
+one removes the pointer from the tree — the stored object stays in the bucket until nothing
+references it any more and garbage collection reclaims it, so the space is not freed at the
+moment you delete.
+
 ## Edit a file in the browser
 
 Markdown and text files that already exist in a repository can be edited and committed from
 the repository page, which is the quickest way to fix a README. LFS-tracked files cannot be
-edited this way, and edits must target a branch rather than a commit SHA. See
+edited this way, and edits must target a branch rather than a commit SHA. To create a file
+that does not exist yet, use **Add file → Create a new file** as described above. See
 [Browsing the Web UI](web-ui.md).
 
 ## How files are routed to Git LFS
@@ -278,6 +308,9 @@ page: the indexing is very likely still in flight.
 | `403 {repo} is archived and read-only` | Unarchive it in the repository settings first |
 | `501 xet_not_supported` | `HF_HUB_DISABLE_XET=1` is not set — see [above](#why-hf_hub_disable_xet1-is-required) |
 | `400 commits must target a branch, not a commit SHA` | The upload named a commit as its revision. Push to a branch |
+| `413 {file} is too large` | A browser upload past the per-file ceiling. Use `git push` or `huggingface_hub` for that file |
+| `400 at most 64 files can be uploaded in one request` | Split the browser upload, or use a route that handles whole folders |
+| `400 invalid upload path …` | A path tried to leave the repository root or write inside `.git`. Upload it under a normal path |
 
 ## Next steps
 

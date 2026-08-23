@@ -27,6 +27,7 @@ export function FileEditor({
   initialContent,
   baseOid,
   blobHref,
+  cancelHref,
   assetBaseUrl,
   repoRootUrl,
   linkContext,
@@ -40,6 +41,12 @@ export function FileEditor({
   initialContent: string;
   baseOid: string;
   blobHref: string;
+  /**
+   * Where Cancel goes. Defaults to `blobHref` — the file the edit came from —
+   * but a file being *created* has no blob page yet, so that caller sends the
+   * directory instead.
+   */
+  cancelHref?: string;
   assetBaseUrl: string;
   repoRootUrl: string;
   linkContext?: MarkdownLinkContext;
@@ -47,6 +54,7 @@ export function FileEditor({
   const t = useT();
   const router = useRouter();
   const isMarkdown = MARKDOWN_EXT.test(fileName);
+  const leaveHref = cancelHref ?? blobHref;
 
   const [content, setContent] = useState(initialContent);
   const [message, setMessage] = useState("");
@@ -158,7 +166,7 @@ export function FileEditor({
               {t("repo.editor.cancel")}
             </Button>
           ) : (
-            <Link href={blobHref} className="text-sm text-fg-subtle hover:text-fg hover:underline">
+            <Link href={leaveHref} className="text-sm text-fg-subtle hover:text-fg hover:underline">
               {t("repo.editor.cancel")}
             </Link>
           )}
@@ -178,7 +186,7 @@ export function FileEditor({
         onClose={() => setConfirmDiscard(false)}
         onConfirm={() => {
           setConfirmDiscard(false);
-          router.push(blobHref);
+          router.push(leaveHref);
         }}
         title={t("repo.editor.discardTitle")}
         description={

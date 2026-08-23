@@ -812,6 +812,106 @@ Constraints and status codes:
 | Sync | When a commit is created, a sync job to GCS is enqueued just like any other path (`Enqueue`) |
 | Auth | 401 when unauthenticated; 403 without write permission (a read-scope token also gets 403) |
 
+### `DELETE /api/v1/edit/{kind}/{ns}/{name}/{rev}/{path...}`  (deleting from the Web UI)
+
+Removes one file in a commit of its own. Same URL as the `PUT` above, same rules, and the same
+response shape — it is the deletion half of the Web UI's file editing, not a separate protocol.
+For deleting many files at once, or a whole folder, use the NDJSON commit API's `deletedFile` /
+`deletedFolder` operations.
+
+req (body optional — an empty body is valid and means "no message, no staleness check"):
+```ts
+{
+  message: string      // Optional. Defaults to "Delete {path}"
+  description: string  // Optional. Appended to the body of the commit message
+  base_oid: string     // Optional. The blob SHA the caller last saw at this path
+}
+```
+res 200: `EditFileResponse`, as for the `PUT`. `oid` is `""` and `size` is `0` — the file they
+would describe is gone; `commit_oid` is the deletion commit.
+
+Constraints and status codes:
+
+| Condition | Behavior |
+|---|---|
+| Body size | Capped at 64KiB (`maxMetaBody`). Exceeding it returns **413 `payload_too_large`**; a body that will not parse is 400 |
+| Missing path | **404 `not_found`** — a delete of something that is not there is not an empty commit |
+| Directory | 400. Delete a directory's files individually, or use `deletedFolder` on the commit API |
+| **LFS-managed path** | **Allowed**, unlike the `PUT`. Editing an LFS file would mean the browser writing pointer bytes it cannot produce; deleting one only drops the pointer from the tree. **The object itself is not deleted from the bucket** — it is content-addressed, immutable and shared instance-wide, so the deletion merely removes a reference and the bytes stay until `thinkingface gc` finds nothing refers to them any more (`docs/dev/content-addressed-storage-design.md` §5) |
+| `rev` | Branch name only. Passing a commit SHA returns 400 (defaults to the repository's default branch when omitted) |
+| Optimistic locking | When `base_oid` is given and it doesn't match the current blob SHA, returns **409 `conflict`**. For an LFS file this is the SHA of the *pointer* blob, which is what the tree listing reports |
+| Sync | A sync job is enqueued exactly as for any other commit (`Enqueue`), so the index is updated and the `repo.push` webhook fires |
+| Auth | 401 when unauthenticated; 403 without write permission (a read-scope token also gets 403); 403 `repository_archived` for an archived repository |
+
+### `POST /api/v1/upload/{kind}/{ns}/{name}/{rev}`  (uploading from the Web UI)
+
+Commits one or more files picked in the browser. Content-Type: `multipart/form-data`. Every part
+lands in a **single commit**, so uploading three files adds one entry to the history, not three.
+
+This is the browser's counterpart to the preupload → LFS batch → commit sequence
+`huggingface_hub` performs: the server does the LFS routing and the object upload on the client's
+behalf, because a browser cannot run git-lfs. Programmatic clients should keep using the
+HF-compatible endpoints, which are resumable and parallel.
+
+req parts (order matters — the body is read as a stream):
+
+| Part | Repeatable | Meaning |
+|---|---|---|
+| `file` | yes | The file's bytes |
+| `path` | yes | Repository path for the **next** `file` part. A `path` field must precede the file it names; when none is left over, the part's own `filename` is used |
+| `message` | no | Commit message. Defaults to `Upload {path}` for one file, `Upload {n} files` for several |
+| `description` | no | Optional. Appended to the body of the commit message |
+
+Any other field is ignored, so a form may carry parts this endpoint has no opinion about.
+
+res 200:
+```ts
+{
+  commit_oid: string  // The new commit's SHA
+  paths: string[]     // What landed, in the order the parts arrived
+}
+```
+
+**Routing to LFS reuses the preupload decision** (`gitrepo.LFSRules.ShouldUseLFS`): a
+`.gitattributes` pattern wins outright, and otherwise anything at or above
+`gitrepo.LFSInlineThreshold` (10MiB) goes to LFS. A multipart part carries no length, so a file
+with no matching pattern is read up to the threshold to find out which side of it the file falls
+on; a pattern match needs no read at all. LFS parts are streamed to object storage as they arrive
+— **the server never buffers a whole file in memory**, which matters because the same endpoint is
+what a 30GB checkpoint would arrive through.
+
+An LFS part is written to a scratch key under `tmp/uploads/` first (the digest, and therefore the
+object's only legitimate key, is not known until the last byte), then copied to
+`storage.LFSKey(oid)` and recorded in `lfs_objects` / `repo_lfs_objects`. Bytes first, index
+afterwards, as everywhere else in the storage layer: a failure in between leaves an object nothing
+references, which `thinkingface gc` reclaims, whereas the reverse order would leave a row
+promising bytes that are not there. A part that fails partway leaves only the scratch object,
+which the bucket's own lifecycle rule on `tmp/uploads/` drops after a day.
+
+Limits (constants in `internal/api/upload.go`):
+
+| Limit | Value | Why |
+|---|---|---|
+| `maxUploadFiles` | 64 files per request | A browser upload is a handful of files someone picked in a dialog; larger sets belong to `git push` / `upload_folder`, which are resumable and parallel |
+| `maxUploadFileBytes` | 10GiB per file | LFS itself caps nothing, but a single non-resumable HTTP request is not the same thing as a resumable transfer |
+| `maxUploadInlineBytes` | 32MiB per file **not** routed to LFS | That path really does pass through memory on its way into a git blob. Only reachable when `.gitattributes` negates LFS for the pattern (`*.csv -filter=lfs`) |
+| `maxUploadInlineTotalBytes` | 128MiB of non-LFS files per request | The per-file limit alone would still allow 64 x 32MiB resident at once. This is the number that actually bounds the handler's memory; LFS parts never contribute to it |
+| `maxUploadFieldBytes` | 8KiB per text field | `message` / `description` / `path` are prose, not payload |
+
+Constraints and status codes:
+
+| Condition | Behavior |
+|---|---|
+| Not multipart | 400 `bad_request` |
+| No `file` part | 400 — an upload with nothing in it is a mistake, not an empty commit |
+| Path validation | Every path goes through `gitrepo.ValidatePath` **before any bytes are stored**: a `..` segment, a `.git` component (case-insensitively, at any depth) or a NUL byte is 400 |
+| Over a size limit | **413 `payload_too_large`**, naming the file |
+| Too many files | 400, naming the limit |
+| `rev` | Branch name only. Passing a commit SHA returns 400 (defaults to the repository's default branch when omitted) |
+| Concurrent push | The commit is rebuilt on the moved head (`retryOnStale`), as for the HF commit API; only exhausted retries surface as 409 `conflict` |
+| Sync | One sync job for the commit (`Enqueue`), so the index is updated and the `repo.push` webhook fires |
+| Auth | 401 when unauthenticated; 403 without write permission (a read-scope token also gets 403); 403 `repository_archived` for an archived repository |
+
 ---
 
 ## 4. File retrieval

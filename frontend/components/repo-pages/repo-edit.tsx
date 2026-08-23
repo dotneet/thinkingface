@@ -19,12 +19,20 @@ export async function RepoEdit({
   name,
   rev,
   path,
+  isNew = false,
 }: {
   kind: RepoKind;
   ns: string;
   name: string;
   rev: string;
   path: string[];
+  /**
+   * Set by `?new=1`, which the tree's "Create a new file" prompt appends.
+   * Without it a path with nothing at it is a 404 -- a typo in a URL should
+   * not silently become a new file. With it, the same page opens an empty
+   * editor at that path instead.
+   */
+  isNew?: boolean;
 }) {
   const fileName = path[path.length - 1] ?? "";
   const dirPath = path.slice(0, -1);
@@ -54,7 +62,7 @@ export async function RepoEdit({
     ? dirResult.data.entries.find((e) => e.path === filePath)
     : undefined;
 
-  if (dirResult.ok && !entry) notFound();
+  if (dirResult.ok && !entry && !isNew) notFound();
 
   const trail = [
     { label: `blob/${rev}`, href: repoTreeHref(kind, ns, name, rev, dirPath.join("/")) },
@@ -83,16 +91,17 @@ export async function RepoEdit({
   }
 
   if (!dirResult.ok) return editError(errorMessage(t, dirResult));
-  if (!entry) return editError(t("repo.blob.fileNotFound"));
+  if (!entry && !isNew) return editError(t("repo.blob.fileNotFound"));
 
   if (!repo.can_write) {
     return editError(t("repo.edit.noPermission"), t("repo.edit.noPermissionHint"));
   }
 
   if (
-    entry.type !== "file" ||
-    (entry.preview !== "text" && entry.preview !== "markdown") ||
-    entry.lfs
+    entry &&
+    (entry.type !== "file" ||
+      (entry.preview !== "text" && entry.preview !== "markdown") ||
+      entry.lfs)
   ) {
     return editError(t("repo.edit.badType"), t("repo.edit.badTypeHint"));
   }
@@ -101,16 +110,25 @@ export async function RepoEdit({
     return editError(t("repo.edit.notBranch", { rev }), t("repo.edit.notBranchHint"));
   }
 
-  const rawResult = await getRawFile(kind, ns, name, rev, path, { headers });
-  if (!rawResult.ok) return editError(errorMessage(t, rawResult));
-  const raw = rawResult.data;
+  // A file being created has nothing to read and nothing to lock against:
+  // empty content, and an empty base_oid, which the API reads as "not
+  // tracking staleness".
+  let initialContent = "";
+  let baseOid = "";
+  if (entry) {
+    const rawResult = await getRawFile(kind, ns, name, rev, path, { headers });
+    if (!rawResult.ok) return editError(errorMessage(t, rawResult));
+    const raw = rawResult.data;
 
-  if (raw.truncated) {
-    return editError(t("repo.edit.tooLarge"), t("repo.edit.tooLargeHint"));
-  }
+    if (raw.truncated) {
+      return editError(t("repo.edit.tooLarge"), t("repo.edit.tooLargeHint"));
+    }
 
-  if (raw.encoding === "base64") {
-    return editError(t("repo.edit.notText"));
+    if (raw.encoding === "base64") {
+      return editError(t("repo.edit.notText"));
+    }
+    initialContent = raw.content;
+    baseOid = entry.oid;
   }
 
   const assetBaseUrl = resolveFileUrl(kind, ns, name, rev, dirPath, publicApiBase());
@@ -129,9 +147,10 @@ export async function RepoEdit({
         rev={rev}
         path={path}
         fileName={fileName}
-        initialContent={raw.content}
-        baseOid={entry.oid}
+        initialContent={initialContent}
+        baseOid={baseOid}
         blobHref={blobHref}
+        cancelHref={entry ? blobHref : repoTreeHref(kind, ns, name, rev, dirPath.join("/"))}
         assetBaseUrl={assetBaseUrl}
         repoRootUrl={repoRootUrl}
         linkContext={{ kind, ns, name, rev, dir: dirPath }}

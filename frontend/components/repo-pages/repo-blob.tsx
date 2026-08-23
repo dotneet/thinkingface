@@ -2,6 +2,7 @@ import { Pencil } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { CommitBar } from "@/components/repo/commit-bar";
+import { DeleteFileButton } from "@/components/repo/delete-file-button";
 import { FileNav } from "@/components/repo/file-nav";
 import { FilePreview } from "@/components/repo/file-preview";
 import { RepoBreadcrumb } from "@/components/repo/repo-breadcrumb";
@@ -103,18 +104,31 @@ export async function RepoBlob({
           <div className="flex flex-wrap items-center gap-2 text-sm text-fg-subtle">
             <span className="tabular-nums">{formatBytes(entry.size)}</span>
             {entry.lfs && <Badge tone="accent">LFS</Badge>}
-            {repo.can_write &&
-              repo.branches.includes(rev) &&
-              (entry.preview === "text" || entry.preview === "markdown") &&
-              !entry.lfs && (
-                <Link
-                  href={repoEditHref(kind, ns, name, rev, entry.path)}
-                  className="ml-auto flex items-center gap-1.5 text-accent hover:underline"
-                >
-                  <Pencil size={14} />
-                  {t("repo.blob.edit")}
-                </Link>
-              )}
+            {repo.can_write && repo.branches.includes(rev) && (
+              <div className="ml-auto flex items-center gap-3">
+                {/* Editing is limited to text this browser can round-trip;
+                    deleting only drops a tree entry, so it is offered for
+                    every file, LFS pointers included. */}
+                {(entry.preview === "text" || entry.preview === "markdown") && !entry.lfs && (
+                  <Link
+                    href={repoEditHref(kind, ns, name, rev, entry.path)}
+                    className="flex items-center gap-1.5 text-accent hover:underline"
+                  >
+                    <Pencil size={14} />
+                    {t("repo.blob.edit")}
+                  </Link>
+                )}
+                <DeleteFileButton
+                  kind={kind}
+                  ns={ns}
+                  name={name}
+                  rev={rev}
+                  path={path}
+                  baseOid={entry.oid}
+                  lfs={entry.lfs}
+                />
+              </div>
+            )}
           </div>
           {lastCommit && (
             <CommitBar

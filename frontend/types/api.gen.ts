@@ -592,6 +592,30 @@ export interface EditFileResponse {
   size: number /* int64 */;
 }
 /**
+ * DeleteFileRequest removes one file in a commit of its own. Every field is
+ * optional: an empty body deletes the path named in the URL with a generated
+ * commit message and no staleness check.
+ */
+export interface DeleteFileRequest {
+  message?: string;
+  description?: string;
+  /**
+   * BaseOID is the blob SHA the caller last saw at this path. When set, the
+   * delete is refused if the path has moved on since, so it never removes a
+   * version nobody looked at. For an LFS file this is the SHA of the
+   * *pointer* blob, which is what the tree listing reports.
+   */
+  base_oid?: string;
+}
+/**
+ * UploadFilesResponse reports the single commit one browser upload produced.
+ * Paths lists what landed, in the order the parts arrived.
+ */
+export interface UploadFilesResponse {
+  commit_oid: string;
+  paths: string[];
+}
+/**
  * ParquetColumn describes one column of a parquet schema.
  */
 export interface ParquetColumn {

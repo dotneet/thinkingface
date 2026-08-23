@@ -141,6 +141,8 @@ message attached to a form or a banner on an otherwise working page.
 | `DataTable`, `ValueCell`, `CellModal` | `ui/data-table.tsx`, `ui/value-cell.tsx`, `ui/cell-modal.tsx` | virtualized grid of `Record<string, unknown>` rows; long cells open in a dialog. `DataTableColumn.feature` (`"image"` / `"json"`, resolved by `lib/cell-value.ts`) switches a column to image thumbnails or a JSON tree in the dialog |
 | `SearchInput`, `FilterInput` | `ui/search-input.tsx` | `SearchInput` submits on Enter **and** on the browser's clear × (`activeValue` + `onSearch`); `FilterInput` reports every keystroke for in-page filtering. Never hand-roll a `type="search"` box — see §9 |
 | `JsonTree` | `ui/json-tree.tsx` | collapsible view of a parsed JSON value; `defaultDepth` controls how much starts expanded |
+| `FileDropZone` | `ui/file-drop.tsx` | the file picker: a visually hidden `<input type="file">` inside a labelled drop area (click and drag-and-drop both land in `onFiles`). The only place allowed to write `type="file"` — enforced by `check:ui`'s `raw-file-input` |
+| `ProgressBar` | `ui/progress-bar.tsx` | determinate progress (`value` 0…1) for work whose end is known, e.g. bytes sent of an upload. Indeterminate is `Spinner`; "will become content" is `Skeleton` |
 
 Conventions inside `ui/`:
 
@@ -197,6 +199,7 @@ It scans every `.ts`/`.tsx` under `app/`, `components/`, `hooks/`, `lib/` and fa
 | `subtle-xs-weight` | `text-xs` + `text-fg-subtle` in one `className` with no weight utility (§2) |
 | `tinted-fill-tone` | a tone's tinted fill next to that tone's **base** text token — use `-strong` (§1) |
 | `raw-search-input` | a `type="search"` attribute outside `components/ui/` — use `SearchInput` / `FilterInput` (§9) |
+| `raw-file-input` | a `type="file"` attribute outside `components/ui/` — use `FileDropZone` (§5) |
 | `client-boundary` | a Server Component importing a plain **value** (not a component) from a `"use client"` module |
 
 `components/ui/**` is exempt from `raw-button` by construction; genuine one-off exceptions go in

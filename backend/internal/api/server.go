@@ -237,6 +237,10 @@ func (s *Server) Handler() http.Handler {
 
 		r.Get("/model-meta/{kind}/{ns}/{name}/{rev}/*", s.handleModelMeta)
 		r.Put("/edit/{kind}/{ns}/{name}/{rev}/*", s.handleEditFile)
+		r.Delete("/edit/{kind}/{ns}/{name}/{rev}/*", s.handleDeleteFile)
+		// Multipart, one commit per request. Separate from /edit because the
+		// body is a stream of files rather than a JSON document.
+		r.Post("/upload/{kind}/{ns}/{name}/{rev}", s.handleUploadFiles)
 
 		r.Get("/parquet/{kind}/{ns}/{name}/schema/{rev}/*", s.handleParquetSchema)
 		r.Get("/parquet/{kind}/{ns}/{name}/rows/{rev}/*", s.handleParquetRows)

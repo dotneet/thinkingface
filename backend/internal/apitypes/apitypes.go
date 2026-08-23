@@ -517,6 +517,26 @@ type EditFileResponse struct {
 	Size      int64  `json:"size"`
 }
 
+// DeleteFileRequest removes one file in a commit of its own. Every field is
+// optional: an empty body deletes the path named in the URL with a generated
+// commit message and no staleness check.
+type DeleteFileRequest struct {
+	Message     string `json:"message,omitempty"`
+	Description string `json:"description,omitempty"`
+	// BaseOID is the blob SHA the caller last saw at this path. When set, the
+	// delete is refused if the path has moved on since, so it never removes a
+	// version nobody looked at. For an LFS file this is the SHA of the
+	// *pointer* blob, which is what the tree listing reports.
+	BaseOID string `json:"base_oid,omitempty"`
+}
+
+// UploadFilesResponse reports the single commit one browser upload produced.
+// Paths lists what landed, in the order the parts arrived.
+type UploadFilesResponse struct {
+	CommitOID string   `json:"commit_oid"`
+	Paths     []string `json:"paths"`
+}
+
 // ---------------------------------------------------------- parquet viewer
 
 // ParquetColumn describes one column of a parquet schema.

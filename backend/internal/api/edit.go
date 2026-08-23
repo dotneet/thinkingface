@@ -1,8 +1,11 @@
 package api
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 	"unicode/utf8"
@@ -215,4 +218,149 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, apitypes.EditFileResponse{
 		Path: path, CommitOID: newHash.String(), OID: newEntry.Hash.String(), Size: newEntry.Size,
 	})
+}
+
+// deleteSummary builds the commit message for a deletion, mirroring
+// commitSummary's shape with a verb that says what actually happened.
+func deleteSummary(path, message, description string) string {
+	summary := message
+	if summary == "" {
+		summary = "Delete " + path
+	}
+	if description != "" {
+		summary += "\n\n" + description
+	}
+	return summary
+}
+
+// decodeOptionalJSON is decodeJSON for a body that may legitimately be absent:
+// DELETE carries its options in a body, but "delete this path, no message, no
+// staleness check" is a request with nothing to say. An empty body leaves v at
+// its zero value; anything present still has to parse and still has to fit.
+func decodeOptionalJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, v any, badMsg string) bool {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBytes))
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+				fmt.Sprintf("request body must be at most %d bytes", maxBytes))
+			return false
+		}
+		badRequest(w, badMsg)
+		return false
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return true
+	}
+	if err := json.Unmarshal(body, v); err != nil {
+		badRequest(w, badMsg)
+		return false
+	}
+	return true
+}
+
+// handleDeleteFile removes a single file in a commit of its own. It is the
+// mirror of handleEditFile and shares its rules -- branch-only revisions,
+// base_oid as an optimistic lock, one path per request -- with one deliberate
+// difference: an LFS-tracked path *may* be deleted. Editing one is refused
+// because the browser would be writing pointer bytes it cannot produce;
+// deleting one only drops the pointer from the tree. The object itself stays
+// in the bucket, content-addressed and shared, until `thinkingface gc` finds
+// that nothing references it (docs/dev/content-addressed-storage-design.md §5).
+func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
+	repo, ok := s.loadRepoForWrite(w, r, chi.URLParam(r, "kind"), chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectUI)
+	if !ok {
+		return
+	}
+	path := wildcardPath(r)
+	if path == "" {
+		badRequest(w, "no file path given")
+		return
+	}
+	rev := chi.URLParam(r, "rev")
+	if looksLikeSHA(rev) {
+		badRequest(w, "deletions must target a branch, not a commit SHA")
+		return
+	}
+	if rev == "" {
+		rev = repo.DefaultBranch
+	}
+
+	var req apitypes.DeleteFileRequest
+	if !decodeOptionalJSON(w, r, maxMetaBody, &req, "request body must be JSON") {
+		return
+	}
+
+	gitRepo, err := s.git.Open(repo.StoragePath)
+	if err != nil {
+		internalError(w, "open git repository", err)
+		return
+	}
+
+	// Read the path's current state first: a delete of something that is not
+	// there is a 404, not an empty commit, and a stale base_oid is a 409.
+	entry, _, err := gitRepo.Stat(rev, path)
+	switch {
+	case err == nil:
+		if entry.IsDir {
+			badRequest(w, path+" is a directory; delete its files individually")
+			return
+		}
+	case errors.Is(err, gitrepo.ErrPathNotFound), errors.Is(err, gitrepo.ErrEmptyRepo):
+		notFound(w, path+" does not exist at "+rev)
+		return
+	default:
+		handleStoreError(w, "stat file", err)
+		return
+	}
+
+	if message, isConflict := editConflict(req.BaseOID, true, entry.Hash.String()); isConflict {
+		writeError(w, http.StatusConflict, "conflict", message)
+		return
+	}
+
+	user := currentUser(r.Context())
+	author := gitrepo.Signature{Name: "thinkingface", Email: "noreply@thinkingface.local", When: time.Now()}
+	if user != nil {
+		author.Name = user.Username
+		if user.Email != "" {
+			author.Email = user.Email
+		}
+	}
+
+	// Same reasoning as handleEditFile: the precondition repeats the base_oid
+	// check under the mutex that picks the parent, and retryOnStale is false
+	// so a concurrently moved head surfaces as 409 instead of quietly
+	// deleting a version the caller never saw.
+	var preconditions []gitrepo.PathPrecondition
+	if req.BaseOID != "" {
+		preconditions = []gitrepo.PathPrecondition{{Path: path, OID: req.BaseOID}}
+	}
+	newHash, oldHash, err := s.commitThroughWAL(r.Context(), repo, gitrepo.CommitRequest{
+		Branch: rev, Message: deleteSummary(path, req.Message, req.Description), Author: author,
+		Ops:           []gitrepo.Op{{Kind: gitrepo.OpDelete, Path: path}},
+		Preconditions: preconditions,
+	}, false)
+	var stale *gitrepo.StalePathError
+	if errors.As(err, &stale) {
+		writeError(w, http.StatusConflict, "conflict",
+			path+" changed concurrently; re-read the file and retry with its current oid")
+		return
+	}
+	if errors.Is(err, errWALConflict) {
+		writeError(w, http.StatusConflict, "conflict", "branch changed concurrently; retry the deletion")
+		return
+	}
+	if err != nil {
+		internalError(w, "create commit", err)
+		return
+	}
+	if err := s.sync.Enqueue(r.Context(), repo.ID, rev, oldHash.String(), newHash.String()); err != nil {
+		internalError(w, "schedule sync", err)
+		return
+	}
+
+	// The same shape handleEditFile answers with, so one client type covers
+	// both. oid/size describe the file that is no longer there: empty and 0.
+	writeJSON(w, http.StatusOK, apitypes.EditFileResponse{Path: path, CommitOID: newHash.String()})
 }
