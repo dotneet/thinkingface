@@ -82,7 +82,7 @@ As in HF, everything is unified under the principle that "everything is a git re
 - Revision: branch, tag, or commit SHA. The default branch is `main`
 - The YAML front matter of `README.md` is interpreted as the repository card (license, tags, language, etc.)
 - The card's `lineage:` block declares **lineage**. Writing the training dataset, base model, and training run lets the Sync Worker index them into `repo_lineage`, so the UI can trace both directions (upstream provenance and downstream models produced from it). The convention is in `docs/dev/api-contract.md` §11
-- `.gitattributes` controls which files go through LFS. The server generates defaults when a repository is created (`*.parquet`, `*.safetensors`, `*.bin`, `*.gguf`, `*.ckpt`, `*.pt`, `*.onnx`, etc., plus anything over 10MB is routed to LFS by the preupload API's decision)
+- `.gitattributes` controls which files go through LFS. The server generates defaults when a repository is created (`*.parquet`, `*.safetensors`, `*.bin`, `*.gguf`, `*.ckpt`, `*.pt`, `*.onnx`, etc., plus anything over 10MB is routed to LFS by the preupload API's decision). The seeded list is kind-specific: dataset repositories additionally track audio / image / video and packed-dataset formats, matching how HF splits its two templates. `gitrepo.DefaultGitAttributes(kind)` is both the seed and the fallback used when a repository's own file cannot be read, so every caller passes the kind
 
 Direct uploads from the Web UI (adding files from the browser) also internally call the HF-compatible commit API, creating a git commit server-side. **There is exactly one write path — git —** so history never diverges between the UI, the CLI, and Python.
 
@@ -169,6 +169,26 @@ generated locally when the script runs (or in a separate bucket via `DEST=gs://�
   the image, injected via `core.hooksPath` — there's no per-repository variable hook). Enqueuing
   the Sync job is still done, as before, by the server process itself detecting when
   receive-pack finishes
+- **Every invocation of the `git` binary goes through `internal/gitexec`** — the environment
+  (ambient `~/.gitconfig` shut out), the server-side configuration, and `InitBare`, which is
+  what both repository creation and WAL materialization create a bare repository with.
+  The configuration travels in `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n` (equivalent to `-c`)
+  rather than being written into each repository, because the bare directory is a cache that
+  materialization deletes and recreates — a `git config` written at creation time would not
+  survive it. What is set, and why:
+
+    | Setting | Reason |
+    |---|---|
+    | `receive.fsckObjects=true` | Reject malformed / hostile objects while they are still in receive-pack's quarantine, before a push becomes an immutable WAL entry |
+    | `receive.autogc=false` | Don't repack inside the push request. In WAL mode the local packs are rebuilt by compaction anyway, and gc could run against a directory the cache is about to evict |
+    | `core.bigFileThreshold` | Same 10 MiB as `gitrepo.LFSInlineThreshold`, so blobs this system already considers oversized are stored without delta compression |
+    | `pack.threads`, `pack.windowMemory` | Bound what one `pack-objects` can cost (threads × window). Unconfigured, git takes the host's CPU count and no memory limit, which is how one clone can OOM a memory-capped instance |
+    | `uploadpack.allowFilter`, `uploadpack.allowAnySHA1InWant` | Allow partial clone and fetching a commit by object name. Access control happens before upload-pack is reached |
+
+    `InitBare` also passes `--template=` (so no sample hooks, `description` or `info/exclude`
+    are copied in, and no inherited `GIT_TEMPLATE_DIR` can add anything) and pins
+    `--object-format=sha1`.
+
 - **Git history stays small**: large files always go through LFS pointers, so the bare repository holds only text and pointers. Disk usage stays light
 
 ### Git over SSH

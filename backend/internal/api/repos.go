@@ -218,7 +218,7 @@ func (s *Server) createRepo(ctx context.Context, user *store.User, kind, ns, nam
 		Message: "Initial commit",
 		Author:  gitrepo.Signature{Name: user.Username, Email: user.Email, When: time.Now()},
 		Ops: []gitrepo.Op{
-			{Kind: gitrepo.OpAdd, Path: ".gitattributes", Data: []byte(gitrepo.DefaultGitAttributes)},
+			{Kind: gitrepo.OpAdd, Path: ".gitattributes", Data: []byte(gitrepo.DefaultGitAttributes(kind))},
 			{Kind: gitrepo.OpAdd, Path: "README.md", Data: []byte(readme)},
 		},
 	}, true)

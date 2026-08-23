@@ -24,7 +24,10 @@ git, both use Git LFS, both are pushed and pulled the same way. Experiment logs 
 repositories too; see [Experiments](#experiments-projects-and-runs) below.
 
 Every new repository is seeded with two files: a `.gitattributes` carrying the default LFS rules,
-and a `README.md` with YAML front matter, so LFS routing works from the very first upload.
+and a `README.md` with YAML front matter, so LFS routing works from the very first upload. The
+rules depend on the kind — a dataset also tracks audio, image and video files, which a model
+repository leaves as ordinary blobs. See
+[How files are routed to Git LFS](guides/uploading.md#how-files-are-routed-to-git-lfs).
 
 !!! note "There is exactly one write path"
 

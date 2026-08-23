@@ -5,10 +5,29 @@ import (
 	"strings"
 )
 
-// DefaultGitAttributes is written into every new repository so that large
-// binary formats go to LFS from the first push, matching what a HF repository
-// ships with.
-const DefaultGitAttributes = `*.7z filter=lfs diff=lfs merge=lfs -text
+// KindDataset is the repository kind whose seeded .gitattributes carries the
+// media rules below. Spelled out here so this file does not depend on the
+// store package for one string.
+const KindDataset = "dataset"
+
+// DefaultGitAttributes returns the .gitattributes seeded into a new repository
+// of the given kind, so that large binary formats go to LFS from the first
+// push. It is also the fallback used when reading a repository's own
+// .gitattributes fails, which is why every caller must pass the kind rather
+// than assume one: routing a dataset's audio files as ordinary blobs because
+// the fallback was the model list would put megabytes of WAV into the object
+// database.
+func DefaultGitAttributes(kind string) string {
+	if kind == KindDataset {
+		return commonGitAttributes + datasetGitAttributes
+	}
+	return commonGitAttributes
+}
+
+// commonGitAttributes matches what a HuggingFace repository ships with (plus
+// the GGUF formats llama.cpp made ubiquitous after that list was written), so
+// a repository cloned from either hub routes files the same way.
+const commonGitAttributes = `*.7z filter=lfs diff=lfs merge=lfs -text
 *.arrow filter=lfs diff=lfs merge=lfs -text
 *.bin filter=lfs diff=lfs merge=lfs -text
 *.bz2 filter=lfs diff=lfs merge=lfs -text
@@ -33,6 +52,7 @@ const DefaultGitAttributes = `*.7z filter=lfs diff=lfs merge=lfs -text
 *.pth filter=lfs diff=lfs merge=lfs -text
 *.rar filter=lfs diff=lfs merge=lfs -text
 *.safetensors filter=lfs diff=lfs merge=lfs -text
+saved_model/**/* filter=lfs diff=lfs merge=lfs -text
 *.tar filter=lfs diff=lfs merge=lfs -text
 *.tar.* filter=lfs diff=lfs merge=lfs -text
 *.tflite filter=lfs diff=lfs merge=lfs -text
@@ -44,6 +64,45 @@ const DefaultGitAttributes = `*.7z filter=lfs diff=lfs merge=lfs -text
 *.gguf filter=lfs diff=lfs merge=lfs -text
 *.ggml filter=lfs diff=lfs merge=lfs -text
 *tfevents* filter=lfs diff=lfs merge=lfs -text
+`
+
+// datasetGitAttributes is appended for dataset repositories only, matching how
+// HuggingFace splits its two templates. Media files are the payload of a
+// dataset and belong in LFS however small any single one is; in a model
+// repository the same patterns would only push the screenshots in a model card
+// through an LFS round trip.
+const datasetGitAttributes = `# Audio - uncompressed
+*.pcm filter=lfs diff=lfs merge=lfs -text
+*.sam filter=lfs diff=lfs merge=lfs -text
+*.raw filter=lfs diff=lfs merge=lfs -text
+# Audio - compressed
+*.aac filter=lfs diff=lfs merge=lfs -text
+*.flac filter=lfs diff=lfs merge=lfs -text
+*.mp3 filter=lfs diff=lfs merge=lfs -text
+*.ogg filter=lfs diff=lfs merge=lfs -text
+*.wav filter=lfs diff=lfs merge=lfs -text
+# Image - uncompressed
+*.bmp filter=lfs diff=lfs merge=lfs -text
+*.gif filter=lfs diff=lfs merge=lfs -text
+*.png filter=lfs diff=lfs merge=lfs -text
+*.tiff filter=lfs diff=lfs merge=lfs -text
+# Image - compressed
+*.jpg filter=lfs diff=lfs merge=lfs -text
+*.jpeg filter=lfs diff=lfs merge=lfs -text
+*.webp filter=lfs diff=lfs merge=lfs -text
+# Video
+*.avi filter=lfs diff=lfs merge=lfs -text
+*.mkv filter=lfs diff=lfs merge=lfs -text
+*.mov filter=lfs diff=lfs merge=lfs -text
+*.mp4 filter=lfs diff=lfs merge=lfs -text
+*.webm filter=lfs diff=lfs merge=lfs -text
+# Packed and embedded datasets
+*.db filter=lfs diff=lfs merge=lfs -text
+*.duckdb filter=lfs diff=lfs merge=lfs -text
+*.lz4 filter=lfs diff=lfs merge=lfs -text
+*.mds filter=lfs diff=lfs merge=lfs -text
+*.sqlite filter=lfs diff=lfs merge=lfs -text
+*.sqlite3 filter=lfs diff=lfs merge=lfs -text
 `
 
 // LFSInlineThreshold is the size above which a file goes to LFS even when no
@@ -106,13 +165,51 @@ func (r *LFSRules) ShouldUseLFS(filePath string, size int64) bool {
 
 // matchAttrPattern implements the slice of gitignore-style matching that
 // .gitattributes files actually use in practice: a bare glob matches the base
-// name at any depth, while a pattern containing a slash is anchored.
+// name at any depth, while a pattern containing a slash is anchored to the
+// repository root.
 func matchAttrPattern(pattern, filePath string) bool {
 	pattern = strings.TrimPrefix(pattern, "/")
-	if strings.Contains(pattern, "/") {
-		ok, err := path.Match(pattern, filePath)
+	if !strings.Contains(pattern, "/") {
+		ok, err := path.Match(pattern, path.Base(filePath))
 		return err == nil && ok
 	}
-	ok, err := path.Match(pattern, path.Base(filePath))
-	return err == nil && ok
+	return matchSegments(strings.Split(pattern, "/"), strings.Split(filePath, "/"))
+}
+
+// matchSegments matches an anchored pattern segment by segment, with "**"
+// standing for zero or more segments -- which covers all three shapes git
+// gives it: a leading "**/" (match in any directory), a trailing "/**" (match
+// everything below), and "/**/" in the middle (match across any depth).
+//
+// path.Match alone cannot do this: its "*" never crosses a separator, so it
+// reads "**" as one more single segment and quietly matches only at the one
+// depth. That mattered as soon as the seeded list gained saved_model/**/*, and
+// it matters more for hand-written rules -- a user's `data/**/*.bin` is
+// honoured by their git-lfs on push but was ignored by this server on upload,
+// so the same file took different routes depending on the client.
+func matchSegments(pattern, name []string) bool {
+	for len(pattern) > 0 {
+		if pattern[0] == "**" {
+			if len(pattern) == 1 {
+				// A trailing "/**" matches everything *inside*, so there has
+				// to be something left to be inside of.
+				return len(name) > 0
+			}
+			for i := 0; i <= len(name); i++ {
+				if matchSegments(pattern[1:], name[i:]) {
+					return true
+				}
+			}
+			return false
+		}
+		if len(name) == 0 {
+			return false
+		}
+		ok, err := path.Match(pattern[0], name[0])
+		if err != nil || !ok {
+			return false
+		}
+		pattern, name = pattern[1:], name[1:]
+	}
+	return len(name) == 0
 }

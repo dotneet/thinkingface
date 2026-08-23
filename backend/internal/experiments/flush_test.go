@@ -190,7 +190,7 @@ func newExpHarness(t *testing.T) *expHarness {
 		Branch: "main", Message: "initial",
 		Author: gitrepo.Signature{Name: "alice", Email: "alice@example.com"},
 		Ops: []gitrepo.Op{
-			{Kind: gitrepo.OpAdd, Path: ".gitattributes", Data: []byte(gitrepo.DefaultGitAttributes)},
+			{Kind: gitrepo.OpAdd, Path: ".gitattributes", Data: []byte(gitrepo.DefaultGitAttributes("dataset"))},
 			{Kind: gitrepo.OpAdd, Path: "README.md", Data: []byte("# metrics\n")},
 		},
 	}); err != nil {

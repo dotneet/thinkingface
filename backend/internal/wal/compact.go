@@ -61,7 +61,13 @@ func Compact(ctx context.Context, st storage.Storage, workDir, storagePath strin
 		return nil
 	}
 
-	if _, err := runGit(ctx, workDir, "repack", "-a", "-d", "--depth=50", "--window=250"); err != nil {
+	// --no-write-bitmap-index: repack.writeBitmaps defaults to true in a bare
+	// repository, so without this every compaction computes a reachability
+	// bitmap that is then thrown away -- only the .pack is uploaded, and a
+	// materialising instance rebuilds the .idx with index-pack. Should clone
+	// performance ever want bitmaps, they have to be built on the
+	// materialising side, where they survive.
+	if _, err := runGit(ctx, workDir, "repack", "-a", "-d", "--no-write-bitmap-index", "--depth=50", "--window=250"); err != nil {
 		return fmt.Errorf("compact %s: %w", storagePath, err)
 	}
 	packPath, err := solePack(workDir)

@@ -329,7 +329,10 @@ Selecting targets: repositories where entries count > threshold (default 50), or
 
 For each repository:
   1. materialize (generation G)
-  2. git repack -a -d --depth=50 --window=250
+  2. git repack -a -d --no-write-bitmap-index --depth=50 --window=250
+     (--no-write-bitmap-index because repack.writeBitmaps defaults to true in a bare
+      repository, and only the .pack of step 3 is uploaded: the bitmap would be computed
+      and thrown away, and the .idx is rebuilt by index-pack on the materializing side)
   3. PUT the resulting single pack to GCS: base/{ulid}.pack
   4. CAS the index (ifGenerationMatch=G.generation):
        base    = the new pack from step 3

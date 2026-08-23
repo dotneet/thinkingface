@@ -130,7 +130,7 @@ func TestPublishBlobs_LeavesLFSObjectsWhereTheyAre(t *testing.T) {
 	}
 
 	f.push("main",
-		gitrepo.Op{Kind: gitrepo.OpAdd, Path: ".gitattributes", Data: []byte(gitrepo.DefaultGitAttributes)},
+		gitrepo.Op{Kind: gitrepo.OpAdd, Path: ".gitattributes", Data: []byte(gitrepo.DefaultGitAttributes("model"))},
 		gitrepo.Op{Kind: gitrepo.OpAdd, Path: "model.bin", Data: gitrepo.FormatLFSPointer(oid, int64(len(content)))},
 	)
 

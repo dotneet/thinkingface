@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+
+	"github.com/dotneet/thinkingface/backend/internal/gitexec"
 )
 
 // Streams are the three standard streams of an SSH session, wired to the git
@@ -99,23 +101,17 @@ func (h *Handler) ServeSSH(ctx context.Context, storagePath string, service Serv
 	return nil
 }
 
-// sshEnv is gitEnv with GIT_PROTOCOL decided by the client rather than
-// hard-coded. Over HTTP the version travels in a header the transport always
-// sends; over SSH it is an optional environment request, and inventing one
-// breaks clients that did not ask for it.
+// sshEnv is the shared git environment (internal/gitexec) with GIT_PROTOCOL
+// decided by the client rather than hard-coded. Over HTTP the version travels
+// in a header the transport always sends; over SSH it is an optional
+// environment request, and inventing one breaks clients that did not ask for
+// it.
 func sshEnv(gitProtocol string) []string {
-	base := gitEnv()
-	out := make([]string, 0, len(base)+1)
-	for _, kv := range base {
-		if strings.HasPrefix(kv, "GIT_PROTOCOL=") {
-			continue
-		}
-		out = append(out, kv)
-	}
+	env := gitexec.Env()
 	if v := sanitizeGitProtocol(gitProtocol); v != "" {
-		out = append(out, "GIT_PROTOCOL="+v)
+		env = append(env, "GIT_PROTOCOL="+v)
 	}
-	return out
+	return env
 }
 
 // sanitizeGitProtocol accepts only the shape git actually sends. The value

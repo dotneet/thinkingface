@@ -215,6 +215,17 @@ storage as an [LFS object](../concepts.md):
     `.gitattributes` for the full list, and edit it like any other file to add your own
     patterns. Later lines win over earlier ones, exactly as in git.
 
+    **Dataset repositories get more.** Media files are the payload of a dataset, so a dataset
+    is seeded with the audio (`*.wav`, `*.flac`, `*.mp3`, `*.ogg`, `*.aac`, `*.pcm`, …), image
+    (`*.png`, `*.jpg`, `*.jpeg`, `*.webp`, `*.gif`, `*.bmp`, `*.tiff`), video (`*.mp4`, `*.mov`,
+    `*.webm`, `*.mkv`, `*.avi`) and packed-dataset (`*.db`, `*.duckdb`, `*.sqlite`, `*.lz4`,
+    `*.mds`) patterns as well — every one of them routed to LFS however small the individual
+    file is. Model repositories are not, so the screenshots in a model card stay ordinary git
+    blobs.
+
+    Patterns may use `**` to cross directories (`data/**/*.bin`), which is matched the same
+    way whether the upload goes through the API or through `git push`.
+
 2. **Anything 10 MiB or larger goes to LFS anyway**, when no pattern matches it. This keeps
    the bare repository small enough to clone cheaply no matter what gets committed.
 
