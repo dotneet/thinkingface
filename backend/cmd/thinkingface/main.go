@@ -136,7 +136,7 @@ func run(command string) error {
 		// the directories under GIT_ROOT become a bounded cache.
 		gitManager.EnableWAL(obj, cfg.GitCacheBytes)
 	}
-	parquet := viewer.New(obj, cfg.ViewerCacheDir, cfg.ViewerCacheBytes)
+	parquet := viewer.New(obj, cfg.ViewerMetadataCacheBytes)
 	// Checkpoint headers are read straight out of storage, so this cache only
 	// has to hold the parsed result, not the file.
 	checkpoints := modelmeta.NewCache(modelmeta.DefaultCacheEntries)

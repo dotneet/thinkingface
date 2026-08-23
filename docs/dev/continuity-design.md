@@ -397,7 +397,7 @@ The GCS implementation uses `cloud.google.com/go/storage`'s
 | min-instances | 1 | keeps the cache warm. Avoids cold starts |
 | Request timeout | 3600s | large clones |
 | `GIT_ROOT` | `/tmp/git` | tmpfs |
-| `TF_VIEWER_CACHE_DIR` | `/tmp/cache` | existing. Already an emptyDir today, so unchanged |
+| `TF_VIEWER_CACHE_DIR` | `/tmp/cache` | existing. Already an emptyDir today, so unchanged as a mount — but the parquet viewer no longer caches to it (it reads via storage range requests); it's WAL compaction's scratch directory now (`backend/cmd/thinkingface/walops.go`) |
 
 `backend/Dockerfile`'s `CGO_ENABLED=1` is **unnecessary** (DuckDB isn't used; the viewer is
 pure-Go parquet-go). A static binary makes the image smaller and cold starts faster.

@@ -89,8 +89,8 @@ func TestLoad_CacheBudgetsHaveDefaultsAndParse(t *testing.T) {
 	if c.GitCacheBytes != 1<<20 {
 		t.Fatalf("GitCacheBytes = %d, want %d", c.GitCacheBytes, 1<<20)
 	}
-	if c.ViewerCacheBytes != 4<<30 {
-		t.Fatalf("ViewerCacheBytes default = %d, want %d", c.ViewerCacheBytes, int64(4<<30))
+	if c.ViewerMetadataCacheBytes != 256<<20 {
+		t.Fatalf("ViewerMetadataCacheBytes default = %d, want %d", c.ViewerMetadataCacheBytes, int64(256<<20))
 	}
 }
 

@@ -26,7 +26,7 @@ func newFlushHarness(t *testing.T) *flushHarness {
 
 	// newHarness builds its own viewer/indexer internally; rebuild the same
 	// wiring here so the test can query Series through it.
-	parquet := viewer.New(h.obj, t.TempDir(), 0)
+	parquet := viewer.New(h.obj, 8<<20)
 	indexer := experiments.NewIndexer(h.st, h.git, h.obj, parquet)
 	h.syn.indexer = indexer
 	h.syn.EnableFlush(experiments.NewFlusher(h.st, h.git, h.obj, parquet, "off"), time.Minute)
