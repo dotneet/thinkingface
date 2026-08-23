@@ -1,4 +1,4 @@
--- Organisations (docs/organization-design.md §6.1): profile columns and
+-- Organisations (docs/dev/organization-design.md §6.1): profile columns and
 -- policies on the namespace row, membership bookkeeping, and the per-org
 -- audit log.
 --

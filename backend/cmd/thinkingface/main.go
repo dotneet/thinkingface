@@ -40,7 +40,7 @@ func main() {
 
 	// `hook` is dispatched before run() so it never touches config.Load /
 	// store.Open. It runs as a child process of `git receive-pack` on every
-	// push (see docs/continuity-design.md §14): it must not require
+	// push (see docs/dev/continuity-design.md §14): it must not require
 	// DATABASE_URL and must stay cheap to start.
 	if command == "hook" {
 		// Re-point slog at stderr as plain text: anything a library logs in
@@ -135,7 +135,7 @@ func run(command string) error {
 	}
 	gitManager := gitrepo.NewManager(cfg.GitRoot)
 	if cfg.WALMode == "authoritative" {
-		// Phase 4+ (docs/continuity-design.md §15): the WAL is the truth and
+		// Phase 4+ (docs/dev/continuity-design.md §15): the WAL is the truth and
 		// the directories under GIT_ROOT become a bounded cache.
 		gitManager.EnableWAL(obj, cfg.GitCacheBytes)
 	}
@@ -150,7 +150,7 @@ func run(command string) error {
 	})
 	sync := syncer.New(db, gitManager, obj, parquet, indexer, hooks, cfg.SyncWorkers)
 	// Route B's ingest buffer is only a buffer: the source of truth stays the
-	// parquet inside the dataset repository (docs/thinkingface-design.md §8),
+	// parquet inside the dataset repository (docs/dev/thinkingface-design.md §8),
 	// so the sync worker periodically commits the buffered points there.
 	if cfg.ExpFlushInterval > 0 {
 		sync.EnableFlush(experiments.NewFlusher(db, gitManager, obj, parquet, cfg.WALMode), cfg.ExpFlushInterval)
@@ -182,7 +182,7 @@ func run(command string) error {
 	// h2c lets git clients negotiate HTTP/2 without TLS termination in the
 	// container, which is how Cloud Run's "HTTP/2 end-to-end" reaches us and
 	// the only way past the 32 MiB HTTP/1 request cap on large pushes
-	// (docs/continuity-design.md §12). Plain HTTP/1 clients are unaffected:
+	// (docs/dev/continuity-design.md §12). Plain HTTP/1 clients are unaffected:
 	// the wrapper falls through for them.
 	h2cHandler := h2c.NewHandler(server.Handler(), &http2.Server{})
 
@@ -203,7 +203,7 @@ func run(command string) error {
 		}
 	}()
 
-	// git over SSH (docs/thinkingface-design.md §5). Optional: HTTPS remains
+	// git over SSH (docs/dev/thinkingface-design.md §5). Optional: HTTPS remains
 	// the primary transport, so a failure to start SSH must not take the API
 	// down with it -- it is logged loudly and the process keeps serving.
 	var ssh *sshserver.Server

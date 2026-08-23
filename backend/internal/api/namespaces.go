@@ -1,6 +1,6 @@
 // Namespaces: the one endpoint that answers "does this name exist, and what
 // does it hold" for a user account and an organisation alike
-// (docs/namespace-design.md §7), the self-service profile edit behind
+// (docs/dev/namespace-design.md §7), the self-service profile edit behind
 // /settings/profile, and the HuggingFace-compatible overview endpoints that
 // read the same profile.
 
@@ -20,7 +20,7 @@ import (
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
 
-// Profile field ceilings (docs/namespace-design.md §10). display_name and
+// Profile field ceilings (docs/dev/namespace-design.md §10). display_name and
 // description are counted in runes because they are prose typed by a person:
 // a byte limit would cut a Japanese bio to a third of an English one. The
 // URLs are counted in bytes, which is what a URL length limit means.
@@ -83,7 +83,7 @@ func (s *Server) namespaceProfile(ctx context.Context, name string) *store.Names
 }
 
 // displayNameOr is the HF `fullname` rule: the profile's display name when it
-// has one, the namespace name otherwise (docs/namespace-design.md §5.3).
+// has one, the namespace name otherwise (docs/dev/namespace-design.md §5.3).
 func displayNameOr(p *store.NamespaceProfile, name string) string {
 	if p != nil && p.DisplayName != "" {
 		return p.DisplayName
@@ -138,7 +138,7 @@ func (s *Server) namespaceResponse(w http.ResponseWriter, r *http.Request, p *st
 	// A site admin is "admin" everywhere (roleIn), but the only profile
 	// editor is PATCH /me/profile, which edits the caller's own namespace; so
 	// for a user namespace can_edit is true for its owner alone, not for a
-	// site admin looking at somebody else (docs/namespace-design.md §10).
+	// site admin looking at somebody else (docs/dev/namespace-design.md §10).
 	isOwner := viewer != nil && strings.EqualFold(viewer.Username, p.Name)
 	canEdit := role == RoleAdmin && (p.Kind == string(apitypes.NamespaceKindOrg) || isOwner)
 	out := apitypes.NamespaceProfile{
@@ -167,10 +167,10 @@ func (s *Server) namespaceResponse(w http.ResponseWriter, r *http.Request, p *st
 // handleGetNamespace answers GET /api/v1/namespaces/{ns}. It is public: a
 // namespace's existence is already visible in every repository URL, and the
 // sign-up form's availability check reads it unauthenticated
-// (docs/namespace-design.md §10).
+// (docs/dev/namespace-design.md §10).
 //
 // Only the name *syntax* is checked before the lookup, not the reserved
-// list: the reserved list guards creation (docs/namespace-design.md §9), and
+// list: the reserved list guards creation (docs/dev/namespace-design.md §9), and
 // an account that predates an entry on it -- or the seeded `admin` user,
 // should a deployment ever reserve that -- still exists and must still
 // answer here. A reserved name nobody holds is a plain 404 from the lookup.
@@ -200,7 +200,7 @@ func (s *Server) handleGetNamespace(w http.ResponseWriter, r *http.Request) {
 // their own user namespace's profile columns, and nothing else. A token works
 // as well as a session so CI can set a profile, but a read-scoped one does
 // not (requireWrite). There is deliberately no route for editing somebody
-// else's profile, site admin included (docs/namespace-design.md §10).
+// else's profile, site admin included (docs/dev/namespace-design.md §10).
 func (s *Server) handleUpdateMyProfile(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.requireWrite(w, r)
 	if !ok {
@@ -242,7 +242,7 @@ func (s *Server) handleUpdateMyProfile(w http.ResponseWriter, r *http.Request) {
 
 // handleHFUserOverview answers GET /api/users/{username}/overview, which is
 // what huggingface_hub's HfApi.get_user_overview() calls
-// (docs/namespace-design.md §7.2). Organisations answer on their own endpoint,
+// (docs/dev/namespace-design.md §7.2). Organisations answer on their own endpoint,
 // so an organisation name is a 404 here -- the same way HF behaves.
 //
 // The follower/like counters are not modelled at all and are reported as 0
@@ -299,7 +299,7 @@ func (s *Server) handleHFOrgOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	// numUsers is the member count regardless of members_visibility: the
 	// size of an organisation is not what that setting hides -- the roster is
-	// (docs/organization-design.md §6.1).
+	// (docs/dev/organization-design.md §6.1).
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":         p.Name,
 		"fullname":     displayNameOr(p, p.Name),

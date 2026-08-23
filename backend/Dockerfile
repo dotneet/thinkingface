@@ -73,7 +73,7 @@ COPY --from=builder /out/thinkingface /usr/local/bin/thinkingface
 COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 
 # core.hooksPath fixed image location for the pre-receive hook (Continuity
-# migration, docs/continuity-design.md §6.2): the hook script lives in the
+# migration, docs/dev/continuity-design.md §6.2): the hook script lives in the
 # image, never per-repository, so pushes always go through
 # `thinkingface hook pre-receive`.
 COPY hooks/pre-receive /opt/thinkingface/hooks/pre-receive
@@ -96,7 +96,7 @@ ENV TF_ADDR=:8080 \
     TF_VIEWER_CACHE_DIR=/data/cache
 
 EXPOSE 8080
-# git over SSH, when TF_SSH_ENABLED=true (docs/thinkingface-design.md §5).
+# git over SSH, when TF_SSH_ENABLED=true (docs/dev/thinkingface-design.md §5).
 EXPOSE 2222
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \

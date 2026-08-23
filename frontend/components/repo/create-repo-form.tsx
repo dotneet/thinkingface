@@ -37,7 +37,7 @@ export function CreateRepoForm({
   namespaces: Namespace[];
   loggedIn: boolean;
   /**
-   * Preselected namespace from `/new?ns=` (docs/namespace-design.md §4.3).
+   * Preselected namespace from `/new?ns=` (docs/dev/namespace-design.md §4.3).
    * Ignored unless the viewer may actually create there, so a hand-edited URL
    * cannot put the form into a state the server would reject.
    */

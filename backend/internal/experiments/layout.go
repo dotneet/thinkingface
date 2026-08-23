@@ -66,7 +66,7 @@ func DetectLayouts(paths []string, repoName string) []Layout {
 		}
 		if hasArtifactSegment(p) {
 			// "{project}/artifacts/{run}/..." is a run's own output
-			// (docs/api-contract.md §7), never project data. Without this an
+			// (docs/dev/api-contract.md §7), never project data. Without this an
 			// artifact named metrics.parquet would invent a project called
 			// "{project}/artifacts/{run}".
 			continue

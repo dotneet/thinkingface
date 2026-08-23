@@ -35,7 +35,7 @@ export function expRunHref(ns: string, repo: string, project: string, run: strin
 export type ListExperimentsParams = {
   /**
    * Restrict the listing to one namespace, case-insensitively
-   * (docs/namespace-design.md §5.6) — what `/{ns}?tab=experiments` uses.
+   * (docs/dev/namespace-design.md §5.6) — what `/{ns}?tab=experiments` uses.
    */
   author?: string;
   /**

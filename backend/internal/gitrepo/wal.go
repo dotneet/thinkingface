@@ -16,7 +16,7 @@ import (
 )
 
 // walBackend is set once at startup when the WAL is authoritative
-// (docs/continuity-design.md §15 Phase 4+). While it is nil — WAL off or
+// (docs/dev/continuity-design.md §15 Phase 4+). While it is nil — WAL off or
 // shadow — the manager behaves exactly as before: the on-disk repositories
 // are the truth and nothing here runs.
 type walBackend struct {
@@ -136,7 +136,7 @@ func (m *Manager) maybeEvict() {
 	// A repository directory is any directory whose name ends in ".git",
 	// wherever it sits under root — {root}/repos/{ulid}.git (new) and
 	// {root}/{models|datasets}/{ns}/{name}.git (legacy) alike
-	// (docs/repo-transfer-design.md §8). Never descend into one: nothing
+	// (docs/dev/repo-transfer-design.md §8). Never descend into one: nothing
 	// inside a bare repository's own directory tree ends in ".git" in a way
 	// that should be treated as a nested repository.
 	_ = filepath.WalkDir(m.root, func(path string, d fs.DirEntry, err error) error {

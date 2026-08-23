@@ -1,15 +1,15 @@
-"""End-to-end tests for the namespace feature (docs/namespace-design.md),
+"""End-to-end tests for the namespace feature (docs/dev/namespace-design.md),
 which unifies "username" and "organization ID" into one concept -- a
 namespace -- exposed through `/{ns}` on the web UI and, for tests, through:
 
 - the UI-facing namespace API (`GET /api/v1/namespaces/{ns}`,
   `PATCH /api/v1/me/profile`, `GET /api/v1/experiments?author=`,
-  docs/namespace-design.md §7.1) via plain `requests` +
+  docs/dev/namespace-design.md §7.1) via plain `requests` +
   `Authorization: Bearer <token>` -- that surface has no `huggingface_hub`
   client, same as `test_orgs.py`'s `/api/v1/orgs/...` coverage, and
 - `huggingface_hub` for the HF-compatible surface a namespace's profile is
   meant to feed: `whoami()["fullname"]`, `get_user_overview()`,
-  `get_organization_overview()` (docs/namespace-design.md §7.2).
+  `get_organization_overview()` (docs/dev/namespace-design.md §7.2).
 
 Requires a running server; see e2e/README.md. `hf_api` / `hf_endpoint` /
 `hf_token` come from conftest.py and act as the seeded admin user. Second
@@ -124,7 +124,7 @@ def _delete_org(endpoint: str, headers: dict[str, str], org: str) -> requests.Re
 def test_fresh_signup_has_an_empty_public_namespace(hf_endpoint: str) -> None:
     """A user who just signed up and never pushed anything still has a
     namespace: `GET /api/v1/namespaces/{u}` is 200 with every count at 0
-    (docs/namespace-design.md §5.5, "an empty namespace should not 404"),
+    (docs/dev/namespace-design.md §5.5, "an empty namespace should not 404"),
     reachable anonymously, and `can_edit` is true only for the account
     itself."""
     user, session, token_id = _new_user(hf_endpoint, "fresh")
@@ -151,7 +151,7 @@ def test_namespace_lookup_is_case_insensitive_but_returns_canonical_spelling(
     hf_endpoint: str,
 ) -> None:
     """Namespace names are matched case-insensitively but the response
-    always carries the spelling used at registration (docs/namespace-design.md
+    always carries the spelling used at registration (docs/dev/namespace-design.md
     §5.5), e.g. looking up `Alice` for a user registered as `alice` returns
     `name: "alice"`."""
     user, session, token_id = _new_user(hf_endpoint, "case")
@@ -166,7 +166,7 @@ def test_namespace_lookup_is_case_insensitive_but_returns_canonical_spelling(
 
 def test_namespace_num_models_counts_created_repos(hf_endpoint: str, unique_name: str) -> None:
     """Creating a model repository under a namespace is reflected in that
-    namespace's `num_models` (docs/namespace-design.md §6, `CountNamespaceResources`)."""
+    namespace's `num_models` (docs/dev/namespace-design.md §6, `CountNamespaceResources`)."""
     user, session, token_id = _new_user(hf_endpoint, "count")
     repo_id = f"{user.username}/{unique_name}"
     created = False
@@ -189,9 +189,9 @@ def test_namespace_num_models_counts_created_repos(hf_endpoint: str, unique_name
 def test_profile_update_reflects_in_whoami_and_user_overview(hf_endpoint: str) -> None:
     """`PATCH /api/v1/me/profile` is a partial update; its fields show up in
     `whoami()["fullname"]` (`display_name || username`) and
-    `get_user_overview().fullname` / `.details` (docs/namespace-design.md
+    `get_user_overview().fullname` / `.details` (docs/dev/namespace-design.md
     §5.3, §7.2). A `javascript:` URL for `website` is rejected with 400
-    (docs/namespace-design.md §10), and a read-scoped token cannot call the
+    (docs/dev/namespace-design.md §10), and a read-scoped token cannot call the
     endpoint at all (403)."""
     user, session, token_id = _new_user(hf_endpoint, "profile")
     try:
@@ -245,7 +245,7 @@ def test_organization_namespace_and_overview(
     shows up both in `GET /api/v1/namespaces/{org}` and in
     `get_organization_overview().num_users`. Passing a *user* namespace to
     `get_organization_overview()` (or an org namespace to `get_user_overview()`)
-    404s, same as upstream HF (docs/namespace-design.md §7.2)."""
+    404s, same as upstream HF (docs/dev/namespace-design.md §7.2)."""
     admin_headers = {"Authorization": f"Bearer {hf_token}"}
     org_name = f"e2e-ns-org-{uuid.uuid4().hex[:8]}"
     try:
@@ -272,7 +272,7 @@ def test_reserved_namespace_name_is_404(hf_endpoint: str) -> None:
     """A reserved name (a static top-level route, here `models`) can never be
     registered, so `GET /api/v1/namespaces/models` is a plain 404 -- the
     lookup only checks the name's syntax and then finds nobody holds it
-    (docs/namespace-design.md §5.5, §9)."""
+    (docs/dev/namespace-design.md §5.5, §9)."""
     resp = _get_namespace(hf_endpoint, "models")
     assert resp.status_code == 404, resp.text
 
@@ -288,7 +288,7 @@ def test_experiments_author_filter_returns_total(
     hf_endpoint: str, hf_token: str, namespace: str
 ) -> None:
     """`GET /api/v1/experiments?author=` filters by namespace (case-insensitive)
-    and the response carries `total` (docs/namespace-design.md §5.6). A fresh
+    and the response carries `total` (docs/dev/namespace-design.md §5.6). A fresh
     namespace's experiment tab is not expected to have any experiment
     repositories from other tests, so this only asserts the shape and that
     `total` is a non-negative count -- not an exact value, since it isn't this

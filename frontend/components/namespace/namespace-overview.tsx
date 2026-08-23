@@ -58,7 +58,7 @@ const EMPTY_COPY: Record<
  * with the models and datasets tabs delegating to the same `RepoListPage`
  * the global `/models` and `/datasets` listings use, so search, facets,
  * sorting and paging behave identically inside a namespace
- * (docs/namespace-design.md §4.3).
+ * (docs/dev/namespace-design.md §4.3).
  *
  * The profile is fetched by the page (which needs it for the 404 and the
  * canonical-spelling redirect) and handed down rather than fetched twice.

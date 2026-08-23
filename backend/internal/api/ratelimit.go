@@ -15,7 +15,7 @@ import (
 //
 // Everything here is per-process and in-memory on purpose. The instance
 // topology this server targets is a single writer (SQLite mode is explicitly
-// one process, docs/thinkingface-design.md §10/§14), and a shared counter
+// one process, docs/dev/thinkingface-design.md §10/§14), and a shared counter
 // would mean a round trip to the database on the exact path an attacker is
 // trying to flood. Under multiple replicas the effective limit is
 // per-replica; that is recorded in §14 rather than papered over.

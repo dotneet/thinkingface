@@ -1,5 +1,5 @@
 -- How a repository relates to the base model it points at
--- (postgres/0011_lineage_relation.sql, docs/api-contract.md §12). Only
+-- (postgres/0011_lineage_relation.sql, docs/dev/api-contract.md §12). Only
 -- 'base_model' edges use it; dataset and run edges keep ''.
 --
 -- SQLite has no ADD COLUMN IF NOT EXISTS, but a migration runs exactly once

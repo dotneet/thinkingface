@@ -8,7 +8,7 @@ import type { RepoKind } from "@/types/api";
 
 /**
  * "A newer version is available", at the top of a repository whose card
- * declares `new_version:` (docs/api-contract.md §12).
+ * declares `new_version:` (docs/dev/api-contract.md §12).
  *
  * The link goes to the *end* of the successor chain, not to the immediate
  * successor: someone landing on v1 wants v4, not v2. The server resolves that

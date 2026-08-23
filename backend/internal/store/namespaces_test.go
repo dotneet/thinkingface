@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// Namespace store tests (docs/namespace-design.md §12). They run against
+// Namespace store tests (docs/dev/namespace-design.md §12). They run against
 // every available backend: the counting query uses SUM(CASE ...) rather than
 // Postgres' FILTER precisely so both engines can run it, and that claim is
 // only worth anything if both are exercised.
@@ -63,7 +63,7 @@ func TestIntegrationCountNamespaceResources(t *testing.T) {
 		ctx := f.ctx
 
 		// An empty namespace counts zero everywhere rather than 404ing: a
-		// freshly registered account has a page (docs/namespace-design.md §5.5).
+		// freshly registered account has a page (docs/dev/namespace-design.md §5.5).
 		bob := f.ns(t, "bob")
 		if c, err := s.CountNamespaceResources(ctx, bob.ID); err != nil || c != (NamespaceCounts{}) {
 			t.Fatalf("counts of an empty namespace = %+v, %v, want all zero", c, err)

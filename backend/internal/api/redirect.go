@@ -1,5 +1,5 @@
 // Redirects for repositories that have been transferred or renamed
-// (docs/repo-transfer-design.md §9). resolveRepo is the one place that turns
+// (docs/dev/repo-transfer-design.md §9). resolveRepo is the one place that turns
 // a miss in `repositories` into either a genuine 404 or a repoMovedError, and
 // redirectMoved is the one place that turns a repoMovedError into the
 // response shape a given route family expects.
@@ -38,7 +38,7 @@ const (
 	// existed: no Location, no repo_moved body. Used for
 	// DELETE /api/repos/delete on an old name, which must not let a client
 	// delete the repository sitting at the new name by accident
-	// (docs/repo-transfer-design.md §6).
+	// (docs/dev/repo-transfer-design.md §6).
 	redirectNone
 )
 
@@ -55,7 +55,7 @@ func (e *repoMovedError) Error() string {
 
 // resolveRepo looks up (kind, ns, name), falling back to repo_redirects when
 // the direct lookup misses so callers can tell "never existed" apart from
-// "used to live here" (docs/repo-transfer-design.md §9).
+// "used to live here" (docs/dev/repo-transfer-design.md §9).
 //
 // kind == "" resolves either kind, like store.GetRepoAnyKind, but then
 // cannot consult repo_redirects (its primary key includes kind), so a miss

@@ -87,7 +87,7 @@ export function UserMenu({
             <div className="truncate text-xs font-medium text-fg-subtle">{user.email}</div>
           </div>
           <div className="my-1 h-px bg-border" />
-          {/* The user's own namespace page (docs/namespace-design.md §8.1) —
+          {/* The user's own namespace page (docs/dev/namespace-design.md §8.1) —
               first, because it is the one destination that is about them
               rather than about a setting. */}
           <Link

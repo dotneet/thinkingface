@@ -1,4 +1,4 @@
-// WAL wiring for the write paths (docs/continuity-design.md §6, §7, §15): the
+// WAL wiring for the write paths (docs/dev/continuity-design.md §6, §7, §15): the
 // HF commit API and the web edit endpoint funnel through commitThroughWAL, so
 // a server-side commit obeys the same acknowledgement rule as a git push —
 // off: disk only; shadow: mirror best-effort; authoritative: no 200 without a

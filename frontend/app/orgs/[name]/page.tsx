@@ -8,7 +8,7 @@ type Search = { tab?: string };
 
 /**
  * `/orgs/{name}` is now only a redirect to the one namespace page, `/{name}`
- * (docs/namespace-design.md §4.1). It stays so bookmarks and external links
+ * (docs/dev/namespace-design.md §4.1). It stays so bookmarks and external links
  * made before the merge keep working; the organisation's settings screens
  * remain under `/orgs/{name}/settings`.
  */

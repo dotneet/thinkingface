@@ -29,7 +29,7 @@ having to think "what's the namespace? what's the name?" every single time.
 
 `tf` eliminates this. It has no protocol of its own — it's a thin client against the
 HF-compatible API the server already exposes (whoami / create_repo / preupload / LFS
-batch / commit; `docs/api-contract.md` §1–§3), so anything `hf upload` can do, `tf up` can
+batch / commit; `docs/dev/api-contract.md` §1–§3), so anything `hf upload` can do, `tf up` can
 do too. The differences are:
 
 - If the repository doesn't exist, `tf up` creates it first (it doesn't rely on the
@@ -290,7 +290,7 @@ Rather than adding commands to this repository's Python package
 - `tf up gs://...` is unsupported (produces a `gs:// import is not supported yet` error).
   For data in GCS, copy it locally first and then run `tf up`
 - The server has no HF-compatible repo auto-create (the premise from
-  `docs/api-contract.md` §3 that "`create_repo` must precede `preupload`/`commit`" still
+  `docs/dev/api-contract.md` §3 that "`create_repo` must precede `preupload`/`commit`" still
   holds), so `tf up` checks for and creates the repository itself before committing
 - The command name `tf` can collide with Terraform (in environments that alias
   `terraform` to `tf`) or with TensorFlow's tooling. Watch out for shell alias

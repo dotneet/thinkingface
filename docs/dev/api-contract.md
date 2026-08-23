@@ -92,7 +92,7 @@ Both are `""` right after signup. Edited via `PATCH /api/v1/me/profile`.
 `namespaces[].role` means different things depending on the namespace kind: for an organization
 (`kind: "org"`) it's `org_members.role` (`admin` / `write` / `read`); for a user's own namespace
 (`kind: "user"`) it's always `"admin"` since the owner is implicitly an admin
-(`docs/organization-design.md` §3).
+(`docs/dev/organization-design.md` §3).
 
 ### `GET /api/whoami-v2`  (HF-compatible)
 res 200:
@@ -114,7 +114,7 @@ site admin — only rows that exist in `org_members`). `roleInOrg` is `admin` / 
 
 `fullname` is the profile's own `display_name`, or the username if unset. `avatarUrl` is
 `avatar_url` (`""` if unset). Same convention already used for `orgs[].fullname` / `avatarUrl`
-against organizations (`docs/namespace-design.md` §5.3). What `hf auth whoami` displays follows this.
+against organizations (`docs/dev/namespace-design.md` §5.3). What `hf auth whoami` displays follows this.
 
 ### `GET /api/organizations/{org}/members`  (HF-compatible)
 Called by `HfApi.list_organization_members()`. Authorization is the same as the UI-facing
@@ -157,7 +157,7 @@ experiment repository is a dataset, and it also appears in `GET /api/datasets`. 
 
 ### 1.1 Organizations
 
-The confirmed design is `docs/organization-design.md` (permission matrix in §4, behavior in §5).
+The confirmed design is `docs/dev/organization-design.md` (permission matrix in §4, behavior in §5).
 The type source of truth is `apitypes` (the `// --- organisations` section of
 `backend/internal/apitypes/apitypes.go`); what follows is a summary of it.
 
@@ -213,7 +213,7 @@ The four profile fields on `POST /api/v1/orgs` and `PATCH /api/v1/orgs/{org}`
 (`display_name` / `description` / `website` / `avatar_url`) go through the **same validation**
 as `PATCH /api/v1/me/profile` ("Profile field validation" in §1.2). In particular, `website` /
 `avatar_url` reject anything other than `http://` / `https://` with 400 `bad_request`
-(previously unvalidated, allowing `javascript:` to be saved; `docs/namespace-design.md` §10).
+(previously unvalidated, allowing `javascript:` to be saved; `docs/dev/namespace-design.md` §10).
 
 Error `type` values (`{"error": {"type": ...}}`, with their corresponding HTTP status):
 `org_creation_disabled` (403), `reserved_name` (400), `last_admin` (409), `has_repositories` (409),
@@ -230,13 +230,13 @@ Reserved names (rejected at creation time for both organization and user names; 
 unaffected): the source of truth is `reservedNamespaceNames` in `backend/internal/api/names.go`
 (not enumerated here; it's mirrored in `frontend/lib/validation.ts`, and `bun run check:ui` checks
 that the two match and that every top-level route under `app/` is covered.
-`docs/namespace-design.md` §9).
+`docs/dev/namespace-design.md` §9).
 
 Instance-wide setting: the environment variable `TF_ORG_CREATION` (`anyone` (default) / `admin`).
 
 ### 1.2 Namespaces
 
-The confirmed design is `docs/namespace-design.md`. A username and an organization ID share
+The confirmed design is `docs/dev/namespace-design.md`. A username and an organization ID share
 **a single namespace**, and both can be looked up through one endpoint regardless of kind.
 The type source of truth is `apitypes` (the `// --- namespaces` section).
 
@@ -459,7 +459,7 @@ normal not-found page.
 ### `POST /api/v1/repos`  (creation from the Web UI)
 req: `{"kind","namespace","name","description":""}` → `{"repo": RepoDetail}`
 On success, if the namespace is an organization, records a `repo.created` audit log entry
-(`docs/organization-design.md` §5).
+(`docs/dev/organization-design.md` §5).
 
 ### `POST /api/repos/create`  (HF-compatible)
 req: `{"type":"dataset"|"model","name":"foo" | "ns/foo","organization":null}`
@@ -493,7 +493,7 @@ req: `{"type","name","organization"}` → 200 `{}`. Cleanup and permissions are 
 (**namespace admin only** — so that going through `huggingface_hub` isn't a permission loophole).
 For an organization-owned repository, only the organization's **admin** role can do this (write
 gets 403). In a user namespace the owner is admin, so behavior doesn't change
-(`docs/organization-design.md` §4). `DELETE /api/v1/repos/{kind}/{ns}/{name}` carries the same
+(`docs/dev/organization-design.md` §4). `DELETE /api/v1/repos/{kind}/{ns}/{name}` carries the same
 constraint.
 
 ### Archiving (making read-only)
@@ -530,7 +530,7 @@ req: `{"fromRepo":"alice/foo","toRepo":"team/foo","type":"model"|"dataset"}`
   404 (destination namespace doesn't exist) / 409 (a repo of the same name already exists at the
   destination, or a transfer is already pending)
 Renaming (within the same namespace) uses the same endpoint. No actual data (LFS / non-LFS blobs /
-git history / WAL) moves — not a single byte (`docs/repo-transfer-design.md`). Keys on GCS are
+git history / WAL) moves — not a single byte (`docs/dev/repo-transfer-design.md`). Keys on GCS are
 content-addressed and independent of namespace, so there's no asynchronous relocation job tied to
 a transfer.
 
@@ -700,7 +700,7 @@ SELECT * FROM read_parquet([
 ```
 
 The Web UI's "GCS access" dialog displays this response as-is (`RepoDetail.gcs_uri` /
-`gcloud_command` have been removed; see `docs/thinkingface-design.md` §4). The file tree's
+`gcloud_command` have been removed; see `docs/dev/thinkingface-design.md` §4). The file tree's
 `TreeEntryUI.gcloud_command` is also generated with the same quoting rule (`shellSingleQuote`).
 
 ### `GET /api/v1/repos/{kind}/{ns}/{name}/refs`  (for the UI)
@@ -1171,7 +1171,7 @@ Points received via `POST .../log` are only staged in `exp_points`; the source o
 the parquet inside the dataset repository. The sync worker periodically
 (`TF_EXP_FLUSH_INTERVAL`, default 1 minute; immediately once a run becomes `finished` / `failed`)
 commits the buffer to `{project}/metrics.parquet` (or that file, if a metrics parquet with a
-different name already exists) and deletes it from `exp_points`. See `docs/thinkingface-design.md`
+different name already exists) and deletes it from `exp_points`. See `docs/dev/thinkingface-design.md`
 §8 for details.
 
 - The commit message is `chore(trackio): flush {project} metrics`. This does not fire the
@@ -1245,7 +1245,7 @@ When an event occurs, an HTTP POST is sent to a registered URL. Registration can
 (`repo_id` is null) or per specific repository; the permission required is write/admin on the
 target namespace (`CanWriteNamespace`, or site admin). Every endpoint requires auth and write
 scope. **When the namespace is an organization, the admin role is required** (write gets 403). In
-a user namespace the owner is admin, so behavior doesn't change (`docs/organization-design.md`
+a user namespace the owner is admin, so behavior doesn't change (`docs/dev/organization-design.md`
 §4).
 
 ```ts
@@ -1757,7 +1757,7 @@ objects that no repository references anymore.
   deletes the GCS `blobs/{sha...}` object (there's no DB table with a corresponding row, so this
   side only does the GCS deletion). Objects updated within the last 24 hours are excluded (a grace
   period to avoid racing with a push whose `repo_files` commit hasn't landed yet; see
-  `docs/content-addressed-storage-design.md` §5 for details).
+  `docs/dev/content-addressed-storage-design.md` §5 for details).
 - `--dry-run` (default `true`): only shows the oids/shas targeted for deletion and their total
   size.
 - `--yes`: allows the actual deletion. Passing `--dry-run=false` alone is treated the same way.

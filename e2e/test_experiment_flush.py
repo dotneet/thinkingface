@@ -1,6 +1,6 @@
 """Route B's ingest buffer must end up as parquet in the dataset repository.
 
-docs/thinkingface-design.md §8 offers two ways to record an experiment: the
+docs/dev/thinkingface-design.md §8 offers two ways to record an experiment: the
 trackio batch sync (route A) and the native ingest API (route B). Both are
 promised the *same* storage: a Parquet file inside a thinkingface dataset
 repository, so the data is git-versioned, readable straight out of the bucket

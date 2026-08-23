@@ -8,7 +8,7 @@ the finalized design to bring that up to a level that can withstand real-world o
 
 > **Note on visibility**: at the time this design was written, repositories had a public/private
 > distinction, and the meaning of the `read` role was tied to "can read private repos." Later,
-> `docs/content-addressed-storage-design.md` §1 abolished the concept of visibility itself as a
+> `docs/dev/content-addressed-storage-design.md` §1 abolished the concept of visibility itself as a
 > premise, so the permission matrix and role definitions from §4 onward have been rewritten. §2
 > "Current state and issues" is left as-is as a record of that time — the `private` concept it
 > mentions no longer exists in the current code.
@@ -34,7 +34,7 @@ Related documents: `thinkingface-design.md` §10-11 (data model, authorization),
 - A per-organization profile page and settings screens (profile / members / webhooks / storage
   usage / audit log / deletion)
 - Whether the member list is public can be configured per organization (visibility of
-  repositories themselves was already abolished in `docs/content-addressed-storage-design.md` §1)
+  repositories themselves was already abolished in `docs/dev/content-addressed-storage-design.md` §1)
 - Who did what, and when, can be traced (a per-organization audit log)
 
 ### Non-Goals
@@ -50,7 +50,7 @@ Related documents: `thinkingface-design.md` §10-11 (data model, authorization),
 - Avatar image upload (`avatar_url` is provided only as an optional field for an external URL)
 - A user profile page (`/{username}`). This design covers only the organization page
   `/orgs/{name}`; the user-side equivalent can be built later from the same parts
-  → **Later superseded by `docs/namespace-design.md`**: both users and organizations are unified
+  → **Later superseded by `docs/dev/namespace-design.md`**: both users and organizations are unified
   under `/{ns}`, and `/orgs/{name}` becomes a permanent redirect to `/{name}`
   (`/orgs/{name}/settings/*` stays as-is)
 
@@ -147,7 +147,7 @@ consistently "the user themself in a user namespace, OR a member of the organiza
 *1 In organizations with `members_visibility = 'public'`, anyone can view the member list
 (default is `members`).
 
-*2 Repositories have no concept of visibility (`docs/content-addressed-storage-design.md` §1).
+*2 Repositories have no concept of visibility (`docs/dev/content-addressed-storage-design.md` §1).
 Reading is open to everyone; role only controls the write side.
 
 **Changes from existing behavior** (two points that narrow write-role privileges):
@@ -229,7 +229,7 @@ different admin must be set up first). Organizations do not depend on their foun
 
 Since repositories have no concept of visibility, detail / tree / resolve / raw / parquet /
 model-meta / reading experiments / LFS batch download / search / lineage do not consult role at
-all (`docs/content-addressed-storage-design.md` §1). Role only affects write and admin
+all (`docs/dev/content-addressed-storage-design.md` §1). Role only affects write and admin
 operations, plus viewing the member list and storage usage.
 
 ### Audit Log
@@ -347,7 +347,7 @@ signup, organization creation) add an extra check (this does not apply to reposi
 ```
 api, apis, datasets, models, spaces, experiments, orgs, organizations, settings, new, login, logout, signup,
 styleguide, healthz, static, _next, assets, raw, resolve, lfs, info, git, webhooks, transfers, me, whoami-v2
-(later unioned with `docs/namespace-design.md` §9. `admin` was excluded since it's the default seed username)
+(later unioned with `docs/dev/namespace-design.md` §9. `admin` was excluded since it's the default seed username)
 ```
 
 Reason: these collide with the frontend's `app/` routes, the backend's `/{ns}/{name}` routes, and
@@ -576,7 +576,7 @@ Decisions:
 - ~~The organization page URL is `/orgs/{name}` (`/{name}` is not chosen, since route collisions
   and the cost of managing reserved names would be too high; `/users/{name}` is also recommended
   when a user profile is built in the future)~~
-  → **Superseded by `docs/namespace-design.md`**: since the `/[ns]` route already exists and the
+  → **Superseded by `docs/dev/namespace-design.md`**: since the `/[ns]` route already exists and the
   cost of managing reserved names has already been paid, both users and organizations are unified
   under `/{ns}`. `/orgs/{name}` becomes a permanent redirect to `/{name}`;
   `/orgs/{name}/settings/*` is unchanged

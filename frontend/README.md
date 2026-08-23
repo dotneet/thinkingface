@@ -1,7 +1,7 @@
 # thinkingface — frontend
 
 Next.js (App Router) + Bun web UI for the thinkingface hub. Implements the
-routes described in `docs/api-contract.md` and `docs/thinkingface-design.md`
+routes described in `docs/dev/api-contract.md` and `docs/dev/thinkingface-design.md`
 §12 against the Go backend.
 
 ## Requirements

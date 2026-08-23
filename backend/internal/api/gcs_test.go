@@ -1,6 +1,6 @@
 // Tests for the bucket-location endpoint and the gs:// URIs the file browser
 // hands out. The generated snippets are copy-pasted by users and mirrored in
-// docs/api-contract.md, so the script and the DuckDB call are asserted as
+// docs/dev/api-contract.md, so the script and the DuckDB call are asserted as
 // whole strings rather than by fragments.
 
 package api

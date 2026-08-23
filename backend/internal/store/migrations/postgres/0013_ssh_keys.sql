@@ -1,5 +1,5 @@
 -- SSH public keys, used to authenticate git over SSH
--- (docs/thinkingface-design.md §5 "Git over SSH").
+-- (docs/dev/thinkingface-design.md §5 "Git over SSH").
 --
 -- fingerprint is the OpenSSH "SHA256:<base64>" form and is globally unique,
 -- not unique per user: the SSH server has only the offered key to go on when

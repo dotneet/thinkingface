@@ -14,7 +14,7 @@ import (
 var ErrTransferNotPending = errors.New("store: transfer is not pending")
 
 // RepoTransfer is one row of the transfer/rename audit trail
-// (docs/repo-transfer-design.md §4, §7): either a completed immediate move
+// (docs/dev/repo-transfer-design.md §4, §7): either a completed immediate move
 // (status "accepted" from the moment it is created) or a request awaiting
 // the target namespace's decision.
 type RepoTransfer struct {
@@ -92,7 +92,7 @@ func scanRepoTransfer(row rowScanner) (*RepoTransfer, error) {
 // transferMove performs the physical relocation of a repository: updating
 // repositories.namespace_id/name, leaving a redirect at the old name,
 // rewriting repo_lineage targets that pointed at the old name and dropping
-// repo-scoped webhooks -- docs/repo-transfer-design.md §7.1's steps between
+// repo-scoped webhooks -- docs/dev/repo-transfer-design.md §7.1's steps between
 // the repositories UPDATE and the repo_transfers INSERT. Object storage needs
 // no step of its own: every key is content-addressed, so not one byte moves
 // when a repository changes hands. It does not touch repo_transfers itself:
@@ -166,7 +166,7 @@ func (s *Store) transferMove(ctx context.Context, ex executor, spec TransferSpec
 	}
 
 	// The new name is now a real repository again, so any redirect that used
-	// to live there must go (docs/repo-transfer-design.md §5 "conflicts").
+	// to live there must go (docs/dev/repo-transfer-design.md §5 "conflicts").
 	if _, err = ex.Exec(ctx,
 		`DELETE FROM repo_redirects WHERE kind = $1 AND from_namespace = $2 AND from_name = $3`,
 		repoKind, toNS.Name, toName); err != nil {
@@ -208,7 +208,7 @@ func (s *Store) transferMove(ctx context.Context, ex executor, spec TransferSpec
 }
 
 // TransferRepo performs an immediate move in one transaction
-// (docs/repo-transfer-design.md §7.1): the caller already has write access
+// (docs/dev/repo-transfer-design.md §7.1): the caller already has write access
 // to both the source and destination namespaces (or is a server admin), so
 // there is nothing left to wait on. It records one 'accepted'
 // repo_transfers row and returns the repository at its new name.
@@ -241,7 +241,7 @@ func (s *Store) TransferRepo(ctx context.Context, spec TransferSpec) (*Repo, err
 
 // CreateRepoTransfer records a pending request that must be accepted by
 // someone with write access to the target namespace
-// (docs/repo-transfer-design.md §7.2). ErrConflict when a pending transfer
+// (docs/dev/repo-transfer-design.md §7.2). ErrConflict when a pending transfer
 // already exists for the repository (the unique partial index enforces this
 // under a race) or the target (namespace, name, kind) is already taken, or
 // when the request is a no-op; ErrNotFound when the repository or target
@@ -334,7 +334,7 @@ func (s *Store) PendingRepoTransfer(ctx context.Context, repoID int64) (*RepoTra
 // source namespace). A pending row past its expires_at is treated as if it
 // were not pending; it is flipped to 'expired' lazily on first touch by the
 // decision methods rather than through a cleanup job
-// (docs/repo-transfer-design.md §7.2).
+// (docs/dev/repo-transfer-design.md §7.2).
 func (s *Store) ListRepoTransfersForUser(ctx context.Context, userID int64) (incoming, outgoing []RepoTransfer, err error) {
 	now := time.Now()
 	writable := `EXISTS (
@@ -378,7 +378,7 @@ func (s *Store) queryRepoTransfers(ctx context.Context, where string, args ...an
 // row, requires it to still be pending and unexpired (an expired row is
 // flipped to 'expired' as a side effect and reported as
 // ErrTransferNotPending), then runs the same physical move as TransferRepo
-// and flips the row to 'accepted' (docs/repo-transfer-design.md §7.2). A
+// and flips the row to 'accepted' (docs/dev/repo-transfer-design.md §7.2). A
 // request whose from-location no longer matches the repository (it was moved
 // or renamed in the meantime) is voided -- status 'cancelled' -- and reported
 // as ErrTransferNotPending instead of being executed.

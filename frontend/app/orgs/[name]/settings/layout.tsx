@@ -20,7 +20,7 @@ export const dynamic = "force-dynamic";
  * never runs and never fetches. Non-admins get an explicit "admins only"
  * message rather than a 404 — the organisation's existence is public
  * information, and the only way to land here without the role is a stale
- * bookmark (docs/organization-design.md §8.1).
+ * bookmark (docs/dev/organization-design.md §8.1).
  */
 export default async function OrgSettingsLayout({
   children,

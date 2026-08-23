@@ -1,4 +1,4 @@
-// namespace: the /{ns} profile page shared by users and organizations (docs/namespace-design.md §8.3).
+// namespace: the /{ns} profile page shared by users and organizations (docs/dev/namespace-design.md §8.3).
 export const namespace = {
   kind: {
     user: "ユーザー",

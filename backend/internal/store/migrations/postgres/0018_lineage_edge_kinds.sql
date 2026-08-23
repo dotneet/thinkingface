@@ -1,4 +1,4 @@
--- Two more lineage edge kinds (docs/api-contract.md §12):
+-- Two more lineage edge kinds (docs/dev/api-contract.md §12):
 --
 --   eval_dataset -- a dataset the repository was *evaluated* on, read from a
 --                   model card's `model-index:`. It targets a dataset

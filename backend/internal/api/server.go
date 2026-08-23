@@ -156,7 +156,7 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/api/organizations/{org}/members", s.handleHFOrgMembers)
 	// HfApi.get_user_overview() / get_organization_overview(). The two share
 	// one name space, so each answers 404 for the other's kind
-	// (docs/namespace-design.md §7.2).
+	// (docs/dev/namespace-design.md §7.2).
 	r.Get("/api/users/{username}/overview", s.handleHFUserOverview)
 	r.Get("/api/organizations/{org}/overview", s.handleHFOrgOverview)
 	// huggingface_hub calls this before every commit that touches a README
@@ -253,7 +253,7 @@ func (s *Server) Handler() http.Handler {
 		r.Post("/experiments/{ns}/{repo}/{project}/finish", s.handleExperimentFinish)
 
 		// Public: the sign-up form's availability check reads this
-		// unauthenticated (docs/namespace-design.md §5.5).
+		// unauthenticated (docs/dev/namespace-design.md §5.5).
 		r.Get("/namespaces/{ns}", s.handleGetNamespace)
 
 		r.Get("/namespaces/{ns}/webhooks", s.handleListWebhooks)

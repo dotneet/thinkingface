@@ -7,7 +7,7 @@ export const auth = {
   username: "Username",
   email: "Email",
   password: "Password",
-  // Sign-up only (docs/namespace-design.md §5.1): claiming a username also
+  // Sign-up only (docs/dev/namespace-design.md §5.1): claiming a username also
   // claims the namespace at /{username}, so the label and hint say so.
   usernameLabel: "Username (your namespace)",
   usernameHint:

@@ -32,7 +32,7 @@ resource "google_project_service" "required" {
 # Every key is content-addressed and immutable: lfs/{oid[0:2]}/{oid[2:4]}/{oid}
 # for LFS objects, blobs/{sha[0:2]}/{sha[2:4]}/{sha} for every other file the
 # sync worker publishes off a pushed ref, plus wal/ (the git WAL,
-# docs/continuity-design.md) and tmp/ (transient upload staging). There is no
+# docs/dev/continuity-design.md) and tmp/ (transient upload staging). There is no
 # human-readable, per-repository layout in the bucket -- nothing here is named
 # after a namespace, repository or path -- and there never was a separate
 # rewrite of the LFS bytes into one: an LFS object lives at exactly one key for
@@ -131,7 +131,7 @@ resource "google_artifact_registry_repository" "images" {
 
 # ---------------------------------------------------------------------------
 # Networking: private VPC for Cloud SQL private IP + Cloud Run Direct VPC
-# egress (api needs to reach Cloud SQL's private IP; docs/continuity-design.md
+# egress (api needs to reach Cloud SQL's private IP; docs/dev/continuity-design.md
 # §12/§14 — Direct VPC egress instead of the Serverless VPC Connector or a
 # Cloud SQL Auth Proxy sidecar, see infra/README.md for the rationale).
 # ---------------------------------------------------------------------------
@@ -343,7 +343,7 @@ resource "google_storage_bucket_iam_member" "api_bucket_object_admin" {
 }
 
 # Lets the api SA mint its own signed URLs (signBlob) without a JSON key,
-# per docs/thinkingface-design.md §6/§14.
+# per docs/dev/thinkingface-design.md §6/§14.
 resource "google_service_account_iam_member" "api_self_token_creator" {
   service_account_id = google_service_account.api.name
   role               = "roles/iam.serviceAccountTokenCreator"
@@ -383,9 +383,9 @@ resource "google_secret_manager_secret_iam_member" "api_session_secret_accessor"
 #
 # Runs on Cloud Run instead of GKE/StatefulSet now that the git bare
 # repositories' primary persistence is the WAL in GCS
-# (docs/continuity-design.md), not a PersistentVolume. The local disk is
+# (docs/dev/continuity-design.md), not a PersistentVolume. The local disk is
 # just a warm cache that may be tmpfs and may disappear between requests.
-# See docs/continuity-design.md §12 for the settings below.
+# See docs/dev/continuity-design.md §12 for the settings below.
 # ---------------------------------------------------------------------------
 
 locals {
@@ -557,7 +557,7 @@ resource "google_cloud_run_v2_service_iam_member" "api_public" {
 }
 
 # ---------------------------------------------------------------------------
-# Cloud Run Job: WAL compaction (`thinkingface compact`, docs/continuity-design.md §10)
+# Cloud Run Job: WAL compaction (`thinkingface compact`, docs/dev/continuity-design.md §10)
 # ---------------------------------------------------------------------------
 
 resource "google_cloud_run_v2_job" "compact" {

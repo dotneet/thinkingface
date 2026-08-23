@@ -187,7 +187,7 @@ func (s *Server) requireWrite(w http.ResponseWriter, r *http.Request) (*store.Us
 // loadRepoForRead fetches the repository named in the URL and enforces read
 // access, writing the error response itself when it returns false. When the
 // name is a former name of a repository that has since moved
-// (docs/repo-transfer-design.md §9), it answers according to mode instead of
+// (docs/dev/repo-transfer-design.md §9), it answers according to mode instead of
 // a plain 404 -- see resolveRepo and redirectMoved.
 func (s *Server) loadRepoForRead(w http.ResponseWriter, r *http.Request, kind, ns, name string, mode redirectMode) (*store.Repo, bool) {
 	ctx := r.Context()
@@ -216,7 +216,7 @@ func (s *Server) loadRepoForRead(w http.ResponseWriter, r *http.Request, kind, n
 // through: git receive-pack, the HF commit/preupload pair, the LFS upload
 // batch, in-browser editing, transfers and experiment ingest. On top of the
 // write permission it refuses an archived repository, so archiving one
-// stops all of them in a single place (docs/api-contract.md §2 "archiving").
+// stops all of them in a single place (docs/dev/api-contract.md §2 "archiving").
 // The two operations that must keep working on an archive -- unarchiving and
 // deleting it -- use loadRepoForWriteAllowArchived instead.
 func (s *Server) loadRepoForWrite(w http.ResponseWriter, r *http.Request, kind, ns, name string, mode redirectMode) (*store.Repo, bool) {
@@ -261,7 +261,7 @@ func (s *Server) loadRepoForWriteAllowArchived(w http.ResponseWriter, r *http.Re
 //
 // The display name and avatar come from the caller's own namespace row rather
 // than the users row -- profiles live on namespaces so a user and an
-// organisation have one shape (docs/namespace-design.md §5.3). Straight after
+// organisation have one shape (docs/dev/namespace-design.md §5.3). Straight after
 // sign-up they are empty strings.
 func (s *Server) userResponse(ctx context.Context, u *store.User) apitypes.User {
 	rows, err := s.store.NamespacesForUser(ctx, u.ID)
@@ -354,7 +354,7 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A sign-up creates a namespace, so the reserved list applies here as
-	// well as to organisation creation (docs/organization-design.md §6.3).
+	// well as to organisation creation (docs/dev/organization-design.md §6.3).
 	if err := validateNamespaceName(req.Username); err != nil {
 		writeNamespaceNameError(w, "username", err)
 		return
@@ -436,7 +436,7 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	scope := currentScope(r.Context())
 	// fullname and avatarUrl come from the caller's profile, the same rule
 	// whoamiOrgs already applies to organisations
-	// (docs/namespace-design.md §5.3). `hf auth whoami` prints fullname.
+	// (docs/dev/namespace-design.md §5.3). `hf auth whoami` prints fullname.
 	profile := s.namespaceProfile(r.Context(), user.Username)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"type":          "user",

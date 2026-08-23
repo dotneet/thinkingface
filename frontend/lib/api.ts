@@ -31,7 +31,7 @@ export type ApiResult<T> =
       type?: string;
       /**
        * Set when the failure is the "repo_moved" 404 (see
-       * docs/repo-transfer-design.md §9): the requested repository name is a
+       * docs/dev/repo-transfer-design.md §9): the requested repository name is a
        * former name of a repository that has since been transferred or
        * renamed. Pages use `isRepoMoved()` to redirect to the new location
        * instead of rendering a generic not-found page.
@@ -154,7 +154,7 @@ export function isUnauthorized(result: ApiResult<unknown>): boolean {
 
 /**
  * True when `result` failed because the repository has been transferred or
- * renamed (docs/repo-transfer-design.md §9): a 404 whose body carried
+ * renamed (docs/dev/repo-transfer-design.md §9): a 404 whose body carried
  * `moved_to`. Narrows `result.movedTo` to non-undefined for callers, notably
  * `redirectIfRepoMoved()` in lib/repo-redirect.ts.
  */

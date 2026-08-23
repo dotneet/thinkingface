@@ -1,5 +1,5 @@
 -- How a repository relates to the base model it points at: HuggingFace Hub's
--- `base_model_relation` (docs/api-contract.md §12). Written by the sync worker
+-- `base_model_relation` (docs/dev/api-contract.md §12). Written by the sync worker
 -- from the card's own declaration, or inferred from the repository's contents
 -- when the card is silent.
 --

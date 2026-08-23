@@ -60,7 +60,7 @@ export default async function NamespacePage({
   ]);
 
   // A namespace that exists but owns nothing is a 200 with zero counts; only
-  // a name nobody holds is a 404 (docs/namespace-design.md §5.5).
+  // a name nobody holds is a 404 (docs/dev/namespace-design.md §5.5).
   if (isNotFound(result)) notFound();
   if (!result.ok) {
     return (

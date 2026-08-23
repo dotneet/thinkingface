@@ -1,6 +1,6 @@
 -- Decouple a repository's physical location from its logical name so that
 -- transferring or renaming a repository never moves data
--- (docs/repo-transfer-design.md §3).
+-- (docs/dev/repo-transfer-design.md §3).
 --
 -- storage_path is assigned once, at creation, and never changes. The WAL
 -- prefix (wal/{storage_path}/) and the local bare directory

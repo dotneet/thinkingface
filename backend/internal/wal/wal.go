@@ -1,12 +1,12 @@
 // Package wal implements the write-ahead log that makes object storage — not
 // the bare repository on disk — the source of truth for git data
-// (docs/continuity-design.md).
+// (docs/dev/continuity-design.md).
 //
 // One object per repository, wal/{storage_path}/index.json, records the refs
 // and the ordered list of packs that reconstruct them. storage_path is the
 // repository's immutable physical location (store.Repo.StoragePath), not its
 // current name, so renaming or transferring a repository never moves its WAL
-// (docs/repo-transfer-design.md §3). Every update to the index goes through a
+// (docs/dev/repo-transfer-design.md §3). Every update to the index goes through a
 // conditional write, so that object's generation is the repository version
 // and the single linearisation point across instances. Local bare
 // repositories are caches: Materialize brings one up to a given generation,

@@ -159,7 +159,7 @@ func TestBuildRepoWhereBaseModelAndRelationConstrainOneEdge(t *testing.T) {
 }
 
 // A base_model edge with no relation reads as a fine-tune, matching how the
-// model tree groups one (docs/api-contract.md §12) -- otherwise rows indexed
+// model tree groups one (docs/dev/api-contract.md §12) -- otherwise rows indexed
 // before the relation column existed would be unreachable from the listing.
 func TestBuildRepoWhereRelationFinetuneMatchesUnsetRelation(t *testing.T) {
 	clause, args := buildRepoWhere(pgDialect{}, RepoFilter{Relation: "finetune"}, repoFilterScopeAll)

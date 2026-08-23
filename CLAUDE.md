@@ -1,7 +1,8 @@
 # CLAUDE.md
 
 thinkingface is a self-hosted clone of the HuggingFace Hub. Go backend + Next.js 15 frontend + pytest E2E + Terraform/k8s.
-Design docs live in `docs/thinkingface-design.md`; the finalized API spec is in `docs/api-contract.md`.
+Design docs live in `docs/dev/thinkingface-design.md`; the finalized API spec is in `docs/dev/api-contract.md`.
+User-facing docs are in `docs/users/` and are published to GitHub Pages (see "Documentation site" below).
 
 ## Architecture map
 
@@ -11,7 +12,8 @@ frontend/  Next.js 15 (App Router) / React 19 / Tailwind v4 / bun
 e2e/       pytest (huggingface_hub / datasets / git / GCS compatibility verification)
 clients/python/  Python clients such as a trackio-compatible shim
 infra/     Terraform + k8s manifests
-docs/      Design docs and API contract
+docs/dev/   Internal design docs and the API contract (not published)
+docs/users/ User-facing documentation, published to GitHub Pages via mkdocs.yml
 ```
 
 ### backend/internal
@@ -33,7 +35,7 @@ docs/      Design docs and API contract
 | `tfcli` | Command layer for the `tf` CLI (`login`/`up`, etc.). `hub` = HTTP client to the server, `local` = file scanning / README card generation, `config` = credential storage/resolution (distinct from the same-named `backend/internal/config`) |
 | `viewer` | Parquet reads over storage (schema, row groups, row ranges) and local caching |
 
-The entry points are `backend/cmd/thinkingface/main.go` (server) and `backend/cmd/tf/main.go` (`tf` CLI; see `docs/tf-cli.md` for details).
+The entry points are `backend/cmd/thinkingface/main.go` (server) and `backend/cmd/tf/main.go` (`tf` CLI; see `docs/dev/tf-cli.md` for details).
 
 ### frontend
 
@@ -61,6 +63,8 @@ make gen-types     # regenerate frontend/types/api.gen.ts from Go wire types
 make dev-web       # next dev on the host (:3100). ★use this to see UI changes live
 make dev-api       # API on the host (:8081, SQLite). try backend changes without rebuilding docker
 make dev-stop      # stop the host-side dev servers above (does not touch docker)
+make docs          # serve the user-facing docs site locally (:8123, live reload)
+make docs-build    # build docs/users/ into site/ exactly as CI does (mkdocs --strict)
 ```
 
 To run things individually:
@@ -84,13 +88,33 @@ You can optionally install lefthook (`lefthook.yml`) for early feedback before c
 `lefthook install` (to remove it, `lefthook uninstall`; to skip it just this once,
 `git commit --no-verify`). The authoritative verification is still `make check` and CI.
 
+## Documentation site (`docs/users/` → GitHub Pages)
+
+`docs/` is split in two, and the split is load-bearing:
+
+- **`docs/users/`** — user-facing documentation. This is the *only* thing published, at
+  <https://dotneet.github.io/thinkingface/>. `mkdocs.yml` (repo root) sets
+  `docs_dir: docs/users`, so anything outside it is invisible to the site.
+- **`docs/dev/`** — internal design docs and the API contract. Never published; keep
+  writing them as before.
+
+Preview with `make docs` (<http://localhost:8123/thinkingface/> — `site_url` puts the site
+under the project-pages base path, matching what GitHub Pages serves). Nav is defined in
+one place, the `nav:` block of `mkdocs.yml`: **a new page under `docs/users/` must be added
+there or it will not appear in the sidebar.** The pages need no frontmatter, so they stay
+readable on GitHub too.
+
+`.github/workflows/docs.yml` builds with `mkdocs build --strict` on PRs (broken internal
+links fail the build) and deploys from `main`. MkDocs is pinned in `docs/requirements.txt`
+and always runs through a disposable `uv` environment.
+
 ## Invariants (break these and things break)
 
 1. **`backend/internal/apitypes` is the single source of truth for Web UI-facing API types.**
    When changing a response shape, change the struct in this package and regenerate
    `frontend/types/api.gen.ts` with `make gen-types`, then commit it (drift is caught by
    `make check` / the CI contract job). Never hand-edit the generated file. Also update
-   `docs/api-contract.md` accordingly. HF-compatible / LFS / ingest endpoints are excluded
+   `docs/dev/api-contract.md` accordingly. HF-compatible / LFS / ingest endpoints are excluded
    from generation since the external protocol is the source of truth there (maintained by
    hand in the handlers).
 2. **Server Component authentication always goes through `authHeaders()` in
@@ -230,7 +254,7 @@ instruction, read it first before re-deriving the steps yourself.
   `make test-store-pg` once `make up` has been run).
 - SQLite mode assumes a single process / single writer (no multiple replicas). Partial
   matching in `search=` is case-insensitive for ASCII only, and full-text search is FTS5-based
-  and does not behave identically to PostgreSQL's tsvector. See `docs/thinkingface-design.md`
+  and does not behave identically to PostgreSQL's tsvector. See `docs/dev/thinkingface-design.md`
   §10 for details and §14 for the production setup.
 - E2E runs against an already-running server: it logs in as the admin user and issues a
   write token (`e2e/conftest.py`). The token is revoked at the end of the session.

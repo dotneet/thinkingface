@@ -12,7 +12,7 @@ better than splitting into separate worktrees.
 ## Why not split into worktrees
 
 `frontend/types/api.gen.ts` (generated), `backend/internal/apitypes` (shared types), the
-`lib/i18n/` dictionaries, and `docs/api-contract.md` get touched by almost every task.
+`lib/i18n/` dictionaries, and `docs/dev/api-contract.md` get touched by almost every task.
 Splitting into worktrees turns the final merge into hell. In a single tree, the Edit tool can
 cleanly let edits in different areas coexist.
 
@@ -22,7 +22,7 @@ cleanly let edits in different areas coexist.
 
 Before launching subagents, decide and write out the following yourself.
 
-- The `apitypes` wire types (if they're changing) and `docs/api-contract.md`
+- The `apitypes` wire types (if they're changing) and `docs/dev/api-contract.md`
 - The skeleton of routing and handlers
 - **The parent assigns DB migration sequence numbers and tells each agent what to use.**
   Gaps in the numbering are harmless (`store.go` records by filename in `schema_migrations`

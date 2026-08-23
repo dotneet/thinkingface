@@ -14,7 +14,7 @@ import (
 )
 
 // IngestIDColumn carries the exp_points row id of a point that reached the
-// parquet through the native ingest API (route B, docs/thinkingface-design.md
+// parquet through the native ingest API (route B, docs/dev/thinkingface-design.md
 // §8). It is what makes a flush idempotent: the process can die between
 // writing the commit and deleting the rows, and the next attempt recognises
 // the points it already wrote instead of appending them twice.
@@ -223,7 +223,7 @@ func cellString(v any) string {
 // holds minRowGroupRows, so a row group's run column covers a narrow,
 // contiguous slice of the run names -- which is what lets viewer.Predicate
 // throw away the row groups of runs a chart did not ask for
-// (docs/thinkingface-design.md §9). maxRowGroupRows keeps one very long run
+// (docs/dev/thinkingface-design.md §9). maxRowGroupRows keeps one very long run
 // from becoming a single unskippable group again, and the minimum keeps a
 // project of thousands of tiny runs from turning into thousands of row groups
 // worth of footer metadata.
@@ -348,7 +348,7 @@ func writeMetricsParquetLaidOut(columns []flushColumn, rows []map[string]any, la
 // per-run and none of which cares how runs are ordered relative to each other:
 //
 //   - Series() resolves two values logged at the same step by taking the later
-//     one in collection order (docs/thinkingface-design.md §8), which for the
+//     one in collection order (docs/dev/thinkingface-design.md §8), which for the
 //     parquet half *is* file order.
 //   - A file with no usable step column charts rows against their position
 //     within their run (series.go's counters).

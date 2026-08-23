@@ -7,7 +7,7 @@ import (
 
 // RepoRedirect is one former (kind, namespace, name) a repository used to be
 // reachable at, left behind by a transfer or rename
-// (docs/repo-transfer-design.md §5, §9). A lookup that misses in
+// (docs/dev/repo-transfer-design.md §5, §9). A lookup that misses in
 // repositories falls back here before answering 404.
 type RepoRedirect struct {
 	Kind          string
@@ -33,7 +33,7 @@ func (s *Store) ResolveRepoRedirect(ctx context.Context, kind, ns, name string) 
 
 // ListRepoRedirects returns every former name that now points at repoID,
 // newest first -- the operational `repo-info` command uses it
-// (docs/repo-transfer-design.md §11).
+// (docs/dev/repo-transfer-design.md §11).
 func (s *Store) ListRepoRedirects(ctx context.Context, repoID int64) ([]RepoRedirect, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT kind, from_namespace, from_name, repo_id, created_at

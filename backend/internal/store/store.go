@@ -26,7 +26,7 @@ var ErrNotFound = errors.New("store: not found")
 var ErrConflict = errors.New("store: already exists")
 
 // ErrLastAdmin is returned by the membership methods when a change would
-// leave an organisation with no admin at all (docs/organization-design.md
+// leave an organisation with no admin at all (docs/dev/organization-design.md
 // §5): demoting, removing, or leaving as the only admin. Someone must always
 // be able to administer the organisation, so the caller has to appoint
 // another admin first.

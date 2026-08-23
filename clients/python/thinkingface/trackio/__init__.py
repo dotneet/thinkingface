@@ -7,7 +7,7 @@ real-time ingest API:
 
     POST /api/v1/experiments/{ns}/{repo}/{project}/log
 
-This is "route B" from the design doc (docs/thinkingface-design.md §8):
+This is "route B" from the design doc (docs/dev/thinkingface-design.md §8):
 opt-in, low-latency logging, while the source of truth stays the same as
 route A (trackio's own batch sync) -- a Parquet file inside a thinkingface
 *dataset* repository, so the data is still git-versioned and readable via

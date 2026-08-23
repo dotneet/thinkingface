@@ -1,5 +1,5 @@
 // Benchmarks for the two read paths behind GET .../metrics
-// (docs/thinkingface-design.md §8, todo/exp-metrics-scale.md): the parquet
+// (docs/dev/thinkingface-design.md §8, todo/exp-metrics-scale.md): the parquet
 // export (scanParquetSeries) and the live ingest buffer (scanLiveSeries).
 // Run with, e.g.:
 //

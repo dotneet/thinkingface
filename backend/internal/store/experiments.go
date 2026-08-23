@@ -495,7 +495,7 @@ func (s *Store) CountPoints(ctx context.Context, runID int64) (int64, error) {
 // ------------------------------------------------------- parquet flush queue
 
 // PendingFlush is one project holding live points that have not yet been
-// written into the dataset repository's parquet (docs/thinkingface-design.md
+// written into the dataset repository's parquet (docs/dev/thinkingface-design.md
 // §8: route B buffers in exp_points, the source of truth stays the parquet).
 type PendingFlush struct {
 	RepoID    int64

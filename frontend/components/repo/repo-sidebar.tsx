@@ -23,7 +23,7 @@ export async function RepoSidebar({ repo }: { repo: RepoDetail }) {
     <aside className="flex w-full flex-col gap-5 text-sm lg:w-72 lg:shrink-0">
       <div className="flex flex-col gap-2">
         {/* Users and organisations share one profile page
-            (docs/namespace-design.md §4.1), so both owners link out; only the
+            (docs/dev/namespace-design.md §4.1), so both owners link out; only the
             label and glyph tell the two kinds apart. */}
         <div className="flex items-center justify-between">
           <span className="flex items-center gap-1.5 text-fg-subtle">

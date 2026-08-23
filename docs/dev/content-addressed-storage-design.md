@@ -1,7 +1,7 @@
 # Content-Addressed Storage Design — Retiring exports/
 
 A design that **retires** the human-readable `exports/` layer from the storage layout in
-`docs/thinkingface-design.md` §4, making GCS keys fully independent of namespace,
+`docs/dev/thinkingface-design.md` §4, making GCS keys fully independent of namespace,
 repository name, and ref. The predecessor was `docs/single-copy-storage-design.md`
 (deleted — a design that promoted `exports/` to be the "real" copy and eliminated the
 double-holding with `lfs/`). This design does not continue that line; instead it solves
@@ -22,7 +22,7 @@ Among the externally visible contracts, the biggest difference from the predeces
 ### Goals
 
 - **Move zero GCS-object bytes on transfer, rename, or delete.** The prior design
-  (`docs/repo-transfer-design.md`) decoupled the WAL and the bare repository from the
+  (`docs/dev/repo-transfer-design.md`) decoupled the WAL and the bare repository from the
   name via `storage_path`, while `exports/` alone stayed bound to the `(ns, name)` key for
   the sake of human-readable paths, requiring a relocation job (`relocate_exports`) on
   every transfer. This eliminates that asymmetry
@@ -54,7 +54,7 @@ scratch, and the design takes the shortest path on that assumption (§7).
 
 - The external shape of the HF-compatible endpoints, the LFS batch API, and git smart
   HTTP is unchanged
-- The key layout and protocol of `wal/` is unchanged (`docs/continuity-design.md`)
+- The key layout and protocol of `wal/` is unchanged (`docs/dev/continuity-design.md`)
 - Bulk retrieval of a whole directory (`cp -r`) or glob-based prefix selection is **not**
   restored by this design. What is lost and its replacement are covered in §8
 
@@ -71,7 +71,7 @@ gs://{bucket}/
 │                                             Content-addressed, immutable (storage.BlobKey).
 │                                             The viewer cache (formerly cache/blobs/{sha}) is
 │                                             folded into this same key
-├── wal/{storage_path}/…                      Unchanged (docs/continuity-design.md)
+├── wal/{storage_path}/…                      Unchanged (docs/dev/continuity-design.md)
 └── tmp/uploads/…                              Unchanged
 ```
 
@@ -193,7 +193,7 @@ with the same command.
 
 Instead of keeping a human-readable mapping in GCS, this endpoint builds one on demand
 from `repo_files` (the index for that ref, rebuilt by the sync worker on every push). The
-authoritative types and response shape live in `docs/api-contract.md` §2; the key points:
+authoritative types and response shape live in `docs/dev/api-contract.md` §2; the key points:
 
 ```ts
 type RepoGCSResponse = {
@@ -306,7 +306,7 @@ to exist** now that the concept of `exports/` itself is gone.
   into an asynchronous job separate from deleting the repository row. Now that deletion
   never touches GCS at all, deleting a repository is complete once the DB row, the bare
   repository, and the WAL are deleted (`deleteRepo` in `internal/api/repos.go`)
-- **The `relocate_exports` transfer job**: see `docs/repo-transfer-design.md` §10. Now that
+- **The `relocate_exports` transfer job**: see `docs/dev/repo-transfer-design.md` §10. Now that
   transfers no longer change GCS keys, the concept of a relocation job disappears entirely
 - **`thinkingface verify-exports`**: a command that cross-checked `repo_files` against the
   `exports/` layout for consistency. Now that `exports/` — "the second layout that needed

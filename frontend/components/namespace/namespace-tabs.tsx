@@ -23,7 +23,7 @@ export async function NamespaceTabs({
   counts: Record<NamespaceTab, number>;
 }) {
   const t = await getT();
-  // A user namespace has no member list (docs/namespace-design.md §4.1), so
+  // A user namespace has no member list (docs/dev/namespace-design.md §4.1), so
   // the tab is not offered at all — `parseNamespaceTab` refuses ?tab=members
   // there for the same reason.
   const tabs: NamespaceTab[] =

@@ -1,5 +1,5 @@
 // Authorization: one effective-role function every permission check in this
-// package funnels through (docs/organization-design.md §3.1, §4). Before it
+// package funnels through (docs/dev/organization-design.md §3.1, §4). Before it
 // existed the same question was asked three different ways -- "owns the
 // namespace", "can write the namespace", "is an org admin" -- which is how a
 // `read` member ended up able to see a private repository in a listing but
@@ -75,7 +75,7 @@ func (r Role) orgRole() apitypes.OrgRole { return apitypes.OrgRole(r.String()) }
 //
 // A site admin answers RoleAdmin without touching the database, and without
 // implying an org_members row: they never appear in a member list or in
-// whoami's orgs (docs/organization-design.md §3).
+// whoami's orgs (docs/dev/organization-design.md §3).
 //
 // A namespace that does not exist is RoleNone with a nil error: callers that
 // care about existence look the namespace up themselves.
@@ -118,7 +118,7 @@ func (s *Server) canWriteIgnoringArchive(ctx context.Context, repo *store.Repo) 
 // canAdmin reports whether the caller may delete or transfer the repository
 // or manage its namespace's webhooks. In a personal namespace this is the
 // owner, so the bar is unchanged there; under an organisation it excludes
-// `write` members (docs/organization-design.md §4).
+// `write` members (docs/dev/organization-design.md §4).
 func (s *Server) canAdmin(ctx context.Context, repo *store.Repo) bool {
 	return s.hasRole(ctx, repo.Namespace, RoleAdmin, true)
 }

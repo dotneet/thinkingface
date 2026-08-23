@@ -1,5 +1,5 @@
 // Organizations: the public directory, the creation form, an organization's
-// profile page, and its settings screens (docs/organization-design.md §8).
+// profile page, and its settings screens (docs/dev/organization-design.md §8).
 export const org = {
   roles: {
     admin: "管理者",

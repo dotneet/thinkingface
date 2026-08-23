@@ -79,7 +79,7 @@ describe("apiFetch query building", () => {
   });
 });
 
-// docs/repo-transfer-design.md §9: a repository resolved by its former name
+// docs/dev/repo-transfer-design.md §9: a repository resolved by its former name
 // answers 404 with `{"error":{"type":"repo_moved","moved_to":{...}}}`, and
 // apiFetch must surface that as `ApiResult.movedTo` without throwing — see
 // CLAUDE.md invariant 3.

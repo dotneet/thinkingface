@@ -1,0 +1,60 @@
+site_name: thinkingface
+site_description: Self-hosted Hugging Face Hub — datasets, models, and experiment tracking on your own storage.
+site_url: https://dotneet.github.io/thinkingface/
+repo_url: https://github.com/dotneet/thinkingface
+repo_name: dotneet/thinkingface
+
+# Only the user-facing docs are published. docs/dev/ holds the internal design
+# documents and is deliberately outside docs_dir.
+docs_dir: docs/users
+site_dir: site
+edit_uri: edit/main/docs/users/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - toc.follow
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - toc:
+      permalink: true
+  - admonition
+  - attr_list
+  - tables
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+
+# Broken internal links fail the build instead of shipping a 404.
+validation:
+  links:
+    absolute_links: relative_to_docs
+    unrecognized_links: warn
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md

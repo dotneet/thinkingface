@@ -36,7 +36,7 @@
 //      with `[` or `(`) is on lib/validation.ts's RESERVED_NAMESPACE_NAMES —
 //      otherwise a new route silently shadows `/[ns]` for whoever holds that
 //      name as a namespace, or worse, sits unreachable behind it
-//      (docs/namespace-design.md §9);
+//      (docs/dev/namespace-design.md §9);
 //   9. lib/validation.ts's RESERVED_NAMESPACE_NAMES and
 //      backend/internal/api/names.go's reservedNamespaceNames name the exact
 //      same set — the frontend list only saves a round trip, the Go one is
@@ -344,7 +344,7 @@ function readFrontendReservedNames() {
 /**
  * Pulls the quoted keys out of `backend/internal/api/names.go`'s
  * `reservedNamespaceNames` map literal — the two lists must name the same
- * set (docs/namespace-design.md §9).
+ * set (docs/dev/namespace-design.md §9).
  */
 function readBackendReservedNames() {
   const relPath = join("..", "backend", "internal", "api", "names.go");

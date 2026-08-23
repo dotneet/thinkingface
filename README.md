@@ -21,8 +21,11 @@ Key features:
 - One-shot `docker compose` startup locally, GCP in production (Cloud Run + Cloud SQL, or SQLite/Litestream + GCS)
 - The metadata DB can be switched between PostgreSQL / SQLite via the `DATABASE_URL` scheme
 
-See [`docs/thinkingface-design.md`](docs/thinkingface-design.md) for design details, and
-[`docs/api-contract.md`](docs/api-contract.md) for the finalized API spec.
+User-facing documentation lives in [`docs/users/`](docs/users/) and is published to
+GitHub Pages at <https://dotneet.github.io/thinkingface/>. The internal design documents
+are under [`docs/dev/`](docs/dev/) and are not part of that site — see
+[`docs/dev/thinkingface-design.md`](docs/dev/thinkingface-design.md) for design details,
+and [`docs/dev/api-contract.md`](docs/dev/api-contract.md) for the finalized API spec.
 
 ### Verified paths
 
@@ -105,12 +108,12 @@ STORAGE_DRIVER=gcs-emulator STORAGE_EMULATOR_HOST=http://localhost:4443 \
   go run ./cmd/thinkingface serve
 ```
 
-**Known limitations** (details in `docs/thinkingface-design.md` §10):
+**Known limitations** (details in `docs/dev/thinkingface-design.md` §10):
 
 - Assumes a single process / single writer connection. Cannot be used with multiple replicas
 - HF-compatible `search=` partial matching is case-insensitive for ASCII only (not an exact match for PostgreSQL's ILIKE)
 - The web UI's full-text search uses FTS5 (the unicode61 tokenizer), which can behave differently from PostgreSQL's tsvector
-- For production use, this assumes a single Cloud Run instance + Litestream (replicating to GCS) setup (`docs/thinkingface-design.md` §14)
+- For production use, this assumes a single Cloud Run instance + Litestream (replicating to GCS) setup (`docs/dev/thinkingface-design.md` §14)
 
 ## Register with a single `tf` CLI command
 
@@ -130,7 +133,7 @@ environment variables to reach the same state; `tf status` shows your login stat
 info.
 
 For details (each command, flags, credential resolution order, and how this relates to
-`hf upload`), see [`docs/tf-cli.md`](docs/tf-cli.md).
+`hf upload`), see [`docs/dev/tf-cli.md`](docs/dev/tf-cli.md).
 
 ## Using it from Python (`huggingface_hub` / `datasets`)
 
@@ -177,11 +180,11 @@ Issue a token from the web UI's `Settings > Tokens` (`/settings/tokens`), or get
 ### Organizations
 
 Create a team namespace from `/orgs/new` and manage members with three roles: `admin` /
-`write` / `read` (details in [`docs/organization-design.md`](docs/organization-design.md)).
+`write` / `read` (details in [`docs/dev/organization-design.md`](docs/dev/organization-design.md)).
 From `huggingface_hub` it feels just like working with a user. Organizations and users share
 the same "namespace" concept, and their profile (display name, bio, website) and resource
 listings are consolidated on the common `/{ns}` page (`/orgs/{name}` redirects to `/{name}`
-for compatibility; see [`docs/namespace-design.md`](docs/namespace-design.md) for details):
+for compatibility; see [`docs/dev/namespace-design.md`](docs/dev/namespace-design.md) for details):
 
 ```python
 api.create_repo("team/imdb-ja", repo_type="dataset", private=True)  # created directly under the org namespace
@@ -249,7 +252,7 @@ HTTP.
 
 Objects in GCS are laid out by **content address**, independent of namespace, repository
 name, or path. Looking inside the bucket, there is no human-readable directory structure (see
-the design rationale in [`docs/thinkingface-design.md`](docs/thinkingface-design.md) §4).
+the design rationale in [`docs/dev/thinkingface-design.md`](docs/dev/thinkingface-design.md) §4).
 
 ```
 gs://{bucket}/
@@ -384,12 +387,12 @@ For hot-reload development, copy `docker-compose.override.yml.example` to
 ## Production deployment (GCP)
 
 Production runs on Cloud Run (both api and web are stateless; the source of truth for git is
-the WAL in GCS, see `docs/continuity-design.md`) + Cloud SQL for PostgreSQL (private IP) +
+the WAL in GCS, see `docs/dev/continuity-design.md`) + Cloud SQL for PostgreSQL (private IP) +
 GCS. It's designed so the only difference from compose is environment variables and
 `STORAGE_DRIVER` (`gcs-emulator` -> `gcs`).
 
 For the metadata DB, you can also choose SQLite + Litestream (a single Cloud Run instance)
-instead of Cloud SQL for PostgreSQL. See `docs/thinkingface-design.md` §14 for details.
+instead of Cloud SQL for PostgreSQL. See `docs/dev/thinkingface-design.md` §14 for details.
 
 ### Environment variables you must set before going public
 

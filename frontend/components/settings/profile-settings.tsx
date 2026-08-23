@@ -16,7 +16,7 @@ import { getNamespace, namespaceHref, updateMyProfile } from "@/lib/namespace";
 import type { NamespaceProfile } from "@/types/api";
 
 /**
- * The signed-in user's own profile (docs/namespace-design.md §5.3, §8.1).
+ * The signed-in user's own profile (docs/dev/namespace-design.md §5.3, §8.1).
  * The username field is read-only — it *is* the namespace and can never
  * change (§5.4) — everything else is `PATCH /api/v1/me/profile`.
  */
@@ -49,7 +49,7 @@ export function ProfileSettings() {
         return;
       }
       // /me carries display_name / avatar_url but not description / website
-      // (docs/namespace-design.md §7.1), so the namespace's own profile is
+      // (docs/dev/namespace-design.md §7.1), so the namespace's own profile is
       // the source of truth here.
       const ns = await getNamespace(me.data.user.username);
       if (!ns.ok) {

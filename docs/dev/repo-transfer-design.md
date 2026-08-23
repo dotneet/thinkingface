@@ -41,7 +41,7 @@ Related documents: `thinkingface-design.md` §3-4 (repository model, GCS layout)
 | Layer | Current key | Role | Does a transfer need to move it? |
 |---|---|---|---|
 | LFS (`lfs/{oid[0:2]}/{oid[2:4]}/{oid}`) | Content address | **Authoritative.** Large binary content | **No** (already independent of the name) |
-| Non-LFS blob (`blobs/{sha[0:2]}/{sha[2:4]}/{sha}`) | Content address | Content of non-LFS git blobs | **No** (already independent of the name; see `docs/content-addressed-storage-design.md`) |
+| Non-LFS blob (`blobs/{sha[0:2]}/{sha[2:4]}/{sha}`) | Content address | Content of non-LFS git blobs | **No** (already independent of the name; see `docs/dev/content-addressed-storage-design.md`) |
 | WAL (`wal/{models\|datasets}/{ns}/{name}/…`) | ns/name | **Authoritative** (in authoritative mode). Git history pack + index | Currently yes → **this design makes it unnecessary** |
 | Local bare repo (`{root}/{models\|datasets}/{ns}/{name}.git`) | ns/name | Authoritative when WAL=off, a cache in WAL mode | Currently yes → **this design makes it unnecessary** |
 | Each DB table | `repo_id` | Metadata | **No** (just an update to `repositories.namespace_id` / `name`) |
@@ -51,7 +51,7 @@ Reference sites (33 hits via `grep`): `gitrepo.Manager.Dir`,
 environment variables in `api/server.go` (`TF_WAL_REPO_{KIND,NS,NAME}`), `wal/*`, `syncer`,
 `cmd/thinkingface/{walops,hook}.go`.
 
-> The `exports/` layer has already been removed (`docs/content-addressed-storage-design.md`). Keys
+> The `exports/` layer has already been removed (`docs/dev/content-addressed-storage-design.md`). Keys
 > on GCS are now just the two content-addressed layers `lfs/` and `blobs/`, both fully independent
 > of namespace and repository name. There was never a need to relocate GCS objects during a
 > transfer in the first place.
@@ -306,7 +306,7 @@ After the commit (outside the transaction):
 - **Nothing touches git / WAL / LFS / GCS.** Since the local bare dir is keyed by the fixed
   `storage_path`, not even `os.Rename` is needed, and GCS's `lfs/` and `blobs/` are content
   addressed and thus independent of namespace/repository name, so no relocation job of any kind is
-  required (`docs/content-addressed-storage-design.md`)
+  required (`docs/dev/content-addressed-storage-design.md`)
 
 ### 7.2 Approval flow (destination outside the actor's permissions)
 
@@ -352,7 +352,7 @@ is deleted while pending, the transfer row is removed via CASCADE.
 | `cmd/thinkingface/walops.go` (gc) | Include `StoragePath` in `AllRepoRefs`; the WAL-orphan scan lists all of `wal/` and cross-references it against the set of `storage_path` values in the DB (`models/…`, `datasets/…`, `repos/…` are all treated uniformly) |
 | `api/git.go` `routeGit` etc. | Pass the resolved `repo.StoragePath` to gitserver |
 | `store` | `Repo.StoragePath`, `RepoRef.StoragePath`, `CreateRepo(..., storagePath)`, `TransferRepo`, CRUD for `repo_redirects` / `repo_transfers`, `ResolveRepoRedirect(kind, ns, name)`, `DeleteRepoRedirect` |
-| `docs/thinkingface-design.md` §4-5 / `continuity-design.md` §3 | Update the key layout to `wal/{storage_path}/`, and add a note explaining the legacy form |
+| `docs/dev/thinkingface-design.md` §4-5 / `continuity-design.md` §3 | Update the key layout to `wal/{storage_path}/`, and add a note explaining the legacy form |
 
 Existing `_test.go` files follow the signature changes. The WAL-related tests in
 `storage/layout_test.go` get rewritten to take `storagePath` as input.
@@ -390,7 +390,7 @@ No caching is kept (transfers are rare, and `repo_redirects` is a single primary
 
 ## 10. GCS never moves during a transfer
 
-With the removal of the `exports/` layer (`docs/content-addressed-storage-design.md`), keys on GCS
+With the removal of the `exports/` layer (`docs/dev/content-addressed-storage-design.md`), keys on GCS
 are now just the two content-addressed layers `lfs/{oid...}` and `blobs/{sha...}`. Both are
 completely independent of namespace and repository name, so **there was never any GCS-side
 relocation job needed for a transfer in the first place**. The old design needed a job
@@ -422,7 +422,7 @@ assumed; kept here as a decision record):
   reverse-lookup "which repository does this WAL prefix belong to" after a transfer
 - The existing `thinkingface gc` gets `storage_path` support as described in §8 (the reference-
   counted GC of `lfs/` / `blobs/` itself is unrelated to `storage_path`; see
-  `docs/content-addressed-storage-design.md`)
+  `docs/dev/content-addressed-storage-design.md`)
 
 ---
 
@@ -498,7 +498,7 @@ assumed; kept here as a decision record):
 > Phase 4's `thinkingface repo-info` is not yet implemented.
 > The `relocate_exports` job and `sync_jobs.kind`/`payload` that existed at the time have since
 > been removed, following the removal of the `exports/` layer
-> (`docs/content-addressed-storage-design.md`) (§10).
+> (`docs/dev/content-addressed-storage-design.md`) (§10).
 
 1. **Separating out the physical location** (ship this first without the transfer feature itself —
    ship the highest-risk change on its own)

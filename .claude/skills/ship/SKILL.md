@@ -54,7 +54,7 @@ Apply these lenses in order:
 3. **Correctness** — boundary values, error paths, nil / empty, timeouts, concurrency.
 4. **Readability** — naming, responsibility, early returns. Does it match the style of the surrounding code?
 5. **Tests** — do they cover the important branches? Do test names make the cause of a failure clear?
-6. **Compatibility and contract** — `docs/api-contract.md`, `apitypes`, generated-file sync. A migration path if it's breaking.
+6. **Compatibility and contract** — `docs/dev/api-contract.md`, `apitypes`, generated-file sync. A migration path if it's breaking.
 7. **Operations** — is anything sensitive leaking into logs? Is the information needed for debugging present?
 
 **When you add a new directory or file type, check whether it's covered by each gate.**
@@ -180,7 +180,7 @@ patterns.
    orphan if the enqueue fails. Design for idempotency assuming concurrent execution
    (`SKIP LOCKED`).
 3. **UI state transitions**. Conflating empty, zero, and failure (`DESIGN.md` §9).
-4. **Contract/implementation mismatch**. The behavior documented in `docs/api-contract.md`
+4. **Contract/implementation mismatch**. The behavior documented in `docs/dev/api-contract.md`
    diverges from the handler. Also includes timezone gaps like the DB's `CURRENT_DATE` vs.
    Go's UTC date, and **a new directory missing from lint / CI targets**.
 5. **Missing authorization**. Forgetting to run a new read or delete path through ownership

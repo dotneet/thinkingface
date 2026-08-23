@@ -5,7 +5,7 @@ import { useT } from "@/lib/i18n/client";
 
 /**
  * Live preview of the URLs a namespace name will claim: sign-up
- * (docs/namespace-design.md §5.1) and organisation creation (§5.2) share it
+ * (docs/dev/namespace-design.md §5.1) and organisation creation (§5.2) share it
  * (§8.2). `window.location.origin` is only known in the browser, so the
  * origin renders empty on first paint and fills in after mount rather than
  * risking a server/client markup mismatch.

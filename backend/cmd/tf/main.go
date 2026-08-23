@@ -4,7 +4,7 @@
 // It speaks only the HuggingFace-compatible HTTP API the server already
 // exposes (whoami / create / preupload / LFS batch / commit), so everything it
 // does could be done with `hf upload` as well -- it just removes the
-// endpoint/token/repo-type ceremony (docs/tf-cli.md).
+// endpoint/token/repo-type ceremony (docs/dev/tf-cli.md).
 package main
 
 import (

@@ -73,7 +73,7 @@ export function groupUpstream(refs: LineageRef[]): {
 /**
  * The relations a model can have to its base model, in the order the model
  * tree lists them (HuggingFace's `base_model_relation`; see
- * docs/api-contract.md §12).
+ * docs/dev/api-contract.md §12).
  */
 export const LINEAGE_RELATIONS = ["finetune", "adapter", "quantized", "merge"] as const;
 

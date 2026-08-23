@@ -13,7 +13,7 @@ function initialsOf(name: string): string {
 
 /**
  * A namespace's avatar — one component for users and organisations alike
- * (docs/namespace-design.md §8.1).
+ * (docs/dev/namespace-design.md §8.1).
  *
  * `avatar_url` links to an image hosted elsewhere (uploads are out of scope),
  * so a plain <img> is right here: next/image would want the remote host

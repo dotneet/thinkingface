@@ -19,7 +19,7 @@ type Handler struct {
 	git *gitrepo.Manager
 
 	// hooksPath, when non-empty, is passed to receive-pack as core.hooksPath
-	// so the image-baked pre-receive hook (docs/continuity-design.md §6.2)
+	// so the image-baked pre-receive hook (docs/dev/continuity-design.md §6.2)
 	// runs on every push. hookEnv supplies the WAL context that hook needs —
 	// the repository's storage path and object-store coordinates — as
 	// environment variables; it never includes DATABASE_URL (§14: the hook

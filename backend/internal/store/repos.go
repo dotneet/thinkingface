@@ -122,7 +122,7 @@ func NewStoragePath() string { return "repos/" + ulid.New() }
 // If (kind, ns, name) used to name a repository that has since moved
 // elsewhere, that redirect is deleted in the same transaction: a repository
 // newly created at an old name takes the name over rather than being shadowed
-// by the redirect (docs/repo-transfer-design.md §5 "conflicts").
+// by the redirect (docs/dev/repo-transfer-design.md §5 "conflicts").
 func (s *Store) CreateRepo(ctx context.Context, nsID int64, name, kind, description, defaultBranch, storagePath string) (*Repo, error) {
 	if storagePath == "" {
 		storagePath = NewStoragePath()
@@ -314,7 +314,7 @@ var repoFilterScopeAll = repoFilterScope{tags: true, license: true, task: true, 
 // a fine-tune. It is the Hub's own default (repocard.RelationFinetune) and the
 // only thing a row indexed before the relation column existed can be read as,
 // so filtering and counting both normalise through it -- exactly as the model
-// tree does in the UI (docs/api-contract.md §12).
+// tree does in the UI (docs/dev/api-contract.md §12).
 const lineageRelationDefault = "finetune"
 
 // relationExpr is the normalised relation of the joined repo_lineage row `l`.

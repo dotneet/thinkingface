@@ -12,7 +12,7 @@ const DEBOUNCE_MS = 400;
 
 /**
  * Live availability indicator for a namespace name being claimed by sign-up
- * or organisation creation (docs/namespace-design.md §5.1, §5.2, §8.2).
+ * or organisation creation (docs/dev/namespace-design.md §5.1, §5.2, §8.2).
  *
  * A grammar or reserved-name violation is judged locally and instantly by
  * `validateNamespaceName` — `errorKeys` lets each caller translate that with

@@ -13,7 +13,7 @@ import type { ExpRunProducer, LineageRef, RepoKind } from "@/types/api";
 
 /**
  * Where a repository came from and what came out of it, as declared by the
- * `lineage:` block of README.md's front matter (see docs/api-contract.md §12).
+ * `lineage:` block of README.md's front matter (see docs/dev/api-contract.md §12).
  *
  * A reference the server could not resolve -- a typo, something not pushed
  * yet, or a repository that never existed -- is rendered as plain
@@ -135,7 +135,7 @@ function RefGroup({
  * end — a run that called `trackio.log_model` and named this repository. The
  * claim is stored with the run rather than in `repo_lineage`, because that
  * index is rebuilt from the card on every push and would drop anything written
- * from outside it (docs/api-contract.md §12).
+ * from outside it (docs/dev/api-contract.md §12).
  */
 function ProducedByGroup({ producers, t }: { producers: ExpRunProducer[]; t: Translator }) {
   if (producers.length === 0) return null;

@@ -62,7 +62,7 @@ func (ix *Indexer) Series(ctx context.Context, repo *store.Repo, req SeriesReque
 	//
 	//   * Two different measurements, at one step. A resumed run re-logs
 	//     steps its previous attempt already reached (see the resume contract
-	//     in docs/thinkingface-design.md §8), and a caller may simply log the
+	//     in docs/dev/thinkingface-design.md §8), and a caller may simply log the
 	//     same step twice. Both values are real and both are kept on disk;
 	//     the chart shows the later one, which dedupeLastWins does after the
 	//     sort below.

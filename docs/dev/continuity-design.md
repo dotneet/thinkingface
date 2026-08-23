@@ -1,6 +1,6 @@
 # Cloud Run Migration Design via the Continuity Approach
 
-Design to replace the GCP production configuration in `docs/thinkingface-design.md` §14 (GKE
+Design to replace the GCP production configuration in `docs/dev/thinkingface-design.md` §14 (GKE
 Autopilot + StatefulSet + PD) with **a scheme that keeps the WAL on GCS**, so that `api` can run
 on Cloud Run.
 
@@ -27,12 +27,12 @@ Three key points:
 
 - **The metadata DB is Postgres or SQLite (switched via `DATABASE_URL`).** Repository existence /
   ACLs / the LFS ledger / sync jobs / the experiment index are held in the same table layout
-  regardless of engine (type mapping etc. in `docs/thinkingface-design.md` §10). The production
+  regardless of engine (type mapping etc. in `docs/dev/thinkingface-design.md` §10). The production
   default is Cloud SQL for PostgreSQL; choosing SQLite means a single Cloud Run instance +
   Litestream setup (same §14). **Whichever is used, the metadata DB plays no part whatsoever in
   the git consistency path** — this is treated as an invariant
 - The LFS (`lfs/`) key layout and protocol are unchanged (later,
-  `docs/content-addressed-storage-design.md` added `blobs/` and retired `exports/`, but the shape
+  `docs/dev/content-addressed-storage-design.md` added `blobs/` and retired `exports/`, but the shape
   of the keys and their relationship to the WAL are the same as they were at the time)
 - Multi-region and repository sharding are out of scope (only Cloud Run's horizontal scaling)
 - The external shape of HF-compatible endpoints is not changed at all
@@ -74,7 +74,7 @@ wal/{storage_path}/base/{ulid}.pack           ← compaction output
 wal/{storage_path}/entries/{seq}-{ulid}.pack  ← one push = one entry
 ```
 
-`{storage_path}` is `repositories.storage_path` (`docs/repo-transfer-design.md` §3-4) — the
+`{storage_path}` is `repositories.storage_path` (`docs/dev/repo-transfer-design.md` §3-4) — the
 repository's **physical location**, immutable and independent of the logical name
 `(kind, namespace, name)`. New repositories get `repos/{ulid}`; repositories that predate the
 introduction of `storage_path` keep the shape of their old physical location via backfill
@@ -415,7 +415,7 @@ pure-Go parquet-go). A static binary makes the image smaller and cold starts fas
 
 The bucket holding `index.json` already has `versioning { enabled = true }` (`infra/main.tf`).
 Deletion of `lfs/` `blobs/` is delegated entirely to reference-counted GC (`thinkingface gc`,
-`docs/content-addressed-storage-design.md`) rather than an age-based lifecycle rule, so the bucket
+`docs/dev/content-addressed-storage-design.md`) rather than an age-based lifecycle rule, so the bucket
 has no rule that automatically prunes noncurrent versions in the first place. `wal/`'s index
 automatically gets the same treatment, so old generations are retained until explicitly deleted.
 **This is called out here as an intentional setting.**
@@ -433,7 +433,7 @@ automatically gets the same treatment, so old generations are retained until exp
 | `cmd/thinkingface/main.go` | Branches the `hook` subcommand **before `config.Load()` / `store.Open()`** (hooks never open the DB; today `config.Load` requires `DATABASE_URL` and would error). Adds the `compact` subcommand |
 | `Dockerfile` | Bundles `/opt/thinkingface/hooks/pre-receive`. Changes to `CGO_ENABLED=0` |
 | `infra/` | Removes the GKE cluster / StatefulSet / PVC; adds a Cloud Run service (api) + Cloud Run Job (compact) |
-| `docs/thinkingface-design.md` | Rewrites §14 |
+| `docs/dev/thinkingface-design.md` | Rewrites §14 |
 
 `api/git.go`'s post-push before/after ref comparison and sync Enqueue, `syncer`, `lfs`, `viewer`,
 and `store` are **unchanged**. `syncer` already has a ticker that picks up "jobs inserted by other

@@ -99,7 +99,7 @@ func toWebhookDeliveryAPI(d *store.WebhookDelivery) apitypes.WebhookDelivery {
 // the caller may administer webhooks on it. Under an organisation that means
 // admin, not write: a webhook carries the namespace's secrets to an external
 // URL, which is an administrative act rather than a content change
-// (docs/organization-design.md §4). A personal namespace's owner is its
+// (docs/dev/organization-design.md §4). A personal namespace's owner is its
 // admin, so nothing changes there.
 func (s *Server) requireNamespaceAdmin(w http.ResponseWriter, r *http.Request, ns string) (*store.User, bool) {
 	user, ok := s.requireWrite(w, r)

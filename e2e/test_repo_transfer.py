@@ -1,6 +1,6 @@
 """End-to-end tests for repository ownership transfer
-(docs/repo-transfer-design.md, "POST /api/repos/move" and "Transfer (for the Web UI)"
-in docs/api-contract.md).
+(docs/dev/repo-transfer-design.md, "POST /api/repos/move" and "Transfer (for the Web UI)"
+in docs/dev/api-contract.md).
 
 These exercise the HF-compatible `POST /api/repos/move`
 (`huggingface_hub.HfApi.move_repo`) and the web UI's own

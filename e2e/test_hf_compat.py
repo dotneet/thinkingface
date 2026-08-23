@@ -2,10 +2,10 @@
 against a thinkingface server?
 
 These exercise the HF-compatible REST surface described in
-docs/api-contract.md (whoami-v2, repos/create, preupload, commit, resolve,
+docs/dev/api-contract.md (whoami-v2, repos/create, preupload, commit, resolve,
 tree) purely through the public `huggingface_hub` / `datasets` APIs -- no
 thinkingface-specific client code -- since that "no client changes needed"
-property is the whole point of the design (docs/thinkingface-design.md §2).
+property is the whole point of the design (docs/dev/thinkingface-design.md §2).
 
 Requires a running server; see e2e/README.md. These pass against the current
 backend -- treat a failure here as a compatibility regression, not as an

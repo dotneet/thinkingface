@@ -77,7 +77,7 @@ func metricColumns() []flushColumn {
 // other (that is the whole point -- it makes a row group's run statistics
 // narrow enough to prune on), but the rows *within* one run must come out in
 // exactly the order they went in, because that order is what resolves two
-// values logged at one step (docs/thinkingface-design.md §8).
+// values logged at one step (docs/dev/thinkingface-design.md §8).
 func TestWriteMetricsParquet_GroupsRunsButKeepsPerRunOrder(t *testing.T) {
 	// Arrival order: two runs interleaved, and run "b" logs step 1 twice --
 	// first 9.0, later 1.0. The later value must stay later.

@@ -53,7 +53,7 @@ func Materialize(ctx context.Context, st storage.Storage, gitDir, storagePath st
 		// create the index.
 		//
 		// This is load bearing during the shadow-write phases of the
-		// migration (docs/continuity-design.md §15 Phase 2/3), where the
+		// migration (docs/dev/continuity-design.md §15 Phase 2/3), where the
 		// on-disk copy is still the source of truth and many repositories
 		// have no index yet. Once the WAL is authoritative (Phase 4+), a
 		// missing index on a repository that should have one is the §13

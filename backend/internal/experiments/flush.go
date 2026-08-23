@@ -1,5 +1,5 @@
 // Flushing live ingest points into the dataset repository's parquet
-// (docs/thinkingface-design.md §8, route B). The native ingest API buffers
+// (docs/dev/thinkingface-design.md §8, route B). The native ingest API buffers
 // points in exp_points so a chart can be live, but the *source of truth* for
 // an experiment is the parquet inside the dataset repository -- that is what
 // git versions, what `gcloud storage` fetches out of the content-addressed
@@ -37,7 +37,7 @@ var flushAuthor = gitrepo.Signature{Name: "thinkingface", Email: "noreply@thinki
 
 // Flusher writes buffered ingest points into a dataset repository's metrics
 // parquet and commits the result through the same WAL rules every other
-// server-side write obeys (docs/continuity-design.md §7).
+// server-side write obeys (docs/dev/continuity-design.md §7).
 type Flusher struct {
 	store   *store.Store
 	git     *gitrepo.Manager

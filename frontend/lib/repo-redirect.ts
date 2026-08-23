@@ -5,7 +5,7 @@ import type { RepoKind } from "@/types/api";
 
 /**
  * When `result` failed because the repository has been transferred or
- * renamed (a 404 carrying `movedTo`, see docs/repo-transfer-design.md §9),
+ * renamed (a 404 carrying `movedTo`, see docs/dev/repo-transfer-design.md §9),
  * permanently redirects to the same route rebuilt at the repository's
  * current location and never returns.
  *

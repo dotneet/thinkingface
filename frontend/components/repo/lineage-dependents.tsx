@@ -75,7 +75,7 @@ export function LineageDependents({ dependents }: { dependents: LineageDependent
  * Null when the group has no single filter that reproduces it: "other" holds
  * whatever relations cards invented, so no one `relation=` covers it, and the
  * new_version / eval_dataset buckets are edge kinds the listing does not filter
- * on (docs/api-contract.md §2).
+ * on (docs/dev/api-contract.md §2).
  */
 function bucketListHref(
   bucket: DependentBucket,

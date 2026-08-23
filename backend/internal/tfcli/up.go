@@ -388,7 +388,7 @@ func resolveUpTarget(to, kindFlag, path, selfName string, files []local.File) (r
 
 // buildUploadFiles converts the scanned local files into hub.LocalFile,
 // generating or merging README.md's front matter from cardOpts when it is
-// non-empty (see docs/tf-cli.md, "repository card").
+// non-empty (see docs/dev/tf-cli.md, "repository card").
 func buildUploadFiles(files []local.File, cardOpts local.CardOptions) ([]hub.LocalFile, error) {
 	var readme *local.File
 	for i := range files {

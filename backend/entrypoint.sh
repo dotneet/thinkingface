@@ -7,7 +7,7 @@
 # script must be a no-op pass-through in that mode -- it only changes
 # behavior when the operator has opted into SQLite + Litestream via
 # infra/main.tf's `database_backend = "sqlite"` (TF_LITESTREAM_REPLICA_URL
-# set and DATABASE_URL a sqlite: URL). See docs/thinkingface-design.md and
+# set and DATABASE_URL a sqlite: URL). See docs/dev/thinkingface-design.md and
 # CLAUDE.md invariant 5: this must never change HF-compatible behavior.
 set -eu
 

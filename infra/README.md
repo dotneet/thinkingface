@@ -1,8 +1,8 @@
 # infra
 
 Terraform for the GCP production deployment described in
-`docs/thinkingface-design.md` §14 ("GCP production configuration") and
-`docs/continuity-design.md` (the Cloud Run / WAL migration). Compose (repo
+`docs/dev/thinkingface-design.md` §14 ("GCP production configuration") and
+`docs/dev/continuity-design.md` (the Cloud Run / WAL migration). Compose (repo
 root `docker-compose.yml`) and this differ only in environment variables and
 the storage driver (`gcs-emulator` locally vs `gcs` here) — that parity is a
 deliberate design goal.
@@ -16,7 +16,7 @@ deliberate design goal.
   in the destination side of the `gcloud storage cp` script
   `GET /api/v1/repos/{kind}/{ns}/{name}/gcs/{rev}` generates), and `wal/` (the
   git write-ahead log — primary persistence for git data, see
-  `docs/continuity-design.md` §3; noncurrent versions are kept indefinitely,
+  `docs/dev/continuity-design.md` §3; noncurrent versions are kept indefinitely,
   since old `index.json` generations are the recovery path for the WAL's
   single point of failure, §13/§16). Object lifecycle for `lfs/`/`blobs/` is
   reference-counted GC (`thinkingface gc`), not a bucket lifecycle rule —
@@ -28,7 +28,7 @@ deliberate design goal.
   IP only (via `google_service_networking_connection`), automated daily
   backups + PITR. Holds metadata only (repos / ACL / LFS ledger / jobs /
   experiments) — it is never on the git consistency path
-  (`docs/continuity-design.md` §1, §5 invariant 6)
+  (`docs/dev/continuity-design.md` §1, §5 invariant 6)
 - `google_service_account.api` — the api workload identity, scoped to:
   - `roles/storage.objectAdmin` on the bucket only (not project-wide)
   - `roles/iam.serviceAccountTokenCreator` on itself (keyless `signBlob` for
@@ -41,7 +41,7 @@ deliberate design goal.
   egress to reach Cloud SQL's private IP. See "Cloud Run settings" below for
   the reasoning behind each setting
 - `google_cloud_run_v2_job.compact` — runs `thinkingface compact` (WAL
-  compaction, `docs/continuity-design.md` §10), same image/SA/VPC egress/
+  compaction, `docs/dev/continuity-design.md` §10), same image/SA/VPC egress/
   secrets as `api`
 - `google_service_account.compact_scheduler` +
   `google_cloud_run_v2_job_iam_member.compact_scheduler_invoker` +
@@ -226,7 +226,7 @@ in-memory, and shared out of the same 8 GiB container memory budget as the
 `git`/`pack-objects` processes. Both directories may be evicted or wiped
 between requests or instances; that's expected and safe, since the actual
 source of truth for git data is the WAL in GCS
-(`docs/continuity-design.md` §2/§9), not local disk. `TF_GIT_CACHE_BYTES`
+(`docs/dev/continuity-design.md` §2/§9), not local disk. `TF_GIT_CACHE_BYTES`
 (default 2 GiB, see `backend/internal/config`) bounds how much of that
 budget the git repo LRU cache is allowed to use.
 

@@ -1,4 +1,4 @@
-// The query-string surface of GET /api/v1/repos (docs/api-contract.md §2).
+// The query-string surface of GET /api/v1/repos (docs/dev/api-contract.md §2).
 // repoFilterFromQuery is pure, so the mapping is checked here without a
 // database; what the filters then mean is store's own integration suite.
 

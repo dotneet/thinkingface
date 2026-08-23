@@ -13,7 +13,7 @@ no artifact API and nothing here talks to the network: this module only
 decides *what* to upload and *where to put it*, which is the part worth
 unit-testing.
 
-See docs/api-contract.md §7 for the naming convention this file fixes.
+See docs/dev/api-contract.md §7 for the naming convention this file fixes.
 """
 
 from __future__ import annotations

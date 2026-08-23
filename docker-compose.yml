@@ -25,7 +25,7 @@ services:
   gcs:
     # Requires 1.55.0 or later: below that, the resumable upload path ignores
     # the generation precondition (fsouza/fake-gcs-server#2260). The WAL
-    # index's CAS (docs/continuity-design.md §11) depends on this precondition.
+    # index's CAS (docs/dev/continuity-design.md §11) depends on this precondition.
     image: fsouza/fake-gcs-server:1.55.1
     restart: unless-stopped
     command:
@@ -58,7 +58,7 @@ services:
       TF_PUBLIC_URL: ${TF_PUBLIC_URL:-http://localhost:8080}
       DATABASE_URL: postgres://${POSTGRES_USER:-tf}:${POSTGRES_PASSWORD:-tf}@postgres:5432/${POSTGRES_DB:-thinkingface}?sslmode=disable
       GIT_ROOT: /data/git
-      # Continuity migration (docs/continuity-design.md §15). Default is the
+      # Continuity migration (docs/dev/continuity-design.md §15). Default is the
       # Phase 2 shadow mode; run the full matrix locally with
       #   TF_WAL_MODE=authoritative docker compose up -d api
       TF_WAL_MODE: ${TF_WAL_MODE:-shadow}
@@ -75,7 +75,7 @@ services:
       TF_VIEWER_CACHE_DIR: /data/cache
       TF_SYNC_WORKERS: ${TF_SYNC_WORKERS:-2}
       TF_ALLOW_SIGNUP: ${TF_ALLOW_SIGNUP:-true}
-      # git over SSH (docs/thinkingface-design.md §5). The host key lives on
+      # git over SSH (docs/dev/thinkingface-design.md §5). The host key lives on
       # the git-data volume so it survives `docker compose down`; a fresh key
       # on every restart would make every client warn about a mismatch.
       TF_SSH_ENABLED: ${TF_SSH_ENABLED:-true}

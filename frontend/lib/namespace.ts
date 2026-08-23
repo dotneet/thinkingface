@@ -1,6 +1,6 @@
 /**
  * Namespaces — a user or an organisation — as the UI sees them
- * (docs/namespace-design.md).
+ * (docs/dev/namespace-design.md).
  *
  * `/[ns]` is the one profile page for both kinds. Next.js matches static
  * segments (`/models`, `/datasets`, …) before the dynamic `[ns]` one, so the

@@ -1,5 +1,5 @@
 // Namespaces: the one concept behind both a user account and an
-// organisation (docs/namespace-design.md §3). A namespaces row owns the name,
+// organisation (docs/dev/namespace-design.md §3). A namespaces row owns the name,
 // the profile columns, and -- for kind='org' -- the membership policy; the
 // user- and organisation-shaped views over it live in users.go and orgs.go.
 
@@ -20,7 +20,7 @@ type Namespace struct {
 }
 
 // NamespaceProfile is a namespaces row read without caring which kind it is
-// (docs/namespace-design.md §6). The profile columns are shared by both
+// (docs/dev/namespace-design.md §6). The profile columns are shared by both
 // kinds; MembersVisibility only means anything for an organisation.
 type NamespaceProfile struct {
 	ID   int64
@@ -53,7 +53,7 @@ type NamespaceCounts struct {
 // NamespaceUpdate is a partial profile update: a nil field is left alone, a
 // non-nil one replaces the stored value (an empty string clears it). The
 // name itself is absent on purpose -- namespaces are never renamed
-// (docs/namespace-design.md §5.4).
+// (docs/dev/namespace-design.md §5.4).
 type NamespaceUpdate struct {
 	DisplayName *string
 	Description *string

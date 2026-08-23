@@ -3,7 +3,7 @@
 -- route, the HF-compatible /datasets/{ns}/{name} shape, git remotes, LFS key
 -- layout). 0001_init.sql only enforced exact-match uniqueness, which let
 -- "alice" and "Alice" coexist as two different accounts/orgs
--- (docs/thinkingface-design.md §10).
+-- (docs/dev/thinkingface-design.md §10).
 --
 -- namespaces.name is always ASCII: backend/internal/api/repos.go's nameRe
 -- restricts it to [A-Za-z0-9._-], so a plain SQL LOWER() fold is exact and

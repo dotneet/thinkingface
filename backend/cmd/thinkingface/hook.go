@@ -21,7 +21,7 @@ import (
 const walPushTimeout = 10 * time.Minute
 
 // runHook dispatches `thinkingface hook <name>`. It is called before
-// config.Load / store.Open (see main, and docs/continuity-design.md §14):
+// config.Load / store.Open (see main, and docs/dev/continuity-design.md §14):
 // the hook runs as a child process of `git receive-pack` on every push, so
 // it must not require DATABASE_URL and must stay cheap to start.
 func runHook(args []string) error {
@@ -39,7 +39,7 @@ func runHook(args []string) error {
 
 // runPreReceiveHook implements `thinkingface hook pre-receive`, the binary
 // that backend/hooks/pre-receive execs via core.hooksPath on every push
-// (docs/continuity-design.md §6.2). Its exit code is the push's fate: 0 lets
+// (docs/dev/continuity-design.md §6.2). Its exit code is the push's fate: 0 lets
 // receive-pack migrate the quarantined objects and update refs, non-zero
 // discards everything.
 //

@@ -25,7 +25,7 @@ export type RepoListParams = {
   task?: string;
   /**
    * "ns/name" of a base model: only its derivatives. Any "@rev" is ignored,
-   * so a revision-pinned edge still matches (docs/api-contract.md §2).
+   * so a revision-pinned edge still matches (docs/dev/api-contract.md §2).
    */
   base_model?: string;
   /**
@@ -66,7 +66,7 @@ export type RepoListSearch = {
   tags?: string | string[];
   license?: string;
   task?: string;
-  /** Lineage filters, mirroring the API (docs/api-contract.md §2). */
+  /** Lineage filters, mirroring the API (docs/dev/api-contract.md §2). */
   base_model?: string;
   relation?: string;
   dataset?: string;

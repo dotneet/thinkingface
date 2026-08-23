@@ -20,7 +20,7 @@ export default async function NewOrgPage() {
         <CreateOrgForm loggedIn />
       ) : (
         // Whether creation is allowed at all is the server's call
-        // (TF_ORG_CREATION, docs/organization-design.md §4.1) and is reported
+        // (TF_ORG_CREATION, docs/dev/organization-design.md §4.1) and is reported
         // as `org_creation_disabled` on submit; not being signed in is the one
         // case we can rule out before the form is even shown.
         <ErrorState

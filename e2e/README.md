@@ -4,7 +4,7 @@
 exercise the server purely through the public HF client libraries — no
 thinkingface-specific code — since the design goal is that those libraries
 work unmodified against `HF_ENDPOINT=<thinkingface>` (see
-`docs/thinkingface-design.md` §2, §7).
+`docs/dev/thinkingface-design.md` §2, §7).
 
 ## What's covered
 
@@ -57,7 +57,7 @@ work unmodified against `HF_ENDPOINT=<thinkingface>` (see
   `can_write` flag being `true` for the authenticated owner and `false`
   anonymously.
 - `test_orgs.py` — the organization feature
-  (`docs/organization-design.md`), through both the UI-only `/api/v1/orgs/...`
+  (`docs/dev/organization-design.md`), through both the UI-only `/api/v1/orgs/...`
   API (`requests` + `Authorization: Bearer`) and `huggingface_hub` for
   everything organizations are meant to unlock. Covers: creating an
   organization makes the creator its admin and shows up in
@@ -65,12 +65,12 @@ work unmodified against `HF_ENDPOINT=<thinkingface>` (see
   signed-up `read` member can `hf_hub_download` from an org repo but gets 403
   on `upload_file`, and promoting them to `write` unlocks the push
   (repositories carry no visibility of their own since
-  `docs/content-addressed-storage-design.md` §1, so what the roles gate is writing,
+  `docs/dev/content-addressed-storage-design.md` §1, so what the roles gate is writing,
   not reading); `list_organization_members` returns every member; demoting or
   removing an organization's last admin is rejected with 409 `last_admin`; and
   deleting an organization is rejected with 409 `has_repositories` until its
   repositories are gone, then succeeds (204).
-- `test_namespaces.py` — the namespace feature (`docs/namespace-design.md`),
+- `test_namespaces.py` — the namespace feature (`docs/dev/namespace-design.md`),
   which unifies "username" and "organization ID" into one concept exposed at
   `/{ns}`. Covers: a freshly signed-up user's namespace answers 200 with
   every count at 0 (not 404) and `can_edit` only for the account itself; a

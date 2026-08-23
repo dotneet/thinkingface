@@ -9,7 +9,7 @@ import (
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
 
-// Namespace endpoints (docs/namespace-design.md §12), driven over real HTTP
+// Namespace endpoints (docs/dev/namespace-design.md §12), driven over real HTTP
 // against the same fixture the org and transfer tests use.
 
 // getNamespace reads GET /api/v1/namespaces/{ns} as the given token (empty
@@ -79,7 +79,7 @@ func TestGetNamespace_UserOrgReservedAndMissing(t *testing.T) {
 		t.Fatalf("missing namespace status = %d, want 404", status)
 	}
 	// A reserved name nobody holds is a 404 like any other free name (the
-	// reserved list only guards creation, docs/namespace-design.md §9).
+	// reserved list only guards creation, docs/dev/namespace-design.md §9).
 	for _, name := range []string{"settings", "models", "new"} {
 		if status, _ := getNamespace(t, f, name, ""); status != 404 {
 			t.Fatalf("reserved name %q status = %d, want 404", name, status)
@@ -202,7 +202,7 @@ func TestUpdateMyProfile_Validation(t *testing.T) {
 		body map[string]any
 	}{
 		// The reason this validation exists: the value would land in an
-		// <a href> (docs/namespace-design.md §10).
+		// <a href> (docs/dev/namespace-design.md §10).
 		{"javascript website", map[string]any{"website": "javascript:alert(1)"}},
 		{"javascript avatar", map[string]any{"avatar_url": "javascript:alert(1)"}},
 		{"data avatar", map[string]any{"avatar_url": "data:text/html,<script>"}},
@@ -252,7 +252,7 @@ func TestUpdateMyProfile_Authorization(t *testing.T) {
 }
 
 // TestUpdateOrg_RejectsHostileURLs is the same validation on the
-// organisation path, which had none before (docs/namespace-design.md §10).
+// organisation path, which had none before (docs/dev/namespace-design.md §10).
 func TestUpdateOrg_RejectsHostileURLs(t *testing.T) {
 	f := newTransferFixture(t)
 	f.org("acme", f.alice)

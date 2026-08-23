@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// Organisation store tests (docs/organization-design.md §11). They run
+// Organisation store tests (docs/dev/organization-design.md §11). They run
 // against every available backend, which is what proves the SQLite and
 // Postgres spellings of the last-admin lock, the JSON details column, and the
 // nullable timestamps behave identically.
@@ -362,7 +362,7 @@ func TestIntegrationOrgAuditLog(t *testing.T) {
 // TestIntegrationOrgFounderBackfill exercises the part of the organisations
 // migration that detaches an organisation from its founder: a legacy row
 // carrying owner_user_id and no org_members entry must come out with an
-// admin membership and a NULL owner (docs/organization-design.md §6.1).
+// admin membership and a NULL owner (docs/dev/organization-design.md §6.1).
 //
 // The legacy shape is recreated by hand and the migration's own backfill
 // statements are replayed from the embedded file, so the assertions are

@@ -1,4 +1,4 @@
-// Reserved namespace names (docs/organization-design.md §6.3). Repository
+// Reserved namespace names (docs/dev/organization-design.md §6.3). Repository
 // names are unaffected: "alice/models" is a perfectly good repository, only
 // a top-level namespace called "models" is not.
 
@@ -34,7 +34,7 @@ var reservedNamespaceNames = map[string]bool{
 	"healthz": true, "static": true, "_next": true, "assets": true,
 	"raw": true, "resolve": true, "lfs": true, "info": true, "git": true,
 	"webhooks": true, "transfers": true, "me": true, "whoami-v2": true,
-	// Frontend-only assets and routes (docs/namespace-design.md §9).
+	// Frontend-only assets and routes (docs/dev/namespace-design.md §9).
 	"favicon.ico": true, "robots.txt": true, "sitemap.xml": true, "duckdb": true,
 	"public": true, "users": true, "namespaces": true, "profile": true, "search": true,
 }

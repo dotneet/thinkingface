@@ -1,5 +1,5 @@
 // namespace: the /{ns} profile page shared by users and organizations
-// (docs/namespace-design.md §8.3).
+// (docs/dev/namespace-design.md §8.3).
 // NOTE: the en dictionary is the source of truth for shape, so it must not be `as const`.
 export const namespace = {
   kind: {

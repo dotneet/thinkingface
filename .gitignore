@@ -96,3 +96,6 @@ lefthook-local.yml
 
 # ---- etc ------------------------------------------------
 tmp/
+
+# MkDocs build output (docs/users -> GitHub Pages)
+site/

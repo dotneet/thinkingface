@@ -1,5 +1,5 @@
 -- Organisations (postgres/0010_organizations.sql,
--- docs/organization-design.md §6.1).
+-- docs/dev/organization-design.md §6.1).
 --
 -- SQLite cannot attach a NOT NULL constraint to a column added with a
 -- non-constant default (CURRENT_TIMESTAMP / a parenthesised expression), so

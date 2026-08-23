@@ -30,7 +30,7 @@ function writableNamespaces(user: User): string[] {
 export function WebhooksManager({
   /**
    * Pins the manager to one namespace and hides the picker — how an
-   * organisation's own settings screen embeds it (docs/organization-design.md
+   * organisation's own settings screen embeds it (docs/dev/organization-design.md
    * §8.1). Left out on /settings/webhooks, where the user picks from every
    * namespace they can write to.
    */

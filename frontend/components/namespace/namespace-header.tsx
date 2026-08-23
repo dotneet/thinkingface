@@ -14,7 +14,7 @@ import type { NamespaceProfile } from "@/types/api";
 /**
  * Identity block at the top of `/{ns}` — the same one for a user and for an
  * organisation, with the kind carried by a badge rather than by a different
- * layout (docs/namespace-design.md §4.3).
+ * layout (docs/dev/namespace-design.md §4.3).
  *
  * The namespace name is always visible even when a display name is set: it is
  * the identifier that appears in the URL and in every `repo_id`.

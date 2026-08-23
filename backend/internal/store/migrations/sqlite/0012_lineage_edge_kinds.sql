@@ -1,5 +1,5 @@
 -- Two more lineage edge kinds, 'eval_dataset' and 'new_version'
--- (postgres/0018_lineage_edge_kinds.sql, docs/api-contract.md §12).
+-- (postgres/0018_lineage_edge_kinds.sql, docs/dev/api-contract.md §12).
 --
 -- SQLite cannot alter a CHECK constraint, so the table is rebuilt: create the
 -- replacement, copy every row, drop the original, rename. The column list is

@@ -121,7 +121,7 @@ type User struct {
 	Email    string `json:"email"`
 	IsAdmin  bool   `json:"is_admin"`
 	// DisplayName and AvatarURL come from the user's own namespace row
-	// (docs/namespace-design.md §5.3); both may be "".
+	// (docs/dev/namespace-design.md §5.3); both may be "".
 	DisplayName string      `json:"display_name"`
 	AvatarURL   string      `json:"avatar_url"`
 	Namespaces  []Namespace `json:"namespaces"`
@@ -136,7 +136,7 @@ type UserResponse struct {
 
 // NamespaceProfile is the public face of a namespace -- a user or an
 // organisation -- as GET /api/v1/namespaces/{ns} returns it
-// (docs/namespace-design.md §7.1). Both kinds share the same profile
+// (docs/dev/namespace-design.md §7.1). Both kinds share the same profile
 // columns on the namespaces row; the organisation-only fields are zero for
 // a user namespace.
 type NamespaceProfile struct {
@@ -160,7 +160,7 @@ type NamespaceProfile struct {
 	NumMembers        int64             `json:"num_members"`
 	MembersVisibility MembersVisibility `json:"members_visibility"`
 
-	// ViewerRole is the caller's effective role (docs/organization-design.md
+	// ViewerRole is the caller's effective role (docs/dev/organization-design.md
 	// §3.1): "admin" for the owner of a user namespace and for a site admin,
 	// the org_members role for an organisation, "" otherwise.
 	ViewerRole OrgRole `json:"viewer_role"`
@@ -177,7 +177,7 @@ type NamespaceResponse struct {
 // NamespaceProfileUpdate is the body of PATCH /api/v1/me/profile. Every
 // field is optional; a present field replaces the stored value (an empty
 // string clears it). The namespace name itself is not editable
-// (docs/namespace-design.md §5.4).
+// (docs/dev/namespace-design.md §5.4).
 type NamespaceProfileUpdate struct {
 	DisplayName *string `json:"display_name,omitempty"`
 	Description *string `json:"description,omitempty"`
@@ -639,7 +639,7 @@ type ExpProjectListItem struct {
 type ExpProjectListResponse struct {
 	Items []ExpProjectListItem `json:"items"`
 	// Total is the number of matching repositories regardless of limit /
-	// offset (docs/namespace-design.md §5.6).
+	// offset (docs/dev/namespace-design.md §5.6).
 	Total int64 `json:"total"`
 }
 
@@ -744,7 +744,7 @@ type ExpArtifact struct {
 // ExpArtifactListResponse lists one run's artifacts.
 type ExpArtifactListResponse struct {
 	// Path is the directory the listing came from,
-	// "{project}/artifacts/{run}" (docs/api-contract.md §7).
+	// "{project}/artifacts/{run}" (docs/dev/api-contract.md §7).
 	Path string `json:"path"`
 	// Rev is the revision listed, always the repository's default branch.
 	Rev       string        `json:"rev"`
@@ -806,7 +806,7 @@ const (
 // LineageRelation names how a repository relates to the base model it points
 // at -- HuggingFace Hub's `base_model_relation`. A card may declare it
 // outright; when it does not, the sync worker infers it from the repository's
-// contents (docs/api-contract.md §12).
+// contents (docs/dev/api-contract.md §12).
 //
 // The wire fields carrying it are plain strings, not this type: a card is free
 // to write something outside the four known values, and such a value is passed
@@ -877,7 +877,7 @@ type LineageDependent struct {
 
 // LineageSuccessor is where a repository's `new_version:` declaration leads:
 // the successor its own card names, and the end of the chain that successor
-// starts (docs/api-contract.md §12).
+// starts (docs/dev/api-contract.md §12).
 type LineageSuccessor struct {
 	// Direct is the successor this repository's card names outright. It is
 	// the only field with anything in it when the reference is dangling, in
@@ -940,7 +940,7 @@ type ExpLineageResponse struct {
 // ------------------------------------------------------------- transfers
 
 // RepoTransferStatus is the lifecycle state of a transfer request
-// (docs/repo-transfer-design.md §7).
+// (docs/dev/repo-transfer-design.md §7).
 type RepoTransferStatus string
 
 const (
@@ -990,7 +990,7 @@ type MyTransfersResponse struct {
 }
 
 // --------------------------------------------------------- organisations
-// (docs/organization-design.md)
+// (docs/dev/organization-design.md)
 
 // OrgRole is a member's role in an organisation. "" means "not a member".
 type OrgRole string
@@ -1019,7 +1019,7 @@ type Org struct {
 
 	// MembersVisibility is about the member list, not about repositories:
 	// there is no repository visibility concept here
-	// (docs/content-addressed-storage-design.md §1).
+	// (docs/dev/content-addressed-storage-design.md §1).
 	MembersVisibility MembersVisibility `json:"members_visibility"`
 
 	NumMembers int64     `json:"num_members"`

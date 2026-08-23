@@ -36,7 +36,7 @@ type Config struct {
 	EmulatorHost  string
 
 	// WALMode selects how far the Continuity migration has progressed
-	// (docs/continuity-design.md §15):
+	// (docs/dev/continuity-design.md §15):
 	//   "off"           — WAL untouched; the on-disk repositories are the truth
 	//   "shadow"        — pushes are mirrored into the WAL best-effort; disk
 	//                     stays authoritative and WAL failures never fail a push
@@ -63,7 +63,7 @@ type Config struct {
 	AdminEmail    string
 
 	// OrgCreation is who may create an organisation: "anyone" (the default)
-	// or "admin" for site admins only (docs/organization-design.md §4.1).
+	// or "admin" for site admins only (docs/dev/organization-design.md §4.1).
 	OrgCreation string
 
 	SessionSecret  string
@@ -86,7 +86,7 @@ type Config struct {
 	// huggingface_hub, git and curl send no Origin and are unaffected.
 	AllowedOrigins []string
 	// AuthRateLimitPerMinute caps failed password attempts per client IP per
-	// minute (per process -- see docs/thinkingface-design.md §14). Per-username
+	// minute (per process -- see docs/dev/thinkingface-design.md §14). Per-username
 	// attempts are capped at half this. Zero disables the limiter entirely,
 	// which is only sensible in tests.
 	AuthRateLimitPerMinute int
@@ -97,7 +97,7 @@ type Config struct {
 
 	// ExpFlushInterval is how long the native ingest API's points may stay
 	// database-only before the sync worker writes them into the dataset
-	// repository's parquet (docs/thinkingface-design.md §8, route B). Shorter
+	// repository's parquet (docs/dev/thinkingface-design.md §8, route B). Shorter
 	// means fresher git history at the cost of more machine-generated
 	// commits; a run that reaches finished/failed is always flushed at once,
 	// regardless of this value. Zero or negative disables the flush entirely,

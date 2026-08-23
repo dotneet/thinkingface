@@ -26,7 +26,7 @@ import (
 // `limit`/`offset` page through, which is what the namespace page's
 // Experiments tab needs: it used to fetch the global list and filter it in
 // the browser, silently losing everything past the first hundred
-// (docs/namespace-design.md §5.6). With no parameters the response is what it
+// (docs/dev/namespace-design.md §5.6). With no parameters the response is what it
 // always was, plus `total`. `search` is the same full text filter every other
 // Web UI listing takes (store.RepoFilter.Search) -- the global /experiments
 // page needs it for the same reason it needs paging: the backend already caps
@@ -342,7 +342,7 @@ func (s *Server) handleExperimentRunAnnotation(w http.ResponseWriter, r *http.Re
 }
 
 // RunArtifactDir is where a run's artifacts live inside its experiment dataset
-// repository: "{project}/artifacts/{run}" (docs/api-contract.md §7).
+// repository: "{project}/artifacts/{run}" (docs/dev/api-contract.md §7).
 //
 // The "artifacts" segment is what keeps the convention clear of the parquet
 // layout the indexer detects (internal/experiments.DetectLayouts): a project

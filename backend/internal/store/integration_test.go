@@ -248,7 +248,7 @@ func TestIntegrationUsersNamespacesTokens(t *testing.T) {
 		}
 		// A namespace lookup by any case resolves to the one row and reports
 		// back the spelling it was created with, never the caller's spelling
-		// (docs/thinkingface-design.md §10 -- same behaviour as GitHub).
+		// (docs/dev/thinkingface-design.md §10 -- same behaviour as GitHub).
 		if got, err := s.GetNamespace(ctx, "ALICE"); err != nil || got.Name != "alice" {
 			t.Fatalf("GetNamespace(ALICE) = %+v, %v, want Name=alice", got, err)
 		}
@@ -1416,7 +1416,7 @@ func TestIntegrationRepoTransfer(t *testing.T) {
 		}
 
 		// Multi-hop: every former name a repository has ever had resolves to
-		// its current location (docs/repo-transfer-design.md §5).
+		// its current location (docs/dev/repo-transfer-design.md §5).
 		got3, err := s.TransferRepo(ctx, TransferSpec{RepoID: r.ID, ToNamespaceID: aliceNS.ID, ToName: "foo3", ActorID: f.admin.ID})
 		if err != nil {
 			t.Fatalf("second TransferRepo: %v", err)
@@ -1433,7 +1433,7 @@ func TestIntegrationRepoTransfer(t *testing.T) {
 
 		// Creating a new repository at an old name reclaims it: the stale
 		// redirect is dropped and the new repository answers there instead
-		// (docs/repo-transfer-design.md §5 "conflicts").
+		// (docs/dev/repo-transfer-design.md §5 "conflicts").
 		reclaimed := f.repo(t, "bob", "foo", "model", nil)
 		if _, err := s.ResolveRepoRedirect(ctx, "model", "bob", "foo"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("stale redirect survived reclaiming create: %v", err)

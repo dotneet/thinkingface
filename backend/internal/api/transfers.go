@@ -1,7 +1,7 @@
 // Repository ownership transfer: the HF-compatible POST /api/repos/move and
 // the web UI's own transfer/accept/reject/cancel endpoints, all funneled
 // through startTransfer so the authorization and completion rules
-// (docs/repo-transfer-design.md §5-§7) live in one place.
+// (docs/dev/repo-transfer-design.md §5-§7) live in one place.
 
 package api
 
@@ -21,7 +21,7 @@ import (
 
 // transferTTL is how long a pending transfer request waits for the
 // destination namespace to decide before it is treated as expired
-// (docs/repo-transfer-design.md §7.2). The design leaves room to make this
+// (docs/dev/repo-transfer-design.md §7.2). The design leaves room to make this
 // configurable later; for now it is a constant like the rest of the
 // implementation it landed with.
 const transferTTL = 7 * 24 * time.Hour
@@ -33,7 +33,7 @@ type forbiddenError struct{ msg string }
 func (e forbiddenError) Error() string { return e.msg }
 
 // startTransfer is the shared implementation behind POST /api/repos/move and
-// POST /api/v1/repos/{kind}/{ns}/{name}/transfer (docs/repo-transfer-design.md
+// POST /api/v1/repos/{kind}/{ns}/{name}/transfer (docs/dev/repo-transfer-design.md
 // §5-§7). It authorizes the actor against the source namespace, decides
 // whether the actor may also write the destination (completing the move
 // immediately) or not (filing a pending request), performs the move, and
@@ -54,7 +54,7 @@ func (s *Server) startTransfer(ctx context.Context, actor *store.User, repo *sto
 	}
 
 	// The source: write access, but an org source restricts this to admin
-	// (docs/repo-transfer-design.md §5 "permissions") so a write member cannot
+	// (docs/dev/repo-transfer-design.md §5 "permissions") so a write member cannot
 	// carry a repository out from under the organisation. A personal namespace's
 	// only "admin" is its owner, so this reads the same for both cases.
 	role, rerr := s.roleIn(ctx, actor, repo.Namespace)
@@ -124,7 +124,7 @@ func (s *Server) startTransfer(ctx context.Context, actor *store.User, repo *sto
 
 // auditTransfer records a completed move on whichever side of it is an
 // organisation: the source logs repo.transferred_out, the destination
-// repo.transferred_in (docs/organization-design.md §5). A move inside a
+// repo.transferred_in (docs/dev/organization-design.md §5). A move inside a
 // single organisation records both, which is what the log should show for a
 // rename that stayed put.
 func (s *Server) auditTransfer(ctx context.Context, actor *store.User, kind, fromNS, fromName, toNS, toName string) {
@@ -187,7 +187,7 @@ func splitRepoID(id string) (ns, name string, ok bool) {
 }
 
 // handleHFMoveRepo implements huggingface_hub.HfApi.move_repo
-// (docs/repo-transfer-design.md §6). A same-namespace call is a rename, using
+// (docs/dev/repo-transfer-design.md §6). A same-namespace call is a rename, using
 // the same path.
 func (s *Server) handleHFMoveRepo(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.requireWrite(w, r)
@@ -338,7 +338,7 @@ func (s *Server) handleMyTransfers(w http.ResponseWriter, r *http.Request) {
 // handleAcceptTransfer and handleRejectTransfer answer
 // POST /api/v1/transfers/{id}/accept and .../reject. Both require write
 // access to the destination namespace: its owner, or an org admin/write
-// member (docs/repo-transfer-design.md §5 "accept / reject").
+// member (docs/dev/repo-transfer-design.md §5 "accept / reject").
 func (s *Server) handleAcceptTransfer(w http.ResponseWriter, r *http.Request) {
 	s.handleDecideTransfer(w, r, true)
 }

@@ -50,7 +50,7 @@ func listRepoTags(q url.Values) []string {
 func queryFlag(v string) bool { return v == "true" || v == "1" }
 
 // repoFilterFromQuery maps the listing query string onto a store filter. It is
-// pure so the parameter surface documented in docs/api-contract.md §2 can be
+// pure so the parameter surface documented in docs/dev/api-contract.md §2 can be
 // tested without a database (repolist_test.go); the viewer scope is layered on
 // by the handler, since only it knows who is asking.
 func repoFilterFromQuery(q url.Values) store.RepoFilter {

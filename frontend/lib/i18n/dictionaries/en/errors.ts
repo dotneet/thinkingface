@@ -1,5 +1,5 @@
 // errors: translated copy for backend `error.type` values (apitypes.ApiError.Type
-// — docs/api-contract.md's error contract). `lib/api-error-message.ts` maps an
+// — docs/dev/api-contract.md's error contract). `lib/api-error-message.ts` maps an
 // `ApiResult` failure's `type` to one of these keys instead of showing the
 // backend's raw English `message` on screen (see [S12] in
 // todo/security-audit-findings.md). Keep this in sync with every `writeError`

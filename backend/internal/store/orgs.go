@@ -10,7 +10,7 @@ import (
 
 // Org is the organisation view of a namespaces row (kind = 'org'), holding
 // the profile fields and the per-organisation policies of
-// docs/organization-design.md §6.1. User namespaces carry the same columns
+// docs/dev/organization-design.md §6.1. User namespaces carry the same columns
 // but never use them.
 //
 // An organisation has no owner: namespaces.owner_user_id is NULL for
@@ -25,7 +25,7 @@ type Org struct {
 	AvatarURL   string
 	// MembersVisibility is "members" or "public". It governs the member list
 	// only: repositories have no visibility of their own
-	// (docs/content-addressed-storage-design.md §1).
+	// (docs/dev/content-addressed-storage-design.md §1).
 	MembersVisibility string
 	CreatedBy         *int64
 	CreatedAt         time.Time
@@ -65,7 +65,7 @@ type OrgUpdate struct {
 }
 
 // AuditEntry is one line of an organisation's audit log
-// (docs/organization-design.md §5). ActorName / TargetName are denormalised
+// (docs/dev/organization-design.md §5). ActorName / TargetName are denormalised
 // so a line still reads after the account it names is deleted.
 type AuditEntry struct {
 	ID           int64
@@ -81,7 +81,7 @@ type AuditEntry struct {
 // NamespaceRole is a user's effective relationship to a namespace, resolved
 // in one round trip: the API's authorization layer needs the namespace kind
 // alongside the role to tell "owner of a personal namespace" from "org
-// member" (docs/organization-design.md §3.1).
+// member" (docs/dev/organization-design.md §3.1).
 type NamespaceRole struct {
 	NamespaceID int64
 	// Kind is "user" or "org".
@@ -130,7 +130,7 @@ func binder(args *[]any) func(any) string {
 // CreateOrg creates an organisation and makes its creator the first admin,
 // in one transaction so an organisation can never exist with nobody able to
 // administer it. owner_user_id stays NULL: authority comes from org_members
-// alone (docs/organization-design.md §3). ErrConflict when the name is
+// alone (docs/dev/organization-design.md §3). ErrConflict when the name is
 // already taken by a user or another organisation.
 func (s *Store) CreateOrg(ctx context.Context, name string, creator int64, in OrgUpdate) (*Org, error) {
 	tx, err := s.db.Begin(ctx)
@@ -225,7 +225,7 @@ func joinComma(parts []string) string {
 // and audit log. It refuses (ErrConflict) while any repository still lives
 // there: dropping dozens of repositories behind one click is exactly the
 // accident this friction exists to prevent
-// (docs/organization-design.md §5 "deleting an organisation"). The count and the delete
+// (docs/dev/organization-design.md §5 "deleting an organisation"). The count and the delete
 // share a transaction so a repository created concurrently cannot slip past.
 func (s *Store) DeleteOrg(ctx context.Context, id int64) error {
 	tx, err := s.db.Begin(ctx)
@@ -449,7 +449,7 @@ func countOrgAdmins(ctx context.Context, ex executor, id int64) (int64, error) {
 
 // UpdateOrgMemberRole changes an existing member's role. Demoting the only
 // admin is ErrLastAdmin: an organisation with no admin could never be
-// administered again (docs/organization-design.md §5).
+// administered again (docs/dev/organization-design.md §5).
 func (s *Store) UpdateOrgMemberRole(ctx context.Context, id, userID int64, role string) (*OrgMember, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -581,7 +581,7 @@ func (s *Store) ListOrgAudit(ctx context.Context, id int64, beforeID int64, limi
 // NamespaceRoleFor resolves what userID may do in the namespace named ns.
 // A user namespace answers "admin" to its owner and "" to everyone else; an
 // organisation answers the org_members role. Site admins are not considered
-// here -- that is the API layer's job (docs/organization-design.md §3.1).
+// here -- that is the API layer's job (docs/dev/organization-design.md §3.1).
 // ErrNotFound when the namespace does not exist. ns is matched
 // case-insensitively (see GetNamespace).
 func (s *Store) NamespaceRoleFor(ctx context.Context, userID int64, ns string) (NamespaceRole, error) {

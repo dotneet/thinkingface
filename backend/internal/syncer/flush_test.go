@@ -89,7 +89,7 @@ func (h *flushHarness) ingest(project, run, status string, steps []int64) int64 
 }
 
 // TestFlushProject_CommitsPublishesAndDrainsTheBuffer walks the full promise
-// of docs/thinkingface-design.md §8 for route B: the buffered points become a
+// of docs/dev/thinkingface-design.md §8 for route B: the buffered points become a
 // commit in the dataset repository, the committed parquet is readable from
 // object storage (so `gcloud storage` and DuckDB can reach it), the repository
 // is recognised as an experiment, and exp_points is emptied.

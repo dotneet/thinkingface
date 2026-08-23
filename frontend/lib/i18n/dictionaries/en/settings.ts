@@ -21,7 +21,7 @@ export const settings = {
     loadFailed: "Failed to load your profile",
     loadFailedHint: "The backend API may be unreachable. Try reloading the page.",
     usernameLabel: "Username",
-    // docs/namespace-design.md §5.3: the username is the namespace and is
+    // docs/dev/namespace-design.md §5.3: the username is the namespace and is
     // never editable; this explains why and links to the one way to get a
     // different one — a new account plus a repository transfer (§5.4).
     usernameLockedHint:

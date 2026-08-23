@@ -1,5 +1,5 @@
 // Periodic flushing of the native ingest API's buffer into the dataset
-// repositories that own it (docs/thinkingface-design.md §8). The ingest
+// repositories that own it (docs/dev/thinkingface-design.md §8). The ingest
 // endpoint writes points to exp_points so the dashboard can be live; the
 // promise the design makes is that the data still ends up as parquet inside
 // the dataset repository, git-versioned, published into object storage and

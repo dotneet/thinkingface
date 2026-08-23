@@ -1,5 +1,5 @@
 // Organisation CRUD, membership management, and the audit log
-// (docs/organization-design.md §7.1). The permission rules themselves live in
+// (docs/dev/organization-design.md §7.1). The permission rules themselves live in
 // authz.go; this file is the HTTP surface over them.
 
 package api
@@ -18,7 +18,7 @@ import (
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
 
-// Audit actions (docs/organization-design.md §5). The set is closed: the UI
+// Audit actions (docs/dev/organization-design.md §5). The set is closed: the UI
 // translates each one, so a new action means a new dictionary entry.
 const (
 	auditOrgCreated         = "org.created"
@@ -161,7 +161,7 @@ func validOrgRole(role apitypes.OrgRole) bool {
 // partial update. The four profile fields go through the same
 // validateProfileFields as PATCH /me/profile, which is what closes the
 // javascript: URL hole this endpoint used to have
-// (docs/namespace-design.md §10).
+// (docs/dev/namespace-design.md §10).
 func applyOrgUpdate(req apitypes.OrgUpdateRequest) (store.OrgUpdate, map[string]any, error) {
 	if err := validateProfileFields(req.DisplayName, req.Description, req.Website, req.AvatarURL); err != nil {
 		return store.OrgUpdate{}, nil, err
@@ -501,7 +501,7 @@ func (s *Server) handleUpdateOrgMember(w http.ResponseWriter, r *http.Request) {
 
 // handleRemoveOrgMember answers DELETE /api/v1/orgs/{org}/members/{username},
 // which is both "an admin removes someone" and "a member leaves": leaving is
-// the same call aimed at yourself (docs/organization-design.md §5).
+// the same call aimed at yourself (docs/dev/organization-design.md §5).
 func (s *Server) handleRemoveOrgMember(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireWrite(w, r)
 	if !ok {
@@ -612,7 +612,7 @@ func (s *Server) handleOrgAuditLog(w http.ResponseWriter, r *http.Request) {
 // handleHFOrgMembers answers GET /api/organizations/{org}/members, which is
 // what huggingface_hub's HfApi.list_organization_members() calls. HF returns
 // a bare list of accounts with no roles; the authorization is the same as
-// the UI's own member list (docs/organization-design.md §7.2).
+// the UI's own member list (docs/dev/organization-design.md §7.2).
 func (s *Server) handleHFOrgMembers(w http.ResponseWriter, r *http.Request) {
 	org, ok := s.loadOrg(w, r, chi.URLParam(r, "org"))
 	if !ok {
@@ -647,7 +647,7 @@ func (s *Server) handleHFOrgMembers(w http.ResponseWriter, r *http.Request) {
 }
 
 // whoamiOrgs builds the `orgs` array of GET /api/whoami-v2 in HuggingFace's
-// shape (docs/organization-design.md §7.2). `hf auth whoami` prints name and
+// shape (docs/dev/organization-design.md §7.2). `hf auth whoami` prints name and
 // roleInOrg from it.
 func (s *Server) whoamiOrgs(ctx context.Context, user *store.User) []map[string]any {
 	orgs, err := s.store.ListOrgsForUser(ctx, user.ID)

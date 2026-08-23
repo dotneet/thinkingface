@@ -1,5 +1,5 @@
 -- SSH public keys (postgres/0013_ssh_keys.sql,
--- docs/thinkingface-design.md §5 "Git over SSH").
+-- docs/dev/thinkingface-design.md §5 "Git over SSH").
 
 CREATE TABLE IF NOT EXISTS user_ssh_keys (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,

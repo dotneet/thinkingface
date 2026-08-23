@@ -1,0 +1,72 @@
+name: docs
+
+# Builds docs/users/ with MkDocs and publishes it to GitHub Pages.
+# docs/dev/ holds the internal design documents and is not part of the site
+# (mkdocs.yml points docs_dir at docs/users).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/users/**"
+      - "docs/requirements.txt"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/users/**"
+      - "docs/requirements.txt"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build (mkdocs --strict)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Nothing here pushes, and the build runs third-party tooling.
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install MkDocs
+        run: pip install -r docs/requirements.txt
+
+      # --strict turns broken internal links and other warnings into failures,
+      # so a bad link fails the PR instead of shipping a 404.
+      - name: Build
+        run: mkdocs build --strict
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: deploy (github-pages)
+    # PRs only build; only main publishes.
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

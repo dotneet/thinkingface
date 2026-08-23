@@ -47,7 +47,7 @@ func NewManager(root string) *Manager {
 // Dir returns the on-disk path of a repository's bare directory. It is
 // keyed by the repository's immutable storage path (store.Repo.StoragePath),
 // never by its name, so a transfer or rename never moves the directory
-// (docs/repo-transfer-design.md §3).
+// (docs/dev/repo-transfer-design.md §3).
 //
 //	{root}/{storage_path}.git    e.g. {root}/repos/01J….git or (legacy) {root}/datasets/{ns}/{name}.git
 func (m *Manager) Dir(storagePath string) string {

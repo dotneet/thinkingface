@@ -1,5 +1,5 @@
 /**
- * Client for the organisation endpoints (docs/organization-design.md §7.1).
+ * Client for the organisation endpoints (docs/dev/organization-design.md §7.1).
  *
  * Every function follows the `apiFetch` contract: it never throws, callers get
  * an `ApiResult<T>` and render an error state (CLAUDE.md invariant 3). The
@@ -183,7 +183,7 @@ export function orgErrorKey(
 /**
  * Base path of an organisation's admin area.
  *
- * The public page moved to `/{name}` (docs/namespace-design.md §4.2), but the
+ * The public page moved to `/{name}` (docs/dev/namespace-design.md §4.2), but the
  * settings screens deliberately stayed under `/orgs/{name}/settings`: the
  * backend's `/{ns}/{name}` is the git transport route, so `alice/settings` is
  * a legal repository path and cannot double as a settings URL.
@@ -194,7 +194,7 @@ export function orgSettingsHref(name: string): string {
 
 /**
  * @deprecated Link to `namespaceHref(name)` (lib/namespace.ts) instead —
- * `/orgs/{name}` now permanently redirects there (docs/namespace-design.md
+ * `/orgs/{name}` now permanently redirects there (docs/dev/namespace-design.md
  * §4.1). Kept because the `/orgs/{name}/settings/*` pages build their own
  * paths from it; use {@link orgSettingsHref} for those.
  */

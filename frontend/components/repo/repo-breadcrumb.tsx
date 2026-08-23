@@ -17,7 +17,7 @@ export async function RepoBreadcrumb({
 }) {
   const t = await getT();
   const base = repoBase(kind, ns, name);
-  // Users and organisations share one profile page (docs/namespace-design.md
+  // Users and organisations share one profile page (docs/dev/namespace-design.md
   // §4.1), so the namespace segment always links there.
   const nsBase = namespaceHref(ns);
   return (

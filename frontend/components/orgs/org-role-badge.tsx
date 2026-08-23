@@ -4,7 +4,7 @@ import type { OrgRole } from "@/types/api";
 
 /**
  * Role → look and label, in one map so the three roles read the same way on
- * every screen (docs/organization-design.md §8.3): admin is the one that
+ * every screen (docs/dev/organization-design.md §8.3): admin is the one that
  * carries power, write is ordinary, read is the quiet default.
  */
 const ROLE_TONES: Record<OrgRole, BadgeTone> = {

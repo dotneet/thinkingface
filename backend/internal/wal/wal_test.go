@@ -18,7 +18,7 @@ const (
 	// storagePath is the repository's immutable physical location that these
 	// tests exercise — the legacy form a pre-storage_path repository was
 	// backfilled with ("{models|datasets}/{ns}/{name}",
-	// docs/repo-transfer-design.md §4). storage.LegacyStoragePath(kind, ns,
+	// docs/dev/repo-transfer-design.md §4). storage.LegacyStoragePath(kind, ns,
 	// repo) produces the same value; it is spelled out here so it stays a
 	// compile-time constant.
 	storagePath = "datasets/" + ns + "/" + repo

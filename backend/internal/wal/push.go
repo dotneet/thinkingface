@@ -9,7 +9,7 @@ import (
 
 // refPolicy decides where a push gets the <old> values it hands to UpdateIndex.
 // It is the only thing that differs between the two phases of the migration
-// (docs/continuity-design.md §15): everything after — packing, uploading, the
+// (docs/dev/continuity-design.md §15): everything after — packing, uploading, the
 // CAS — is identical, and is shared below so the two paths cannot drift.
 type refPolicy int
 

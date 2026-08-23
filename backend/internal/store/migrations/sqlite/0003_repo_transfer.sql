@@ -1,5 +1,5 @@
 -- Repository transfer (postgres/0009_repo_transfer.sql,
--- docs/repo-transfer-design.md §4, §7).
+-- docs/dev/repo-transfer-design.md §4, §7).
 
 CREATE TABLE IF NOT EXISTS repo_redirects (
     kind           TEXT    NOT NULL CHECK (kind IN ('dataset', 'model')),

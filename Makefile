@@ -57,7 +57,7 @@ endef
 
 .PHONY: build-web help up down up-sqlite down-sqlite logs rebuild psql check check-backend check-frontend check-python \
         check-types gen-types test test-backend test-frontend test-store-pg test-e2e fmt lint clean tf \
-        dev-web dev-api gcs-proxy dev-stop
+        dev-web dev-api gcs-proxy dev-stop docs docs-build
 
 # The full SQLite override set. See the comment at the top of
 # docker-compose.sqlite.yml.
@@ -127,6 +127,22 @@ dev-stop: ## Stop the host-side dev servers started by dev-web / dev-api / gcs-p
 
 tf: ## Build the tf CLI into backend/bin/tf
 	cd backend && go build -trimpath -ldflags "-s -w -X github.com/dotneet/thinkingface/backend/internal/tfcli.Version=$$(git describe --tags --always --dirty 2>/dev/null || echo dev)" -o bin/tf ./cmd/tf
+
+# ---- documentation site ----------------------------------------------------
+
+# docs/users/ is the published site (mkdocs.yml points docs_dir there);
+# docs/dev/ holds the internal design docs and is deliberately excluded.
+# Run in a disposable uv environment so MkDocs never lands in the ambient
+# python environment (same approach as make test-e2e).
+MKDOCS := uv run --isolated --with-requirements docs/requirements.txt mkdocs
+DOCS_PORT ?= 8123
+
+docs: ## Serve docs/users/ locally with live reload (DOCS_PORT, default 8123)
+	@echo "==> mkdocs on http://localhost:$(DOCS_PORT)/thinkingface/ (site_url sets the base path)"
+	$(MKDOCS) serve -a 127.0.0.1:$(DOCS_PORT)
+
+docs-build: ## Build the docs site into site/ the same way CI does
+	$(MKDOCS) build --strict
 
 # ---- quality gates ---------------------------------------------------------
 

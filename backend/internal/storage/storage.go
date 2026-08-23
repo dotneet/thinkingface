@@ -14,7 +14,7 @@ var ErrNotFound = errors.New("storage: object not found")
 
 // ErrPreconditionFailed is a generation mismatch on a conditional write (GCS
 // answers 412). It is the linearisation signal the WAL builds on: whoever gets
-// it lost the race and must re-read before retrying (docs/continuity-design.md §11).
+// it lost the race and must re-read before retrying (docs/dev/continuity-design.md §11).
 var ErrPreconditionFailed = errors.New("storage: precondition failed")
 
 type ObjectInfo struct {

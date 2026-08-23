@@ -30,7 +30,7 @@ export function validateName(name: string): NameError | null {
  * Names a new namespace (a sign-up username or an organisation) may not take,
  * because they collide with a front-end route under `app/`, with the backend's
  * `/{ns}/{name}` routes, or with the HF-compatible `/datasets/{ns}/{name}`
- * prefix (docs/organization-design.md §6.3).
+ * prefix (docs/dev/organization-design.md §6.3).
  *
  * MIRROR of `reservedNames` in `backend/internal/api/names.go` — the server is
  * authoritative and rejects with `{"error":{"type":"reserved_name"}}`; this
@@ -67,7 +67,7 @@ export const RESERVED_NAMESPACE_NAMES: readonly string[] = [
   "transfers",
   "me",
   "whoami-v2",
-  // Frontend-only assets and routes (docs/namespace-design.md §9).
+  // Frontend-only assets and routes (docs/dev/namespace-design.md §9).
   "favicon.ico",
   "robots.txt",
   "sitemap.xml",

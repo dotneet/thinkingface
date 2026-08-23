@@ -112,7 +112,7 @@ func TestMaybeEvict_LockedRepositoryIsSkipped(t *testing.T) {
 }
 
 // TestMaybeEvict_FindsBothLegacyAndNewStoragePathShapes exercises the walker
-// added for the storage_path migration (docs/repo-transfer-design.md §8):
+// added for the storage_path migration (docs/dev/repo-transfer-design.md §8):
 // eviction must treat {root}/repos/{ulid}.git (two levels) exactly like
 // {root}/{models|datasets}/{ns}/{name}.git (three levels) — any directory
 // ending in ".git", wherever it sits under root.

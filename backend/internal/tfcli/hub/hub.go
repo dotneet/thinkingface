@@ -1,6 +1,6 @@
 // Package hub is the HTTP client the tf CLI uses to talk to a thinkingface
 // server. It covers exactly the HuggingFace-compatible subset an upload needs
-// (docs/api-contract.md §1, §2, §3, §8) plus the two thinkingface-only calls
+// (docs/dev/api-contract.md §1, §2, §3, §8) plus the two thinkingface-only calls
 // behind `tf login` (password login + token minting).
 //
 // Design rules:
@@ -824,7 +824,7 @@ type CommitResult struct {
 
 // Commit is POST .../commit/{rev} with an application/x-ndjson body:
 // one header line ({"key":"header","value":{"summary","description"}}) followed
-// by one line per op (docs/api-contract.md §3). The body is streamed through
+// by one line per op (docs/dev/api-contract.md §3). The body is streamed through
 // an io.Pipe so a large regular file never has to sit in memory twice.
 func (c *Client) Commit(ctx context.Context, ref Ref, rev, summary, description string, ops []CommitOp) (*CommitResult, error) {
 	if summary == "" {

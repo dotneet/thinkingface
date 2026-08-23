@@ -1,5 +1,5 @@
 // Operational subcommands for the Continuity migration
-// (docs/continuity-design.md §10, §15):
+// (docs/dev/continuity-design.md §10, §15):
 //
 //	wal-seed    Phase 3 — create WAL indexes for repositories that predate it
 //	wal-verify  Phase 3 — materialise every WAL into a scratch dir and compare

@@ -31,10 +31,10 @@ func kindDir(kind string) string {
 }
 
 // WALPrefix returns the directory key (with trailing slash) that holds one
-// repository's write-ahead log (docs/continuity-design.md §3). It is keyed by
+// repository's write-ahead log (docs/dev/continuity-design.md §3). It is keyed by
 // the repository's immutable storage path, not its name, so transferring or
 // renaming a repository never relocates the WAL
-// (docs/repo-transfer-design.md §3).
+// (docs/dev/repo-transfer-design.md §3).
 //
 //	wal/{storage_path}/            e.g. wal/repos/01J…/ or (legacy) wal/datasets/{ns}/{name}/
 func WALPrefix(storagePath string) string {

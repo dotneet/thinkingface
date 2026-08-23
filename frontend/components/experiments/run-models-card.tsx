@@ -15,7 +15,7 @@ import type { ExpRunModelRef } from "@/types/api";
  * that never happened, or a repository that was never pushed — is
  * kept and shown as text with a note, never dropped and never linked. That is
  * the same treatment a dangling `lineage:` reference gets
- * (docs/api-contract.md §12), so the two halves of the provenance UI behave
+ * (docs/dev/api-contract.md §12), so the two halves of the provenance UI behave
  * alike.
  *
  * The pinned revision is recorded verbatim and is not verified: a link to a

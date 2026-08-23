@@ -196,7 +196,7 @@ func (s *Server) createRepo(ctx context.Context, user *store.User, kind, ns, nam
 	// and never reused, so it cannot collide with the WAL or bare directory
 	// a previously deleted repository left behind — unlike the old
 	// (kind, ns, name) keying, there is nothing here to purge before the
-	// first write (docs/repo-transfer-design.md §8).
+	// first write (docs/dev/repo-transfer-design.md §8).
 	repo, err := s.store.CreateRepo(ctx, namespace.ID, name, kind, description, "main", store.NewStoragePath())
 	if err != nil {
 		return nil, err

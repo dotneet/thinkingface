@@ -125,7 +125,7 @@ describe("validateNamespaceName", () => {
     expect(validateNamespaceName("my-models")).toBeNull();
   });
 
-  it("covers the names the design lists (docs/organization-design.md §6.3)", () => {
+  it("covers the names the design lists (docs/dev/organization-design.md §6.3)", () => {
     // Guards against an entry being dropped while syncing with
     // backend/internal/api/names.go.
     expect(RESERVED_NAMESPACE_NAMES).toContain("orgs");
@@ -134,7 +134,7 @@ describe("validateNamespaceName", () => {
     expect(new Set(RESERVED_NAMESPACE_NAMES).size).toBe(RESERVED_NAMESPACE_NAMES.length);
   });
 
-  it("reserves every static top-level route under app/ (docs/namespace-design.md §9)", () => {
+  it("reserves every static top-level route under app/ (docs/dev/namespace-design.md §9)", () => {
     // `/[ns]` is a Next.js dynamic segment matched only after every static
     // route under app/ has missed, so any static directory that is *not* on
     // the reserved list would shadow a namespace of the same name with no

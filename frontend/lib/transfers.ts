@@ -12,7 +12,7 @@ function transferPath(kind: RepoKind, ns: string, name: string): string {
 }
 
 /**
- * Starts a transfer (docs/repo-transfer-design.md §6-7). The response's
+ * Starts a transfer (docs/dev/repo-transfer-design.md §6-7). The response's
  * `repo` is set when the move completed immediately (200); it is absent
  * when the destination needed approval and the transfer is now pending
  * (202) — both are `ok: true` here, callers branch on `data.repo`.

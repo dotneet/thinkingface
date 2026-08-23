@@ -4,13 +4,30 @@
     {
       "name": "web-dev",
       "runtimeExecutable": "/usr/bin/make",
-      "runtimeArgs": ["dev-web"],
+      "runtimeArgs": [
+        "dev-web"
+      ],
       "port": 3100
     },
     {
       "name": "web-docker",
       "url": "http://localhost:3000",
       "port": 3000
+    },
+    {
+      "name": "docs",
+      "runtimeExecutable": "/opt/homebrew/bin/uv",
+      "runtimeArgs": [
+        "run",
+        "--isolated",
+        "--with-requirements",
+        "docs/requirements.txt",
+        "mkdocs",
+        "serve",
+        "-a",
+        "127.0.0.1:8123"
+      ],
+      "port": 8123
     }
   ]
 }

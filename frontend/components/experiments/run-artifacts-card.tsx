@@ -36,7 +36,7 @@ const ICONS: Record<PreviewKind, LucideIcon> = {
 /**
  * The files a run produced: whatever `trackio.log_artifact` committed under
  * `{project}/artifacts/{run}` in the same dataset repository as the metrics
- * (docs/api-contract.md §7).
+ * (docs/dev/api-contract.md §7).
  *
  * They are plain repository files, which is the whole point of the design —
  * so every row links into the file browser that already exists rather than

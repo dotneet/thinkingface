@@ -89,7 +89,7 @@ export interface User {
   is_admin: boolean;
   /**
    * DisplayName and AvatarURL come from the user's own namespace row
-   * (docs/namespace-design.md §5.3); both may be "".
+   * (docs/dev/namespace-design.md §5.3); both may be "".
    */
   display_name: string;
   avatar_url: string;
@@ -104,7 +104,7 @@ export interface UserResponse {
 /**
  * NamespaceProfile is the public face of a namespace -- a user or an
  * organisation -- as GET /api/v1/namespaces/{ns} returns it
- * (docs/namespace-design.md §7.1). Both kinds share the same profile
+ * (docs/dev/namespace-design.md §7.1). Both kinds share the same profile
  * columns on the namespaces row; the organisation-only fields are zero for
  * a user namespace.
  */
@@ -131,7 +131,7 @@ export interface NamespaceProfile {
   num_members: number /* int64 */;
   members_visibility: MembersVisibility;
   /**
-   * ViewerRole is the caller's effective role (docs/organization-design.md
+   * ViewerRole is the caller's effective role (docs/dev/organization-design.md
    * §3.1): "admin" for the owner of a user namespace and for a site admin,
    * the org_members role for an organisation, "" otherwise.
    */
@@ -152,7 +152,7 @@ export interface NamespaceResponse {
  * NamespaceProfileUpdate is the body of PATCH /api/v1/me/profile. Every
  * field is optional; a present field replaces the stored value (an empty
  * string clears it). The namespace name itself is not editable
- * (docs/namespace-design.md §5.4).
+ * (docs/dev/namespace-design.md §5.4).
  */
 export interface NamespaceProfileUpdate {
   display_name?: string;
@@ -755,7 +755,7 @@ export interface ExpProjectListResponse {
   items: ExpProjectListItem[];
   /**
    * Total is the number of matching repositories regardless of limit /
-   * offset (docs/namespace-design.md §5.6).
+   * offset (docs/dev/namespace-design.md §5.6).
    */
   total: number /* int64 */;
 }
@@ -906,7 +906,7 @@ export interface ExpArtifact {
 export interface ExpArtifactListResponse {
   /**
    * Path is the directory the listing came from,
-   * "{project}/artifacts/{run}" (docs/api-contract.md §7).
+   * "{project}/artifacts/{run}" (docs/dev/api-contract.md §7).
    */
   path: string;
   /**
@@ -983,7 +983,7 @@ export type LineageEdgeKind = typeof LineageEdgeKindDataset | typeof LineageEdge
  * LineageRelation names how a repository relates to the base model it points
  * at -- HuggingFace Hub's `base_model_relation`. A card may declare it
  * outright; when it does not, the sync worker infers it from the repository's
- * contents (docs/api-contract.md §12).
+ * contents (docs/dev/api-contract.md §12).
  * The wire fields carrying it are plain strings, not this type: a card is free
  * to write something outside the four known values, and such a value is passed
  * through verbatim rather than being rewritten into a lie. These constants are
@@ -1081,7 +1081,7 @@ export interface LineageDependent {
 /**
  * LineageSuccessor is where a repository's `new_version:` declaration leads:
  * the successor its own card names, and the end of the chain that successor
- * starts (docs/api-contract.md §12).
+ * starts (docs/dev/api-contract.md §12).
  */
 export interface LineageSuccessor {
   /**
@@ -1167,7 +1167,7 @@ export interface ExpLineageResponse {
 }
 /**
  * RepoTransferStatus is the lifecycle state of a transfer request
- * (docs/repo-transfer-design.md §7).
+ * (docs/dev/repo-transfer-design.md §7).
  */
 export type RepoTransferStatus = string;
 export const RepoTransferPending: RepoTransferStatus = "pending";
@@ -1246,7 +1246,7 @@ export interface Org {
   /**
    * MembersVisibility is about the member list, not about repositories:
    * there is no repository visibility concept here
-   * (docs/content-addressed-storage-design.md §1).
+   * (docs/dev/content-addressed-storage-design.md §1).
    */
   members_visibility: MembersVisibility;
   num_members: number /* int64 */;

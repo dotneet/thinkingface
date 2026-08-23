@@ -1,5 +1,5 @@
 // Organisations: the public directory, the creation form, an organisation's
-// profile page, and its settings screens (docs/organization-design.md §8).
+// profile page, and its settings screens (docs/dev/organization-design.md §8).
 // NOTE: the en dictionary is the source of truth for shape, so it must not be
 // `as const` (doing so would turn it into literal types and force ja to use
 // the exact same strings).

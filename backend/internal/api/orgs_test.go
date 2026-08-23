@@ -12,7 +12,7 @@ import (
 )
 
 // Organisation endpoints and the permission matrix of
-// docs/organization-design.md §4, driven over real HTTP against the same
+// docs/dev/organization-design.md §4, driven over real HTTP against the same
 // fixture the transfer tests use.
 
 // orgRoles are the columns of the permission matrix. "site-admin" is the
@@ -64,7 +64,7 @@ func (f *orgFixture) call(method, path string, body any) response {
 	return f.do(method, path, f.token(f.actor, "write"), body)
 }
 
-// TestOrgPermissionMatrix walks docs/organization-design.md §4 operation by
+// TestOrgPermissionMatrix walks docs/dev/organization-design.md §4 operation by
 // operation. Each cell gets its own fixture so the destructive rows (delete a
 // repository, add a member) cannot leak into the next one.
 func TestOrgPermissionMatrix(t *testing.T) {

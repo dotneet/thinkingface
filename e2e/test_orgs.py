@@ -1,7 +1,7 @@
 """End-to-end tests for the organization feature
-(docs/organization-design.md), driven through:
+(docs/dev/organization-design.md), driven through:
 
-- the UI-facing organization API (`/api/v1/orgs/...`, docs/organization-design.md
+- the UI-facing organization API (`/api/v1/orgs/...`, docs/dev/organization-design.md
   §7.1) via plain `requests` + `Authorization: Bearer <token>`, since that
   surface has no `huggingface_hub` client, and
 - `huggingface_hub` itself for everything an organization is meant to make
@@ -11,7 +11,7 @@
 Requires a running server; see e2e/README.md. `hf_api` / `hf_endpoint` /
 `hf_token` come from conftest.py and act as the seeded admin user (a site
 admin, so it is implicitly "admin" in every organization without needing an
-`org_members` row -- docs/organization-design.md §3).
+`org_members` row -- docs/dev/organization-design.md §3).
 
 Second (and third) accounts are freshly signed up per test, following the
 `_signup` / `_mint_write_token` / `other_user` pattern in
@@ -136,7 +136,7 @@ def _remove_member(
 def _delete_repos_ignore(hf_api: HfApi, repo_ids: list[tuple[str, str]]) -> None:
     """Best-effort cleanup of every (repo_id, repo_type) pair, ignoring repos
     that are already gone. A member org must have zero repositories before it
-    can be deleted (docs/organization-design.md §5 "Deleting an organization"), so this
+    can be deleted (docs/dev/organization-design.md §5 "Deleting an organization"), so this
     always has to run before `_delete_org`."""
     for repo_id, repo_type in repo_ids:
         try:
@@ -161,7 +161,7 @@ def test_org_create_shows_up_in_whoami(
 ) -> None:
     """Creating an organization makes the creator its admin, and that shows
     up in `whoami()["orgs"]` -- the shape `hf auth whoami` reads
-    (docs/organization-design.md §7.2)."""
+    (docs/dev/organization-design.md §7.2)."""
     admin_headers = {"Authorization": f"Bearer {hf_token}"}
     create_resp = _create_org(hf_endpoint, admin_headers, org_name)
     assert create_resp.status_code == 201, create_resp.text
@@ -261,7 +261,7 @@ def test_org_last_admin_is_protected(
     hf_api: HfApi, hf_endpoint: str, hf_token: str, org_name: str
 ) -> None:
     """An organization always needs at least one admin: demoting or removing
-    the last one is rejected with 409 (docs/organization-design.md §5)."""
+    the last one is rejected with 409 (docs/dev/organization-design.md §5)."""
     admin_headers = {"Authorization": f"Bearer {hf_token}"}
     creator_username = hf_api.whoami()["name"]
     try:
@@ -288,7 +288,7 @@ def test_org_delete_requires_no_repositories(
     hf_api: HfApi, hf_endpoint: str, hf_token: str, org_name: str, unique_name: str
 ) -> None:
     """An organization with repositories cannot be deleted (409); once they
-    are gone, deletion succeeds (204) (docs/organization-design.md §5)."""
+    are gone, deletion succeeds (204) (docs/dev/organization-design.md §5)."""
     admin_headers = {"Authorization": f"Bearer {hf_token}"}
     repo_id = f"{org_name}/{unique_name}"
     repos: list[tuple[str, str]] = []

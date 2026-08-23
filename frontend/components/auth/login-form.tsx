@@ -41,7 +41,7 @@ export function LoginForm({ next }: { next?: string }) {
     if (tab === "signup") {
       // Same rule the API applies to a new username: the shared name syntax
       // plus the reserved-namespace list, because signing up claims a
-      // namespace (backend/internal/api/names.go, docs/organization-design.md §6.3).
+      // namespace (backend/internal/api/names.go, docs/dev/organization-design.md §6.3).
       const nameError = validateNamespaceName(username.trim());
       if (nameError) {
         setError(t(USERNAME_ERROR_KEYS[nameError]));

@@ -16,7 +16,7 @@ variable "environment" {
 }
 
 variable "bucket_name" {
-  description = "GCS bucket name. Defaults to \"{project_id}-thinkingface\" per docs/thinkingface-design.md §4 when left empty."
+  description = "GCS bucket name. Defaults to \"{project_id}-thinkingface\" per docs/dev/thinkingface-design.md §4 when left empty."
   type        = string
   default     = ""
 }
@@ -158,7 +158,7 @@ variable "api_max_instances" {
 }
 
 variable "compact_job_name" {
-  description = "Cloud Run Job name for WAL compaction (`thinkingface compact`, docs/continuity-design.md §10)."
+  description = "Cloud Run Job name for WAL compaction (`thinkingface compact`, docs/dev/continuity-design.md §10)."
   type        = string
   default     = "thinkingface-compact"
 }
