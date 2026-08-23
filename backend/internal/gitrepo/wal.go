@@ -125,14 +125,29 @@ func (m *Manager) maybeEvict() {
 	w.lastScan = time.Now()
 	w.mu.Unlock()
 
-	type repoDir struct {
-		dir  string
-		size int64
-		used time.Time
+	repos, evictableTotal := m.scanEvictable()
+	if evictableTotal <= w.cacheBytes {
+		return
 	}
+	m.evictDown(repos, evictableTotal, time.Now())
+}
+
+// repoDir is one eviction candidate as the scan found it. used is a
+// *snapshot*: by the time evictDown acts on it a request may have arrived, so
+// it decides ordering, never deletion.
+type repoDir struct {
+	dir  string
+	size int64
+	used time.Time
+}
+
+// scanEvictable walks the git root for eviction candidates and returns them
+// with the total they occupy. Split from evictDown so the gap between
+// measuring a repository and deleting it — the gap a request can arrive in —
+// is something a test can open on purpose.
+func (m *Manager) scanEvictable() ([]repoDir, int64) {
 	var repos []repoDir
 	var evictableTotal int64
-	now := time.Now()
 	// A repository directory is any directory whose name ends in ".git",
 	// wherever it sits under root — {root}/repos/{ulid}.git (new) and
 	// {root}/{models|datasets}/{ns}/{name}.git (legacy) alike
@@ -153,22 +168,16 @@ func (m *Manager) maybeEvict() {
 		}
 		size := dirSize(dir)
 		evictableTotal += size
-		w.mu.Lock()
-		used, ok := w.lastUse[dir]
-		w.mu.Unlock()
-		if !ok {
-			// Fall back to the state file's mtime: survives restarts.
-			if st, err := os.Stat(filepath.Join(dir, wal.StateFileName)); err == nil {
-				used = st.ModTime()
-			}
-		}
-		repos = append(repos, repoDir{dir: dir, size: size, used: used})
+		repos = append(repos, repoDir{dir: dir, size: size, used: m.lastUseOf(dir)})
 		return filepath.SkipDir
 	})
-	if evictableTotal <= w.cacheBytes {
-		return
-	}
+	return repos, evictableTotal
+}
 
+// evictDown removes candidates, least recently used first, until the total is
+// back inside the budget.
+func (m *Manager) evictDown(repos []repoDir, evictableTotal int64, now time.Time) {
+	w := m.wal
 	sort.Slice(repos, func(i, j int) bool { return repos[i].used.Before(repos[j].used) })
 	for _, r := range repos {
 		if evictableTotal <= w.cacheBytes {
@@ -185,6 +194,19 @@ func (m *Manager) maybeEvict() {
 		if !lock.TryLock() {
 			continue // in use right now; skip rather than wait
 		}
+		// Re-read the idle time now that the lock is held, and drop the
+		// candidate if it went fresh. r.used is a snapshot from the scan, and
+		// the scan is not instantaneous: an EnsureLocal that started after
+		// this directory was measured has by now materialised it, stamped it
+		// and returned, and its caller is about to read the directory.
+		// Deleting on the stale snapshot would take it out from under that
+		// caller even though the stamp landed before the unlock this TryLock
+		// just won — the mid-request eviction the stamp ordering exists to
+		// prevent (see EnsureLocal and docs/dev/continuity-design.md §16).
+		if now.Sub(m.lastUseOf(r.dir)) < evictMinIdle {
+			lock.Unlock()
+			continue
+		}
 		err := os.RemoveAll(r.dir)
 		lock.Unlock()
 		if err == nil {
@@ -194,6 +216,23 @@ func (m *Manager) maybeEvict() {
 			w.mu.Unlock()
 		}
 	}
+}
+
+// lastUseOf is when a repository directory was last handed to a caller: the
+// in-memory stamp EnsureLocal writes, or -- when there is none, which is the
+// state right after a restart -- the state file's mtime, which survives one.
+// A directory with neither reads as the zero time, i.e. maximally idle.
+func (m *Manager) lastUseOf(dir string) time.Time {
+	m.wal.mu.Lock()
+	used, ok := m.wal.lastUse[dir]
+	m.wal.mu.Unlock()
+	if ok {
+		return used
+	}
+	if st, err := os.Stat(filepath.Join(dir, wal.StateFileName)); err == nil {
+		return st.ModTime()
+	}
+	return time.Time{}
 }
 
 func dirSize(dir string) int64 {
