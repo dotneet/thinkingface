@@ -3,6 +3,7 @@
 thinkingface is a self-hosted clone of the HuggingFace Hub. Go backend + Next.js 15 frontend + pytest E2E + Terraform.
 Design docs live in `docs/dev/thinkingface-design.md`; the finalized API spec is in `docs/dev/api-contract.md`.
 User-facing docs are in `docs/users/` and are published to GitHub Pages (see "Documentation site" below).
+The contributor-facing setup guide (running the stack, quality gates, conventions) is `docs/dev/development.md`; keep it in step with this file and the Makefile.
 
 ## Architecture map
 
