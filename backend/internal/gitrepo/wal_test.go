@@ -278,21 +278,44 @@ func TestEnsureLocal_SurvivesConcurrentEviction(t *testing.T) {
 	oldT := time.Now().Add(-48 * time.Hour)
 	_ = os.Chtimes(filepath.Join(dirB, wal.StateFileName), oldT, oldT)
 
+	// The evictor runs until the loop below is finished rather than for a
+	// fixed number of rounds: maybeEvict is microseconds, so a counted loop
+	// drains before the first EnsureLocal even starts and the two never
+	// overlap at all (this test used to report the race happening in 0 of 300
+	// rounds).
+	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < 300; i++ {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
 			m.wal.mu.Lock()
 			m.wal.lastScan = time.Time{} // defeat the scan throttle
-			delete(m.wal.lastUse, dirA)  // simulate restart amnesia every round
 			m.wal.mu.Unlock()
 			m.maybeEvict()
 		}
 	}()
 
 	for i := 0; i < 300; i++ {
-		// Age A's state file so only the in-memory stamp can protect it.
+		// Strip both of A's protections -- the aged state file and the
+		// in-memory stamp -- *before* the call, so the only thing that can
+		// keep the directory alive is the stamp EnsureLocal itself writes.
+		//
+		// Dropping the stamp from the evicting goroutine instead would race
+		// the assertion below rather than this call: a delete landing between
+		// EnsureLocal's return and the Stat leaves A looking 48 hours idle
+		// again, and evicting it there is the documented, accepted gap (see
+		// evictMinIdle and continuity-design §16), not the invariant under
+		// test. That is what made this test fail on CI while passing locally.
 		_ = os.Chtimes(filepath.Join(dirA, wal.StateFileName), oldT, oldT)
+		m.wal.mu.Lock()
+		delete(m.wal.lastUse, dirA)
+		m.wal.mu.Unlock()
+
 		if err := m.EnsureLocal(context.Background(), "datasets/acme/widgets"); err != nil {
 			t.Fatalf("EnsureLocal round %d: %v", i, err)
 		}
@@ -300,7 +323,13 @@ func TestEnsureLocal_SurvivesConcurrentEviction(t *testing.T) {
 			t.Fatalf("round %d: repository evicted right after a successful EnsureLocal", i)
 		}
 	}
+	close(stop)
 	<-done
+	// Note for anyone reading a green run: whether the evictor ever lands
+	// inside the unstamped window is a scheduling accident, so this test
+	// passing is not proof the interleaving occurred. The deterministic half
+	// of this invariant is TestEnsureLocal_StampVisibleBeforeLockRelease
+	// below, which forces the ordering with a gate instead of racing for it.
 }
 
 // The sharp version of the Bugbot regression: the stamp must be visible the
