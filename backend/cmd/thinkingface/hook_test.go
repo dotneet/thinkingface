@@ -82,7 +82,7 @@ func TestRunPreReceiveHook_ModeUnsetPassesThrough(t *testing.T) {
 }
 
 func TestRunPreReceiveHook_UnknownModeFailsClosed(t *testing.T) {
-	t.Setenv("TF_WAL_MODE", "authoratitive") // typo on purpose
+	t.Setenv("TF_WAL_MODE", "authoritive") // near-miss of "authoritative", on purpose
 	var stderr bytes.Buffer
 	if err := runPreReceiveHook(strings.NewReader("aaaa1111 bbbb2222 refs/heads/main\n"), &stderr); err == nil {
 		t.Fatal("a typoed mode must reject the push, not silently bypass the WAL")

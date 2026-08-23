@@ -13,9 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-
 	"github.com/dotneet/thinkingface/backend/internal/api"
 	"github.com/dotneet/thinkingface/backend/internal/auth"
 	"github.com/dotneet/thinkingface/backend/internal/config"
@@ -179,16 +176,19 @@ func run(command string) error {
 	go sync.RunFlush(ctx)
 	go hooks.Run(ctx)
 
-	// h2c lets git clients negotiate HTTP/2 without TLS termination in the
-	// container, which is how Cloud Run's "HTTP/2 end-to-end" reaches us and
-	// the only way past the 32 MiB HTTP/1 request cap on large pushes
+	// Unencrypted HTTP/2 (h2c, prior knowledge) lets Cloud Run's "HTTP/2
+	// end-to-end" reach the container without TLS termination, which is the
+	// only way past the 32 MiB HTTP/1 request cap on large pushes
 	// (docs/dev/continuity-design.md §12). Plain HTTP/1 clients are unaffected:
-	// the wrapper falls through for them.
-	h2cHandler := h2c.NewHandler(server.Handler(), &http2.Server{})
+	// the server still speaks HTTP/1 on the same port.
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
 
 	httpServer := &http.Server{
-		Addr:    cfg.Addr,
-		Handler: h2cHandler,
+		Addr:      cfg.Addr,
+		Handler:   server.Handler(),
+		Protocols: protocols,
 		// Uploads and clones can be slow; a write timeout would cut them off.
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,

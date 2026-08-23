@@ -28,7 +28,7 @@ func TestLoad_WALModeDefaultsToOff(t *testing.T) {
 
 func TestLoad_WALModeRejectsUnknownValues(t *testing.T) {
 	setBase(t)
-	t.Setenv("TF_WAL_MODE", "authoratitive") // typo must not boot
+	t.Setenv("TF_WAL_MODE", "authoritive") // near-miss of "authoritative" must not boot
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TF_WAL_MODE") {
 		t.Fatalf("Load() err = %v, want TF_WAL_MODE validation error", err)
 	}
