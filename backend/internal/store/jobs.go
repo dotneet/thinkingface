@@ -40,15 +40,39 @@ func (s *Store) EnqueueSync(ctx context.Context, repoID int64, ref, oldSHA, newS
 	return err
 }
 
-// ClaimSyncJob atomically takes the next pending job. It returns nil, nil when
-// the queue is empty. On Postgres SKIP LOCKED lets several workers claim
-// distinct jobs concurrently; on SQLite the statement runs alone on the
+// ClaimSyncJob atomically takes the next pending job whose repository and ref
+// no other worker is already syncing. It returns nil, nil when nothing is
+// claimable. On Postgres SKIP LOCKED lets several workers claim jobs for
+// *different* refs concurrently; on SQLite the statement runs alone on the
 // writer connection, which is what makes the sub-select + UPDATE atomic.
+//
+// The NOT EXISTS clause serialises work per repo+ref, and both of its halves
+// are load bearing. Syncer.publishBlob walks the OldSHA..NewSHA diff rather
+// than the whole tree, so two jobs for one ref running at once publish two
+// disjoint sets of blobs; a file touched only by the job that finishes first
+// (.gitattributes and the seeded README, which only ever appear in the
+// repo-creation commit) is then left with no blobs/{sha} object at all, and
+// nothing republishes it afterwards. EnqueueSync collapses repeated pushes
+// into a single pending row, but only while that row is still pending -- a
+// push arriving while the previous job runs inserts a second row for the ref.
+//
+//   - No 'running' sibling: the ordinary case, once the earlier claim committed.
+//   - No lower-id 'pending' sibling: closes the window in which the earlier
+//     claim has not committed yet, so a second worker still sees that job as
+//     pending rather than running. It also keeps a ref's jobs in id order,
+//     which is what makes each job's old_sha describe the state the previous
+//     one actually left behind.
 func (s *Store) ClaimSyncJob(ctx context.Context) (*SyncJob, error) {
 	j := &SyncJob{}
 	err := s.db.QueryRow(ctx,
 		`UPDATE sync_jobs SET status = 'running', attempts = attempts + 1, updated_at = now()
-		 WHERE id = (SELECT id FROM sync_jobs WHERE status = 'pending' ORDER BY id`+
+		 WHERE id = (SELECT j.id FROM sync_jobs j
+		              WHERE j.status = 'pending'
+		                AND NOT EXISTS (SELECT 1 FROM sync_jobs s
+		                                 WHERE s.repo_id = j.repo_id AND s.ref = j.ref
+		                                   AND (s.status = 'running'
+		                                        OR (s.status = 'pending' AND s.id < j.id)))
+		              ORDER BY j.id`+
 			s.d.forUpdate(" SKIP LOCKED")+` LIMIT 1)
 		 RETURNING id, repo_id, ref, old_sha, new_sha, attempts, kind`,
 	).Scan(&j.ID, &j.RepoID, &j.Ref, &j.OldSHA, &j.NewSHA, &j.Attempts, &j.Kind)

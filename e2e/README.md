@@ -127,20 +127,20 @@ Environment variables (all optional, default to the local compose setup):
 The suite passes against the current backend (37 tests). Two things worth
 knowing before you read a red run:
 
-- `test_gcs_export.py`'s tests can be **flaky**, and the flake (when it
-  happens) is a real server-side race rather than a slow-sync timeout. With
-  `TF_SYNC_WORKERS=2`, `store.ClaimSyncJob`'s `FOR UPDATE SKIP LOCKED` lets two
-  workers process two jobs for the *same* repo and ref concurrently -- the
+- `test_gcs_export.py` used to be **flaky** because of a server-side race, not
+  a slow-sync timeout. With `TF_SYNC_WORKERS=2`, `store.ClaimSyncJob` handed
+  two workers two jobs for the *same* repo and ref at once -- the
   repo-creation job and the follow-up commit job. `Syncer.publishBlob`
   (`backend/internal/syncer/syncer.go`) walks `OldSHA..NewSHA` diffs rather
   than the whole tree on every push, falling back to the full tree only when
   there is no `OldSHA` (the very first sync) or the diff fails; depending on
-  which of the two concurrent jobs finishes last, a file that is not part of
-  *that* job's diff (e.g. `.gitattributes`, only ever present in the
-  repo-creation commit) can end up unpublished at its `blobs/{sha}` key.
-  Raising `SYNC_TIMEOUT_SECONDS` does not help: nothing re-publishes
-  afterwards. The fix belongs in `backend/internal/syncer` (serialise jobs per
-  repo+ref).
+  which of the two concurrent jobs finished last, a file outside *that* job's
+  diff (e.g. `.gitattributes`, only ever present in the repo-creation commit)
+  could end up unpublished at its `blobs/{sha}` key, and nothing republished it
+  afterwards. `ClaimSyncJob` now refuses a job whose repo+ref another worker is
+  already syncing, so the jobs for one ref run in id order however many workers
+  are configured. `TestIntegrationSyncJobs` covers both the sequential and the
+  concurrent case; if this test ever flakes again, look there first.
 - Every test creates its repo inside a `try:` and deletes it in `finally:`, so
   a failing assertion still cleans up. A killed process (Ctrl-C, CI timeout)
   does not; `make clean` resets the local stack.

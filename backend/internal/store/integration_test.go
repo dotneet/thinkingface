@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -742,6 +743,107 @@ func TestIntegrationSyncJobs(t *testing.T) {
 		}
 		if n, _ := s.PendingSyncCount(ctx, r.ID); n != 0 {
 			t.Fatalf("PendingSyncCount after failure = %d", n)
+		}
+
+		// One ref at a time. EnqueueSync only collapses into a row that is
+		// still pending, so a push landing while the previous job runs leaves
+		// two rows for the same ref -- and handing both out at once is what
+		// used to leave .gitattributes unpublished (see ClaimSyncJob).
+		r2 := f.repo(t, "alice", "serial", "dataset", nil)
+		if err := s.EnqueueSync(ctx, r2.ID, "main", "", "a1"); err != nil {
+			t.Fatal(err)
+		}
+		first, err := s.ClaimSyncJob(ctx)
+		if err != nil || first == nil || first.Ref != "main" {
+			t.Fatalf("claim first = %+v, %v", first, err)
+		}
+		if err := s.EnqueueSync(ctx, r2.ID, "main", "a1", "a2"); err != nil {
+			t.Fatal(err)
+		}
+		if n, _ := s.PendingSyncCount(ctx, r2.ID); n != 2 {
+			t.Fatalf("second push did not queue a second row: PendingSyncCount = %d", n)
+		}
+		if blocked, err := s.ClaimSyncJob(ctx); err != nil || blocked != nil {
+			t.Fatalf("claimed a second job for a ref already syncing: %+v, %v", blocked, err)
+		}
+		// A different ref of the same repository is not blocked by it.
+		if err := s.EnqueueSync(ctx, r2.ID, "dev", "", "d1"); err != nil {
+			t.Fatal(err)
+		}
+		other, err := s.ClaimSyncJob(ctx)
+		if err != nil || other == nil || other.Ref != "dev" {
+			t.Fatalf("claim other ref = %+v, %v", other, err)
+		}
+		_ = s.FinishSyncJob(ctx, other.ID, nil)
+		// Once the running job finishes, the queued one becomes claimable, and
+		// it carries the old_sha the finished job left behind.
+		if err := s.FinishSyncJob(ctx, first.ID, nil); err != nil {
+			t.Fatal(err)
+		}
+		queued, err := s.ClaimSyncJob(ctx)
+		if err != nil || queued == nil || queued.Ref != "main" || queued.OldSHA != "a1" || queued.NewSHA != "a2" {
+			t.Fatalf("claim after finish = %+v, %v", queued, err)
+		}
+		_ = s.FinishSyncJob(ctx, queued.ID, nil)
+
+		// ... and never hold two jobs for one ref at the same time, which on
+		// Postgres also has to survive the window where the first claim has
+		// locked its row but not yet committed.
+		r3 := f.repo(t, "alice", "parallel", "dataset", nil)
+		for _, ref := range []string{"main", "dev", "exp"} {
+			if err := s.EnqueueSync(ctx, r3.ID, ref, "", "x1"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.ClaimSyncJob(ctx); err != nil {
+				t.Fatal(err)
+			}
+			// Collapses only into a pending row, so this queues a second one.
+			if err := s.EnqueueSync(ctx, r3.ID, ref, "x1", "x2"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := s.RequeueRunningJobs(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var activeMu sync.Mutex
+		active := map[string]bool{}
+		var overlap atomic.Bool
+		var wg2 sync.WaitGroup
+		for w := 0; w < 8; w++ {
+			wg2.Add(1)
+			go func() {
+				defer wg2.Done()
+				for {
+					j, err := s.ClaimSyncJob(ctx)
+					if err != nil {
+						t.Errorf("same-ref claim: %v", err)
+						return
+					}
+					if j == nil {
+						return
+					}
+					activeMu.Lock()
+					if active[j.Ref] {
+						overlap.Store(true)
+					}
+					active[j.Ref] = true
+					activeMu.Unlock()
+
+					time.Sleep(time.Millisecond)
+
+					activeMu.Lock()
+					active[j.Ref] = false
+					activeMu.Unlock()
+					_ = s.FinishSyncJob(ctx, j.ID, nil)
+				}
+			}()
+		}
+		wg2.Wait()
+		if overlap.Load() {
+			t.Fatal("two workers held jobs for the same ref at once")
+		}
+		if n, _ := s.PendingSyncCount(ctx, r3.ID); n != 0 {
+			t.Fatalf("same-ref queue not drained: %d left", n)
 		}
 
 		// Concurrent claimers never get the same job.
