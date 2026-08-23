@@ -175,6 +175,10 @@ export interface TokenItem {
    * LastUsedAt is null until the token authenticates a request.
    */
   last_used_at: string | null;
+  /**
+   * ExpiresAt is null for a token that never expires.
+   */
+  expires_at: string | null;
 }
 /**
  * TokenListResponse is the body of GET /api/v1/tokens.

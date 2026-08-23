@@ -97,7 +97,7 @@ func newTFFixture(t *testing.T) *tfFixture {
 	if err != nil {
 		t.Fatalf("new token: %v", err)
 	}
-	if _, err := st.CreateToken(ctx, f.alice.ID, "test", "write", tokHash); err != nil {
+	if _, err := st.CreateToken(ctx, f.alice.ID, "test", "write", tokHash, nil); err != nil {
 		t.Fatalf("create token: %v", err)
 	}
 	f.token = tok

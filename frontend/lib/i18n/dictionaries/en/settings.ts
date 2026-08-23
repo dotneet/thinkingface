@@ -70,6 +70,18 @@ export const settings = {
     neverUsed: "Never",
     delete: "Delete",
     deleting: "Deleting…",
+    expiry: {
+      label: "Expiration",
+      never: "No expiration",
+      days7: "7 days",
+      days30: "30 days",
+      days60: "60 days",
+      days90: "90 days",
+      days365: "365 days",
+      column: "Expires",
+      noExpiration: "Never",
+      expiredBadge: "Expired",
+    },
   },
   sshKeys: {
     title: "SSH keys",
