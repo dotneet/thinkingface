@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/go-git/go-git/v5/plumbing"
+
+	"github.com/dotneet/thinkingface/backend/internal/gitexec"
 )
 
 // requireGit skips the test when the git binary is not available, since
@@ -806,5 +808,15 @@ func TestCommit_PathPreconditionOnUnbornBranchWithOIDIsStale(t *testing.T) {
 	var stale *StalePathError
 	if !errors.As(err, &stale) {
 		t.Fatalf("err = %v, want StalePathError on unborn branch", err)
+	}
+}
+
+// core.bigFileThreshold is only worth setting because it names the same size
+// this package routes to LFS at; if the two drift apart, git starts spending a
+// delta window on blobs this system already considers oversized.
+func TestBigFileThresholdMatchesLFSThreshold(t *testing.T) {
+	if gitexec.BigFileThreshold != LFSInlineThreshold {
+		t.Errorf("gitexec.BigFileThreshold = %d, gitrepo.LFSInlineThreshold = %d; they must stay equal",
+			gitexec.BigFileThreshold, LFSInlineThreshold)
 	}
 }

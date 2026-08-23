@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -19,6 +18,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/storer"
+
+	"github.com/dotneet/thinkingface/backend/internal/gitexec"
 )
 
 var (
@@ -71,7 +72,13 @@ func (m *Manager) Exists(storagePath string) bool {
 }
 
 // Init creates the bare repository. It shells out to git rather than using
-// go-git so the layout is exactly what upload-pack/receive-pack expect.
+// go-git so the layout is exactly what upload-pack/receive-pack expect, and
+// through gitexec so it is the same git -- same config, same template -- that
+// wal.Materialize would rebuild the repository with.
+//
+// The background context matches Open below: creating a repository is a
+// sub-second local operation, and abandoning it half-done because the client
+// hung up would leave exactly the state createRepo rolls back for.
 func (m *Manager) Init(storagePath, defaultBranch string) error {
 	dir := m.Dir(storagePath)
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
@@ -80,14 +87,7 @@ func (m *Manager) Init(storagePath, defaultBranch string) error {
 	if _, err := os.Stat(dir); err == nil {
 		return nil
 	}
-	if defaultBranch == "" {
-		defaultBranch = "main"
-	}
-	cmd := exec.Command("git", "init", "--bare", "--initial-branch="+defaultBranch, dir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git init %s: %w: %s", dir, err, out)
-	}
-	return nil
+	return gitexec.InitBare(context.Background(), dir, defaultBranch)
 }
 
 func (m *Manager) Remove(storagePath string) error {

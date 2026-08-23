@@ -11,30 +11,12 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+
+	"github.com/dotneet/thinkingface/backend/internal/gitexec"
 )
 
 // packHeaderSize is "PACK" + 4-byte version + 4-byte object count.
 const packHeaderSize = 12
-
-// gitEnv keeps the child process away from ambient user configuration, exactly
-// as gitserver.gitEnv does. It is duplicated rather than imported because this
-// package must stay below the transport layer: internal/wal is called by
-// gitserver, never the other way round.
-//
-// One deliberate difference from gitserver's copy: no GIT_PROTOCOL=version=2.
-// That variable shapes the smart-HTTP negotiation gitserver fronts; everything
-// this package runs (init, index-pack, pack-objects, update-ref, symbolic-ref,
-// repack) is local plumbing with no protocol negotiation at all. Anyone adding
-// a variable to either copy should look at the other and decide explicitly.
-func gitEnv() []string {
-	return []string{
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_TERMINAL_PROMPT=0",
-		"HOME=/tmp",
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-	}
-}
 
 // quarantineVars are the variables receive-pack exports for its pre-receive
 // hook so the hook can see the objects the client just pushed. Until the hook
@@ -52,7 +34,7 @@ var quarantineVars = [...]string{
 }
 
 // quarantineEnv forwards the quarantine variables when this process is itself a
-// git hook. gitEnv deliberately shuts the ambient environment out, so this is
+// git hook. gitexec.Env deliberately shuts the ambient environment out, so this is
 // the one exception, and it is a narrow one: in the API server these variables
 // are never set, so the returned slice is empty and nothing changes.
 //
@@ -70,12 +52,15 @@ func quarantineEnv() []string {
 	return out
 }
 
-// gitCommand runs git against a bare repository. GIT_DIR is set explicitly so
-// the command works no matter what the process working directory is.
+// gitCommand runs git against a bare repository, with the same environment and
+// server-side configuration as every other git invocation in this system
+// (internal/gitexec). GIT_DIR is set explicitly so the command works no matter
+// what the process working directory is. Nothing here negotiates a protocol,
+// so GIT_PROTOCOL -- which gitserver adds for the transport -- has no place.
 func gitCommand(ctx context.Context, gitDir string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = gitDir
-	env := append(gitEnv(), "GIT_DIR="+gitDir)
+	env := append(gitexec.Env(), "GIT_DIR="+gitDir)
 	cmd.Env = append(env, quarantineEnv()...)
 	return cmd
 }

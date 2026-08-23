@@ -24,6 +24,7 @@ docs/users/ User-facing documentation, published to GitHub Pages via mkdocs.yml
 | `auth` | Password hashing, personal access tokens, signed session cookie (`tf_session`) |
 | `config` | Runtime configuration loading from environment variables |
 | `experiments` | Indexer that converts trackio's parquet exports into runs / metric series |
+| `gitexec` | The one way this system runs the `git` binary: hardened environment, server-side config (`GIT_CONFIG_*`), and `InitBare`. Never `exec.Command("git", ...)` directly |
 | `gitrepo` | Owns bare repositories on disk. Creation, tree reads, .gitattributes, LFS pointer handling |
 | `gitserver` | git smart HTTP transport (wraps the `git` binary's stateless-rpc) |
 | `lfs` | Git LFS batch API. Actual object bytes transfer directly between client and GCS via signed URLs |

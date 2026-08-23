@@ -7,11 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/dotneet/thinkingface/backend/internal/gitexec"
 	"github.com/dotneet/thinkingface/backend/internal/storage"
 )
 
@@ -185,12 +185,9 @@ func recreateBare(ctx context.Context, gitDir string) error {
 		return fmt.Errorf("create parent of %s: %w", gitDir, err)
 	}
 	// HEAD is realigned from the index refs later; "main" is only the seed.
-	cmd := exec.CommandContext(ctx, "git", "init", "--bare", "--initial-branch=main", gitDir)
-	cmd.Env = gitEnv()
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git init %s: %w: %s", gitDir, err, out)
-	}
-	return nil
+	// Through gitexec so a rebuilt copy is byte-for-byte the repository
+	// gitrepo.Manager.Init would have created.
+	return gitexec.InitBare(ctx, gitDir, "main")
 }
 
 // applyPack streams one WAL pack straight from storage into the object

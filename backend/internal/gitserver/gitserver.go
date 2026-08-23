@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/dotneet/thinkingface/backend/internal/gitexec"
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
 )
 
@@ -158,19 +159,12 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, storagePath stri
 	return nil
 }
 
-// gitEnv keeps the child process away from the ambient user configuration so
-// server behaviour does not depend on whoever built the image.
+// gitEnv is the shared git environment (internal/gitexec) plus the protocol
+// version this transport speaks. Over HTTP the version is fixed: every request
+// is a fresh stateless RPC and this handler always frames it as v2. The SSH
+// transport passes the client's own value through instead -- see sshEnv.
 func gitEnv() []string {
-	return []string{
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_TERMINAL_PROMPT=0",
-		"HOME=/tmp",
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		// Advertise the object format explicitly so clients do not negotiate
-		// something the repositories were not created with.
-		"GIT_PROTOCOL=version=2",
-	}
+	return append(gitexec.Env(), "GIT_PROTOCOL=version=2")
 }
 
 // pktLine encodes one git protocol packet.

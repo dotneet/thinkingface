@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dotneet/thinkingface/backend/internal/gitexec"
 )
 
 // These helpers drive the real git binary against real bare repositories: the
@@ -24,7 +26,7 @@ func requireGit(t *testing.T) {
 }
 
 func testGitEnv() []string {
-	return append(gitEnv(),
+	return append(gitexec.Env(),
 		"GIT_AUTHOR_NAME=tester", "GIT_AUTHOR_EMAIL=tester@example.com",
 		"GIT_COMMITTER_NAME=tester", "GIT_COMMITTER_EMAIL=tester@example.com",
 		"GIT_AUTHOR_DATE=2026-01-01T00:00:00Z", "GIT_COMMITTER_DATE=2026-01-01T00:00:00Z",
