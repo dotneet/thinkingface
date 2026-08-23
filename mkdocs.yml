@@ -57,4 +57,22 @@ validation:
 
 nav:
   - Home: index.md
-  - Getting Started: getting-started.md
+  - Getting Started:
+      - Quickstart: getting-started.md
+      - Core Concepts: concepts.md
+  - Guides:
+      - Uploading Files: guides/uploading.md
+      - Downloading Files: guides/downloading.md
+      - Working with Git: guides/git.md
+      - Browsing the Web UI: guides/web-ui.md
+      - Viewing Datasets: guides/dataset-viewer.md
+      - Inspecting Models: guides/model-checkpoints.md
+      - Tracking Experiments: guides/experiments.md
+      - Organizations: guides/organizations.md
+  - Reference:
+      - tf CLI: reference/tf-cli.md
+      - Authentication: reference/authentication.md
+      - Compatibility: reference/compatibility.md
+  - Self-hosting:
+      - Deployment: self-hosting/deployment.md
+      - Configuration: self-hosting/configuration.md

@@ -310,7 +310,7 @@ port 4443.
 # Point the gcloud CLI at the local emulator
 gcloud config set api_endpoint_overrides/storage http://localhost:4443/storage/v1/
 
-# Pull the script from the API and run it directly (add an Authorization header for a private repo)
+# Pull the script from the API and run it directly
 curl -s http://localhost:8080/api/v1/repos/dataset/me/imdb-ja/gcs/main \
   | jq -r .gcloud_script | DEST=./imdb-ja sh
 
@@ -418,5 +418,5 @@ terraform init
 terraform apply -var="project_id=my-gcp-project"
 ```
 
-For the post-apply steps (pushing images, `kubectl apply -f infra/k8s/`, deploying the
-frontend to Cloud Run), see [`infra/README.md`](infra/README.md).
+For the post-apply steps (pushing images and deploying the API and frontend to Cloud
+Run), see [`infra/README.md`](infra/README.md).

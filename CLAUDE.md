@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-thinkingface is a self-hosted clone of the HuggingFace Hub. Go backend + Next.js 15 frontend + pytest E2E + Terraform/k8s.
+thinkingface is a self-hosted clone of the HuggingFace Hub. Go backend + Next.js 15 frontend + pytest E2E + Terraform.
 Design docs live in `docs/dev/thinkingface-design.md`; the finalized API spec is in `docs/dev/api-contract.md`.
 User-facing docs are in `docs/users/` and are published to GitHub Pages (see "Documentation site" below).
 
@@ -11,7 +11,7 @@ backend/   Go 1.25 / chi + pgx + go-git (HF-compatible REST + git smart HTTP + L
 frontend/  Next.js 15 (App Router) / React 19 / Tailwind v4 / bun
 e2e/       pytest (huggingface_hub / datasets / git / GCS compatibility verification)
 clients/python/  Python clients such as a trackio-compatible shim
-infra/     Terraform + k8s manifests
+infra/     Terraform (GCP: Cloud Run + Cloud SQL / GCS)
 docs/dev/   Internal design docs and the API contract (not published)
 docs/users/ User-facing documentation, published to GitHub Pages via mkdocs.yml
 ```
@@ -107,6 +107,11 @@ readable on GitHub too.
 `.github/workflows/docs.yml` builds with `mkdocs build --strict` on PRs (broken internal
 links fail the build) and deploys from `main`. MkDocs is pinned in `docs/requirements.txt`
 and always runs through a disposable `uv` environment.
+
+The screenshots in `docs/users/images/` are captured mechanically from a throwaway instance
+seeded with demo content, never by hand — `scripts/docs-demo/` plus the procedure in
+`docs/dev/docs-screenshots.md`. Never hand-edit or hand-crop them, and never screenshot your
+own compose stack: it is full of E2E leftovers, and the UI must be in English.
 
 ## Invariants (break these and things break)
 
