@@ -48,6 +48,16 @@ deliberate design goal.
   `google_cloud_scheduler_job.compact` — triggers the compact Job once a day
   via the Cloud Run Admin API's `jobs.run` method (OAuth token, scoped SA
   that can only invoke this one job)
+- `google_cloud_run_v2_job.gc` — runs `thinkingface gc` (reference-counted GC
+  of `lfs/`/`blobs/`), same image/SA/VPC egress/secrets as `api`/`compact`,
+  but its own timeout and schedule (see "Cloud Run Job settings"
+  below). **Reports only by default** — see "Reference-counted GC" below for
+  how to turn on actual deletion
+- `google_service_account.gc_scheduler` +
+  `google_cloud_run_v2_job_iam_member.gc_scheduler_invoker` +
+  `google_cloud_scheduler_job.gc` — triggers the gc Job once a week (offset
+  from `compact`'s schedule so the two never run at once), same pattern as
+  the compact scheduler resources above
 - `google_cloud_run_v2_service.web` — stateless Cloud Run service for the
   Next.js frontend (deployed with a placeholder image on first apply; CI
   owns the image afterwards, see `lifecycle.ignore_changes`)
@@ -95,6 +105,43 @@ domain strategy for your environment.
 - `egress = "PRIVATE_RANGES_ONLY"` routes only Cloud SQL-bound traffic (RFC1918) through the
   VPC, while calls to GCS / Secret Manager stay on Cloud Run's normal path (no VPC billing,
   no extra hop).
+
+## Cloud Run Job settings (compact vs gc)
+
+| Item | `compact` | `gc` | Reason for the difference |
+|---|---|---|---|
+| Resources | 2 vCPU / 8 GiB | 2 vCPU / 8 GiB (same) | `gc` needs the 8 GiB for the same reason `api`/`compact` have it: `gcBlobs` (`backend/cmd/thinkingface/gc.go`) holds the *entire* `blobs/` listing and the entire set of referenced `blob_sha` values in memory at once — both scale with total bucket object / row count, not with any one repository. The 2 vCPU is then forced rather than chosen: Cloud Run permits at most 4 GiB per vCPU, so 8 GiB requires ≥ 2 vCPU. `gc` would otherwise be happy with less, since unlike `compact` it never forks `git`/pack-objects and is dominated by sequential GCS List/Delete and Postgres round trips |
+| Timeout | 3600s (1h) | 21600s (6h) | `compact` walks one repository's WAL at a time; `gc` does a single unpaginated listing of all of `blobs/` (`backend/internal/storage.GCS.List` has no page cap) and then deletes orphans one HTTP call at a time (no GCS batch-delete API). A first run against a deployment with a large accumulated backlog needs real headroom; a caught-up bucket finishes in minutes |
+| Schedule | daily, 03:00 UTC (`compact_schedule`) | weekly, Sunday 05:00 UTC (`gc_schedule`) | Offset so the two never load Postgres/GCS at the same time. Weekly is enough for `gc` because an orphaned object has no urgency the way an uncompacted WAL does — it just sits there costing storage until the next run |
+
+### Reference-counted GC (`thinkingface gc`)
+
+`thinkingface gc`'s own default is `--dry-run`: it reports orphaned `lfs/`
+and `blobs/` objects without deleting anything. The `gc` Job mirrors that —
+`var.gc_delete_enabled` (default `false`) controls whether the Job's `args`
+include `--yes`:
+
+- **`false` (default)**: the scheduled Job only prints a report (visible via
+  `gcloud run jobs executions list` / the execution's logs). Nothing is ever
+  deleted by the schedule. This is deliberate — a freshly Terraform-deployed
+  environment should not start deleting production storage objects on its
+  first scheduled run before an operator has read a few reports and confirmed
+  they agree with what the deployment actually still references.
+- **`true`**: the scheduled Job passes `--yes` and actually deletes what it
+  finds orphaned.
+
+To turn on real deletion once you've reviewed a few dry-run reports:
+
+```bash
+terraform apply -var="project_id=my-gcp-project" -var="gc_delete_enabled=true"
+```
+
+Or, for a supervised one-off pass without changing the schedule's default:
+
+```bash
+gcloud run jobs execute $(terraform output -raw gc_job_name) \
+  --args=gc,--yes --region ${REGION}
+```
 
 ## Database backend: postgres (default) vs sqlite
 
@@ -189,15 +236,19 @@ terraform {
    docker build -t ${REGION}-docker.pkg.dev/${PROJECT}/thinkingface/backend:latest ../backend
    docker push ${REGION}-docker.pkg.dev/${PROJECT}/thinkingface/backend:latest
    ```
-2. Point Cloud Run's `api` service and the `compact` Job at the real backend
-   image (Terraform deliberately ignores drift on that field after the
-   first apply for both resources):
+2. Point Cloud Run's `api` service and the `compact`/`gc` Jobs at the real
+   backend image (Terraform deliberately ignores drift on that field after
+   the first apply for all three resources):
    ```bash
    gcloud run deploy $(terraform output -raw api_service_name) \
      --image ${REGION}-docker.pkg.dev/${PROJECT}/thinkingface/backend:latest \
      --region ${REGION}
 
    gcloud run jobs update $(terraform output -raw compact_job_name) \
+     --image ${REGION}-docker.pkg.dev/${PROJECT}/thinkingface/backend:latest \
+     --region ${REGION}
+
+   gcloud run jobs update $(terraform output -raw gc_job_name) \
      --image ${REGION}-docker.pkg.dev/${PROJECT}/thinkingface/backend:latest \
      --region ${REGION}
    ```
@@ -217,6 +268,13 @@ terraform {
    ```bash
    gcloud scheduler jobs run thinkingface-compact-${ENVIRONMENT} --location ${REGION}   # manual trigger
    gcloud run jobs executions list --job $(terraform output -raw compact_job_name) --region ${REGION}
+   ```
+6. Sanity-check the gc Job's dry-run report before ever setting
+   `gc_delete_enabled = true` (see "Reference-counted GC" above):
+   ```bash
+   gcloud scheduler jobs run thinkingface-gc-${ENVIRONMENT} --location ${REGION}   # manual trigger, dry-run by default
+   gcloud run jobs executions list --job $(terraform output -raw gc_job_name) --region ${REGION}
+   # then read the execution's logs to see what it would have deleted
    ```
 
 ## Notes on the runtime filesystem

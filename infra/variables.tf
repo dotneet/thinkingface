@@ -169,6 +169,47 @@ variable "compact_schedule" {
   default     = "0 3 * * *"
 }
 
+variable "gc_job_name" {
+  description = "Cloud Run Job name for reference-counted GC (`thinkingface gc`, reclaims lfs/ and blobs/ objects nothing references any more -- see the object store comment near the top of main.tf)."
+  type        = string
+  default     = "thinkingface-gc"
+}
+
+variable "gc_schedule" {
+  description = <<-EOT
+    Cloud Scheduler cron expression for the gc Job. Default: once a week,
+    Sundays at 05:00 UTC -- two hours after the daily compact_schedule
+    default and on a coarser cadence, so the two never load Postgres and GCS
+    at the same time. Weekly (rather than daily, like compact) is enough
+    because gc's own full-bucket listing is far more expensive per run than
+    compact's per-repo WAL fold, and orphaned storage has no urgency the way
+    an uncompacted WAL does: an orphan just sits there costing storage until
+    the next run collects it.
+  EOT
+  type        = string
+  default     = "0 5 * * 0"
+}
+
+variable "gc_delete_enabled" {
+  description = <<-EOT
+    Whether the gc Job actually deletes orphaned lfs/ and blobs/ objects
+    (passes `--yes`) or only reports them, which is `thinkingface gc`'s own
+    default behavior (`--dry-run=true`) when this is left off.
+
+    Defaults to false: a freshly Terraform-deployed environment should not
+    start deleting production storage objects on its first scheduled run
+    before an operator has read a few dry-run reports (`gcloud run jobs
+    executions list --job <gc_job_name>` / the execution's logs) and
+    confirmed they agree with what the deployment actually still
+    references. Flip to true once you trust the reports, or run a one-off
+    `gcloud run jobs execute <gc_job_name> --args=gc,--yes --region
+    <region>` for a supervised first pass instead of waiting for the next
+    scheduled run.
+  EOT
+  type        = bool
+  default     = false
+}
+
 # ---- Cloud Run (web) --------------------------------------------------------
 
 variable "web_service_name" {
