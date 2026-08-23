@@ -175,9 +175,9 @@ def test_push_lands_at_content_addressed_keys_and_gcs_endpoint(
         assert body["ref"] == "main"
         files_by_path = {f["path"]: f for f in body["files"]}
         assert {"README.md", "data/train.parquet"} <= set(files_by_path), body["files"]
-        assert [f["path"] for f in body["files"]] == sorted(
-            f["path"] for f in body["files"]
-        ), "files must be path-sorted"
+        assert [f["path"] for f in body["files"]] == sorted(f["path"] for f in body["files"]), (
+            "files must be path-sorted"
+        )
 
         readme_file = files_by_path["README.md"]
         assert readme_file["lfs"] is False

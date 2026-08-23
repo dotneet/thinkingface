@@ -91,7 +91,7 @@ class Handler(BaseHTTPRequestHandler):
     upstream = "localhost:4443"
     public_host = "gcs:4443"
 
-    def log_message(self, fmt: str, *args) -> None:  # noqa: A002 - stdlib signature
+    def log_message(self, fmt: str, *args) -> None:
         # One line per request on stderr, so the proxy can share a terminal
         # with the API it is serving without drowning it.
         sys.stderr.write("gcs-proxy %s\n" % (fmt % args))
@@ -123,7 +123,7 @@ class Handler(BaseHTTPRequestHandler):
                 conn.request(self.command, self.path, body=body, headers=headers)
                 resp = conn.getresponse()
             except OSError as err:
-                self.send_error(502, "upstream %s: %s" % (self.upstream, err))
+                self.send_error(502, f"upstream {self.upstream}: {err}")
                 return
 
             self.send_response(resp.status, resp.reason)

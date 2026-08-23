@@ -525,8 +525,7 @@ class _Run:
             resp.raise_for_status()
         except Exception as exc:  # network failures must never raise
             warnings.warn(
-                f"thinkingface.trackio: failed to mark run {self.name!r} as "
-                f"{status!r} ({exc!r})."
+                f"thinkingface.trackio: failed to mark run {self.name!r} as {status!r} ({exc!r})."
             )
         # After the finish call: that is what guarantees the run row exists,
         # since a run that logged no points at all is created there.
@@ -579,7 +578,7 @@ def _normalize_resume(resume: Any) -> str:
     mode = str(resume).strip().lower()
     if mode not in _RESUME_MODES:
         raise ValueError(
-            'resume must be one of "allow", "must", "never" (or True/False), ' f"got {resume!r}"
+            f'resume must be one of "allow", "must", "never" (or True/False), got {resume!r}'
         )
     return mode
 

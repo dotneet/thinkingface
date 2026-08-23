@@ -553,9 +553,9 @@ def test_gcs_objects_stay_put_after_transfer(
 
         # Make sure the pre-move object actually landed before moving, so the
         # post-move "still there, unmoved" assertion is meaningful.
-        assert _wait_until(
-            lambda: _object_bytes_or_none(lfs_key) == content
-        ), f"{lfs_key} never reached the uploaded content before the move"
+        assert _wait_until(lambda: _object_bytes_or_none(lfs_key) == content), (
+            f"{lfs_key} never reached the uploaded content before the move"
+        )
 
         admin_headers = {"Authorization": f"Bearer {hf_token}"}
         move_resp = _move(

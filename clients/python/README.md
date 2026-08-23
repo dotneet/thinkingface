@@ -43,6 +43,7 @@ print(open(path).read())
 
 ```python
 import os
+
 os.environ["HF_ENDPOINT"] = "http://localhost:8080"
 os.environ["HF_TOKEN"] = "tf_xxxxxxxxxxxx"
 ```
@@ -52,9 +53,14 @@ os.environ["HF_TOKEN"] = "tf_xxxxxxxxxxxx"
 ```python
 from datasets import load_dataset
 
-ds = load_dataset("parquet", data_files=hf_hub_download(
-    repo_id="me/my-dataset", repo_type="dataset", filename="data/train.parquet",
-))
+ds = load_dataset(
+    "parquet",
+    data_files=hf_hub_download(
+        repo_id="me/my-dataset",
+        repo_type="dataset",
+        filename="data/train.parquet",
+    ),
+)
 ```
 
 ## trackio (real-time logging)
@@ -68,6 +74,7 @@ both approaches are interchangeable and inspectable with DuckDB or
 
 ```python
 import os
+
 os.environ["THINKINGFACE_ENDPOINT"] = "http://localhost:8080"
 os.environ["THINKINGFACE_TOKEN"] = "tf_xxxxxxxxxxxx"
 # Optional: defaults to "{your username}/trackio-metrics"
@@ -99,9 +106,9 @@ and goes over LFS automatically once it is big enough for the repository's
 `.gitattributes`.
 
 ```python
-trackio.log_artifact("out/confusion_matrix.png")            # → {project}/artifacts/{run}/confusion_matrix.png
-trackio.log_artifact("out/eval.json", name="eval/raw.json") # → .../artifacts/{run}/eval/raw.json
-trackio.log_artifact("out/samples/")                        # the whole directory, layout preserved
+trackio.log_artifact("out/confusion_matrix.png")  # → {project}/artifacts/{run}/confusion_matrix.png
+trackio.log_artifact("out/eval.json", name="eval/raw.json")  # → .../artifacts/{run}/eval/raw.json
+trackio.log_artifact("out/samples/")  # the whole directory, layout preserved
 ```
 
 Nothing is uploaded while the run is going: everything logged is committed
@@ -119,7 +126,7 @@ resolved, which is what you want right after pushing it:
 
 ```python
 api.upload_folder(repo_id="me/bert-ja", folder_path="out/checkpoint")
-trackio.log_model("me/bert-ja")     # pins whatever that push produced
+trackio.log_model("me/bert-ja")  # pins whatever that push produced
 ```
 
 The link is stored as a run *annotation*, not in `config` and not in any
@@ -174,8 +181,7 @@ already has a run with the name you passed:
 | `"must"` | Continue the existing run, and raise `RuntimeError` if it does not exist (or cannot be looked up). |
 
 ```python
-run = trackio.init(project="mnist", name="baseline", resume="allow",
-                   config={"lr": 1e-3})
+run = trackio.init(project="mnist", name="baseline", resume="allow", config={"lr": 1e-3})
 for step in range(run.step, 100_000):
     trackio.log({"loss": ...})
 ```

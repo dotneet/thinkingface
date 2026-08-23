@@ -182,7 +182,8 @@ jobs:
           python-version: "3.12"
 
       - name: Install ruff
-        run: pip install ruff
+        # Pinned so a ruff release cannot fail CI on code that passes locally.
+        run: pip install -r requirements-lint.txt
 
       - name: ruff check
         run: ruff check e2e clients/python scripts

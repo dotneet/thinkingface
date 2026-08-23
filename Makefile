@@ -41,18 +41,12 @@ POSTGRES_PASSWORD ?= tf
 POSTGRES_DB ?= thinkingface
 POSTGRES_PORT ?= 5432
 
-# Use `ruff` if it actually runs, otherwise fall back to `uvx ruff`.
-# (There are cases like pyenv shims where the binary is on PATH but can't
-#  actually run, so this checks by whether --version succeeds rather than
-#  command -v.)
+# Always the pinned ruff from requirements-lint.txt, in a disposable uv
+# environment (the same approach as docs/requirements.txt). Using whatever
+# `ruff` happens to be on PATH is what let a stale local version pass while
+# CI's newer one failed -- and the old fallback could skip the check entirely.
 define RUFF
-	@if ruff --version >/dev/null 2>&1; then \
-		ruff $(1); \
-	elif uvx ruff --version >/dev/null 2>&1; then \
-		uvx ruff $(1); \
-	else \
-		echo "  !! SKIPPED: ruff / uvx not found (pip install ruff). CI still runs it" >&2; \
-	fi
+	@uv run --isolated --with-requirements requirements-lint.txt ruff $(1)
 endef
 
 .PHONY: build-web help up down up-sqlite down-sqlite logs rebuild psql check check-backend check-frontend check-python \
