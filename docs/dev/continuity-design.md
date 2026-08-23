@@ -493,7 +493,11 @@ the two match, and only then** switch over. Don't skip this dual-write period.
    could `RemoveAll` the same directory. As a mitigation, eviction only happens when "idle for 10+
    minutes AND TryLock succeeds," and since every request updates lastUse at the start, in actual
    operation (where LFS keeps repositories to a few hundred KiB and transfers take seconds) the
-   race essentially never occurs. The WAL side is already committed, so this never causes data
+   race essentially never occurs. The idle check is made **twice** — once in the scan that picks
+   candidates, and again under the repository lock immediately before `RemoveAll` — because the
+   scan's measurement is a snapshot and a request arriving after it would otherwise be invisible
+   to the delete (`gitrepo.evictDown`; `TestEvictDown_SkipsRepositoryStampedAfterTheScan` pins
+   it). The WAL side is already committed, so this never causes data
    loss — the only impact is the failure of that one transfer. The full fix is to convert the
    per-repo lock to an RWMutex (with the read path holding a shared lock), tracked as a
    follow-up
