@@ -315,6 +315,18 @@ type RepoDetailResponse struct {
 	Repo RepoDetail `json:"repo"`
 }
 
+// RepoUpdateRequest is the body of PATCH /api/v1/repos/{kind}/{ns}/{name}.
+// Every field is optional and absent ones are left unchanged, so new
+// configuration fields can be added here without breaking existing callers;
+// today there is only one, and the request must set it (there is nothing
+// else to update).
+type RepoUpdateRequest struct {
+	// DefaultBranch switches which branch clone, tree listings, the
+	// repository card, lineage and the parquet index read by default. The
+	// branch must already exist in the repository.
+	DefaultBranch *string `json:"default_branch,omitempty"`
+}
+
 // RepoFacetItem is one value of a listing facet (a tag, a license, a task)
 // together with how many repositories in the current result set carry it.
 type RepoFacetItem struct {

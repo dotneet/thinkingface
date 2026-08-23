@@ -187,6 +187,21 @@ Two behaviours to keep in mind:
   indexed already — but a revision that exists nowhere else may not appear in the file index
   that the bucket-access script is generated from.
 
+### Changing the default branch
+
+Pushed to `master` when you meant `main`? You don't need to re-push anything to fix it. Open
+the repository's **Settings** tab (shown when you can administer the repository) and pick the
+right branch under **Default branch**, then save. The branch you choose must already exist —
+push it first if it doesn't yet.
+
+This repoints what a plain `git clone` of the repository checks out, and switches which branch
+the file list, the README card (tags, license, description), and the lineage graph read from —
+the same "default branch only" metadata called out above. If the branch was pushed before it
+became the default, that metadata may take a moment to catch up; the repository page shows an
+indexing indicator while it does. Changing the default branch requires namespace-admin access
+(the same level as archiving or transferring the repository) and is refused while the
+repository is archived — unarchive it first.
+
 ## What a push triggers on the server
 
 When a branch tip moves, a background worker publishes the revision's non-LFS files to object

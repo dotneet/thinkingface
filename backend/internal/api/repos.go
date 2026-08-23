@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -343,6 +344,125 @@ func (s *Server) deleteRepo(ctx context.Context, repo *store.Repo) error {
 	// removes references, not bytes. Another repository may hold the very same
 	// content. `thinkingface gc` reclaims what nothing references any more.
 	return nil
+}
+
+// ------------------------------------------------------------------- update
+
+// handleUpdateRepo answers PATCH /api/v1/repos/{kind}/{ns}/{name}, a partial
+// update over repository configuration; today the only field is
+// default_branch (docs/dev/api-contract.md "Changing the default branch").
+//
+// Gated by canAdmin rather than canWrite -- the same namespace-admin bar as
+// archive/transfer/delete, not a plain write member -- because switching the
+// default branch changes what a bare `git clone` checks out and which ref
+// every listing, the README card, lineage and the parquet index read from:
+// a repository-configuration decision, not a content edit.
+//
+// Explicitly rejects an archived repository even though
+// loadRepoForWriteAllowArchived lets a write member's *request* through:
+// unlike unarchiving (the one write archive must still allow) this is not
+// the escape hatch for its own state, so it stays refused like every other
+// content-adjacent change until the repository is unarchived.
+func (s *Server) handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
+	repo, ok := s.loadRepoForWriteAllowArchived(w, r,
+		chi.URLParam(r, "kind"), chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectUI)
+	if !ok {
+		return
+	}
+	if !s.canAdmin(r.Context(), repo) {
+		forbidden(w, "you must have admin access to "+repo.Namespace+" to change settings on "+repo.FullName())
+		return
+	}
+	if repo.Archived() {
+		writeError(w, http.StatusForbidden, "repository_archived",
+			repo.FullName()+" is archived and read-only; unarchive it in the repository settings to make changes")
+		return
+	}
+
+	var req apitypes.RepoUpdateRequest
+	if !decodeJSON(w, r, maxMetaBody, &req, "request body must be JSON") {
+		return
+	}
+	if req.DefaultBranch == nil {
+		badRequest(w, "nothing to update: send default_branch")
+		return
+	}
+	branch := strings.TrimSpace(*req.DefaultBranch)
+	if branch == "" {
+		badRequest(w, "default_branch must not be empty")
+		return
+	}
+
+	// Idempotent no-op: same value, nothing to touch on disk, in the index,
+	// or in the queue.
+	if branch == repo.DefaultBranch {
+		writeJSON(w, http.StatusOK, apitypes.RepoDetailResponse{Repo: s.buildDetail(r.Context(), repo)})
+		return
+	}
+
+	gitRepo, err := s.git.Open(repo.StoragePath)
+	if err != nil {
+		internalError(w, "open repository", err)
+		return
+	}
+	tip, err := gitRepo.RefTarget("refs/heads/" + branch)
+	if err != nil {
+		notFound(w, "branch "+branch+" does not exist in "+repo.FullName())
+		return
+	}
+
+	// HEAD first, then the row: if the process dies between them a retry of
+	// this same request still succeeds (SetHead is idempotent and the branch
+	// == repo.DefaultBranch check above only short-circuits once the row
+	// agrees), whereas the reverse order could leave the row pointing at a
+	// branch HEAD was never repointed to.
+	if err := gitRepo.SetHead(r.Context(), branch); err != nil {
+		internalError(w, "update HEAD", err)
+		return
+	}
+	updated, err := s.store.SetRepoDefaultBranch(r.Context(), repo.ID, branch)
+	if err != nil {
+		internalError(w, "update repository", err)
+		return
+	}
+
+	// Re-run the post-push pipeline for the newly-default branch: the syncer
+	// only refreshes head_sha/card/lineage/is_experiment for
+	// job.Ref == repo.DefaultBranch (internal/syncer/syncer.go), so a branch
+	// that was pushed to long before it became the default -- the case this
+	// endpoint exists for -- still carries the *old* default branch's
+	// metadata until this runs. repo_files and the parquet index are
+	// refreshed unconditionally by the same job, which makes re-running them
+	// here harmless when the branch was already indexed.
+	//
+	// old == new (both the branch's current tip) rather than the row's stale
+	// previous head: no commit was made, so the eventual repo.push webhook's
+	// changed_files comes back 0 and its old_sha/new_sha are equal -- a
+	// subscriber can tell this apart from a real push on the same ref. A new
+	// webhook event type was deliberately not added for this
+	// (docs/dev/api-contract.md "Changing the default branch" explains why).
+	if err := s.sync.Enqueue(r.Context(), repo.ID, branch, tip.String(), tip.String()); err != nil {
+		// Undo the switch so the request is all-or-nothing. commit.go and
+		// edit.go leave their own enqueue failures half-applied, and can
+		// afford to: their damage is a stale index on a ref that any later
+		// push re-enqueues. Nothing heals this one. Once the row and HEAD
+		// agree on the new branch, a retry hits the idempotent no-op above
+		// and returns 200 without ever enqueueing, so the stale
+		// head_sha/card/lineage would survive until someone happened to
+		// push to that branch. Rolling back keeps the retry meaningful.
+		if rbErr := gitRepo.SetHead(r.Context(), repo.DefaultBranch); rbErr != nil {
+			slog.Error("roll back HEAD after failed reindex enqueue",
+				"repo", repo.FullName(), "branch", repo.DefaultBranch, "err", rbErr)
+		}
+		if _, rbErr := s.store.SetRepoDefaultBranch(r.Context(), repo.ID, repo.DefaultBranch); rbErr != nil {
+			slog.Error("roll back default branch after failed reindex enqueue",
+				"repo", repo.FullName(), "branch", repo.DefaultBranch, "err", rbErr)
+		}
+		internalError(w, "enqueue reindex", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, apitypes.RepoDetailResponse{Repo: s.buildDetail(r.Context(), updated)})
 }
 
 // ------------------------------------------------------------------ archive

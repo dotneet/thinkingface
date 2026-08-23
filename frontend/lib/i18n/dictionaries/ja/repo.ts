@@ -271,6 +271,17 @@ export const repo = {
         nameGitSuffix: "リポジトリ名の末尾に「.git」は使用できません。",
       },
     },
+    defaultBranch: {
+      title: "デフォルトブランチ",
+      description:
+        "clone で checkout されるブランチで、ファイル一覧・README・リネージもここから読み込まれます。",
+      label: "ブランチ",
+      save: "保存",
+      saving: "保存中…",
+      saved: "デフォルトブランチを更新しました。",
+      blockedByArchive: "デフォルトブランチを変更するには先にアーカイブを解除してください。",
+      noBranches: "まだコミットがないため、切り替え先のブランチがありません。",
+    },
     archive: {
       title: "リポジトリのアーカイブ",
       description:

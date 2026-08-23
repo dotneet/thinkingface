@@ -204,6 +204,7 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/repos", s.handleListRepos)
 		r.Post("/repos", s.handleCreateRepo)
 		r.Get("/repos/{kind}/{ns}/{name}", s.handleRepoDetail)
+		r.Patch("/repos/{kind}/{ns}/{name}", s.handleUpdateRepo)
 		r.Delete("/repos/{kind}/{ns}/{name}", s.handleDeleteRepo)
 		r.Get("/repos/{kind}/{ns}/{name}/tree/{rev}/*", s.handleUITree)
 		r.Get("/repos/{kind}/{ns}/{name}/tree/{rev}", s.handleUITree)
