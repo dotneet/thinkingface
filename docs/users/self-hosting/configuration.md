@@ -28,7 +28,8 @@ a variable is unset.
 | `GCS_BUCKET` | Target bucket name. | `thinkingface` | |
 | `GCS_PREFIX` | Optional key prefix inside the bucket, for sharing one bucket across environments. | *(empty)* | Leading/trailing slashes are stripped. |
 | `STORAGE_EMULATOR_HOST` | Address of the fake-gcs-server emulator. | *(empty)* | Required when `STORAGE_DRIVER=gcs-emulator`; startup fails without it. Not used, and should be left unset, with `STORAGE_DRIVER=gcs`. |
-| `TF_SIGNED_URL_TTL` | How long signed GCS URLs (LFS transfer, direct downloads) stay valid. | `1h` | Only meaningful with `STORAGE_DRIVER=gcs` — the emulator cannot verify signed URLs, so that mode proxies bytes through the server instead. |
+| `TF_SIGNED_URL_TTL` | Floor of how long a signed GCS URL (LFS transfer, direct download) stays valid. The actual lifetime is derived from the object's size and clamped into `[TF_SIGNED_URL_TTL, TF_SIGNED_URL_MAX_TTL]`, so this mainly governs small transfers. | `1h` | Only meaningful with `STORAGE_DRIVER=gcs` — the emulator cannot verify signed URLs, so that mode proxies bytes through the server instead. |
+| `TF_SIGNED_URL_MAX_TTL` | Ceiling of the same clamp, for large transfers. | `12h` | Same `STORAGE_DRIVER=gcs`-only caveat as `TF_SIGNED_URL_TTL`. |
 
 ## Database
 

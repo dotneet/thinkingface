@@ -12,6 +12,10 @@ import (
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
 
+// testSignedURLMaxTTL stands in for config.SignedURLMaxTTL, which is what
+// the staging grace is derived from. It is the shipped default.
+const testSignedURLMaxTTL = 12 * time.Hour
+
 type fakeGCDB struct {
 	all        []store.LFSObjectRef
 	referenced map[string]bool
@@ -84,7 +88,7 @@ func TestRunGC_SkipsObjectThatGainedAReferenceAfterTheScan(t *testing.T) {
 	obj := &fakeGCStorage{}
 
 	err := withDiscardedStdout(func() error {
-		return runGC(context.Background(), db, obj, []string{"--yes"})
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
 	})
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
@@ -108,7 +112,7 @@ func TestRunGC_DryRunDeletesNothing(t *testing.T) {
 	obj := &fakeGCStorage{}
 
 	err := withDiscardedStdout(func() error {
-		return runGC(context.Background(), db, obj, nil)
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, nil)
 	})
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
@@ -128,7 +132,7 @@ func TestRunGC_StorageFailureDoesNotCountAsASkip(t *testing.T) {
 	obj := &fakeGCStorage{fail: map[string]error{storage.LFSKey(oid): errors.New("boom")}}
 
 	err := withDiscardedStdout(func() error {
-		return runGC(context.Background(), db, obj, []string{"--yes"})
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
 	})
 	if err == nil {
 		t.Fatal("runGC: want storage failure, got nil")
@@ -193,7 +197,7 @@ func TestRunGC_DeletesOrphanedBlobsAndKeepsReferencedOnes(t *testing.T) {
 	}}
 
 	err := withDiscardedStdout(func() error {
-		return runGC(context.Background(), db, obj, []string{"--yes"})
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
 	})
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
@@ -209,7 +213,7 @@ func TestRunGC_DryRunDeletesNoBlobs(t *testing.T) {
 	obj := &fakeGCStorage{blobs: []storage.ObjectInfo{blobObject("bbbb2222", 90*24*time.Hour)}}
 
 	err := withDiscardedStdout(func() error {
-		return runGC(context.Background(), db, obj, nil)
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, nil)
 	})
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
@@ -228,9 +232,89 @@ func TestRunGC_BlobStorageFailureIsReported(t *testing.T) {
 	}
 
 	err := withDiscardedStdout(func() error {
-		return runGC(context.Background(), db, obj, []string{"--yes"})
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
 	})
 	if err == nil {
 		t.Fatal("runGC: want a blob storage failure, got nil")
+	}
+}
+
+// ----------------------------------------------------------------- staging
+
+func stagingObject(key string, age time.Duration) storage.ObjectInfo {
+	return storage.ObjectInfo{
+		Key:     key,
+		Size:    int64(len(key)),
+		Updated: time.Now().Add(-age),
+	}
+}
+
+func TestRunGC_KeepsStagingObjectsWithinGrace(t *testing.T) {
+	db := &fakeGCDB{referenced: map[string]bool{}, liveRefs: map[string]bool{}, blobRefs: map[string]bool{}}
+	obj := &fakeGCStorage{blobs: []storage.ObjectInfo{
+		// Well within stagingGrace: this looks like an upload still in
+		// flight and must survive even a --yes run.
+		stagingObject("tmp/uploads/lfs/1/aaaa", time.Minute),
+	}}
+
+	err := withDiscardedStdout(func() error {
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
+	})
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if len(obj.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none (object is within stagingGrace)", obj.deleted)
+	}
+}
+
+func TestRunGC_DryRunLeavesOldStagingObjects(t *testing.T) {
+	db := &fakeGCDB{referenced: map[string]bool{}, liveRefs: map[string]bool{}, blobRefs: map[string]bool{}}
+	obj := &fakeGCStorage{blobs: []storage.ObjectInfo{
+		stagingObject("tmp/uploads/lfs/1/bbbb", stagingGrace(testSignedURLMaxTTL)+time.Hour),
+	}}
+
+	err := withDiscardedStdout(func() error {
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, nil)
+	})
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if len(obj.deleted) != 0 {
+		t.Fatalf("dry run deleted %v", obj.deleted)
+	}
+}
+
+func TestRunGC_DeletesOldStagingObjectsWithYes(t *testing.T) {
+	key := "tmp/uploads/lfs/1/cccc"
+	db := &fakeGCDB{referenced: map[string]bool{}, liveRefs: map[string]bool{}, blobRefs: map[string]bool{}}
+	obj := &fakeGCStorage{blobs: []storage.ObjectInfo{
+		stagingObject(key, stagingGrace(testSignedURLMaxTTL)+time.Hour),
+	}}
+
+	err := withDiscardedStdout(func() error {
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
+	})
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if len(obj.deleted) != 1 || obj.deleted[0] != key {
+		t.Fatalf("deleted = %v, want [%s]", obj.deleted, key)
+	}
+}
+
+func TestRunGC_StagingStorageFailureIsReported(t *testing.T) {
+	key := "tmp/uploads/lfs/1/dddd"
+	db := &fakeGCDB{referenced: map[string]bool{}, liveRefs: map[string]bool{}, blobRefs: map[string]bool{}}
+	obj := &fakeGCStorage{
+		blobs: []storage.ObjectInfo{stagingObject(key, stagingGrace(testSignedURLMaxTTL)+time.Hour)},
+		fail:  map[string]error{key: errors.New("boom")},
+	}
+
+	err := withDiscardedStdout(func() error {
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
+	})
+	if err == nil {
+		t.Fatal("runGC: want a staging storage failure, got nil")
 	}
 }

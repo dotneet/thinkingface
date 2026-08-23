@@ -109,7 +109,12 @@ func (g *GCS) SignedGetURL(ctx context.Context, key string, ttl time.Duration, d
 	return g.client.Bucket(g.bucket).SignedURL(g.full(key), opts)
 }
 
-func (g *GCS) SignedPutURL(ctx context.Context, key string, ttl time.Duration, size int64) (string, error) {
+// SignedPutURL signs a PUT for one key. No x-goog-content-length-range is
+// signed in: huggingface_hub sends the object bytes without replaying the
+// batch action headers, so requiring one would make every HF upload fail the
+// signature check. The staged object's size is validated on the server side at
+// verify time instead.
+func (g *GCS) SignedPutURL(ctx context.Context, key string, ttl time.Duration) (string, error) {
 	if !g.signing {
 		return "", errors.New("signed URLs unavailable in emulator mode")
 	}

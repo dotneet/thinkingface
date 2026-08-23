@@ -94,7 +94,7 @@ func run(command string) error {
 		if err != nil {
 			return err
 		}
-		return runGC(ctx, db, obj, os.Args[2:])
+		return runGC(ctx, db, obj, cfg.SignedURLMaxTTL, os.Args[2:])
 	case "compact":
 		obj, err := newStorage(ctx, cfg)
 		if err != nil {
