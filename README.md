@@ -14,6 +14,10 @@
 </p>
 
 <p align="center">
+  <strong>English</strong> · <a href="README.ja.md">日本語</a>
+</p>
+
+<p align="center">
   <a href="https://dotneet.github.io/thinkingface/">Documentation</a> ·
   <a href="https://dotneet.github.io/thinkingface/getting-started/">Quickstart</a> ·
   <a href="https://dotneet.github.io/thinkingface/reference/compatibility/">Compatibility</a> ·

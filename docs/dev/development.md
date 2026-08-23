@@ -181,6 +181,14 @@ top priority. What the suite covers is listed in [`e2e/README.md`](../../e2e/REA
   <http://localhost:8123/thinkingface/> with live reload; `make docs-build` runs the same
   `mkdocs build --strict` CI does, so broken internal links fail early. A new page must be added
   to the `nav:` block of `mkdocs.yml` to appear in the sidebar.
+- The site is **bilingual**: `mkdocs-static-i18n` builds English at the root and Japanese
+  under `/ja/`. A Japanese page is the same path with a `.ja` suffix
+  (`guides/uploading.md` → `guides/uploading.ja.md`); it is *not* added to `nav:`, and a page
+  without a translation falls back to English. Nav labels are translated in the `ja` block of
+  `mkdocs.yml` (`nav_translations`). Links between pages keep the plain `.md` path — the
+  plugin rewrites them per locale — and translated `##` headings repeat the English anchor
+  (`## 見出し { #english-anchor }`) so cross-page anchors keep working. `README.md` and
+  `README.ja.md` are the same pair at the repository root.
 - `docs/dev/` is not published. Design documents and the API contract live here.
 - Screenshots under `docs/users/images/` are generated from a seeded throwaway instance by
   `scripts/docs-demo/` — see [`docs-screenshots.md`](docs-screenshots.md). Do not hand-edit or

@@ -106,9 +106,32 @@ one place, the `nav:` block of `mkdocs.yml`: **a new page under `docs/users/` mu
 there or it will not appear in the sidebar.** The pages need no frontmatter, so they stay
 readable on GitHub too.
 
+### Bilingual (en / ja)
+
+The site is built twice by `mkdocs-static-i18n` with `docs_structure: suffix`: English at
+the root and Japanese under `/ja/`, with a language switcher in the header.
+
+- **A Japanese page is the English file's name plus a `.ja` suffix** — `guides/uploading.md`
+  → `guides/uploading.ja.md`, in the same directory. Nothing is added to `nav:` for it; the
+  plugin substitutes it into the existing tree, and **a page with no `.ja.md` silently falls
+  back to the English content**, so a partial translation always builds.
+- **Nav labels and `site_description` are translated in `mkdocs.yml`**, under the `ja` entry's
+  `nav_translations`. A new nav label needs an entry there or it stays English in `/ja/`.
+- **Cross-page links stay as the plain `.md` path** (`../reference/tf-cli.md`) — the plugin
+  resolves each one to the current locale. Writing `.ja.md` in a link is wrong.
+- **Translated `##` headings carry the original English anchor** via `attr_list`
+  (`## データセットを作る { #create-a-dataset }`), so `foo.md#anchor` links and deep links
+  survive a language switch. Broken anchors are only INFO-level in mkdocs, so `--strict` will
+  *not* catch a mistake here — keep the ids in step by hand.
+- **The screenshots are shared**: `docs/users/images/` is referenced from both languages and
+  the UI in them stays English. Only the alt text is translated.
+- `README.md` (English) and `README.ja.md` are a pair linked from each other's header. The
+  Japanese README links into `/ja/` on the docs site; repository-relative links point at the
+  same English files.
+
 `.github/workflows/docs.yml` builds with `mkdocs build --strict` on PRs (broken internal
-links fail the build) and deploys from `main`. MkDocs is pinned in `docs/requirements.txt`
-and always runs through a disposable `uv` environment.
+links fail the build) and deploys from `main`. MkDocs and `mkdocs-static-i18n` are pinned in
+`docs/requirements.txt` and always run through a disposable `uv` environment.
 
 The screenshots in `docs/users/images/` are captured mechanically from a throwaway instance
 seeded with demo content, never by hand — `scripts/docs-demo/` plus the procedure in
