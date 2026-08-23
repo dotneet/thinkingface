@@ -20,12 +20,13 @@ import (
 // through LFS, which never passes through this endpoint.
 const maxCommitBody = 512 << 20
 
-// loadLFSRules reads .gitattributes at a revision. A repository without one
-// still gets size-based routing from the zero value.
-func (s *Server) loadLFSRules(repo *gitrepo.Repo, rev string) *gitrepo.LFSRules {
+// loadLFSRules reads .gitattributes at a revision. A repository whose own copy
+// cannot be read falls back to the list its kind was seeded with, so the
+// fallback routes files the same way the repository itself would.
+func (s *Server) loadLFSRules(repo *gitrepo.Repo, rev, kind string) *gitrepo.LFSRules {
 	content, err := repo.ReadFile(rev, ".gitattributes", 1<<20)
 	if err != nil {
-		return gitrepo.ParseGitAttributes([]byte(gitrepo.DefaultGitAttributes))
+		return gitrepo.ParseGitAttributes([]byte(gitrepo.DefaultGitAttributes(kind)))
 	}
 	return gitrepo.ParseGitAttributes(content)
 }
@@ -53,7 +54,7 @@ func (s *Server) handlePreupload(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "open git repository", err)
 		return
 	}
-	rules := s.loadLFSRules(gitRepo, chi.URLParam(r, "rev"))
+	rules := s.loadLFSRules(gitRepo, chi.URLParam(r, "rev"), repo.Kind)
 
 	type result struct {
 		Path         string `json:"path"`

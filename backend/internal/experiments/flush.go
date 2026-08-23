@@ -273,7 +273,7 @@ func mergePoints(existing *existingTable, points []store.PendingPoint) ([]flushC
 // This mirrors what a huggingface_hub upload does, so the file behaves
 // identically no matter which side produced it.
 func (f *Flusher) blobFor(ctx context.Context, gitRepo *gitrepo.Repo, repo *store.Repo, ref, path string, data []byte) ([]byte, error) {
-	rules := gitrepo.ParseGitAttributes([]byte(gitrepo.DefaultGitAttributes))
+	rules := gitrepo.ParseGitAttributes([]byte(gitrepo.DefaultGitAttributes(repo.Kind)))
 	if content, err := gitRepo.ReadFile(ref, ".gitattributes", 1<<20); err == nil {
 		rules = gitrepo.ParseGitAttributes(content)
 	}

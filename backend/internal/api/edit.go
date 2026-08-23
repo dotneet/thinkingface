@@ -98,7 +98,7 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rules := s.loadLFSRules(gitRepo, rev)
+	rules := s.loadLFSRules(gitRepo, rev, repo.Kind)
 	if rules.ShouldUseLFS(path, int64(len(content))) {
 		badRequest(w, lfsEditRejection(path))
 		return

@@ -48,7 +48,7 @@ func newFlushHarness(t *testing.T) *flushHarness {
 		Branch: "main", Message: "initial",
 		Author: gitrepo.Signature{Name: "alice", Email: "alice@example.com"},
 		Ops: []gitrepo.Op{
-			{Kind: gitrepo.OpAdd, Path: ".gitattributes", Data: []byte(gitrepo.DefaultGitAttributes)},
+			{Kind: gitrepo.OpAdd, Path: ".gitattributes", Data: []byte(gitrepo.DefaultGitAttributes("dataset"))},
 			addOp("README.md", "# metrics\n"),
 		},
 	})

@@ -164,7 +164,7 @@ func setupBenchIndexer(b *testing.B, rows []map[string]any, metrics int, layout 
 		Branch: "main", Message: "seed",
 		Author: gitrepo.Signature{Name: "bench", Email: "bench@example.com"},
 		Ops: []gitrepo.Op{
-			{Kind: gitrepo.OpAdd, Path: ".gitattributes", Data: []byte(gitrepo.DefaultGitAttributes)},
+			{Kind: gitrepo.OpAdd, Path: ".gitattributes", Data: []byte(gitrepo.DefaultGitAttributes("dataset"))},
 			{Kind: gitrepo.OpAdd, Path: "demo/metrics.parquet", Data: gitrepo.FormatLFSPointer(oid, size)},
 		},
 	}); err != nil {
