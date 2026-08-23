@@ -4,7 +4,8 @@ The images embedded in `docs/users/` live in `docs/users/images/` and are captur
 mechanically, not by hand. Two things make that necessary:
 
 - They must show **English UI and English sample content**, whatever the locale of the
-  machine taking them.
+  machine taking them. The Japanese pages (`*.ja.md`) embed the *same* files — only the alt
+  text is translated — so there is no Japanese set to regenerate.
 - They must show **only curated demo content**. A developer's compose stack accumulates
   E2E leftovers (`e2e-3e7e83067f`, `uiaudit-model-1`, …), and those must never reach a
   published page.

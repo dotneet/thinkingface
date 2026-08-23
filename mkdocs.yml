@@ -47,6 +47,43 @@ markdown_extensions:
       alternate_style: true
 
 plugins:
+  # i18n first: it rewrites the file set (docs_structure: suffix picks *.ja.md
+  # out of docs/users/ and builds them under /ja/), and reconfigures material's
+  # language switcher and the search plugin for every locale.
+  - i18n:
+      docs_structure: suffix
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: en
+          name: English
+          default: true
+          build: true
+        - locale: ja
+          name: 日本語
+          build: true
+          site_name: thinkingface
+          site_description: セルフホスト型の Hugging Face Hub — データセット・モデル・実験を自分たちのストレージで。
+          nav_translations:
+            Home: ホーム
+            Getting Started: はじめる
+            Quickstart: クイックスタート
+            Core Concepts: 基本コンセプト
+            Guides: ガイド
+            Uploading Files: ファイルのアップロード
+            Downloading Files: ファイルのダウンロード
+            Working with Git: Git を使う
+            Browsing the Web UI: Web UI を使う
+            Viewing Datasets: データセットの閲覧
+            Inspecting Models: モデルの確認
+            Tracking Experiments: 実験のトラッキング
+            Organizations: Organization
+            Reference: リファレンス
+            Authentication: 認証
+            Compatibility: 互換性
+            Self-hosting: セルフホスト
+            Deployment: デプロイ
+            Configuration: 設定
   - search
 
 # Broken internal links fail the build instead of shipping a 404.
