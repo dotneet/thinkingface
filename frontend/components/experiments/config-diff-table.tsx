@@ -1,0 +1,175 @@
+"use client";
+
+import { SlidersHorizontal } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Badge } from "@/components/ui/badge";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Checkbox } from "@/components/ui/field";
+import { colorForRun } from "@/lib/chart-utils";
+import { cn } from "@/lib/cn";
+import { useT } from "@/lib/i18n/client";
+import { buildConfigDiff } from "@/lib/run-compare";
+import { isReservedConfigKey } from "@/lib/run-config";
+import type { ExpRun } from "@/types/api";
+
+/**
+ * Hyperparameter comparison: one row per config key, one column per selected
+ * run. Rows where the runs disagree are highlighted, and "Differences only"
+ * hides the rest — with a sweep of 40 keys, the handful that actually moved is
+ * the whole question.
+ */
+export function ConfigDiffTable({
+  runs,
+  runOrder,
+  baseline,
+}: {
+  runs: ExpRun[];
+  /** Full project run order, so a run keeps its chart colour here too. */
+  runOrder: string[];
+  baseline?: string;
+}) {
+  const t = useT();
+  const [diffOnly, setDiffOnly] = useState(false);
+  // The reserved sections are folded away by default: the environment snapshot
+  // and the TrainingArguments differ on something in almost every pair of runs
+  // (a git commit, an output_dir), which buries the two hyperparameters the
+  // sweep actually moved. The run detail page shows them in full.
+  const [showReserved, setShowReserved] = useState(false);
+
+  const allRows = useMemo(() => buildConfigDiff(runs), [runs]);
+  const reservedCount = useMemo(
+    () => allRows.filter((r) => isReservedConfigKey(r.key)).length,
+    [allRows],
+  );
+  const rows = showReserved ? allRows : allRows.filter((r) => !isReservedConfigKey(r.key));
+  const visible = diffOnly ? rows.filter((r) => r.differs) : rows;
+  const diffCount = rows.filter((r) => r.differs).length;
+
+  if (runs.length === 0) {
+    return (
+      <EmptyState
+        icon={SlidersHorizontal}
+        title={t("experiments.configDiff.noRunsTitle")}
+        description={t("experiments.configDiff.noRunsDescription")}
+      />
+    );
+  }
+
+  if (allRows.length === 0) {
+    return (
+      <EmptyState
+        icon={SlidersHorizontal}
+        title={t("experiments.configDiff.noConfigTitle")}
+        description={t("experiments.configDiff.noConfigDescription")}
+      />
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+        <span className="text-fg-subtle">
+          {t(
+            runs.length === 1
+              ? "experiments.configDiff.summaryOne"
+              : "experiments.configDiff.summaryOther",
+            { diff: diffCount, total: rows.length, count: runs.length },
+          )}
+        </span>
+        <div className="flex flex-wrap items-center gap-4">
+          {reservedCount > 0 && (
+            <label className="flex items-center gap-2">
+              <Checkbox
+                checked={showReserved}
+                onChange={(e) => setShowReserved(e.target.checked)}
+              />
+              <span className="text-fg-subtle">
+                {t("experiments.configDiff.showReserved", { count: reservedCount })}
+              </span>
+            </label>
+          )}
+          <label className="flex items-center gap-2">
+            <Checkbox checked={diffOnly} onChange={(e) => setDiffOnly(e.target.checked)} />
+            <span className="text-fg-subtle">{t("experiments.configDiff.differencesOnly")}</span>
+          </label>
+        </div>
+      </div>
+
+      {visible.length === 0 ? (
+        // rows.length === 0 means everything this run logged lives in the
+        // folded sections, which is a different answer from "the runs agree".
+        <EmptyState
+          icon={SlidersHorizontal}
+          title={
+            rows.length === 0
+              ? t("experiments.configDiff.onlyReservedTitle")
+              : t("experiments.configDiff.noDiffTitle")
+          }
+          description={
+            rows.length === 0
+              ? t("experiments.configDiff.onlyReservedDescription")
+              : t("experiments.configDiff.noDiffDescription")
+          }
+        />
+      ) : (
+        <div className="scroll-x rounded-lg border border-border">
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr className="border-b border-border text-left text-xs font-medium text-fg-subtle">
+                <th className="sticky left-0 z-10 bg-bg-raised px-3 py-2 font-medium">
+                  {t("experiments.configDiff.colParameter")}
+                </th>
+                {runs.map((run) => (
+                  <th key={run.name} className="px-3 py-2 font-medium whitespace-nowrap">
+                    <span className="flex items-center gap-2">
+                      <span
+                        className="h-2.5 w-2.5 shrink-0 rounded-full"
+                        style={{ background: colorForRun(runOrder.indexOf(run.name)) }}
+                      />
+                      <span className="text-fg">{run.name}</span>
+                      {run.name === baseline && (
+                        <Badge tone="accent">{t("experiments.table.baselineBadge")}</Badge>
+                      )}
+                    </span>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((row) => (
+                <tr
+                  key={row.key}
+                  className={cn(
+                    "border-b border-border last:border-0",
+                    row.differs ? "bg-warning/10" : "hover:bg-bg-hover",
+                  )}
+                >
+                  {/* Opaque background so the horizontally scrolled values
+                      pass behind the pinned key column rather than through it. */}
+                  <th
+                    scope="row"
+                    className="sticky left-0 z-10 bg-bg-raised px-3 py-2 text-left font-medium text-fg-muted"
+                  >
+                    {row.key}
+                  </th>
+                  {row.values.map((value, i) => (
+                    <td
+                      // The run name is the column identity; values repeat.
+                      key={runs[i]?.name ?? i}
+                      className={cn(
+                        "px-3 py-2 tabular-nums",
+                        row.differs ? "font-medium text-fg" : "text-fg-muted",
+                      )}
+                    >
+                      {value}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,177 @@
+// Periodic flushing of the native ingest API's buffer into the dataset
+// repositories that own it (docs/thinkingface-design.md §8). The ingest
+// endpoint writes points to exp_points so the dashboard can be live; the
+// promise the design makes is that the data still ends up as parquet inside
+// the dataset repository, git-versioned, published into object storage and
+// readable by DuckDB. This file is what keeps that promise.
+
+package syncer
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"time"
+
+	"github.com/dotneet/thinkingface/backend/internal/experiments"
+	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
+	"github.com/dotneet/thinkingface/backend/internal/store"
+)
+
+// flushPollInterval is how often the flusher looks for work. It is far
+// shorter than the configured flush interval because a run that has just
+// finished (or failed) is flushed at once rather than at the end of its
+// project's interval: the poll is cheap (one grouped query), the flush is not.
+const flushPollInterval = 10 * time.Second
+
+// maxFlushProjects bounds one poll's candidate list, so a server with a very
+// large number of live projects still makes steady progress instead of
+// building an enormous batch.
+const maxFlushProjects = 100
+
+// EnableFlush turns on the periodic metrics flush. interval is the maximum
+// time a still-running project's points stay database-only; a run that has
+// reached a terminal status is flushed on the next poll regardless. Calling
+// it with a nil flusher leaves the flush disabled, which is what the sync
+// tests that only exercise the push pipeline want.
+func (s *Syncer) EnableFlush(f *experiments.Flusher, interval time.Duration) {
+	if f == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	s.flusher = f
+	s.flushInterval = interval
+}
+
+// RunFlush drives the periodic flush until ctx is cancelled. It is a separate
+// goroutine from the sync worker pool: a flush must not sit behind a slow
+// export, and it takes no sync_jobs row, so two replicas racing on the same
+// project resolve it through the commit's path precondition rather than
+// through the job queue.
+func (s *Syncer) RunFlush(ctx context.Context) {
+	if s.flusher == nil {
+		return
+	}
+	ticker := time.NewTicker(flushPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if err := s.flushDue(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("flush experiment metrics", "error", err)
+		}
+	}
+}
+
+// flushDue flushes every project whose buffer is due: one that has waited out
+// the flush interval, and one holding points for a run that already finished
+// or failed.
+func (s *Syncer) flushDue(ctx context.Context) error {
+	pending, err := s.store.ListPendingFlushProjects(ctx, maxFlushProjects)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+
+	s.flushMu.Lock()
+	due := make([]store.PendingFlush, 0, len(pending))
+	seen := make(map[int64]bool, len(pending))
+	for _, p := range pending {
+		seen[p.ProjectID] = true
+		last, known := s.lastFlush[p.ProjectID]
+		if p.Terminal || !known || now.Sub(last) >= s.flushInterval {
+			due = append(due, p)
+		}
+	}
+	// Projects whose buffer is now empty must not keep an entry forever: the
+	// map would grow with every project the instance ever saw.
+	for id := range s.lastFlush {
+		if !seen[id] {
+			delete(s.lastFlush, id)
+		}
+	}
+	s.flushMu.Unlock()
+
+	for _, p := range due {
+		if err := s.FlushProject(ctx, p.RepoID, p.ProjectID, p.Project); err != nil {
+			// One project's failure (a stale precondition, a schema this
+			// package cannot rewrite) must not stop the others. The points
+			// stay buffered and the next poll tries again.
+			slog.Warn("flush experiment project", "repo_id", p.RepoID,
+				"project", p.Project, "points", p.NumPoints, "error", err)
+			continue
+		}
+		if p.NumPoints > experiments.MaxFlushPoints {
+			// The buffer was larger than one flush moves, so the rest is due
+			// right now rather than an interval from now: leaving the project
+			// unstamped makes the next poll pick it up again.
+			continue
+		}
+		s.flushMu.Lock()
+		s.lastFlush[p.ProjectID] = time.Now()
+		s.flushMu.Unlock()
+	}
+	return nil
+}
+
+// FlushProject writes one project's buffered points into its dataset
+// repository and drops them from the database. The three steps are ordered so
+// that no state in between loses a point from the chart:
+//
+//  1. commit the parquet, which is now the durable copy;
+//  2. re-index the repository, so Series can see the new rows (the layout is
+//     detected from repo_files, which only this step refreshes);
+//  3. delete the buffered rows.
+//
+// A crash between 1 and 2 leaves the points buffered and the commit in place;
+// the retry recognises what it already wrote through the ingest-id column and
+// appends nothing twice. A crash between 2 and 3 leaves rows that are already
+// in the parquet, which the same check removes on the retry.
+func (s *Syncer) FlushProject(ctx context.Context, repoID, projectID int64, project string) error {
+	if s.flusher == nil {
+		return nil
+	}
+	repo, err := s.store.GetRepoByID(ctx, repoID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if repo.Archived() {
+		return nil
+	}
+
+	result, err := s.flusher.Flush(ctx, repo, projectID, project)
+	if err != nil {
+		if errors.Is(err, gitrepo.ErrRepoNotFound) {
+			// Nothing to commit into; leave the points where they are rather
+			// than dropping data on the floor.
+			return nil
+		}
+		return err
+	}
+	if result == nil {
+		return nil
+	}
+
+	if _, err := s.runPushPipeline(ctx, repo, &store.SyncJob{
+		RepoID: repo.ID, Ref: result.Ref, OldSHA: result.OldSHA, NewSHA: result.NewSHA,
+	}); err != nil {
+		return err
+	}
+	if err := s.store.DeletePoints(ctx, result.PointIDs); err != nil {
+		return err
+	}
+
+	slog.Info("flushed experiment metrics", "repo", repo.FullName(), "project", project,
+		"path", result.Path, "points", len(result.PointIDs), "appended", result.NumAppended,
+		"commit", result.NewSHA)
+	return nil
+}

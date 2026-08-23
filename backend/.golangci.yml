@@ -1,0 +1,55 @@
+version: "2"
+
+linters:
+  # The standard set is errcheck, govet, ineffassign, staticcheck and unused.
+  # Keep additions deliberate: a linter earns its place by catching real bugs,
+  # not by enforcing house style a reviewer would rather argue about.
+  default: standard
+  enable:
+    - misspell
+
+  settings:
+    misspell:
+      # No locale: comments here mix British and US spellings, so pinning either
+      # one turns misspell into a style bot instead of a typo catcher.
+      # Its core dictionary still rewrites -ise/-our forms whatever the locale,
+      # so the British forms actually in use are listed below.
+      # "licence" is not prose at all: it is a filename this code matches on.
+      ignore-rules:
+        - authorises
+        - behaviour
+        - cancelled
+        - honouring
+        - initialise
+        - initialised
+        - licence
+        - materialised
+        - organisations
+        - recognisable
+        - recognise
+        - recognised
+        - recognises
+        - serialises
+    staticcheck:
+      # The upstream defaults, minus QF1001. The QF ("quickfix") family suggests
+      # refactorings rather than reporting defects, and De Morgan's law does not
+      # make a character-range test easier to read.
+      checks:
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        - -QF1001
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - std-error-handling
+
+formatters:
+  enable:
+    - gofmt

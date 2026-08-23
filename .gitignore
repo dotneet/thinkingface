@@ -1,0 +1,98 @@
+# ---- env / secrets --------------------------------------------------------
+.env
+.env.*
+!.env.example
+docker-compose.override.yml
+
+# ---- Go (backend) ----------------------------------------------------------
+backend/thinkingface
+backend/bin/
+backend/dist/
+backend/*.test
+backend/*.out
+backend/coverage.out
+/vendor/
+
+# ---- Node / Bun (frontend) --------------------------------------------------
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.turbo/
+# The DuckDB-WASM files are a generated artifact copied from node_modules
+# into public (roughly 75MB).
+# frontend/scripts/copy-duckdb-assets.mjs places them before build / dev.
+frontend/public/duckdb/
+frontend/next-env.d.ts
+.bun/
+bun.lockb
+# TypeScript incremental build info (also in frontend/.gitignore, but just in case)
+*.tsbuildinfo
+.eslintcache
+
+# ---- Python (clients/python, e2e) -------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg
+.python-version
+# e2e/uv.lock is deliberately NOT ignored: commit it so environments using uv
+# can reproduce the same dependencies (requirements.txt is also kept around
+# for compatibility).
+
+# ---- Terraform (infra) -------------------------------------------------------
+infra/.terraform/
+# infra/.terraform.lock.hcl is intentionally NOT ignored: commit it so
+# `terraform init` resolves the same provider versions everywhere.
+infra/*.tfstate
+infra/*.tfstate.*
+infra/*.tfplan
+infra/crash.log
+infra/crash.*.log
+infra/terraform.tfvars
+infra/*.auto.tfvars
+infra/override.tf
+infra/override.tf.json
+infra/*_override.tf
+infra/*_override.tf.json
+
+# ---- local data volumes (if ever bind-mounted instead of named volumes) ----
+.data/
+git-data/
+pg-data/
+gcs-data/
+
+# ---- macOS -------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ---- editors -------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---- host-side dev servers ------------------------------------------------------
+# scripts/dev-api.sh's SQLite DB / bare repository / viewer cache / binary
+.dev/
+
+# ---- agent / tooling local state ------------------------------------------------
+# .claude/settings.json (shared hook config) is committed. Only personal settings are excluded.
+.claude/settings.local.json
+.claude/local/
+.claude/plans/
+.claude/worktrees/
+lefthook-local.yml
+.lefthook-local/
+
+# ---- etc ------------------------------------------------
+tmp/

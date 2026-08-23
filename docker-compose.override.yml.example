@@ -1,0 +1,42 @@
+# Example override for local hot-reload development.
+#
+# Copy to `docker-compose.override.yml` (docker compose picks it up
+# automatically alongside docker-compose.yml) and adjust to taste:
+#
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#   docker compose up
+#
+# This bind-mounts source trees into the containers and swaps the
+# production entrypoints for the framework dev servers, so edits on the
+# host are picked up without rebuilding the image.
+
+services:
+  api:
+    # Reuse the same builder stage but stop before the final build, then run
+    # `go run` / air for reload. Requires a `dev` stage in backend/Dockerfile
+    # (or install https://github.com/air-verse/air and drop a .air.toml).
+    build:
+      context: ./backend
+      target: builder
+    entrypoint: ["go", "run", "./cmd/thinkingface"]
+    command: ["serve"]
+    working_dir: /src
+    volumes:
+      - ./backend:/src
+      - git-data:/data
+    environment:
+      CGO_ENABLED: "1"
+
+  web:
+    build:
+      context: ./frontend
+      target: deps
+    entrypoint: ["bun", "run", "dev"]
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    environment:
+      API_URL: http://api:8080
+      NEXT_PUBLIC_API_URL: http://localhost:8080

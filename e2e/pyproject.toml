@@ -1,0 +1,48 @@
+# Project definition for the E2E test suite.
+#
+# Keep the dependencies in sync with requirements.txt (requirements.txt is kept
+# around for the existing `pip install -r` flow / CI compatibility).
+# On environments with uv, `uv lock` / `uv sync` can reproduce it from the lockfile.
+
+[project]
+name = "thinkingface-e2e"
+version = "0.1.0"
+description = "End-to-end huggingface_hub / datasets / git / GCS compatibility suite for thinkingface"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest>=8.0",
+    "huggingface_hub>=0.24",
+    "datasets>=2.19",
+    "pyarrow>=14.0",
+    "requests>=2.31",
+]
+
+[tool.uv]
+# This is a test suite, not an installable package.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "W",   # pycodestyle warnings
+]
+ignore = [
+    "E501",  # Leave line length to the formatter
+]
+
+[tool.ruff.format]
+quote-style = "double"

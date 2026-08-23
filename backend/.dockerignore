@@ -1,0 +1,25 @@
+# Version control
+.git
+.gitignore
+
+# Build artifacts
+*.exe
+*.test
+*.out
+thinkingface
+/bin/
+/dist/
+
+# Local dev / IDE
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Docs not needed in the image
+*.md

@@ -1,0 +1,258 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: backend (Go)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    # Of backend/internal/store's integration tests, the PostgreSQL path only
+    # runs when TF_TEST_DATABASE_URL is set (otherwise only SQLite runs).
+    # CI always brings up this service so both paths get exercised.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: tf
+          POSTGRES_PASSWORD: tf
+          POSTGRES_DB: thinkingface
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U tf -d thinkingface"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Do not leave the job's GITHUB_TOKEN in .git/config: nothing here
+          # pushes, and the later steps run third-party tooling (tygo, bun,
+          # pip, docker build) that would otherwise have a credential within
+          # reach.
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::Some files need gofmt"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        env:
+          TF_TEST_DATABASE_URL: postgres://tf:tf@localhost:5432/thinkingface?sslmode=disable
+        run: go test ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.4.0
+          working-directory: backend
+          args: --timeout=5m
+
+  frontend:
+    name: frontend (Next.js)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Do not leave the job's GITHUB_TOKEN in .git/config: nothing here
+          # pushes, and the later steps run third-party tooling (tygo, bun,
+          # pip, docker build) that would otherwise have a credential within
+          # reach.
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Pinned rather than `latest`: a bun release should break CI on a
+          # deliberate bump, not on the morning it ships.
+          bun-version: "1.3.14"
+
+      - name: bun install
+        run: bun install --frozen-lockfile
+
+      - name: typecheck
+        run: bun run typecheck
+
+      - name: lint
+        run: bun run lint
+
+      - name: format:check
+        run: bun run format:check
+
+      - name: check:ui
+        run: bun run check:ui
+
+      - name: test
+        run: bun run test
+
+      - name: build
+        run: bun run build
+
+  contract:
+    name: contract (tygo type sync)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Do not leave the job's GITHUB_TOKEN in .git/config: nothing here
+          # pushes, and the later steps run third-party tooling (tygo, bun,
+          # pip, docker build) that would otherwise have a credential within
+          # reach.
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      # `git status --porcelain`, not `git diff --exit-code`: diff only inspects
+      # *tracked* files, so an api.gen.ts that exists but was never committed
+      # would make this job pass while the frontend has no generated types at
+      # all. --porcelain reports modified, untracked and deleted alike.
+      - name: Regenerate api.gen.ts and verify it is committed in sync
+        run: |
+          set -euo pipefail
+          test -f frontend/types/api.gen.ts || {
+            echo "::error::frontend/types/api.gen.ts is missing from the repository. Commit the result of 'make gen-types'"
+            exit 1
+          }
+          git ls-files --error-unmatch frontend/types/api.gen.ts >/dev/null || {
+            echo "::error::frontend/types/api.gen.ts is not tracked by git. Run 'git add frontend/types/api.gen.ts' and commit it"
+            exit 1
+          }
+          backend/scripts/gen-types.sh
+          status="$(git status --porcelain -- frontend/types/api.gen.ts)"
+          if [ -n "$status" ]; then
+            echo "$status"
+            git --no-pager diff -- frontend/types/api.gen.ts || true
+            echo "::error::frontend/types/api.gen.ts is out of sync with the Go types (backend/internal/apitypes). Run 'make gen-types' and commit the result"
+            exit 1
+          fi
+
+  python:
+    name: python (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Do not leave the job's GITHUB_TOKEN in .git/config: nothing here
+          # pushes, and the later steps run third-party tooling (tygo, bun,
+          # pip, docker build) that would otherwise have a credential within
+          # reach.
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: ruff check
+        run: ruff check e2e clients/python scripts
+
+      - name: ruff format --check
+        run: ruff format --check e2e clients/python scripts
+
+  e2e:
+    name: e2e (huggingface_hub compat, ${{ matrix.backend }})
+    # A heavy job that brings up the whole stack via docker compose, so only
+    # run it on push to main or manual dispatch.
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Exercises both the PostgreSQL and SQLite paths via DATABASE_URL's scheme.
+        backend: [postgres, sqlite]
+    env:
+      # sqlite layers docker-compose.sqlite.yml on top (equivalent to `make up-sqlite`).
+      # postgres uses only docker-compose.yml.
+      COMPOSE_ARGS: >-
+        ${{ matrix.backend == 'sqlite' && '-f docker-compose.yml -f docker-compose.sqlite.yml' || '-f docker-compose.yml' }}
+      COMPOSE_SERVICES: >-
+        ${{ matrix.backend == 'sqlite' && 'api web gcs' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Do not leave the job's GITHUB_TOKEN in .git/config: nothing here
+          # pushes, and the later steps run third-party tooling (tygo, bun,
+          # pip, docker build) that would otherwise have a credential within
+          # reach.
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Prepare .env
+        run: cp .env.example .env
+
+      - name: docker compose up
+        run: docker compose $COMPOSE_ARGS up -d --build $COMPOSE_SERVICES
+
+      - name: Wait for the API to become healthy
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/healthz >/dev/null 2>&1; then
+              echo "api is healthy after ${i} attempt(s)"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::api did not become healthy in time"
+          docker compose $COMPOSE_ARGS ps
+          docker compose $COMPOSE_ARGS logs --no-color
+          exit 1
+
+      - name: Install E2E dependencies
+        run: pip install -r e2e/requirements.txt
+
+      - name: pytest
+        working-directory: e2e
+        run: pytest -v
+
+      - name: Dump service logs on failure
+        if: failure()
+        run: docker compose $COMPOSE_ARGS logs --no-color
+
+      - name: docker compose down
+        if: always()
+        run: docker compose $COMPOSE_ARGS down -v

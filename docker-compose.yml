@@ -1,0 +1,113 @@
+name: thinkingface
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tf}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tf}
+      POSTGRES_DB: ${POSTGRES_DB:-thinkingface}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    ports:
+      # Lets the host connect directly (`make test-store-pg` runs
+      # backend/internal/store's integration tests against
+      # TF_TEST_DATABASE_URL=postgres://...@localhost:${POSTGRES_PORT:-5432}/...).
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tf} -d ${POSTGRES_DB:-thinkingface}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  gcs:
+    # Requires 1.55.0 or later: below that, the resumable upload path ignores
+    # the generation precondition (fsouza/fake-gcs-server#2260). The WAL
+    # index's CAS (docs/continuity-design.md §11) depends on this precondition.
+    image: fsouza/fake-gcs-server:1.55.1
+    restart: unless-stopped
+    command:
+      - "-scheme=http"
+      - "-public-host=gcs:4443"
+      - "-port=4443"
+      - "-filesystem-root=/data"
+    volumes:
+      - gcs-data:/data
+    ports:
+      - "4443:4443"
+    healthcheck:
+      # fake-gcs-server exposes a lightweight internal healthcheck endpoint;
+      # falls back fine to the JSON bucket-list API on older image tags.
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:4443/_internal/healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  api:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TF_ADDR: ${TF_ADDR:-:8080}
+      TF_PUBLIC_URL: ${TF_PUBLIC_URL:-http://localhost:8080}
+      DATABASE_URL: postgres://${POSTGRES_USER:-tf}:${POSTGRES_PASSWORD:-tf}@postgres:5432/${POSTGRES_DB:-thinkingface}?sslmode=disable
+      GIT_ROOT: /data/git
+      # Continuity migration (docs/continuity-design.md §15). Default is the
+      # Phase 2 shadow mode; run the full matrix locally with
+      #   TF_WAL_MODE=authoritative docker compose up -d api
+      TF_WAL_MODE: ${TF_WAL_MODE:-shadow}
+      TF_GIT_HOOKS_PATH: /opt/thinkingface/hooks
+      STORAGE_DRIVER: gcs-emulator
+      GCS_BUCKET: ${GCS_BUCKET:-thinkingface}
+      GCS_PREFIX: ${GCS_PREFIX:-}
+      STORAGE_EMULATOR_HOST: http://gcs:4443
+      TF_SIGNED_URL_TTL: ${TF_SIGNED_URL_TTL:-1h}
+      TF_ADMIN_USERNAME: ${TF_ADMIN_USERNAME:-admin}
+      TF_ADMIN_PASSWORD: ${TF_ADMIN_PASSWORD:-admin}
+      TF_ADMIN_EMAIL: ${TF_ADMIN_EMAIL:-admin@example.com}
+      TF_SESSION_SECRET: ${TF_SESSION_SECRET:-dev-insecure-session-secret}
+      TF_VIEWER_CACHE_DIR: /data/cache
+      TF_SYNC_WORKERS: ${TF_SYNC_WORKERS:-2}
+      TF_ALLOW_SIGNUP: ${TF_ALLOW_SIGNUP:-true}
+      # git over SSH (docs/thinkingface-design.md §5). The host key lives on
+      # the git-data volume so it survives `docker compose down`; a fresh key
+      # on every restart would make every client warn about a mismatch.
+      TF_SSH_ENABLED: ${TF_SSH_ENABLED:-true}
+      TF_SSH_ADDR: ":2222"
+      TF_SSH_HOST_KEY_PATH: /data/ssh/host_ed25519
+    volumes:
+      - git-data:/data
+    ports:
+      - "8080:8080"
+      - "${TF_SSH_PORT:-2222}:2222"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gcs:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    environment:
+      # Server-side (SSR/route handlers) talk to the api container directly.
+      API_URL: http://api:8080
+      # Browser-side code talks to the host-published port.
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pg-data:
+  gcs-data:
+  git-data:

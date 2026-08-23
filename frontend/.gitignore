@@ -1,0 +1,9 @@
+node_modules
+.next
+# Build artifact: scripts/copy-duckdb-assets.mjs stages the DuckDB-WASM runtime
+# here from node_modules (~75MB).
+public/duckdb
+out
+.env
+.env.local
+*.tsbuildinfo

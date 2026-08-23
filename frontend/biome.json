@@ -1,0 +1,84 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.9/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "includes": [
+      "**",
+      "!**/.next",
+      "!**/node_modules",
+      "!next-env.d.ts",
+      "!**/*.tsbuildinfo",
+      "!bun.lock",
+      "!types/*.gen.ts"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100,
+    "lineEnding": "lf"
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double",
+      "jsxQuoteStyle": "double",
+      "semicolons": "always",
+      "trailingCommas": "all",
+      "arrowParentheses": "always",
+      "bracketSameLine": false,
+      "bracketSpacing": true
+    }
+  },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
+  },
+  "assist": {
+    "enabled": true,
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "a11y": {
+        "noAriaUnsupportedElements": "off",
+        "useAltText": "off",
+        "useAriaPropsForRole": "off",
+        "useAriaPropsSupportedByRole": "off",
+        "useValidAriaProps": "off",
+        "useValidAriaValues": "off",
+        "noLabelWithoutControl": "off"
+      },
+      "correctness": {
+        "noChildrenProp": "off",
+        "noUnusedFunctionParameters": "off",
+        "noUnusedImports": "off",
+        "noUnusedVariables": "off",
+        "useExhaustiveDependencies": "off",
+        "useHookAtTopLevel": "off",
+        "useJsxKeyInIterable": "off"
+      },
+      "suspicious": {
+        "noDuplicateJsxProps": "off",
+        "noExplicitAny": "off"
+      },
+      "performance": {
+        "noImgElement": "off"
+      },
+      "style": {
+        "noNonNullAssertion": "off"
+      }
+    }
+  }
+}

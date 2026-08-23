@@ -1,0 +1,16 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web-dev",
+      "runtimeExecutable": "/usr/bin/make",
+      "runtimeArgs": ["dev-web"],
+      "port": 3100
+    },
+    {
+      "name": "web-docker",
+      "url": "http://localhost:3000",
+      "port": 3000
+    }
+  ]
+}

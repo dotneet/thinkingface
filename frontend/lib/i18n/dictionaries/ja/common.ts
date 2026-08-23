@@ -1,0 +1,50 @@
+// Shell (header / nav / user menu) and the language settings page.
+export const common = {
+  meta: {
+    description: "データセット・モデル・実験トラッキング。",
+  },
+  nav: {
+    datasets: "データセット",
+    models: "モデル",
+    experiments: "実験",
+  },
+  header: {
+    new: "新規作成",
+    newRepository: "新しいリポジトリ",
+    openMenu: "メニューを開く",
+    closeMenu: "メニューを閉じる",
+    searchModels: "モデルを検索...",
+    searchDatasets: "データセットを検索...",
+    searchExperiments: "実験を検索...",
+  },
+  theme: {
+    light: "ライトテーマ",
+    dark: "ダークテーマ",
+    system: "システムテーマ",
+    toggle: "テーマ: {label}。クリックで切り替え。",
+  },
+  userMenu: {
+    login: "ログイン",
+    accountMenu: "{username} のアカウントメニュー",
+    accessTokens: "アクセストークン",
+    sshKeys: "SSH キー",
+    storageUsage: "ストレージ使用量",
+    webhooks: "Webhook",
+    transfers: "リポジトリの移管",
+    organizations: "組織",
+    newOrganization: "組織を作成",
+    language: "言語",
+    logout: "ログアウト",
+    loggingOut: "ログアウト中…",
+    logoutFailed: "ログアウトできませんでした: {message}",
+  },
+  language: {
+    title: "言語",
+    description: "Web インターフェースの表示言語を選択します。",
+    groupLabel: "表示言語",
+    auto: "ブラウザ設定に従う",
+    autoHint: "ブラウザが要求する言語を使用します。現在: {resolved}。",
+    en: "English",
+    ja: "日本語",
+  },
+};

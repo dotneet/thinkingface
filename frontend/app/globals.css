@@ -1,0 +1,587 @@
+@import "tailwindcss";
+
+@theme inline {
+  /* Figtree carries no CJK glyphs and next/font's variable ends at
+     `Figtree, "Figtree Fallback"` — without the tail below, Japanese text
+     falls through to whatever the browser's default family happens to be
+     (serif on some Windows setups). The UI is bilingual (lib/i18n), so the
+     CJK stack is part of the design, not a fallback afterthought. */
+  --font-sans:
+    var(--font-body), "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic UI",
+    "Yu Gothic", Meiryo, sans-serif;
+  --font-mono: var(--font-mono-code), "Hiragino Sans", "Noto Sans JP", monospace;
+
+  /* Tailwind's stock leading for the two sizes the whole UI is built from
+     (1.333 / 1.429) is tuned for Latin. Japanese has a much higher ink
+     density per line, so both are opened up one notch. */
+  --text-xs--line-height: 1.5;
+  --text-sm--line-height: 1.6;
+
+  --color-bg: var(--tf-bg);
+  --color-bg-raised: var(--tf-bg-raised);
+  --color-bg-sunken: var(--tf-bg-sunken);
+  --color-bg-hover: var(--tf-bg-hover);
+  --color-border: var(--tf-border);
+  --color-border-strong: var(--tf-border-strong);
+  --color-border-control: var(--tf-border-control);
+  --color-fg: var(--tf-fg);
+  --color-fg-muted: var(--tf-fg-muted);
+  --color-fg-subtle: var(--tf-fg-subtle);
+  --color-accent: var(--tf-accent);
+  --color-accent-fg: var(--tf-accent-fg);
+  --color-accent-muted: var(--tf-accent-muted);
+  --color-positive: var(--tf-positive);
+  --color-negative: var(--tf-negative);
+  --color-warning: var(--tf-warning);
+  --color-accent-strong: var(--tf-accent-strong);
+  --color-positive-strong: var(--tf-positive-strong);
+  --color-negative-strong: var(--tf-negative-strong);
+  --color-warning-strong: var(--tf-warning-strong);
+}
+
+:root {
+  color-scheme: light;
+
+  /* Neutral surfaces: cool slate tint, never pure gray. */
+  --tf-bg: oklch(0.985 0.004 265);
+  --tf-bg-raised: oklch(1 0 0);
+  --tf-bg-sunken: oklch(0.96 0.006 265);
+  --tf-bg-hover: oklch(0.94 0.008 265);
+  --tf-border: oklch(0.88 0.008 265);
+  --tf-border-strong: oklch(0.78 0.012 265);
+  /* Boundary of an interactive control (input, select, checkbox). Separate
+     from --tf-border because a decorative hairline may be faint but a control
+     outline owes the reader 3:1 (WCAG 1.4.11). 3.50 vs bg-raised, 3.12 vs the
+     control's own bg-sunken fill. */
+  --tf-border-control: oklch(0.63 0.012 265);
+  --tf-fg: oklch(0.22 0.014 265);
+  --tf-fg-muted: oklch(0.44 0.014 265);
+  /* 5.51 on bg-raised, 4.62 on bg-hover — the whole surface ladder clears AA
+     for normal text. It used to sit at 0.58 (4.28 / 3.59), which was below AA
+     everywhere, and this is the most-used foreground token in the app. */
+  --tf-fg-subtle: oklch(0.52 0.012 265);
+
+  /* Accent: teal-indigo, distinct from HF's orange/yellow identity. */
+  --tf-accent: oklch(0.52 0.14 240);
+  --tf-accent-fg: oklch(0.99 0.005 240);
+  --tf-accent-muted: oklch(0.93 0.03 240);
+
+  --tf-positive: oklch(0.55 0.14 155);
+  --tf-negative: oklch(0.55 0.19 25);
+  --tf-warning: oklch(0.72 0.15 80);
+
+  /* `-strong` = the same hue, dense enough to be *text* on its own tinted
+     fill. Tinting a surface with `bg-warning/20` darkens it by the same hue
+     the text uses, so `text-warning` on `bg-warning/20` can never reach 4.5
+     in light mode (it measured 2.12). The fills stay as they are; only the
+     text and the status icons move to these. */
+  --tf-accent-strong: oklch(0.44 0.14 240);
+  --tf-positive-strong: oklch(0.46 0.13 155);
+  --tf-negative-strong: oklch(0.46 0.16 25);
+  --tf-warning-strong: oklch(0.46 0.13 80);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --tf-bg: oklch(0.19 0.01 260);
+    --tf-bg-raised: oklch(0.23 0.011 260);
+    --tf-bg-sunken: oklch(0.16 0.01 260);
+    --tf-bg-hover: oklch(0.27 0.013 260);
+    --tf-border: oklch(0.32 0.014 260);
+    --tf-border-strong: oklch(0.42 0.016 260);
+    --tf-border-control: oklch(0.52 0.016 260);
+    --tf-fg: oklch(0.93 0.006 260);
+    --tf-fg-muted: oklch(0.74 0.012 260);
+    /* 5.22 on bg-raised, 4.66 on bg-hover (was 3.94 / 3.52 — worse than the
+       light theme's, because both themes shared L=0.58 without accounting
+       for the surface underneath). */
+    --tf-fg-subtle: oklch(0.65 0.012 260);
+
+    --tf-accent: oklch(0.74 0.13 220);
+    --tf-accent-fg: oklch(0.16 0.02 240);
+    --tf-accent-muted: oklch(0.3 0.05 230);
+
+    --tf-positive: oklch(0.68 0.15 155);
+    --tf-negative: oklch(0.68 0.17 25);
+    --tf-warning: oklch(0.78 0.14 85);
+
+    /* Dark tints are darker than the text, so `accent` and `warning` already
+       clear AA on them and `-strong` simply aliases them, which is what lets a
+       component name one token in both themes. `positive` and `negative` do
+       not (4.39 and 4.44 on their /15 fill over bg-hover), so they brighten. */
+    --tf-accent-strong: oklch(0.74 0.13 220);
+    --tf-positive-strong: oklch(0.72 0.15 155);
+    --tf-negative-strong: oklch(0.74 0.15 25);
+    --tf-warning-strong: oklch(0.78 0.14 85);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --tf-bg: oklch(0.19 0.01 260);
+  --tf-bg-raised: oklch(0.23 0.011 260);
+  --tf-bg-sunken: oklch(0.16 0.01 260);
+  --tf-bg-hover: oklch(0.27 0.013 260);
+  --tf-border: oklch(0.32 0.014 260);
+  --tf-border-strong: oklch(0.42 0.016 260);
+  --tf-border-control: oklch(0.52 0.016 260);
+  --tf-fg: oklch(0.93 0.006 260);
+  --tf-fg-muted: oklch(0.74 0.012 260);
+  /* 5.22 on bg-raised, 4.66 on bg-hover (was 3.94 / 3.52 — worse than the
+     light theme's, because both themes shared L=0.58 without accounting
+     for the surface underneath). */
+  --tf-fg-subtle: oklch(0.65 0.012 260);
+
+  --tf-accent: oklch(0.74 0.13 220);
+  --tf-accent-fg: oklch(0.16 0.02 240);
+  --tf-accent-muted: oklch(0.3 0.05 230);
+
+  --tf-positive: oklch(0.68 0.15 155);
+  --tf-negative: oklch(0.68 0.17 25);
+  --tf-warning: oklch(0.78 0.14 85);
+
+  /* Dark tints are darker than the text, so `accent` and `warning` already
+     clear AA on them and `-strong` simply aliases them, which is what lets a
+     component name one token in both themes. `positive` and `negative` do
+     not (4.39 and 4.44 on their /15 fill over bg-hover), so they brighten. */
+  --tf-accent-strong: oklch(0.74 0.13 220);
+  --tf-positive-strong: oklch(0.72 0.15 155);
+  --tf-negative-strong: oklch(0.74 0.15 25);
+  --tf-warning-strong: oklch(0.78 0.14 85);
+}
+
+/* Default border colour for bare `border` utilities. Must live in @layer base:
+   an unlayered rule outranks every layered one, which silently killed
+   border-transparent / border-accent etc. (they sit in @layer utilities). */
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--tf-border);
+  }
+}
+
+/* Keyboard-only focus ring (`:focus-visible`, never plain `:focus`) for every
+   interactive element — a global reset rather than a per-primitive utility so
+   plain <a> / <Link> and anything outside components/ui/ get it too, not just
+   Button/Badge-as-link. `--tf-accent` already meets non-text contrast against
+   both bg and bg-raised in both themes (it is tuned for text-on-accent use).
+   `outline` (not `ring`/box-shadow) so it is never clipped by a parent's
+   border-radius, and it sits in @layer base so a component's own
+   `focus:border-accent` treatment (ui/field.tsx's Input/Textarea/Select,
+   which sets `outline-none`) can still win via the later @layer utilities. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--tf-accent);
+    outline-offset: 2px;
+  }
+}
+
+html {
+  overflow-x: hidden;
+}
+
+body {
+  background: var(--tf-bg);
+  color: var(--tf-fg);
+  overflow-x: hidden;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.scroll-x {
+  overflow-x: auto;
+}
+
+/* Form-control styling lives in components/ui/field.tsx (Input / Textarea /
+   Select / Checkbox), not here — this file only carries global resets, the
+   two generic utilities above, and the styles for markdown rendered by
+   react-markdown, which produces plain HTML we cannot put classes on. */
+
+::selection {
+  background: var(--tf-accent-muted);
+}
+
+/* react-markdown README rendering.
+   Only .tf-markdown-scoped rules belong in this file (DESIGN.md §5) — this
+   is the one block covering everything ReactMarkdown can emit, including
+   the DOM produced by sibling components (heading anchors, table wrapper,
+   code block chrome) that other parts of the app own. */
+
+/* Kill the overhang above the first line and below the last — the block
+   sits inside cards / preview panes that already carry their own padding. */
+.tf-markdown > :first-child {
+  margin-top: 0;
+}
+.tf-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.tf-markdown h1,
+.tf-markdown h2,
+.tf-markdown h3,
+.tf-markdown h4,
+.tf-markdown h5,
+.tf-markdown h6 {
+  font-weight: 600;
+  line-height: 1.3;
+  margin-top: 1.6em;
+  margin-bottom: 0.6em;
+  color: var(--tf-fg);
+  /* Room for the sticky site header (h-14 = 3.5rem) when a heading is the
+     target of an in-page anchor jump. */
+  scroll-margin-top: 5rem;
+}
+.tf-markdown h1,
+.tf-markdown h2 {
+  border-bottom: 1px solid var(--tf-border);
+  padding-bottom: 0.3em;
+}
+/* The scale has to stay legible against body copy that is 0.875rem in most
+   call sites (the card sets text-sm). At the old values h5 (0.9rem) and h6
+   (0.875rem) were the same size *and* the same weight as the paragraphs
+   around them, so they did not read as headings at all: below h4 the
+   distinction moves from size to weight and letter-spacing. */
+.tf-markdown h1 {
+  font-size: 1.75rem;
+}
+.tf-markdown h2 {
+  font-size: 1.4rem;
+}
+.tf-markdown h3 {
+  font-size: 1.2rem;
+}
+.tf-markdown h4 {
+  font-size: 1.05rem;
+}
+.tf-markdown h5 {
+  font-size: 1rem;
+  font-weight: 700;
+}
+.tf-markdown h6 {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--tf-fg-muted);
+}
+
+/* Heading permalink appended by the markdown renderer. Hidden until the
+   heading is hovered/focused, always visible when the input has no hover
+   (touch). */
+.tf-markdown a.tf-heading-anchor {
+  opacity: 0;
+  margin-left: 0.35em;
+  color: var(--tf-fg-subtle);
+  text-decoration: none;
+}
+.tf-markdown :is(h1, h2, h3, h4, h5, h6):hover a.tf-heading-anchor,
+.tf-markdown a.tf-heading-anchor:focus-visible {
+  opacity: 1;
+}
+@media (hover: none) {
+  .tf-markdown a.tf-heading-anchor {
+    opacity: 1;
+  }
+}
+
+.tf-markdown p {
+  margin: 0.8em 0;
+  line-height: 1.7;
+  color: var(--tf-fg);
+  overflow-wrap: break-word;
+}
+.tf-markdown a {
+  color: var(--tf-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+.tf-markdown code {
+  font-family: var(--font-mono-code);
+  background: var(--tf-bg-sunken);
+  border: 1px solid var(--tf-border);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  font-size: 0.875em;
+  overflow-wrap: break-word;
+}
+.tf-markdown pre {
+  background: var(--tf-bg-sunken);
+  border: 1px solid var(--tf-border);
+  border-radius: 8px;
+  padding: 1em;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+.tf-markdown pre code {
+  border: none;
+  background: none;
+  padding: 0;
+  overflow-wrap: normal;
+}
+/* Wrapper the code-block component renders around the language/copy bar +
+   <pre>. Owned by another part of the app; only its outer spacing is ours. */
+.tf-markdown .tf-codeblock {
+  margin: 0.8em 0;
+}
+
+/* highlight.js token colours, tuned from the existing semantic tokens so
+   both themes stay readable on --tf-bg-sunken. */
+.tf-markdown .hljs-comment,
+.tf-markdown .hljs-quote {
+  color: var(--tf-fg-subtle);
+  font-style: italic;
+}
+.tf-markdown .hljs-keyword,
+.tf-markdown .hljs-selector-tag,
+.tf-markdown .hljs-literal,
+.tf-markdown .hljs-subst,
+.tf-markdown .hljs-tag {
+  color: var(--tf-accent);
+}
+.tf-markdown .hljs-type,
+.tf-markdown .hljs-built_in {
+  color: var(--tf-accent);
+  font-weight: 600;
+}
+.tf-markdown .hljs-string,
+.tf-markdown .hljs-regexp,
+.tf-markdown .hljs-addition,
+.tf-markdown .hljs-doctag {
+  color: var(--tf-positive);
+}
+.tf-markdown .hljs-number,
+.tf-markdown .hljs-symbol,
+.tf-markdown .hljs-bullet,
+.tf-markdown .hljs-link,
+.tf-markdown .hljs-meta,
+.tf-markdown .hljs-attribute {
+  color: var(--tf-warning);
+}
+.tf-markdown .hljs-deletion {
+  color: var(--tf-negative);
+}
+.tf-markdown .hljs-title,
+.tf-markdown .hljs-section,
+.tf-markdown .hljs-name,
+.tf-markdown .hljs-selector-id,
+.tf-markdown .hljs-selector-class,
+.tf-markdown .hljs-attr {
+  color: var(--tf-fg);
+  font-weight: 600;
+}
+.tf-markdown .hljs-variable,
+.tf-markdown .hljs-template-variable,
+.tf-markdown .hljs-params {
+  color: var(--tf-fg);
+}
+.tf-markdown .hljs-punctuation,
+.tf-markdown .hljs-operator {
+  color: var(--tf-fg-muted);
+}
+.tf-markdown .hljs-emphasis {
+  font-style: italic;
+}
+.tf-markdown .hljs-strong {
+  font-weight: 700;
+}
+
+.tf-markdown ul,
+.tf-markdown ol {
+  margin: 0.6em 0;
+  padding-left: 1.4em;
+  color: var(--tf-fg);
+}
+.tf-markdown ul {
+  list-style: disc;
+}
+.tf-markdown ul ul {
+  list-style: circle;
+}
+.tf-markdown ul ul ul {
+  list-style: square;
+}
+.tf-markdown ol {
+  list-style: decimal;
+}
+.tf-markdown li {
+  margin: 0.3em 0;
+}
+.tf-markdown li > ul,
+.tf-markdown li > ol {
+  margin: 0.2em 0;
+}
+/* GFM task list items: no bullet, checkbox baseline-aligned with the text
+   instead of the default UA offset. */
+.tf-markdown li.task-list-item {
+  list-style: none;
+  margin-left: -1.4em;
+  padding-left: 1.4em;
+}
+.tf-markdown input[type="checkbox"] {
+  accent-color: var(--tf-accent);
+}
+.tf-markdown li.task-list-item input[type="checkbox"] {
+  margin: 0 0.5em 0 0;
+  vertical-align: middle;
+}
+
+.tf-markdown blockquote {
+  border-left: 3px solid var(--tf-border-strong);
+  padding-left: 1em;
+  color: var(--tf-fg-subtle);
+  margin: 0.8em 0;
+}
+.tf-markdown blockquote > :first-child {
+  margin-top: 0;
+}
+.tf-markdown blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+/* Table wrapper rendered by the code that turns bare `<table>` into
+   `div.tf-table-wrap.scroll-x > table` so wide tables scroll instead of
+   blowing out the layout. */
+.tf-markdown .tf-table-wrap {
+  overflow-x: auto;
+  margin: 0.8em 0;
+}
+.tf-markdown table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.9em;
+  margin: 0;
+}
+.tf-markdown th,
+.tf-markdown td {
+  border: 1px solid var(--tf-border);
+  padding: 0.4em 0.7em;
+  text-align: left;
+  vertical-align: top;
+}
+.tf-markdown th {
+  background: var(--tf-bg-sunken);
+  font-weight: 600;
+  color: var(--tf-fg);
+}
+.tf-markdown tbody tr:nth-child(even) {
+  background: color-mix(in oklch, var(--tf-bg-sunken) 45%, transparent);
+}
+
+.tf-markdown img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+.tf-markdown p[align="center"],
+.tf-markdown div[align="center"] {
+  text-align: center;
+}
+
+.tf-markdown hr {
+  border: none;
+  border-top: 1px solid var(--tf-border);
+  margin: 1.6em 0;
+}
+
+.tf-markdown del {
+  color: var(--tf-fg-subtle);
+  text-decoration: line-through;
+}
+
+.tf-markdown kbd {
+  font-family: var(--font-mono-code);
+  font-size: 0.85em;
+  color: var(--tf-fg);
+  background: var(--tf-bg-sunken);
+  border: 1px solid var(--tf-border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0.1em 0.45em;
+}
+
+.tf-markdown sup,
+.tf-markdown sub {
+  font-size: 0.75em;
+  line-height: 0;
+  position: relative;
+  vertical-align: baseline;
+}
+.tf-markdown sup {
+  top: -0.5em;
+}
+.tf-markdown sub {
+  bottom: -0.25em;
+}
+
+/* GFM footnotes (remark-gfm): reference markers and the definitions list
+   remark appends at the end of the document. */
+.tf-markdown [data-footnote-ref] {
+  text-decoration: none;
+  color: var(--tf-accent);
+}
+.tf-markdown .data-footnote-backref {
+  text-decoration: none;
+  margin-left: 0.25em;
+}
+.tf-markdown .footnotes {
+  margin-top: 2em;
+  padding-top: 1em;
+  border-top: 1px solid var(--tf-border);
+  font-size: 0.85em;
+  color: var(--tf-fg-subtle);
+}
+.tf-markdown .footnotes ol {
+  color: var(--tf-fg-subtle);
+}
+
+.tf-markdown details {
+  border: 1px solid var(--tf-border);
+  border-radius: 8px;
+  padding: 0.6em 0.9em;
+  margin: 0.8em 0;
+  background: var(--tf-bg-sunken);
+}
+.tf-markdown summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--tf-fg);
+}
+.tf-markdown details[open] summary {
+  margin-bottom: 0.6em;
+}
+.tf-markdown details > :last-child {
+  margin-bottom: 0;
+}
+
+.tf-markdown figure {
+  margin: 0.8em 0;
+}
+.tf-markdown figcaption {
+  font-size: 0.85em;
+  color: var(--tf-fg-subtle);
+  text-align: center;
+  margin-top: 0.4em;
+}
+
+.tf-markdown video {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+
+/* KaTeX ($…$ / $$…$$ via remark-math + rehype-katex): wide equations
+   scroll horizontally instead of overflowing the card. */
+.tf-markdown .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.25em 0;
+}

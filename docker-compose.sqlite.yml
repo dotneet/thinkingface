@@ -1,0 +1,43 @@
+# Override file for bringing the stack up in SQLite mode.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.sqlite.yml up -d api web gcs
+#   (`make up-sqlite` is a shortcut for this command)
+#
+# The postgres service itself does not start. It is excluded via two
+# complementary mechanisms:
+#
+#   1. Tag the postgres service with `profiles: ["postgres"]`.
+#      It is automatically excluded from a `docker compose up` that names no
+#      profile (the same holds even for `up -d api web gcs`, which names
+#      services explicitly).
+#   2. Replace the api service's `depends_on` wholesale with an `!override`
+#      tag, dropping the dependency on postgres and leaving only gcs.
+#      (`depends_on` is a mapping, so a normal merge that only adds keys
+#      cannot remove the postgres entry. It has to be explicitly overridden
+#      with the Compose Specification's merge tag [1]. Available since Docker
+#      Compose v2.24+ -- this repo has been verified against the v2.40 line.)
+#      [1] https://github.com/compose-spec/compose-spec/blob/master/13-merge.md
+#
+# Both are used together so that losing either one alone doesn't cause an
+# accident (e.g. if the operational habit later changes to bringing things up
+# with `up -d` and no service names, the profiles setting still keeps
+# postgres from starting).
+#
+# The actual SQLite file is persisted in a named volume (sqlite-data).
+
+services:
+  postgres:
+    profiles:
+      - postgres
+
+  api:
+    depends_on: !override
+      gcs:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: sqlite:///data/db/thinkingface.db
+    volumes:
+      - sqlite-data:/data/db
+
+volumes:
+  sqlite-data:

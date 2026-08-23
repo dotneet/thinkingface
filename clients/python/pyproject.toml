@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "thinkingface"
+version = "0.1.0"
+description = "Python client helpers for a self-hosted thinkingface Hub (HuggingFace Hub compatible)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "thinkingface" }]
+dependencies = [
+    "huggingface_hub>=0.24",
+    "pyarrow>=14.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# Autolog integrations (thinkingface.trackio.integrations). Both are optional:
+# importing thinkingface.trackio.integrations never requires either package,
+# only instantiating the corresponding class does.
+transformers = ["transformers>=4.30"]
+lightning = ["lightning>=2.0"]
+
+[project.urls]
+Homepage = "https://github.com/dotneet/thinkingface"
+
+[tool.hatch.build.targets.wheel]
+packages = ["thinkingface"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "W",   # pycodestyle warnings
+]
+ignore = [
+    "E501",  # Leave line length to the formatter
+    # warnings.warn()'s stacklevel changes where the warning is reported, so
+    # for now we disable this to preserve existing client behavior.
+    "B028",
+]
+
+[tool.ruff.format]
+quote-style = "double"
