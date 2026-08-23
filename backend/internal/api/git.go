@@ -184,46 +184,32 @@ func (s *Server) handleLFSProxyUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Buffer to a temporary key first: the digest is only known once the whole
-	// body has been read, and a mismatched object must never land under its
-	// claimed name.
-	tmpKey := "tmp/uploads/" + oid + "-" + strconv.FormatInt(repoID, 10)
+	// Write to the staging key first, exactly as the signed-URL path does:
+	// the digest is only known once the whole body has been read, and a
+	// mismatched object must never land on the shared content-addressed key.
+	// This path can hash the bytes because they pass through the server; the
+	// signed-URL path cannot, which is why size is all Verify can check.
+	stagingKey := storage.LFSStagingKey(repoID, oid)
 	hashReader := newHashingReader(r.Body)
-	if err := s.storage.Put(r.Context(), tmpKey, hashReader, "application/octet-stream"); err != nil {
+	if err := s.storage.Put(r.Context(), stagingKey, hashReader, "application/octet-stream"); err != nil {
 		internalError(w, "buffer upload", err)
 		return
 	}
 	gotOID, size := hashReader.Result()
 	if gotOID != oid {
-		_ = s.storage.Delete(r.Context(), tmpKey)
+		_ = s.storage.Delete(r.Context(), stagingKey)
 		writeLFSError(w, http.StatusBadRequest,
 			"uploaded content hashes to "+gotOID+" but was declared as "+oid)
 		return
 	}
-	// Like every other upload path, this writes to the content-addressed key,
-	// which is where the object stays.
-	key := storage.LFSKey(oid)
-	if err := s.storage.Copy(r.Context(), tmpKey, key); err != nil {
-		internalError(w, "store lfs object", err)
-		return
-	}
-	_ = s.storage.Delete(r.Context(), tmpKey)
-
-	if err := s.store.RecordLFSObject(r.Context(), repoID, oid, size, func(k string) (bool, error) {
-		info, err := s.storage.Stat(r.Context(), k)
-		if errors.Is(err, storage.ErrNotFound) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		return size <= 0 || info.Size == size, nil
-	}); err != nil {
-		if errors.Is(err, store.ErrLFSObjectGone) {
+	// Promotion (copy to lfs/{oid}, link, drop the staged object) is shared
+	// with Verify so both upload paths publish objects the same way.
+	if err := s.lfs.PromoteStaged(r.Context(), repoID, oid, size); err != nil {
+		if errors.Is(err, store.ErrLFSObjectGone) || errors.Is(err, lfs.ErrNotStaged) {
 			writeLFSError(w, http.StatusConflict, "object was removed; retry the upload")
 			return
 		}
-		internalError(w, "record lfs object", err)
+		internalError(w, "store lfs object", err)
 		return
 	}
 	w.WriteHeader(http.StatusOK)

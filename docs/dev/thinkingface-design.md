@@ -102,7 +102,7 @@ gs://{bucket}/
 │   ├── index.json                            #   CAS target. Refs and pack ordering
 │   ├── base/{ulid}.pack                      #   Compaction snapshot
 │   └── entries/{seq}-{ulid}.pack             #   One push = one entry
-└── tmp/uploads/{oid}-{repoID}                # Scratch space for LFS proxy uploads
+└── tmp/uploads/lfs/{repoID}/{oid}            # Staging area every LFS upload lands in before verify
 ```
 
 - **LFS payloads live only in `lfs/`, and non-LFS blob payloads live only in `blobs/` — exactly one copy of each.**
@@ -111,6 +111,11 @@ gs://{bucket}/
 - Transfers, renames, and deletions never move a single byte of GCS objects. Orphaned objects are
   reclaimed by `thinkingface gc` (using `repo_lfs_objects` as the reference count for `lfs/` and
   `repo_files.blob_sha` for `blobs/`)
+- A signed PUT URL for an LFS upload targets `tmp/uploads/lfs/{repoID}/{oid}`, never `lfs/` directly.
+  An upload lands in `lfs/` only once verify checks the transferred byte count and promotes it there
+  with a server-side copy, so a half-finished or corrupt transfer never becomes visible as a valid
+  object. Nothing indexes `tmp/uploads/`, so `thinkingface gc` reclaims whatever an interrupted
+  upload leaves behind purely by age (`stagingGrace` in `backend/cmd/thinkingface/gc.go`)
 - `wal/` is keyed by `repositories.storage_path` (an immutable physical location assigned when the
   repository is created; new repositories get `repos/{ulid}`, while repositories predating the
   introduction of `storage_path` keep their old-style location `{models|datasets}/{ns}/{name}` via

@@ -56,7 +56,19 @@ type Config struct {
 	// budget on the server process's *heap*, not on tmpfs/disk space (§12).
 	ViewerMetadataCacheBytes int64
 
+	// SignedURLTTL is the floor of a signed transfer URL's lifetime, not a
+	// fixed duration: the actual lifetime is derived from the object's byte
+	// count (large uploads need longer than a fast connection takes for a
+	// small one) and then clamped into [SignedURLTTL, SignedURLMaxTTL]. Raise
+	// it if clients on slow links are still failing small transfers before
+	// the floor expires.
 	SignedURLTTL time.Duration
+	// SignedURLMaxTTL is the ceiling that clamps the size-derived lifetime
+	// described above. It also bounds how long an LFS upload may sit in the
+	// tmp/uploads/ staging area before `thinkingface gc` may treat it as
+	// abandoned (see stagingGrace in cmd/thinkingface/gc.go), so raising it
+	// pushes that grace period out too.
+	SignedURLMaxTTL time.Duration
 
 	// Seed values applied on first boot when the users table is empty.
 	AdminUsername string
@@ -148,6 +160,7 @@ func Load() (*Config, error) {
 
 		ViewerMetadataCacheBytes: envInt64("TF_VIEWER_METADATA_CACHE_BYTES", 256<<20),
 		SignedURLTTL:             envDuration("TF_SIGNED_URL_TTL", time.Hour),
+		SignedURLMaxTTL:          envDuration("TF_SIGNED_URL_MAX_TTL", 12*time.Hour),
 		AdminUsername:            env("TF_ADMIN_USERNAME", "admin"),
 		AdminPassword:            env("TF_ADMIN_PASSWORD", DefaultAdminPassword),
 		AdminEmail:               env("TF_ADMIN_EMAIL", "admin@example.com"),

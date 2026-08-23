@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/dotneet/thinkingface/backend/internal/lfs"
 	"github.com/dotneet/thinkingface/backend/internal/storage"
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
@@ -18,6 +19,36 @@ import (
 // committed yet. A day is far longer than either takes and costs only the
 // storage of a handful of objects until the next run.
 const blobGrace = 24 * time.Hour
+
+// minStagingGrace floors the window below, so that an operator who shortens
+// TF_SIGNED_URL_MAX_TTL cannot shorten it to something a slow transfer can
+// outlive. It matches blobGrace for the same reason blobGrace is a day.
+const minStagingGrace = 24 * time.Hour
+
+// stagingGrace is how long an object may sit under tmp/uploads/ before gc
+// treats it as abandoned rather than mid-upload. Nothing records a staging
+// object anywhere -- there is no table for it, unlike lfs_objects for lfs/ --
+// so age is the only signal available, the same inference gcBlobs makes for
+// blobs/.
+//
+// The floor that inference has to clear is the longest a signed PUT URL can
+// legitimately still be in use. That is *not* TF_SIGNED_URL_MAX_TTL read
+// literally: lfs.MaxSignedURLTTL is the authority, because a zero (no
+// ceiling) means URLs live up to GCS's 7-day signing limit rather than
+// expiring sooner. Deriving it there rather than restating it here is the
+// point -- the two drifting apart is silent and expensive in both directions:
+// a hardcoded 24h against a raised ceiling has gc deleting uploads that are
+// still being written.
+//
+// Doubling leaves room for an upload that started just before its URL's
+// nominal expiry, plus clock skew between whichever machine signed the URL and
+// whichever machine runs gc.
+func stagingGrace(signedURLMaxTTL time.Duration) time.Duration {
+	if grace := 2 * lfs.MaxSignedURLTTL(signedURLMaxTTL); grace > minStagingGrace {
+		return grace
+	}
+	return minStagingGrace
+}
 
 // gcDB is the store surface runGC needs. *store.Store implements it.
 type gcDB interface {
@@ -33,15 +64,18 @@ type gcStorage interface {
 	List(ctx context.Context, prefix string) ([]storage.ObjectInfo, error)
 }
 
-// runGC reclaims both content-addressed layers: lfs/, whose objects are
+// runGC reclaims the two content-addressed layers -- lfs/, whose objects are
 // tracked in lfs_objects and referenced through repo_lfs_objects, and blobs/,
-// which is tracked nowhere and referenced by repo_files.blob_sha. Neither
-// shrinks on its own -- repositories get deleted and files get overwritten,
-// but a content-addressed key is immutable and may be shared by any number of
-// repositories, so no push or delete may remove one.
+// which is tracked nowhere and referenced by repo_files.blob_sha -- plus the
+// tmp/uploads/ staging area LFS PUTs land in before verify promotes them into
+// lfs/. Neither content-addressed layer shrinks on its own -- repositories get
+// deleted and files get overwritten, but a content-addressed key is immutable
+// and may be shared by any number of repositories, so no push or delete may
+// remove one. Staging objects are different: nothing shares them, so an
+// interrupted upload just sits there until gc removes it.
 //
-// Both passes report first and only delete with --yes (or --dry-run=false).
-func runGC(ctx context.Context, db gcDB, obj gcStorage, args []string) error {
+// All three passes report first and only delete with --yes (or --dry-run=false).
+func runGC(ctx context.Context, db gcDB, obj gcStorage, signedURLMaxTTL time.Duration, args []string) error {
 	fs := flag.NewFlagSet("gc", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", true, "report orphaned objects without deleting anything (default)")
 	yes := fs.Bool("yes", false, "actually delete the orphaned objects from storage and postgres")
@@ -56,7 +90,10 @@ func runGC(ctx context.Context, db gcDB, obj gcStorage, args []string) error {
 	if err := gcLFS(ctx, db, obj, execute); err != nil {
 		return err
 	}
-	return gcBlobs(ctx, db, obj, execute)
+	if err := gcBlobs(ctx, db, obj, execute); err != nil {
+		return err
+	}
+	return gcStaging(ctx, obj, signedURLMaxTTL, execute)
 }
 
 // gcLFS collects lfs/ objects that no repository links to any more.
@@ -170,6 +207,65 @@ func gcBlobs(ctx context.Context, db gcDB, obj gcStorage, execute bool) error {
 	fmt.Printf("deleted %d of %d orphaned blobs (%d bytes)\n", deleted, len(orphaned), deletedBytes)
 	if storageFailures > 0 {
 		return fmt.Errorf("%d blobs failed to delete from storage; see the logged errors above", storageFailures)
+	}
+	return nil
+}
+
+// gcStaging collects tmp/uploads/ objects abandoned by interrupted LFS
+// uploads. A signed PUT now lands in staging, not lfs/ directly; only a
+// successful verify (which checks the transferred size) promotes it into
+// lfs/ via a server-side copy. A client that never verifies -- it crashed,
+// the connection dropped, the user gave up -- leaves its bytes sitting
+// under tmp/uploads/ forever unless something removes them, and with
+// datasets running past 10GB per file that adds up fast.
+//
+// Unlike gcLFS there is no lfs_objects row to consult and nothing to lock:
+// no table records a staging object at all, so there is no reference count
+// to check and no way to distinguish "abandoned" from "still uploading"
+// except elapsed time. That is the same inference gcBlobs makes for
+// blobs/, and stagingGrace plays the role blobGrace does there -- except it
+// has to clear a known floor (the longest a client may still legitimately
+// be using a signed URL) rather than an estimate of how long a push takes, so
+// it is derived from the configured ceiling instead of picked directly.
+func gcStaging(ctx context.Context, obj gcStorage, signedURLMaxTTL time.Duration, execute bool) error {
+	objects, err := obj.List(ctx, storage.LFSStagingPrefix)
+	if err != nil {
+		return fmt.Errorf("list staging objects: %w", err)
+	}
+
+	cutoff := time.Now().Add(-stagingGrace(signedURLMaxTTL))
+	orphaned := make([]storage.ObjectInfo, 0, len(objects))
+	var totalBytes int64
+	for _, o := range objects {
+		if !o.Updated.Before(cutoff) {
+			continue
+		}
+		orphaned = append(orphaned, o)
+		totalBytes += o.Size
+		fmt.Printf("orphaned upload %s  %d bytes\n", o.Key, o.Size)
+	}
+	fmt.Printf("%d of %d staging objects are orphaned (%d bytes total)\n", len(orphaned), len(objects), totalBytes)
+
+	if !execute {
+		fmt.Println("dry run: nothing deleted. Re-run with --yes to delete these objects.")
+		return nil
+	}
+
+	var deleted int
+	var deletedBytes int64
+	var storageFailures int
+	for _, o := range orphaned {
+		if err := obj.Delete(ctx, o.Key); err != nil {
+			slog.Error("gc: delete failed, leaving the staging object for a later retry", "key", o.Key, "error", err)
+			storageFailures++
+			continue
+		}
+		deleted++
+		deletedBytes += o.Size
+	}
+	fmt.Printf("deleted %d of %d orphaned staging objects (%d bytes)\n", deleted, len(orphaned), deletedBytes)
+	if storageFailures > 0 {
+		return fmt.Errorf("%d staging objects failed to delete from storage; see the logged errors above", storageFailures)
 	}
 	return nil
 }

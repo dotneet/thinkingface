@@ -41,7 +41,7 @@ func (m *memStore) SupportsSignedURL() bool { return false }
 func (m *memStore) SignedGetURL(context.Context, string, time.Duration, string) (string, error) {
 	return "", errors.New("unused")
 }
-func (m *memStore) SignedPutURL(context.Context, string, time.Duration, int64) (string, error) {
+func (m *memStore) SignedPutURL(context.Context, string, time.Duration) (string, error) {
 	return "", errors.New("unused")
 }
 

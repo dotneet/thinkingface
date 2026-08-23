@@ -169,7 +169,7 @@ func (s *indexOnlyStore) SupportsSignedURL() bool { return false }
 func (s *indexOnlyStore) SignedGetURL(context.Context, string, time.Duration, string) (string, error) {
 	return "", errors.New("unused")
 }
-func (s *indexOnlyStore) SignedPutURL(context.Context, string, time.Duration, int64) (string, error) {
+func (s *indexOnlyStore) SignedPutURL(context.Context, string, time.Duration) (string, error) {
 	return "", errors.New("unused")
 }
 func (s *indexOnlyStore) Put(context.Context, string, io.Reader, string) error {

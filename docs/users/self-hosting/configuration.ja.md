@@ -27,7 +27,8 @@
 | `GCS_BUCKET` | 対象のバケット名。 | `thinkingface` | |
 | `GCS_PREFIX` | バケット内のキーに付けるオプションのプレフィックス。1 つのバケットを複数の環境で共有する場合に使います。 | *(empty)* | 先頭・末尾のスラッシュは取り除かれます。 |
 | `STORAGE_EMULATOR_HOST` | fake-gcs-server エミュレータのアドレス。 | *(empty)* | `STORAGE_DRIVER=gcs-emulator` のときは必須で、設定しないと起動に失敗します。`STORAGE_DRIVER=gcs` の場合は使用されないため、未設定のままにしてください。 |
-| `TF_SIGNED_URL_TTL` | 署名付き GCS URL（LFS 転送、直接ダウンロード）が有効な期間。 | `1h` | `STORAGE_DRIVER=gcs` のときのみ意味を持ちます — エミュレータは署名付き URL を検証できないため、そのモードでは代わりにサーバーがバイト列をプロキシします。 |
+| `TF_SIGNED_URL_TTL` | 署名付き GCS URL（LFS 転送、直接ダウンロード）が有効な期間の下限。実際の有効期間はオブジェクトのサイズから算出され、`[TF_SIGNED_URL_TTL, TF_SIGNED_URL_MAX_TTL]` の範囲にクランプされるため、この値が効くのは主に小さい転送です。 | `1h` | `STORAGE_DRIVER=gcs` のときのみ意味を持ちます — エミュレータは署名付き URL を検証できないため、そのモードでは代わりにサーバーがバイト列をプロキシします。 |
+| `TF_SIGNED_URL_MAX_TTL` | 同じクランプの上限。大きな転送に対して効きます。 | `12h` | `TF_SIGNED_URL_TTL` と同じく `STORAGE_DRIVER=gcs` のときのみ意味を持ちます。 |
 
 ## データベース { #database }
 

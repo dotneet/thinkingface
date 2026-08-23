@@ -37,7 +37,7 @@ func (m *memStorage) SignedGetURL(ctx context.Context, key string, ttl time.Dura
 	return "", errors.New("memStorage: signed URLs not supported")
 }
 
-func (m *memStorage) SignedPutURL(ctx context.Context, key string, ttl time.Duration, size int64) (string, error) {
+func (m *memStorage) SignedPutURL(ctx context.Context, key string, ttl time.Duration) (string, error) {
 	return "", errors.New("memStorage: signed URLs not supported")
 }
 
