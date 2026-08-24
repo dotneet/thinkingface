@@ -154,8 +154,7 @@ export const settings = {
     accountLoadFailed: "アカウント情報の読み込みに失敗しました",
     accountLoadFailedHint: "バックエンド API に接続できない可能性があります。",
     noNamespaceTitle: "管理できる名前空間がありません",
-    noNamespaceDescription:
-      "Webhook を設定するには、名前空間への write または admin 権限が必要です。",
+    noNamespaceDescription: "Webhook を設定するには、名前空間への admin 権限が必要です。",
     namespaceLabel: "名前空間",
     scopeLabel: "スコープ",
     scopeHint: "空欄にするとすべてのリポジトリで発火します",
@@ -202,6 +201,19 @@ export const settings = {
       hint: "新しいデータセットまたはモデルが作成された",
     },
     repoDeleted: { label: "リポジトリの削除", hint: "リポジトリが削除された" },
+    repoMoved: {
+      label: "リポジトリの移動",
+      hint: "リポジトリの名前変更または別の namespace への移譲が完了した",
+    },
+    repoTransferRequested: {
+      label: "リポジトリ移譲のリクエスト",
+      hint: "この namespace への移譲リクエストが承認待ちになった",
+    },
+    repoArchived: { label: "リポジトリのアーカイブ", hint: "リポジトリが読み取り専用になった" },
+    repoUnarchived: {
+      label: "リポジトリのアーカイブ解除",
+      hint: "リポジトリの読み取り専用状態が解除された",
+    },
     runFinished: { label: "Run の完了", hint: "実験 run が完了した" },
     runFailed: { label: "Run の失敗", hint: "実験 run が失敗した" },
   },
