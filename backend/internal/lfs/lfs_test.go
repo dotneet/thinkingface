@@ -404,6 +404,65 @@ func TestBatchUploadDedupDoesNotRequireExistingLink(t *testing.T) {
 	}
 }
 
+// Upload dedup answers "you do not need to send these bytes, and the object is
+// now linked to your repository", and its only evidence is the client's own
+// declaration: knowing the oid *and* the size is taken as knowing the content.
+// Half of that is public -- every LFS pointer in every readable repository is
+// an oid -- so the size is the half that has to be checked, and declaring zero
+// used to skip the check rather than fail it. That turned one batch request
+// into a link to somebody else's object, which download, resolve and the
+// transfer proxy all then read as entitlement.
+func TestBatchUploadRefusesToDedupOnAnUndeclaredSize(t *testing.T) {
+	rec := &fakeRecorder{}
+	st := newKeyStorage(map[string]int64{storage.LFSKey(goodOID): goodSize})
+	h := keyTestHandler(rec, st)
+
+	resp, err := h.Batch(context.Background(), 9, &BatchRequest{
+		Operation: "upload",
+		Objects:   []ObjectRef{{OID: goodOID, Size: 0}},
+	}, "")
+	if err != nil {
+		t.Fatalf("Batch: %v", err)
+	}
+	if rec.calls != 0 {
+		t.Errorf("RecordLFSObject calls = %d, want 0: nothing here evidenced the content", rec.calls)
+	}
+	if rec.owned[fmt.Sprintf("9/%s", goodOID)] {
+		t.Error("repository 9 was linked to an object it never uploaded")
+	}
+	// The client is told to upload instead, which is the honest answer: prove
+	// it holds the bytes by sending them.
+	if _, ok := resp.Objects[0].Actions["upload"]; !ok {
+		t.Fatalf("object = %+v, want an upload action rather than a deduplicated hit", resp.Objects[0])
+	}
+}
+
+// Zero is refused as a *disagreement*, never as a value: a genuinely empty LFS
+// object declares zero and is zero, so its sizes agree like any other pair and
+// it deduplicates normally. .gitattributes routes files to LFS by path rather
+// than by content, so an empty tracked file is an ordinary thing for git-lfs
+// to push and this has to keep working.
+func TestBatchUploadDedupsAGenuinelyEmptyObject(t *testing.T) {
+	emptyOID := oidOf(nil)
+	rec := &fakeRecorder{}
+	st := newKeyStorage(map[string]int64{storage.LFSKey(emptyOID): 0})
+	h := keyTestHandler(rec, st)
+
+	resp, err := h.Batch(context.Background(), 9, &BatchRequest{
+		Operation: "upload",
+		Objects:   []ObjectRef{{OID: emptyOID, Size: 0}},
+	}, "")
+	if err != nil {
+		t.Fatalf("Batch: %v", err)
+	}
+	if resp.Objects[0].Actions != nil || resp.Objects[0].Error != nil {
+		t.Fatalf("object = %+v, want a deduplicated hit with no actions", resp.Objects[0])
+	}
+	if !rec.owned[fmt.Sprintf("9/%s", emptyOID)] {
+		t.Error("the empty object was not linked to the repository")
+	}
+}
+
 func TestVerifyFailsWhenGCDeletedDuringRecord(t *testing.T) {
 	rec := &fakeRecorder{}
 	// Verify stats the staging key twice -- once to size it, once after
@@ -465,6 +524,10 @@ type keyStorage struct {
 	// onRead runs when an object's bytes are read, so a test can simulate a
 	// client overwriting a staged object while it is being hashed.
 	onRead func(key string)
+	// onStat runs after a Stat has read the object's size and generation but
+	// before it returns them, so a test can simulate a write landing in the
+	// window between a promotion's checks and the copy that follows them.
+	onStat func(key string)
 }
 
 func newKeyStorage(objects map[string]int64) *keyStorage {
@@ -516,7 +579,13 @@ func (k *keyStorage) Stat(_ context.Context, key string) (storage.ObjectInfo, er
 	if !ok {
 		return storage.ObjectInfo{}, storage.ErrNotFound
 	}
-	return storage.ObjectInfo{Key: key, Size: size, Generation: k.generations[key]}, nil
+	info := storage.ObjectInfo{Key: key, Size: size, Generation: k.generations[key]}
+	// The hook fires with the answer already captured: what it writes lands
+	// after this Stat observed the object, which is the race being modelled.
+	if k.onStat != nil {
+		k.onStat(key)
+	}
+	return info, nil
 }
 
 func (k *keyStorage) Get(ctx context.Context, key string) (io.ReadCloser, error) {
@@ -923,14 +992,14 @@ func TestVerifyFailsWhenNothingWasUploaded(t *testing.T) {
 // sequence Verify uses. That path hashed the body as it received it, so
 // promotion takes its word for the digest and never reads the object back --
 // the fake has no bytes for this key at all, which is the assertion.
-func TestPromoteStagedPublishesAndLinksWithoutRehashing(t *testing.T) {
-	staging := storage.LFSStagingKey(3, goodOID)
+func TestPromoteStagedFromPublishesAndLinksWithoutRehashing(t *testing.T) {
+	staging := storage.LFSIncomingKey(3, "0123456789abcdef")
 	rec := &fakeRecorder{}
 	st := newKeyStorage(map[string]int64{staging: 42})
 	h := keyTestHandler(rec, st)
 
-	if err := h.PromoteStaged(context.Background(), 3, goodOID, 42); err != nil {
-		t.Fatalf("PromoteStaged: %v", err)
+	if err := h.PromoteStagedFrom(context.Background(), 3, goodOID, 42, staging); err != nil {
+		t.Fatalf("PromoteStagedFrom: %v", err)
 	}
 	if size := st.objects[storage.LFSKey(goodOID)]; size != 42 {
 		t.Errorf("promoted object size = %d, want 42", size)
@@ -943,10 +1012,73 @@ func TestPromoteStagedPublishesAndLinksWithoutRehashing(t *testing.T) {
 	}
 }
 
-func TestPromoteStagedRejectsMalformedOID(t *testing.T) {
+// The window between a promotion's checks and its copy is the one place where
+// "the bytes I inspected" and "the bytes at this key" can come apart, and what
+// it publishes onto is lfs/{oid}: a key every repository on the instance
+// shares, that dedup treats as authoritative, and that nothing rewrites
+// afterwards. storage.LFSStagingKey is named after the repository and the oid
+// -- both of them the client's own words -- and its upload URL can still be
+// live, so a second writer can land on it; the check therefore has to run for
+// a caller that hashed the bytes on ingest too, because that promise is about
+// the body *that* request received and says nothing about what is at the key
+// when the copy runs.
+func TestPromoteStagedFromRefusesStagingRewrittenBeforeTheCopy(t *testing.T) {
+	staging := storage.LFSStagingKey(1, goodOID)
+	published := storage.LFSKey(goodOID)
+	rec := &fakeRecorder{}
+	st := newKeyStorage(nil)
+	st.put(published, goodBody) // other repositories already reference these bytes
+	st.put(staging, goodBody)
+	// Same length as the real object, so the size check cannot tell them
+	// apart: only the generation can.
+	forged := bytes.Repeat([]byte("x"), int(goodSize))
+	st.onStat = func(key string) {
+		if key == staging {
+			st.onStat = nil // a single racing write, landing after the size check
+			st.put(staging, forged)
+		}
+	}
+	h := keyTestHandler(rec, st)
+
+	err := h.PromoteStagedFrom(context.Background(), 1, goodOID, goodSize, staging)
+	var changed *StagedObjectChangedError
+	if !errors.As(err, &changed) {
+		t.Fatalf("PromoteStagedFrom error = %v, want a StagedObjectChangedError", err)
+	}
+	if got := st.bodies[published]; !bytes.Equal(got, goodBody) {
+		t.Fatalf("%s now holds %q: the shared content-addressed key was overwritten", published, got)
+	}
+	if rec.calls != 0 {
+		t.Errorf("RecordLFSObject calls = %d, want 0", rec.calls)
+	}
+	for _, op := range st.log.ops {
+		if strings.HasPrefix(op, "copy ") {
+			t.Errorf("operations = %v, want no copy", st.log.ops)
+		}
+	}
+	if _, ok := st.objects[staging]; !ok {
+		t.Error("the staged object was deleted; it should be left for the collector")
+	}
+
+	// ...and the client's own re-upload promotes normally once the writes
+	// have settled, so the check costs a retry rather than the object.
+	st.put(staging, goodBody)
+	if err := h.PromoteStagedFrom(context.Background(), 1, goodOID, goodSize, staging); err != nil {
+		t.Fatalf("PromoteStagedFrom after the race settled: %v", err)
+	}
+	if size := st.objects[published]; size != goodSize {
+		t.Errorf("promoted object size = %d, want %d", size, goodSize)
+	}
+}
+
+func TestPromoteStagedFromRejectsMalformedOID(t *testing.T) {
 	h := keyTestHandler(&fakeRecorder{}, newKeyStorage(nil))
-	if err := h.PromoteStaged(context.Background(), 3, "../../etc/passwd", 1); err == nil {
-		t.Fatal("PromoteStaged accepted an oid that is not a digest")
+	staging := storage.LFSIncomingKey(3, "0123456789abcdef")
+	if err := h.PromoteStagedFrom(context.Background(), 3, "../../etc/passwd", 1, staging); err == nil {
+		t.Fatal("PromoteStagedFrom accepted an oid that is not a digest")
+	}
+	if err := h.PromoteStagedFrom(context.Background(), 3, goodOID, 1, ""); err == nil {
+		t.Fatal("PromoteStagedFrom accepted an empty staging key")
 	}
 }
 

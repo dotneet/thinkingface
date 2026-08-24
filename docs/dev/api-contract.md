@@ -1745,7 +1745,11 @@ different name already exists) and deletes it from `exp_points`. See `docs/dev/t
 - datasets accept the same at `/datasets/{ns}/{name}.git/...`
 - `POST /{...}.git/info/lfs/objects/batch` — the LFS Batch API
   - upload: `actions.upload.href` (a signed PUT, or a proxy URL in the emulator) and
-    `actions.verify` are returned only for oids not already held.
+    `actions.verify` are returned only for oids not already held. "Already held" means an object
+    at that oid's key whose length is **exactly** the `size` the request declared: deduplication's
+    only evidence is the client's own declaration, so an object declared as 0 bytes that is not 0
+    bytes gets an upload action rather than a link to bytes the caller never showed it had. A
+    genuinely empty object (declared 0, stored 0) deduplicates like any other.
   - download: `actions.download.href`, **only when that oid is linked to this repository in
     `repo_lfs_objects`.** An unlinked oid returns a per-object error
     `{"code":404,"message":"object <oid> not found"}` (this doesn't fail the whole batch). Whether
