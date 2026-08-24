@@ -102,7 +102,7 @@ gs://{bucket}/
 │   ├── index.json                            #   CAS target. Refs and pack ordering
 │   ├── base/{ulid}.pack                      #   Compaction snapshot
 │   └── entries/{seq}-{ulid}.pack             #   One push = one entry
-└── tmp/uploads/{oid}-{repoID}                # Scratch space for LFS proxy uploads
+└── tmp/uploads/lfs/{repoID}/{oid}            # Staging area every LFS upload lands in before verify
 ```
 
 - **LFS payloads live only in `lfs/`, and non-LFS blob payloads live only in `blobs/` — exactly one copy of each.**
@@ -111,6 +111,11 @@ gs://{bucket}/
 - Transfers, renames, and deletions never move a single byte of GCS objects. Orphaned objects are
   reclaimed by `thinkingface gc` (using `repo_lfs_objects` as the reference count for `lfs/` and
   `repo_files.blob_sha` for `blobs/`)
+- A signed PUT URL for an LFS upload targets `tmp/uploads/lfs/{repoID}/{oid}`, never `lfs/` directly.
+  An upload lands in `lfs/` only once verify checks the transferred byte count and promotes it there
+  with a server-side copy, so a half-finished or corrupt transfer never becomes visible as a valid
+  object. Nothing indexes `tmp/uploads/`, so `thinkingface gc` reclaims whatever an interrupted
+  upload leaves behind purely by age (`stagingGrace` in `backend/cmd/thinkingface/gc.go`)
 - `wal/` is keyed by `repositories.storage_path` (an immutable physical location assigned when the
   repository is created; new repositories get `repos/{ulid}`, while repositories predating the
   introduction of `storage_path` keep their old-style location `{models|datasets}/{ns}/{name}` via
@@ -458,8 +463,23 @@ Avoiding CGo keeps builds and cross-compilation simple. SQL filtering was ultima
 server-side. **DuckDB was instead placed "on the browser side"** (below), which sidesteps the
 backend's pure-Go constraint entirely.
 
-- Objects are LRU-cached to local disk (4GiB by default) before being opened. Concurrent access
-  to the same file is collapsed into a single download via singleflight
+- Objects are read directly from storage via range requests (`storage.Storage`'s ranged read),
+  never downloaded whole to local disk first. This is what makes multi-GB/multi-10GB Parquet
+  files safe to view on Cloud Run, where the writable filesystem is tmpfs backed by instance
+  memory: downloading the whole object first would OOM the instance long before the viewer got
+  to look at it. What *is* kept is the object's **tail bytes** — the region holding the footer
+  and the page index — in an in-process LRU across keys
+  (`TF_VIEWER_METADATA_CACHE_BYTES`, 256MiB by default), so that repeated opens of the same file
+  cost no round trip at all. That cache is safe to hold indefinitely because every key the
+  viewer is given is content-addressed (`storage.LFSKey` / `storage.BlobKey`), so a key's bytes
+  never change. Row data is never cached and is re-read range by range as needed
+- **Round trips are the cost a ranged design pays instead, so they are budgeted.** The tail
+  probe is sized `clamp(size/8, 128KiB, 4MiB)` and the same number is handed to parquet-go as
+  its `ReadBufferSize`, so `OptimisticRead`'s footer read lands exactly inside the cached tail.
+  A cold `Schema()` on a 10MiB file is 1 `Stat` + 1 ranged read (~12% of the file); a warm one
+  is zero requests; a 50-row preview is one ranged read (~0.4%). On a 10GB file the reads stay
+  at the same absolute size. `backend/internal/viewer/objectreader_test.go` asserts these
+  bounds, so a change that reintroduces whole-object reads fails the build
 - **There are two kinds of row-group skipping. Don't conflate them**:
   - **Row-count (positional) based** — `Reader.Rows(offset, limit)` looks only at the row count
     of each row group and skips anything entirely outside `[offset, offset+limit)`. Viewing the

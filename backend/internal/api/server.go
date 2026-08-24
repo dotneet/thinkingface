@@ -90,7 +90,7 @@ func NewServer(d Deps) *Server {
 		// requests; the cache is pure memoisation, never a dependency.
 		s.models = modelmeta.NewCache(modelmeta.DefaultCacheEntries)
 	}
-	s.lfs = lfs.New(d.Store, d.Storage, d.Config.SignedURLTTL, d.Config.PublicURL, d.Config.SessionSecret)
+	s.lfs = lfs.New(d.Store, d.Storage, d.Config.SignedURLTTL, d.Config.SignedURLMaxTTL, d.Config.PublicURL, d.Config.SessionSecret)
 	s.gitHTTP = gitserver.New(d.Git)
 	if d.Config.WALMode != "off" && d.Config.GitHooksPath != "" {
 		cfg := d.Config

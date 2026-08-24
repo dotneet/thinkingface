@@ -409,7 +409,7 @@ locals {
   api_env = merge(
     {
       GIT_ROOT            = "/tmp/git"   # tmpfs cache, not the source of truth (WAL in GCS is)
-      TF_VIEWER_CACHE_DIR = "/tmp/cache" # tmpfs, existing emptyDir-equivalent
+      TF_VIEWER_CACHE_DIR = "/tmp/cache" # tmpfs; WAL compaction's scratch dir only -- the parquet viewer no longer caches to disk here
       STORAGE_DRIVER      = "gcs"
       GCS_BUCKET          = google_storage_bucket.main.name
       GCS_PREFIX          = ""
@@ -421,11 +421,14 @@ locals {
       TF_ADMIN_EMAIL      = "admin@example.com"
       TF_WAL_MODE         = "authoritative"
       TF_GIT_HOOKS_PATH   = "/opt/thinkingface/hooks" # baked into the image, see backend/Dockerfile
-      # Both caches live on the memory-backed filesystem and share the 8 GiB
-      # instance memory with the git/pack-objects processes: budget explicitly
-      # (2 GiB each) instead of trusting the binary's defaults (2 + 4 GiB).
-      TF_GIT_CACHE_BYTES    = "2147483648"
-      TF_VIEWER_CACHE_BYTES = "2147483648"
+      # The materialised-repository cache lives on the memory-backed
+      # filesystem and shares the 8 GiB instance memory with the
+      # git/pack-objects processes: budget it explicitly (2 GiB) instead of
+      # trusting the binary's default. The parquet viewer's metadata cache is
+      # a small heap allocation, not tmpfs, so it stays at the binary's
+      # default (256 MiB) rather than being sized against the tmpfs budget.
+      TF_GIT_CACHE_BYTES             = "2147483648"
+      TF_VIEWER_METADATA_CACHE_BYTES = "268435456"
     },
     var.database_backend == "sqlite" ? {
       DATABASE_URL              = local.sqlite_database_url
@@ -481,7 +484,7 @@ resource "google_cloud_run_v2_service" "api" {
       resources {
         limits = {
           cpu    = "2"
-          memory = "8Gi" # tmpfs GIT_ROOT/TF_VIEWER_CACHE_DIR share this budget with the git/pack-objects processes
+          memory = "8Gi" # tmpfs GIT_ROOT (materialised-repository cache) and the git/pack-objects processes share this budget; the parquet viewer's metadata cache is a small heap allocation, not tmpfs, so it no longer figures into this sizing
         }
         cpu_idle = false # CPU always allocated: syncer/webhook workers run in-process outside request handling
       }
@@ -687,6 +690,185 @@ resource "google_cloud_scheduler_job" "compact" {
   depends_on = [
     google_project_service.required,
     google_cloud_run_v2_job_iam_member.compact_scheduler_invoker,
+  ]
+}
+
+# ---------------------------------------------------------------------------
+# Cloud Run Job: reference-counted GC (`thinkingface gc`) -- reclaims lfs/
+# and blobs/ objects that no repository references any more. This is the
+# only mechanism that ever removes those objects (see the "GCS:
+# content-addressed object store" comment near the top of this file --
+# lifecycle rules are deliberately not used, since an untouched object is
+# very often still exactly what a stable release should keep serving
+# forever). Without this Job, a Terraform-deployed instance's bucket grows
+# without bound: nothing else in this configuration ever deletes an lfs/ or
+# blobs/ object.
+#
+# Same image/SA/VPC egress/secrets/resources as compact above, but a far
+# longer timeout: gc's own scan is a full, unpaginated listing of the
+# entire blobs/ prefix (backend/internal/storage.GCS.List has no page cap)
+# followed by one-object-at-a-time deletes (no GCS batch-delete API), so
+# its cost scales with total bucket object count and orphan count -- not
+# with any single repository's WAL, like compact.
+# ---------------------------------------------------------------------------
+
+resource "google_cloud_run_v2_job" "gc" {
+  project  = var.project_id
+  name     = var.gc_job_name
+  location = var.region
+
+  template {
+    template {
+      service_account = google_service_account.api.email
+      # A first run against a deployment that has never had gc enabled (or
+      # has had it off for a while) can have a large backlog of orphans to
+      # delete one HTTP call at a time -- there's no batch delete, so that
+      # backlog is strictly slower to clear than compact's per-repo WAL
+      # fold. 6h gives that backlog room; a caught-up bucket finishes a
+      # steady-state run in minutes.
+      timeout     = "21600s"
+      max_retries = 1
+
+      vpc_access {
+        network_interfaces {
+          network    = google_compute_network.main.name
+          subnetwork = google_compute_subnetwork.vpc_access.name
+        }
+        egress = "PRIVATE_RANGES_ONLY"
+      }
+
+      containers {
+        image = var.api_placeholder_image
+        # --yes only when var.gc_delete_enabled is turned on (see its
+        # description in variables.tf for why the default is off); without
+        # it this runs `thinkingface gc`'s own default, --dry-run, which
+        # only prints a report and deletes nothing.
+        args = concat(["gc"], var.gc_delete_enabled ? ["--yes"] : [])
+
+        resources {
+          limits = {
+            # Memory is what sizes this job: gcBlobs
+            # (backend/cmd/thinkingface/gc.go) holds the entire blobs/
+            # listing (one ObjectInfo per object) and the entire set of
+            # referenced blob_sha values in memory at the same time, both
+            # scaling with total bucket object / repo_files row count rather
+            # than with any single repository. 8Gi matches api/compact's
+            # budget and comfortably covers multi-million object/row counts;
+            # raise it independently of the other jobs if a deployment's
+            # bucket grows far beyond that.
+            #
+            # CPU is not the bottleneck -- unlike compact, gc never forks
+            # git/pack-objects, and its work is sequential GCS List/Delete
+            # plus Postgres round trips. 2 vCPU is a floor rather than a
+            # choice: Cloud Run permits at most 4 GiB per vCPU, so 8 GiB
+            # requires >= 2 vCPU and the API rejects the deployment
+            # otherwise. Going down to 1 vCPU would mean going down to
+            # 4 GiB, which is the one dimension this job cannot spare.
+            cpu    = "2"
+            memory = "8Gi"
+          }
+        }
+
+        dynamic "env" {
+          for_each = local.api_env
+          content {
+            name  = env.key
+            value = env.value
+          }
+        }
+
+        # See the matching block on google_cloud_run_v2_service.api above:
+        # secret_key_ref in postgres mode only, plain value via local.api_env
+        # otherwise.
+        dynamic "env" {
+          for_each = var.database_backend == "postgres" ? { DATABASE_URL = google_secret_manager_secret.database_url[0].secret_id } : {}
+          content {
+            name = env.key
+            value_source {
+              secret_key_ref {
+                secret  = env.value
+                version = "latest"
+              }
+            }
+          }
+        }
+        env {
+          name = "TF_ADMIN_PASSWORD"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.admin_password.secret_id
+              version = "latest"
+            }
+          }
+        }
+        env {
+          name = "TF_SESSION_SECRET"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.session_secret.secret_id
+              version = "latest"
+            }
+          }
+        }
+      }
+    }
+  }
+
+  lifecycle {
+    ignore_changes = [
+      template[0].template[0].containers[0].image,
+    ]
+  }
+
+  depends_on = [
+    google_project_service.required,
+    google_secret_manager_secret_iam_member.api_database_url_accessor,
+    google_secret_manager_secret_iam_member.api_admin_password_accessor,
+    google_secret_manager_secret_iam_member.api_session_secret_accessor,
+  ]
+}
+
+# Dedicated SA for Cloud Scheduler -> Cloud Run Job invocation, scoped to
+# just this one job (not the broader api SA) -- same rationale as
+# compact_scheduler above.
+resource "google_service_account" "gc_scheduler" {
+  project      = var.project_id
+  account_id   = "thinkingface-gc-${var.environment}"
+  display_name = "thinkingface gc scheduler (${var.environment})"
+}
+
+resource "google_cloud_run_v2_job_iam_member" "gc_scheduler_invoker" {
+  project  = var.project_id
+  location = google_cloud_run_v2_job.gc.location
+  name     = google_cloud_run_v2_job.gc.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.gc_scheduler.email}"
+}
+
+# Triggers the gc Job via the Cloud Run Admin API's `jobs.run` method,
+# authenticated as gc_scheduler with an OAuth token -- same mechanism as
+# compact above, deliberately offset onto a different day/hour (see
+# gc_schedule's description in variables.tf) so the two never put load on
+# Postgres and GCS at the same time.
+resource "google_cloud_scheduler_job" "gc" {
+  project   = var.project_id
+  region    = var.region
+  name      = "thinkingface-gc-${var.environment}"
+  schedule  = var.gc_schedule
+  time_zone = "UTC"
+
+  http_target {
+    http_method = "POST"
+    uri         = "https://${var.region}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${var.project_id}/jobs/${google_cloud_run_v2_job.gc.name}:run"
+
+    oauth_token {
+      service_account_email = google_service_account.gc_scheduler.email
+    }
+  }
+
+  depends_on = [
+    google_project_service.required,
+    google_cloud_run_v2_job_iam_member.gc_scheduler_invoker,
   ]
 }
 
