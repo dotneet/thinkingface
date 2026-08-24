@@ -126,9 +126,12 @@ domain strategy for your environment.
     snapshot** while the live `serve` instance owns the only current copy of the
     database. Any LFS object uploaded since that snapshot has no row in the
     Job's copy, so gc would conclude it is unreferenced and delete bytes a
-    repository is still serving. `DeleteOrphanedLFSObject`'s row lock cannot
-    coordinate across two different database files. Reclaiming storage under
-    sqlite has to happen inside the serving process, which is separate work.
+    repository is still serving — and `gcLFSUntracked`, whose entire premise is
+    "no `lfs_objects` row means nobody wrote one", would draw that conclusion
+    about every one of them. Neither `DeleteOrphanedLFSObject`'s row lock nor
+    `DeleteUntrackedLFSObject`'s claim can coordinate across two different
+    database files. Reclaiming storage under sqlite has to happen inside the
+    serving process, which is separate work.
 
 
 `thinkingface gc`'s own default is `--dry-run`: it reports orphaned `lfs/`

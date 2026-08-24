@@ -253,7 +253,11 @@ func (s *Store) DeleteOrphanedLFSObject(ctx context.Context, oid string, removeS
 //
 // On SQLite there are no row locks and none are needed: every write
 // transaction runs alone on the single writer connection, so the insert and
-// the delete are the same indivisible step.
+// the delete are the same indivisible step. That holds within one process
+// and only there -- a collector reading a Litestream-restored copy of the
+// database would see neither the server's rows nor its locks, which is why
+// `thinkingface gc` is refused outright in sqlite mode rather than guarded
+// here (infra/README.md, backend/entrypoint.sh).
 //
 // Returns deleted=false with a nil error when the oid turned out to be
 // tracked; that is a normal outcome, not a fault.
