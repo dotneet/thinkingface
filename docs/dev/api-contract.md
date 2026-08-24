@@ -17,6 +17,11 @@ The confirmed specification between the backend (Go) and frontend (Next.js), and
   back. A non-matching `Origin` gets no CORS headers at all (the request itself still goes through).
   When unset, the default is the origin of `TF_PUBLIC_URL`, plus, if `TF_PUBLIC_URL` is not https,
   `http://localhost:3000` / `http://127.0.0.1:3000`. `Vary: Origin` is always attached.
+  `Access-Control-Expose-Headers` names what browser JS is allowed to read back: `ETag`,
+  `X-Repo-Commit`, `X-Linked-Etag`, `X-Linked-Size`, `Content-Length`, `Content-Range`,
+  `Accept-Ranges`, `Location`. `Content-Range` / `Accept-Ranges` are on the list so a
+  cross-origin range read of `resolve` can tell which bytes it was given — a header left off
+  it is invisible to the caller, not merely unadvertised.
 - **CSRF**: For requests other than GET/HEAD/OPTIONS authenticated via cookie session,
   if the `Origin` (or the `Referer`'s origin if absent) doesn't match the allowlist, the response
   is **403 `forbidden`**. Requests with neither `Origin` nor `Referer` are allowed through

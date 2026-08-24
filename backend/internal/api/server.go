@@ -351,8 +351,16 @@ func (s *Server) cors(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Headers",
 				"Authorization, Content-Type, X-Requested-With, Accept, Range")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
+			// Content-Range and Accept-Ranges are listed for the same reason
+			// Content-Length is: resolve answers 206 to a satisfiable Range,
+			// and a browser hides any response header the server does not
+			// name here from the JS that asked for it -- so a cross-origin
+			// range read would get the bytes without being able to tell which
+			// bytes they are. The Web UI is on a different origin from the API
+			// in every deployment shape this ships with.
 			w.Header().Set("Access-Control-Expose-Headers",
-				"ETag, X-Repo-Commit, X-Linked-Etag, X-Linked-Size, Content-Length, Location")
+				"ETag, X-Repo-Commit, X-Linked-Etag, X-Linked-Size, "+
+					"Content-Length, Content-Range, Accept-Ranges, Location")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

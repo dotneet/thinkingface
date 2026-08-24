@@ -10,6 +10,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -145,5 +146,35 @@ func TestResolve_HeadIgnoresRange(t *testing.T) {
 	}
 	if got := rec.Header().Get("Content-Range"); got != "" {
 		t.Errorf("Content-Range = %q, want it unset on a HEAD", got)
+	}
+}
+
+// A cross-origin range read has to be able to see which bytes it got. A
+// browser hides every response header the server does not name in
+// Access-Control-Expose-Headers, so a 206 whose Content-Range is unlisted
+// reaches the JS that asked for it looking like a whole-file 200 -- and the
+// Web UI sits on a different origin from the API in every deployment shape
+// this ships with.
+func TestResolve_RangeHeadersAreExposedCrossOrigin(t *testing.T) {
+	f := newRangeFixture(t)
+
+	rec := f.do(secRequest{
+		method: "GET",
+		path:   "/datasets/alice/data/resolve/main/rows.csv",
+		headers: map[string]string{
+			"Range": "bytes=4-7",
+			// The origin newSecFixture allowlists; an unlisted one gets no
+			// CORS headers at all (TestCORS_OnlyAllowlistedOriginsGetCredentialedHeaders).
+			"Origin": "http://web.test.local",
+		},
+	})
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("status = %d, want 206; body = %q", rec.Code, rec.Body.String())
+	}
+	exposed := rec.Header().Get("Access-Control-Expose-Headers")
+	for _, h := range []string{"Content-Range", "Accept-Ranges", "Content-Length", "ETag"} {
+		if !strings.Contains(exposed, h) {
+			t.Errorf("Access-Control-Expose-Headers = %q, want it to include %s", exposed, h)
+		}
 	}
 }
