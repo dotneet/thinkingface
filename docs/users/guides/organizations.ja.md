@@ -180,7 +180,7 @@ for member in api.list_organization_members("acme"):
 | **Profile** | 表示名、説明、Web サイト、アバター URL（画像を外部でホストしているものへのリンクで、アップロード機能はありません）。ネームスペース名は固定です。 |
 | **Policy** | 上で説明した `members_visibility`。 |
 | **Members** | 追加、昇格、降格、削除。上で説明したとおりです。 |
-| **Webhooks** | Organization のリポジトリで発生したイベントを通知する HTTP エンドポイント。購読できるイベントは `repo.push`、`repo.created`、`repo.deleted`、`run.finished`、`run.failed` です。 |
+| **Webhooks** | Organization のリポジトリで発生したイベント（プッシュ、リポジトリのライフサイクル、転送、実験 run のステータス）を通知する HTTP エンドポイント。9 種類のイベント全部、ペイロード、署名の検証、リトライ方針は [Webhook](webhooks.md) を参照してください。 |
 | **Storage** | Organization のリポジトリがオブジェクトストレージ上に保持する LFS のバイト数を、リポジトリごとに内訳表示します。 |
 | **Audit log** | 管理上の変更とリポジトリのライフサイクルイベントを、新しい順に表示します。 |
 | **Delete organization** | 危険な操作です。詳しくは後述します。 |

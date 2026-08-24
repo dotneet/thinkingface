@@ -41,6 +41,7 @@ Storage バケットに保存し、学習の run を記録します。しかも�
 | ブラウザでデータセットやチェックポイントを見る | [Web UI を使う](guides/web-ui.md) |
 | 学習の run を記録して比較する | [実験のトラッキング](guides/experiments.md) |
 | チームで共有するネームスペースを用意する | [Organization](guides/organizations.md) |
+| プッシュや run の完了を受けて自前の処理を動かす | [Webhook](guides/webhooks.md) |
 | Hub と何が互換で何が互換でないかを正確に知る | [互換性](reference/compatibility.md) |
 | 本番環境にデプロイする | [デプロイ](self-hosting/deployment.md) |
 

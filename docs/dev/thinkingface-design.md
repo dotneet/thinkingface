@@ -208,8 +208,10 @@ generated locally when the script runs (or in a separate bucket via `DEST=gs://�
 ### Git over SSH
 
 In addition to Smart HTTP, **git over SSH** (`internal/sshserver`, default `:2222`, toggled with
-`TF_SSH_ENABLED`) is provided. It's a path that lets you clone private repositories without
-passing a token every time — it does not replace the HTTP path.
+`TF_SSH_ENABLED`) is provided. It's a path that lets you clone and push without passing a token
+every time — it does not replace the HTTP path. (Nothing here is about private repositories:
+there are none, see §11. The convenience is key-based auth in place of a token, and the extra
+guarantee is that the SSH transport refuses a client with no registered key at all.)
 
 - Implemented with `gliderlabs/ssh` (a thin wrapper over `golang.org/x/crypto/ssh`, pure Go). No additional CGo dependency
 - **Public-key authentication only.** No password / keyboard-interactive callback is ever
@@ -227,9 +229,11 @@ passing a token every time — it does not replace the HTTP path.
   command line**: it's parsed down to (kind, ns, name), looked up in the DB, and only the real
   path built from `repositories.storage_path` is handed to git
 - Authorization has no separate implementation of its own; it delegates to `internal/api`'s
-  `ServeGit` (`api/gitssh.go`). Repository resolution, private-repo invisibility, write
-  permission, archive checks, the WAL hook, and post-push sync job registration all go through
-  exactly the same code as the HTTP path
+  `ServeGit` (`api/gitssh.go`). Repository resolution, write permission, archive checks, the WAL
+  hook, and post-push sync job registration all go through exactly the same code as the HTTP path
+  (there is no per-repository read filtering to delegate: no repository is hidden from a caller
+  who gets this far, see §11. What SSH adds over HTTP is that the transport itself refuses
+  anyone without a registered key)
 - The host key is `TF_SSH_HOST_KEY_PATH` (default `/data/ssh/host_ed25519`). If absent, an
   ed25519 key is generated at startup and saved with mode 0600. **Put it on persistent
   storage**: on tmpfs the host key changes on every cold start, and every client warns about a
@@ -553,9 +557,13 @@ user_ssh_keys    (id, user_id, title, public_key, fingerprint unique,
                   last_used_at, created_at)                    -- git-over-SSH authentication (§5)
 namespaces       (id, name, kind: user|org, owner_user_id)
 org_members      (namespace_id, user_id, role: admin|write|read)
-repositories     (id, namespace_id, name, kind: dataset|model,
-                  visibility: public|private, default_branch,
-                  card jsonb, created_at, updated_at)
+repositories     (id, namespace_id, name, kind: dataset|model, default_branch,
+                  description, card jsonb, head_sha, total_size, downloads,
+                  is_experiment, storage_path, archived_at nullable,
+                  created_at, updated_at)
+                                                               -- no visibility column; see §11
+                                                               -- storage_path is the opaque
+                                                               -- ULID prefix used by §4 and §5
 repo_files       (repo_id, ref, path, size, mode,
                   lfs_oid nullable, blob_sha, updated_at)      -- file tree cache
 lfs_objects      (oid pk, size, created_at)
@@ -635,10 +643,32 @@ Constraints:
 - SSH public keys: git over SSH is authenticated with keys registered in `user_ssh_keys` (§5
   "Git over SSH"). Adding or removing a key requires write scope (so a read-only token can't
   create write-capable credentials)
-- Authorization: repository visibility (public/private) + namespace role (organizations use
-  `admin` / `write` / `read`; the full permission matrix and organization features are in
-  `docs/dev/organization-design.md`). Authorization is evaluated when signed URLs are issued (the
-  URLs themselves are short-lived)
+- **Authorization is decided by namespace role and archive state alone. There is no repository
+  visibility.** An early draft of this document specified a `visibility: public|private` column
+  on `repositories`; it was never implemented and the concept has been dropped, so nothing in
+  the system filters *reads* on a per-repository flag:
+  - **Reads are open to everyone who can reach the server**, including callers presenting no
+    credentials at all — repo listings, tree, resolve, `git clone`, and the LFS download side.
+    Nothing in `internal/api` filters reads on a visibility column, and no such column exists in
+    either migration set (`repositories` in `migrations/postgres/0001_init.sql`).
+  - **Writes** need write scope plus a namespace role: the owner for a personal namespace, or
+    `admin` / `write` for an organization (`read` members get 403). The full permission matrix
+    and organization features are in `docs/dev/organization-design.md`.
+  - **Archived repositories are read-only for everyone**, checked after the write permission so
+    an archived repository does not answer differently to a caller who could not write to it
+    anyway (`loadRepoForWrite` in `backend/internal/api/auth.go`). This is a 403
+    `repository_archived`, deliberately *not* a 404 — see `docs/dev/api-contract.md` §1.
+  - Authorization is evaluated when signed URLs are issued (the URLs themselves are short-lived).
+
+  This is a deliberate product decision, not a gap waiting to be filled: thinkingface is a
+  single-tenant, internal system whose **only read boundary is the network boundary around the
+  instance**. `docs/dev/content-addressed-storage-design.md` ("Assumptions") *depends* on it —
+  visibility plays no part in deciding what gets published to `blobs/`, so any pushed ref is
+  published unconditionally. Reintroducing private repositories would therefore be a change to
+  the storage design, not just an extra column. The user-facing side of the same fact is stated
+  in `docs/users/reference/compatibility.md`, `docs/users/concepts.md` and
+  `docs/users/guides/downloading.md`. For HF compatibility `create_repo(..., private=True)` is
+  *accepted* and ignored, and repository listings always report `private: false`.
 - Namespace profiles: `PATCH /api/v1/me/profile` (display name, bio, website, avatar URL) can
   only be edited by the account itself. The equivalent organization API
   (`PATCH /api/v1/orgs/{org}`) is restricted to members with the `admin` role. Neither the
@@ -647,9 +677,12 @@ Constraints:
 - It's a deliberate design decision that **the path of reading the bucket (`lfs/` + `blobs/`)
   directly via `gcloud storage` is controlled by GCS IAM.** The script that the UI/API issues
   only returns a list of keys — it never goes through the object contents — so whether reads
-  actually succeed is decided by the bucket's IAM. For deployments that need to strictly protect
-  private data, either split the bucket and restrict IAM, or provide an option that limits
-  script issuance to public repositories only
+  actually succeed is decided by the bucket's IAM. Since there is no per-repository visibility
+  (above), the bucket is the granularity at which sensitive data can be separated at all: a
+  deployment that must keep one body of data away from another has to put it in a different
+  bucket (or a different instance) and restrict IAM accordingly — there is no per-repository
+  switch to reach for, and the script endpoint has no "public repositories only" mode to fall
+  back on
 
 ## 12. Frontend (Next.js + Bun)
 
@@ -743,14 +776,46 @@ flowchart LR
   for the reasoning)
 - WAL compaction (`docs/dev/continuity-design.md` §10) is implemented as a Cloud Run Job, triggered
   daily by Cloud Scheduler
-- Backing up git data: the WAL's `index.json` keeps old generations around via the bucket's
-  `versioning { enabled = true }`. Deletion of `lfs/` `blobs/` is entirely delegated to
-  reference-count GC (`thinkingface gc`), with no age-based lifecycle rule
-  (`docs/dev/content-addressed-storage-design.md`), so across the whole bucket the same property
-  holds as for the WAL: "an old generation stays around unless explicitly deleted." Accident
-  prevention is handled by `soft_delete_policy` (shared bucket-wide). PG relies on Cloud SQL
-  automated backups + PITR
+- Backing up git data: the WAL's `index.json` keeps old generations around indefinitely via the
+  bucket's `versioning { enabled = true }` plus a lifecycle configuration that deliberately never
+  matches `wal/` — an old generation is the only recovery path for a corrupted or deleted index
+  (§13 above, `docs/dev/continuity-design.md` §13/§16 open issue 5; recovery procedure in
+  `docs/dev/wal-index-recovery.md`). *Which* `lfs/`/`blobs/` objects get deleted is entirely
+  delegated to reference-counted GC (`thinkingface gc`), with no age-based lifecycle rule on live
+  objects (`docs/dev/content-addressed-storage-design.md`) — but because the bucket has
+  versioning enabled, a gc delete alone only turns an object noncurrent, so a lifecycle rule
+  (`var.lfs_blobs_noncurrent_retention_days`, default 30 days, scoped to `lfs/`/`blobs/` only)
+  deletes the noncurrent version 30 days later so gc's deletes actually free storage. Accident
+  prevention is handled by `soft_delete_policy`, which is bucket-wide and covers deletes that
+  versioning cannot undo. Note that both windows default to 30 days
+  (`var.bucket_soft_delete_retention_days`, `var.lfs_blobs_noncurrent_retention_days`), so out of
+  the box they expire together rather than one outliving the other — raise the soft-delete window
+  if you want a grace period that survives the lifecycle rule. PG relies on Cloud SQL automated
+  backups + PITR
 - IaC is Terraform (the `infra/` directory). The goal is for compose and production to differ only in environment variables and the Storage driver
+
+> **Operator warning — the bundled Terraform publishes the instance to the entire internet.**
+> §11 says the network boundary around the instance is the *only* read boundary there is, and
+> the user-facing docs repeat it. The Terraform in `infra/` does not put such a boundary
+> anywhere: both Cloud Run services are created with `ingress = "INGRESS_TRAFFIC_ALL"`
+> (`infra/main.tf`, the `api` and `web` services) and both get `roles/run.invoker` granted to
+> `allUsers`, with no IAP, no Cloud Armor policy and no load balancer in front — `infra/` creates
+> none of the three (`infra/README.md` discusses adding a load balancer with Cloud Armor or IAP,
+> but no resource does it). That is deliberate for `api` (git / git-lfs / HF clients
+> invoke it directly and authenticate inside the app), but it means **applying `infra/` as-is
+> makes every repository on the instance world-readable, unauthenticated, from any IP**.
+> An operator who wants an actual boundary has to add one: `ingress =
+> "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"` behind an internal LB or VPN, IAP in front of `web`,
+> a Cloud Armor policy on an external LB, or equivalent. Note that any such layer must still let
+> git and `huggingface_hub` through to `api` with their own credentials — an interactive IAP
+> sign-in in front of `api` breaks every non-browser client.
+>
+> The matching account-creation default: `TF_ALLOW_SIGNUP` defaults to **`true`** in the binary
+> (`backend/internal/config/config.go`). The Terraform does set `TF_ALLOW_SIGNUP = "false"` on
+> the `api` service, so an `infra/`-based deployment is not open to self-signup — but any
+> deployment that does not set it explicitly (docker compose, `make up`, a hand-rolled
+> container) lets anyone who can reach the instance create an account, and therefore obtain a
+> write-capable token. Set it explicitly rather than relying on the default.
 
 ### 14.1 Option: SQLite + Litestream (a Configuration Without Cloud SQL)
 
@@ -807,8 +872,8 @@ thinkingface/
 | **2. Direct git operations** | Smart HTTP, LFS Batch + signed URLs, Sync Worker, the two content-addressed layers (`lfs/` + `blobs/`) | ✅ Done |
 | **3. Viewer** | Parquet schema/row API, table UI | ✅ Done (safetensors inspector not yet implemented) |
 | **4. Experiments** | Indexing for trackio path A, ingest API (path B), chart UI | ✅ Done |
-| **5. Operations** | Organizations/roles, search improvements, Terraform, backups, E2E compatibility test CI | Terraform and E2E tests are written but not yet applied. Organizations have only the DB/store skeleton — API and UI are not yet implemented (the full design is in `docs/dev/organization-design.md`) |
-| **6. Namespace unification** | Unify username = personal namespace and organization ID = organization namespace into a single `/{ns}` (with `/orgs/{name}` redirecting), and give users a profile too (display name, bio, website, avatar URL). Includes making reserved names a single source of truth, plus the HF-compatible `users/{u}/overview` / `organizations/{o}/overview` | Design is in `docs/dev/namespace-design.md` (phase breakdown in the same doc's §13) |
+| **5. Operations** | Organizations/roles, search improvements, Terraform, backups, E2E compatibility test CI | ✅ Organizations are done end to end — the `/api/v1/orgs*` routes in `backend/internal/api/server.go`, the directory/settings screens under `frontend/app/orgs/`, roles, audit log, webhooks and transfers (design: `docs/dev/organization-design.md`). ⚠️ Terraform is written and `fmt`/`init`/`validate`-checked by the `terraform` job in CI, but never `apply`-ed there (that needs GCP credentials), so server-side limits only surface at apply time. ⚠️ The E2E suite has a CI job (`e2e`, a postgres/sqlite matrix in `.github/workflows/ci.yml`) but it **does not run on pull requests** — it brings the whole compose stack up, so it is gated to pushes on `main` and to `workflow_dispatch`. On a PR it reports as skipped, which means E2E is effectively a local gate before merge (`make test-e2e` after `make up`) and a post-merge one on `main` |
+| **6. Namespace unification** | Unify username = personal namespace and organization ID = organization namespace into a single `/{ns}` (with `/orgs/{name}` redirecting), and give users a profile too (display name, bio, website, avatar URL). Includes making reserved names a single source of truth, plus the HF-compatible `users/{u}/overview` / `organizations/{o}/overview` | ✅ Done — `frontend/app/[ns]/page.tsx` is the one namespace page, `frontend/app/orgs/[name]/page.tsx` is a `permanentRedirect` to it (settings stay under `/orgs/{name}/settings`), and `/api/users/{username}/overview` / `/api/organizations/{org}/overview` are served from `backend/internal/api/server.go`. Design and phase breakdown: `docs/dev/namespace-design.md` (§13) |
 
 The goal of this ordering was for the system to already be useful from the Python ecosystem as
 of Phase 1 (since the commit API handles uploads even without git). In practice, verification of

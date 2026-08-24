@@ -78,7 +78,12 @@ plugins:
             Inspecting Models: モデルの確認
             Tracking Experiments: 実験のトラッキング
             Organizations: Organization
+            Webhooks: Webhook
             Reference: リファレンス
+            # Intentionally identical: `tf` is a command name, and the Japanese
+            # page's own H1 is "tf CLI" too. The key is listed anyway so the
+            # gap is a decision on the record rather than a missing entry.
+            tf CLI: tf CLI
             Authentication: 認証
             Compatibility: 互換性
             Self-hosting: セルフホスト
@@ -106,6 +111,7 @@ nav:
       - Inspecting Models: guides/model-checkpoints.md
       - Tracking Experiments: guides/experiments.md
       - Organizations: guides/organizations.md
+      - Webhooks: guides/webhooks.md
   - Reference:
       - tf CLI: reference/tf-cli.md
       - Authentication: reference/authentication.md
