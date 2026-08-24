@@ -35,7 +35,14 @@ type Storage interface {
 	SupportsSignedURL() bool
 
 	SignedGetURL(ctx context.Context, key string, ttl time.Duration, downloadName string) (string, error)
-	SignedPutURL(ctx context.Context, key string, ttl time.Duration, size int64) (string, error)
+	// SignedPutURL grants a write to exactly one key for ttl. It deliberately
+	// takes no expected size: the obvious way to enforce one on GCS is to sign
+	// an x-goog-content-length-range header, and huggingface_hub does not
+	// forward the LFS batch action headers onto the PUT, so a signature
+	// covering that header would break HF compatibility outright. Size is
+	// checked after the fact instead, on the staged object, before it is
+	// promoted to its content-addressed key.
+	SignedPutURL(ctx context.Context, key string, ttl time.Duration) (string, error)
 
 	Put(ctx context.Context, key string, r io.Reader, contentType string) error
 	Get(ctx context.Context, key string) (io.ReadCloser, error)

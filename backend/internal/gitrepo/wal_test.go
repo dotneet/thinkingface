@@ -169,7 +169,7 @@ func (s *indexOnlyStore) SupportsSignedURL() bool { return false }
 func (s *indexOnlyStore) SignedGetURL(context.Context, string, time.Duration, string) (string, error) {
 	return "", errors.New("unused")
 }
-func (s *indexOnlyStore) SignedPutURL(context.Context, string, time.Duration, int64) (string, error) {
+func (s *indexOnlyStore) SignedPutURL(context.Context, string, time.Duration) (string, error) {
 	return "", errors.New("unused")
 }
 func (s *indexOnlyStore) Put(context.Context, string, io.Reader, string) error {
@@ -259,11 +259,16 @@ func TestEnsureLocal_CacheHitStampsLastUseForEviction(t *testing.T) {
 func TestEnsureLocal_SurvivesConcurrentEviction(t *testing.T) {
 	m := NewManager(t.TempDir())
 	st := &indexOnlyStore{}
-	m.EnableWAL(st, 512) // tiny budget: B alone exceeds it
+	// A one-byte budget, not 512: these are stub repositories of a few dozen
+	// bytes, so with 512 the first successful pass evicts B and everything
+	// left fits, after which maybeEvict returns before it ever looks at idle
+	// time. The eviction pressure this test is named for lasted one round.
+	m.EnableWAL(st, 1)
 	dirA := walManagedRepo(t, m, st, "datasets/acme/widgets")
 
-	// B: idle, evictable, big enough to keep eviction hungry. Its index key
-	// differs from A's, but eviction never reads the store, so that is fine.
+	// B: idle, evictable, and the first thing eviction reaches for, so that A
+	// is not the only candidate. Its index key differs from A's, but eviction
+	// never reads the store, so that is fine.
 	dirB := filepath.Join(m.root, "models", "acme", "filler.git")
 	if err := os.MkdirAll(filepath.Join(dirB, "objects"), 0o755); err != nil {
 		t.Fatal(err)
@@ -278,21 +283,51 @@ func TestEnsureLocal_SurvivesConcurrentEviction(t *testing.T) {
 	oldT := time.Now().Add(-48 * time.Hour)
 	_ = os.Chtimes(filepath.Join(dirB, wal.StateFileName), oldT, oldT)
 
+	// The evictor runs until the loop below is finished rather than for a
+	// fixed number of rounds: maybeEvict is microseconds, so a counted loop
+	// drains before the first EnsureLocal even starts and the two never
+	// overlap at all (this test used to report the race happening in 0 of 300
+	// rounds).
+	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < 300; i++ {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
 			m.wal.mu.Lock()
 			m.wal.lastScan = time.Time{} // defeat the scan throttle
-			delete(m.wal.lastUse, dirA)  // simulate restart amnesia every round
 			m.wal.mu.Unlock()
 			m.maybeEvict()
 		}
 	}()
+	// Deferred, not written after the loop: a t.Fatalf below unwinds through
+	// runtime.Goexit, which would skip a trailing close and leave this
+	// goroutine spinning maybeEvict for the rest of the package's run.
+	defer func() {
+		close(stop)
+		<-done
+	}()
 
 	for i := 0; i < 300; i++ {
-		// Age A's state file so only the in-memory stamp can protect it.
+		// Strip both of A's protections -- the aged state file and the
+		// in-memory stamp -- *before* the call, so the only thing that can
+		// keep the directory alive is the stamp EnsureLocal itself writes.
+		//
+		// Dropping the stamp from the evicting goroutine instead would race
+		// the assertion below rather than this call: a delete landing between
+		// EnsureLocal's return and the Stat leaves A looking 48 hours idle
+		// again, and evicting it there is the documented, accepted gap (see
+		// evictMinIdle and continuity-design §16), not the invariant under
+		// test. That is what made this test fail on CI while passing locally.
 		_ = os.Chtimes(filepath.Join(dirA, wal.StateFileName), oldT, oldT)
+		m.wal.mu.Lock()
+		delete(m.wal.lastUse, dirA)
+		m.wal.mu.Unlock()
+
 		if err := m.EnsureLocal(context.Background(), "datasets/acme/widgets"); err != nil {
 			t.Fatalf("EnsureLocal round %d: %v", i, err)
 		}
@@ -300,7 +335,54 @@ func TestEnsureLocal_SurvivesConcurrentEviction(t *testing.T) {
 			t.Fatalf("round %d: repository evicted right after a successful EnsureLocal", i)
 		}
 	}
-	<-done
+	// Note for anyone reading a green run: whether the evictor ever lands
+	// inside the unstamped window is a scheduling accident, so this test
+	// passing is not proof the interleaving occurred. The deterministic half
+	// of this invariant is TestEnsureLocal_StampVisibleBeforeLockRelease
+	// below, which forces the ordering with a gate instead of racing for it.
+}
+
+// The stamp landing before the lock is released is only half the protection:
+// eviction measures idle time during its scan and deletes afterwards, so a
+// request that arrives in between is invisible to the snapshot. Deleting on
+// that snapshot removes a repository whose caller has already been told it is
+// there and is about to read it -- with no lock held, because the git exec
+// paths do not hold one.
+//
+// The scan/evict split lets that window be opened deliberately instead of
+// raced for: scan, then stamp exactly as EnsureLocal does, then run the
+// eviction pass on the now-stale snapshot.
+func TestEvictDown_SkipsRepositoryStampedAfterTheScan(t *testing.T) {
+	m := NewManager(t.TempDir())
+	st := &indexOnlyStore{}
+	m.EnableWAL(st, 1) // one-byte budget: everything is over it
+	dir := walManagedRepo(t, m, st, "datasets/acme/widgets")
+
+	// No stamp, and a state file old enough to be evictable: the state a
+	// repository is in right after a restart.
+	oldT := time.Now().Add(-48 * time.Hour)
+	_ = os.Chtimes(filepath.Join(dir, wal.StateFileName), oldT, oldT)
+
+	repos, total := m.scanEvictable()
+	if len(repos) != 1 {
+		t.Fatalf("scan found %d candidates, want 1", len(repos))
+	}
+	if total <= m.wal.cacheBytes {
+		t.Fatalf("scan totalled %d bytes, which is inside the %d-byte budget: nothing would be evicted",
+			total, m.wal.cacheBytes)
+	}
+
+	// A request arrives: EnsureLocal materialises the repository and stamps it
+	// before releasing the lock. The candidate list still says "idle".
+	m.wal.mu.Lock()
+	m.wal.lastUse[dir] = time.Now()
+	m.wal.mu.Unlock()
+
+	m.evictDown(repos, total, time.Now())
+
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("evicted a repository that was stamped after the scan: %v", err)
+	}
 }
 
 // The sharp version of the Bugbot regression: the stamp must be visible the

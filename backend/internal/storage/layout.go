@@ -1,6 +1,9 @@
 package storage
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // LFSKey returns the content-addressed key for an LFS object. This layer is the
 // source of truth: immutable, deduplicated across every repository.
@@ -10,6 +13,31 @@ func LFSKey(oid string) string {
 	}
 	return "lfs/" + oid[0:2] + "/" + oid[2:4] + "/" + oid
 }
+
+// LFSStagingKey returns the key an in-flight LFS upload writes to before it is
+// verified and promoted to LFSKey(oid).
+//
+// Uploaded bytes must never land on LFSKey directly: that key is immutable,
+// content-addressed and shared by every repository on the instance, so a
+// truncated transfer -- or bytes whose digest does not match the oid the
+// client declared -- would corrupt the object for everybody referencing it.
+// Staging is per repository *and* per oid so two repositories uploading the
+// same content cannot overwrite each other's in-flight bytes.
+//
+//	tmp/uploads/lfs/{repoID}/{oid}
+//
+// Nothing here is durable: an upload abandoned before verify leaves an object
+// under this prefix for the garbage collector to reclaim.
+func LFSStagingKey(repoID int64, oid string) string {
+	return LFSStagingPrefix + strconv.FormatInt(repoID, 10) + "/" + oid
+}
+
+// LFSStagingPrefix is where every LFSStagingKey lives. `thinkingface gc`
+// sweeps it by age, and it is spelled once here rather than in both places:
+// the two are only connected by the string, so a prefix changed on the write
+// side alone would leave the collector quietly sweeping nothing while
+// abandoned multi-gigabyte uploads pile up.
+const LFSStagingPrefix = "tmp/uploads/lfs/"
 
 // BlobKey returns the content-addressed key for a non-LFS git blob: the
 // bytes of every plain file on a pushed ref are published here so

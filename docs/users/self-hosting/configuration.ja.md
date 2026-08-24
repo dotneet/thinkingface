@@ -27,7 +27,8 @@
 | `GCS_BUCKET` | 対象のバケット名。 | `thinkingface` | |
 | `GCS_PREFIX` | バケット内のキーに付けるオプションのプレフィックス。1 つのバケットを複数の環境で共有する場合に使います。 | *(empty)* | 先頭・末尾のスラッシュは取り除かれます。 |
 | `STORAGE_EMULATOR_HOST` | fake-gcs-server エミュレータのアドレス。 | *(empty)* | `STORAGE_DRIVER=gcs-emulator` のときは必須で、設定しないと起動に失敗します。`STORAGE_DRIVER=gcs` の場合は使用されないため、未設定のままにしてください。 |
-| `TF_SIGNED_URL_TTL` | 署名付き GCS URL（LFS 転送、直接ダウンロード）が有効な期間。 | `1h` | `STORAGE_DRIVER=gcs` のときのみ意味を持ちます — エミュレータは署名付き URL を検証できないため、そのモードでは代わりにサーバーがバイト列をプロキシします。 |
+| `TF_SIGNED_URL_TTL` | 署名付き GCS URL（LFS 転送、直接ダウンロード）が有効な期間の下限。実際の有効期間はオブジェクトのサイズから算出され、`[TF_SIGNED_URL_TTL, TF_SIGNED_URL_MAX_TTL]` の範囲にクランプされるため、この値が効くのは主に小さい転送です。 | `1h` | `STORAGE_DRIVER=gcs` のときのみ意味を持ちます — エミュレータは署名付き URL を検証できないため、そのモードでは代わりにサーバーがバイト列をプロキシします。 |
+| `TF_SIGNED_URL_MAX_TTL` | 同じクランプの上限。大きな転送に対して効きます。 | `12h` | `TF_SIGNED_URL_TTL` と同じく `STORAGE_DRIVER=gcs` のときのみ意味を持ちます。 |
 
 ## データベース { #database }
 
@@ -83,8 +84,8 @@ git clone ssh://git@localhost:2222/admin/imdb-reviews.git
 | 変数 | 説明 | デフォルト | 備考 |
 |---|---|---|---|
 | `TF_SYNC_WORKERS` | push 後のジョブ（blob の公開、メタデータインデックスの更新）を処理する並行ワーカーの数。 | `2` | ワーカーは異なる ref を並行して処理します。1 つのリポジトリ・ref に対するジョブは常に順番に 1 つずつ実行されるため、この値を増やしても安全です。 |
-| `TF_VIEWER_CACHE_DIR` | Parquet ビューアのキャッシュ用ローカルディレクトリ。 | `/data/cache` | |
-| `TF_VIEWER_CACHE_BYTES` | そのキャッシュのバイト数の上限。 | `4294967296`（4 GiB） | Cloud Run 上では、このディレクトリはメモリバックエンド（tmpfs）であり、インスタンスのメモリ予算を共有するため、そこでは意図的にサイズを決める必要があります。 |
+| `TF_VIEWER_CACHE_DIR` | WAL compaction 用のローカル作業ディレクトリ。Parquet ビューアはストレージからレンジ読み込みでオブジェクトを直接読むため、もうここにディスクキャッシュを持ちません。 | `/data/cache` | |
+| `TF_VIEWER_METADATA_CACHE_BYTES` | Parquet ビューアのプロセス内フッタ（メタデータ）キャッシュのバイト数の上限。 | `268435456`（256 MiB） | これはディスクではなくプロセスのヒープメモリであり、`TF_VIEWER_CACHE_DIR` の tmpfs 予算とは競合しません。 |
 | `TF_WAL_MODE` | Continuity 移行がどこまで進んでいるか: `off`、`shadow`、`authoritative` のいずれか。 | `off`（Compose では `shadow`） | `off`: `GIT_ROOT` 配下のディスク上リポジトリが正となります。`shadow`: push は GCS バックエンドの write-ahead log にもベストエフォートでミラーされます — ディスクが正であり続け、WAL の失敗が push を失敗させることはありません。`authoritative`: WAL が正となり、読み取りはそこから実体化され、`GIT_ROOT` は容量に上限のある再構築可能なキャッシュになります。これら以外の値を指定すると起動に失敗します。 |
 | `TF_GIT_HOOKS_PATH` | イメージに焼き込まれた `core.hooksPath` のディレクトリで、push を WAL 経由に配線します。 | *(empty)* | **`TF_WAL_MODE` が `off` でない場合は必須です** — これがないと、git smart HTTP 経由の push が WAL を静かにバイパスしてしまうため、設定しないと起動に失敗します。Compose ではこれを `/opt/thinkingface/hooks` に設定しています。 |
 | `TF_GIT_CACHE_BYTES` | `TF_WAL_MODE=authoritative` のとき、`GIT_ROOT` 配下の実体化されたリポジトリキャッシュのバイト数の上限。 | `2147483648`（2 GiB） | `0` でエビクションを無効化します。WAL が authoritative でない場合は使われません。 |
