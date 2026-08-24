@@ -266,7 +266,8 @@ CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook
 
 -- Daily download counters, used to answer "downloads in the last 30 days" on
 -- a repository page without scanning history (postgres/0006_download_stats.sql).
--- Cumulative downloads keep living on repositories.downloads.
+-- Cumulative downloads keep living on repositories.downloads; one count per
+-- resolve request advances both (docs/dev/api-contract.md).
 CREATE TABLE IF NOT EXISTS repo_download_stats (
     repo_id INTEGER NOT NULL REFERENCES repositories (id) ON DELETE CASCADE,
     date    DATE NOT NULL,

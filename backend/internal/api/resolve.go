@@ -121,10 +121,12 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, kind stri
 		return
 	}
 
-	// One resolve request is one count for the 30-day download-stats table,
-	// whether it is a HEAD, a plain GET, or a redirect to an LFS signed URL --
-	// the client's actual transfer against GCS never touches this server, so
-	// this is the only point that ever sees the request.
+	// One resolve request is one count for both download counters, whether it
+	// is a HEAD, a plain GET, or a redirect to an LFS signed URL -- the
+	// client's actual transfer against GCS never touches this server, so this
+	// is the only point that ever sees the request. Counting the two at
+	// different points is what let the 30-day window exceed the all-time
+	// total the UI shows it against.
 	s.recordDownload(r.Context(), repo.ID)
 
 	w.Header().Set("X-Repo-Commit", commit.String())
@@ -180,7 +182,6 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, kind stri
 	} else {
 		w.Header().Set("Content-Length", strconv.FormatInt(entry.Size, 10))
 	}
-	s.store.IncrementDownloads(r.Context(), repo.ID)
 	if _, err := io.Copy(w, body); err != nil {
 		// The client hung up mid-transfer; nothing useful left to do.
 		return
@@ -203,12 +204,23 @@ func writePartialContent(w http.ResponseWriter, offset, length, size int64) int6
 	return span
 }
 
-// recordDownload records a resolve hit off the request path. It must never
-// delay the response, so it hands the write to a goroutine detached from the
-// request context (the request may already be finished by the time this
-// runs); RecordDownload itself only logs on failure.
+// recordDownload records a resolve hit off the request path, advancing both
+// counters the UI shows side by side: the repository's running total
+// (repositories.downloads) and today's bucket in the 30-day stats table. They
+// are written from this one place so a single rule -- one resolve request is
+// one count -- governs both; counting them under different rules is what let
+// a 30-day window come out larger than the all-time total it is a window of.
+//
+// Neither write may delay the response, so both go to a goroutine detached
+// from the request context (the request may well be finished by the time this
+// runs), and neither can fail a download: IncrementDownloads and
+// RecordDownload only log.
 func (s *Server) recordDownload(ctx context.Context, repoID int64) {
-	go s.store.RecordDownload(context.WithoutCancel(ctx), repoID)
+	detached := context.WithoutCancel(ctx)
+	go func() {
+		s.store.IncrementDownloads(detached, repoID)
+		s.store.RecordDownload(detached, repoID)
+	}()
 }
 
 // lfsObjectOwned guards every path that turns a pointer in a repository's
@@ -285,7 +297,6 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 			internalError(w, "sign download url", err)
 			return
 		}
-		s.store.IncrementDownloads(r.Context(), repo.ID)
 		// Content-Length must not describe the redirect body.
 		w.Header().Del("Content-Length")
 		http.Redirect(w, r, url, http.StatusFound)
@@ -309,7 +320,6 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 	if partial {
 		writePartialContent(w, offset, length, entry.LFS.Size)
 	}
-	s.store.IncrementDownloads(r.Context(), repo.ID)
 	_, _ = io.Copy(w, rc)
 }
 
