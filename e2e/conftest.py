@@ -195,11 +195,16 @@ def ssh_endpoint(hf_api: HfApi, namespace: str) -> tuple[str, int]:
     finally:
         hf_api.delete_repo(repo_id=probe, repo_type="model", missing_ok=True)
 
-    if not advertised and "TF_SSH_PORT" not in os.environ:
+    # Either override is enough to mean "I know where it is, test it anyway".
+    # Checking only one of them made the documented escape hatch a no-op for
+    # anybody who used the other, and then answered with the very instruction
+    # they had just followed.
+    overridden = "TF_SSH_HOST" in os.environ or "TF_SSH_PORT" in os.environ
+    if not advertised and not overridden:
         pytest.skip(
             f"the server at {TF_ENDPOINT} advertises no ssh_clone_url, so git "
-            "over SSH is disabled there (TF_SSH_ENABLED). Set TF_SSH_HOST / "
-            "TF_SSH_PORT to test a listener it does not advertise."
+            "over SSH is disabled there (TF_SSH_ENABLED). Set TF_SSH_HOST "
+            "and/or TF_SSH_PORT to test a listener it does not advertise."
         )
 
     split = urllib.parse.urlsplit(advertised) if advertised else None
