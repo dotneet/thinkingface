@@ -86,8 +86,8 @@ func TestCreateWebhook_NewEventsCanBeSubscribedAndMatched(t *testing.T) {
 			}
 			var body apitypes.CreateWebhookResponse
 			resp.json(t, &body)
-			if len(body.Webhook.Events) != 1 || body.Webhook.Events[0] != event {
-				t.Fatalf("created webhook events = %v, want [%q]", body.Webhook.Events, event)
+			if len(body.Events) != 1 || body.Events[0] != event {
+				t.Fatalf("created webhook events = %v, want [%q]", body.Events, event)
 			}
 
 			ns, err := f.st.GetNamespace(ctx, "alice")
@@ -98,7 +98,7 @@ func TestCreateWebhook_NewEventsCanBeSubscribedAndMatched(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ListMatchingWebhooks: %v", err)
 			}
-			if len(matches) != 1 || matches[0].ID != body.Webhook.ID {
+			if len(matches) != 1 || matches[0].ID != body.ID {
 				t.Fatalf("ListMatchingWebhooks(%q) = %+v, want exactly the webhook just created", event, matches)
 			}
 
