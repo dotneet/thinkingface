@@ -537,3 +537,47 @@ func TestRunGC_UntrackedPassIgnoresStagingObjects(t *testing.T) {
 		t.Fatalf("deleted storage=%v db=%v, want none", obj.deleted, db.removedUntracked)
 	}
 }
+
+// An object gc cannot remove must not cost every *other* object a full
+// scheduling interval. The passes share no state, so a failure in one is
+// reported and the rest still run.
+func TestRunGC_OnePassFailingDoesNotStopTheOthers(t *testing.T) {
+	failing := storage.LFSKey(deduppedOID)
+	db := &fakeGCDB{
+		all:        []store.LFSObjectRef{{OID: deduppedOID, Size: 10}},
+		referenced: map[string]bool{},
+		liveRefs:   map[string]bool{},
+		blobRefs:   map[string]bool{},
+	}
+	obj := &fakeGCStorage{
+		objects: []storage.ObjectInfo{
+			// Reclaimed by the unreferenced pass, and its delete fails.
+			lfsObject(deduppedOID, 90*24*time.Hour),
+			// Each of these belongs to one of the passes that follow.
+			lfsObject(untrackedOID, 90*24*time.Hour),
+			blobObject("bbbb2222", 90*24*time.Hour),
+			stagingObject("tmp/uploads/lfs/1/cccc", stagingGrace(testSignedURLMaxTTL)+time.Hour),
+		},
+		fail: map[string]error{failing: errors.New("boom")},
+	}
+
+	err := withDiscardedStdout(func() error {
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
+	})
+	if err == nil {
+		t.Fatal("runGC: want the failed delete reported, got nil")
+	}
+	want := []string{
+		storage.LFSKey(untrackedOID),
+		storage.BlobKey("bbbb2222"),
+		"tmp/uploads/lfs/1/cccc",
+	}
+	if len(obj.deleted) != len(want) {
+		t.Fatalf("deleted = %v, want %v", obj.deleted, want)
+	}
+	for i, key := range want {
+		if obj.deleted[i] != key {
+			t.Fatalf("deleted = %v, want %v", obj.deleted, want)
+		}
+	}
+}

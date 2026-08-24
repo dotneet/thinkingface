@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -113,13 +114,16 @@ func runGC(ctx context.Context, db gcDB, obj gcStorage, signedURLMaxTTL time.Dur
 	// other way round. The default (dry-run=true, yes=false) only reports.
 	execute := *yes || !*dryRun
 
-	if err := gcLFS(ctx, db, obj, execute); err != nil {
-		return err
-	}
-	if err := gcBlobs(ctx, db, obj, execute); err != nil {
-		return err
-	}
-	return gcStaging(ctx, obj, signedURLMaxTTL, execute)
+	// Every pass runs even if an earlier one failed, and the failures are
+	// reported together. The passes share no state and each one already
+	// tolerates a per-object failure by logging it and moving on, so letting
+	// one abort the rest only means whatever it would have reclaimed waits
+	// for the next scheduled run -- a week, at the shipped schedule.
+	return errors.Join(
+		gcLFS(ctx, db, obj, execute),
+		gcBlobs(ctx, db, obj, execute),
+		gcStaging(ctx, obj, signedURLMaxTTL, execute),
+	)
 }
 
 // gcLFS reclaims the lfs/ layer, which leaks in two different shapes and
@@ -137,11 +141,16 @@ func runGC(ctx context.Context, db gcDB, obj gcStorage, signedURLMaxTTL time.Dur
 // The reads are shared and ordered deliberately. The listing goes first
 // because it is the slow one, and both database reads come after it, so a row
 // that commits while the listing runs is seen rather than mistaken for a leak
-// -- the same ordering, for the same reason, that gcBlobs uses. The
-// unreferenced pass then runs before the untracked one: it deletes rows, and
-// the untracked set was computed against the rows as they were before it ran,
-// so the objects it removes are already excluded and no key is deleted twice.
+// -- the same ordering, for the same reason, that gcBlobs uses. The untracked
+// set is then computed from the rows as they stand before either pass deletes
+// anything, so whatever the unreferenced pass removes is already excluded
+// from it and no key is offered to both.
 func gcLFS(ctx context.Context, db gcDB, obj gcStorage, execute bool) error {
+	// A read that fails aborts both passes rather than either: an unusable
+	// listing leaves the untracked pass with nothing to reason about, and
+	// treating an unreadable lfs_objects as an empty one would make every
+	// stored object look untracked. Deletes go to the same bucket the
+	// listing failed against, so there is nothing to salvage by continuing.
 	objects, err := obj.List(ctx, storage.LFSPrefix)
 	if err != nil {
 		return fmt.Errorf("list lfs objects in storage: %w", err)
@@ -157,10 +166,13 @@ func gcLFS(ctx context.Context, db gcDB, obj gcStorage, execute bool) error {
 
 	untracked := store.UntrackedLFSObjects(objects, all, time.Now().Add(-untrackedLFSGrace))
 
-	if err := gcLFSUnreferenced(ctx, db, obj, all, referenced, execute); err != nil {
-		return err
-	}
-	return gcLFSUntracked(ctx, db, obj, untracked, len(objects), execute)
+	// Deleting is a different matter: the two candidate sets are disjoint and
+	// every delete is guarded on its own, so one object gc could not remove
+	// is no reason to leave the other pass's objects for another week.
+	return errors.Join(
+		gcLFSUnreferenced(ctx, db, obj, all, referenced, execute),
+		gcLFSUntracked(ctx, db, obj, untracked, len(objects), execute),
+	)
 }
 
 // gcLFSUnreferenced collects lfs/ objects that no repository links to any more.
