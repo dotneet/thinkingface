@@ -44,6 +44,15 @@ Webhook は、このインスタンス上で何かが起きたことを、あな
 `run.finished` / `run.failed` はそのステータスへの**遷移**時にのみ発火します。そのため、終了後もログを
 送り続ける run や、finish 呼び出しのリトライによって、毎回新しい配信が飛ぶことはありません。
 
+!!! warning "run 系イベントにはライブ ingest API が必要です"
+
+    `run.finished` / `run.failed` が発火するのは、ingest API 経由で報告された run
+    ——run の最後に `finish()` を呼ぶ `thinkingface.trackio`—— だけです。もう一方の経路、
+    つまり trackio が自分で書いた Parquet をデータセットリポジトリに push する形で届いた run は、
+    ステータス付きでインデックスされますが webhook は発火しません。その経路を使っている場合は、
+    実験リポジトリの `repo.push` を購読してください。詳しくは
+    [実験のトラッキング](experiments.md) を参照してください。
+
 ## 配信の中身 { #what-a-delivery-looks-like }
 
 リクエストは JSON ボディを持つ `POST` です。

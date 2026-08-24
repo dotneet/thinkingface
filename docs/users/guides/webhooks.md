@@ -44,6 +44,15 @@ rejected as an unknown event rather than silently stored.
 `run.finished` / `run.failed` fire on the **transition** into that status, so a run that keeps
 logging after finishing — or a retried finish call — does not send a fresh delivery each time.
 
+!!! warning "Run events need the live ingest API"
+
+    Only runs reported through the ingest API — `thinkingface.trackio`, which calls
+    `finish()` at the end of a run — produce `run.finished` / `run.failed`. Runs that arrive
+    by the other route, where trackio writes its own Parquet files and you push them to a
+    dataset repository, are indexed with a status but fire no webhook. Subscribe to
+    `repo.push` on the experiment repository if that is how your runs get here. See
+    [Tracking Experiments](experiments.md).
+
 ## What a delivery looks like
 
 The request is a `POST` with a JSON body:
