@@ -27,8 +27,11 @@ const (
 // reference that does not resolve is still shown rather than dropped.
 var KnownRelations = []string{RelationFinetune, RelationAdapter, RelationQuantized, RelationMerge}
 
-// maxRelationLen bounds a relation coming off a card. The value reaches a
-// database column and a UI grouping key, and nothing about a card is trusted.
+// maxRelationLen bounds a relation coming off a card, in runes rather than
+// bytes (the column it reaches, repo_lineage.relation, is an unbounded TEXT
+// column, so nothing forces a byte ceiling; a rune ceiling is what keeps the
+// UI grouping key readable regardless of script). Nothing about a card is
+// trusted.
 const maxRelationLen = 64
 
 // adapterMarkers are the file names that only exist in a PEFT/LoRA adapter
@@ -105,10 +108,9 @@ func canonicalRelation(s string) string {
 			return known
 		}
 	}
-	if len(s) > maxRelationLen {
-		s = s[:maxRelationLen]
-	}
-	return s
+	// truncateRunes (repocard.go): a rune-count cut, not a byte-count one, so a
+	// declared value written in Japanese isn't sliced mid-character.
+	return truncateRunes(s, maxRelationLen)
 }
 
 // InferBaseModelRelation guesses how a repository relates to its base models

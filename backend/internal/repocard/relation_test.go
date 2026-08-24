@@ -1,6 +1,10 @@
 package repocard
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
 
 func TestInferBaseModelRelation(t *testing.T) {
 	tests := []struct {
@@ -173,6 +177,29 @@ base_model_relation: 42
 				t.Errorf("Lineage().BaseModelRelation = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCanonicalRelation_TruncatesUnknownValues(t *testing.T) {
+	// Regression: an unknown ASCII relation longer than maxRelationLen is
+	// still cut at exactly maxRelationLen characters, unchanged from the
+	// byte-slicing behaviour for single-byte text.
+	long := strings.Repeat("x", maxRelationLen+20)
+	if got := canonicalRelation(long); got != strings.Repeat("x", maxRelationLen) {
+		t.Errorf("canonicalRelation(long ASCII) = %q, want %d x's", got, maxRelationLen)
+	}
+
+	// The maxRelationLen-th character lands inside a run of 3-byte Japanese
+	// characters; the cut must land on a rune boundary so the result stays
+	// valid UTF-8 instead of a mid-character byte slice.
+	longJA := strings.Repeat("a", maxRelationLen-1) + "あいうえお"
+	got := canonicalRelation(longJA)
+	if !utf8.ValidString(got) {
+		t.Fatalf("canonicalRelation(long Japanese) = %q is not valid UTF-8", got)
+	}
+	want := strings.Repeat("a", maxRelationLen-1) + "あ"
+	if got != want {
+		t.Errorf("canonicalRelation(long Japanese) = %q, want %q", got, want)
 	}
 }
 

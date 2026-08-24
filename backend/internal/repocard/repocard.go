@@ -288,9 +288,28 @@ func (c Card) IsExperiment() bool {
 	return false
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
+// truncateRunes returns the first n runes of s, or s unchanged when it
+// already has n or fewer. Cutting by rune count rather than slicing by byte
+// index never splits a multi-byte character (Japanese description text, for
+// instance) in two, which would otherwise leave an invalid UTF-8 tail that
+// json.Marshal silently replaces with U+FFFD on the way out.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string(r[:n])
+}
+
+// truncate cuts s to n runes and marks the cut with an ellipsis. n is a
+// character count, not a byte count: nothing downstream (the description
+// column is an unbounded TEXT column) requires a byte ceiling, and a
+// byte-based cap would give Japanese text roughly a third as many characters
+// as English for the same limit.
+func truncate(s string, n int) string {
+	cut := truncateRunes(s, n)
+	if cut == s {
+		return s
+	}
+	return cut + "…"
 }

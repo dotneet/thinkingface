@@ -3,6 +3,7 @@ package repocard
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestLineage(t *testing.T) {
@@ -150,6 +151,35 @@ func TestDescription_EmptyWhenNothingAvailable(t *testing.T) {
 	card := Parse([]byte("---\nlicense: mit\n---\n\n# Just a heading\n\n"))
 	if got := card.Description(); got != "" {
 		t.Errorf("Description() = %q, want empty string", got)
+	}
+}
+
+func TestDescription_TruncatesASCIIAtRuneLimit(t *testing.T) {
+	// Regression: plain ASCII text must still be cut at exactly 300
+	// characters, same as before rune-aware truncation.
+	long := strings.Repeat("x", 350)
+	card := Parse([]byte("---\ndescription: " + long + "\n---\n"))
+	got := card.Description()
+	want := strings.Repeat("x", 300) + "…"
+	if got != want {
+		t.Errorf("Description() = %q, want 300 x's plus an ellipsis", got)
+	}
+}
+
+func TestDescription_TruncatesOnRuneBoundaryForMultibyteText(t *testing.T) {
+	// The 300-character cut lands inside a run of 3-byte Japanese characters;
+	// truncation must land on a rune boundary rather than slicing mid-character
+	// and producing invalid UTF-8 (which json.Marshal would silently replace
+	// with U+FFFD in the API response).
+	long := strings.Repeat("a", 299) + "あいうえお"
+	card := Parse([]byte("---\ndescription: " + long + "\n---\n"))
+	got := card.Description()
+	if !utf8.ValidString(got) {
+		t.Fatalf("Description() = %q is not valid UTF-8", got)
+	}
+	want := strings.Repeat("a", 299) + "あ" + "…"
+	if got != want {
+		t.Errorf("Description() = %q, want %q", got, want)
 	}
 }
 
