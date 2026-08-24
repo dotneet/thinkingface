@@ -762,3 +762,39 @@ func TestEditFile_CreatesAFileInADirectoryThatDoesNotExistYet(t *testing.T) {
 		t.Errorf("docs/notes/.gitkeep = %q, want empty", got)
 	}
 }
+
+// TestLimitedReader_CapIsInclusive pins the boundary the file-size ceiling is
+// documented with. io.Copy fills its buffer and then issues one more Read to
+// find the end, so a reader that fails as soon as its budget reaches zero
+// rejects a file of exactly the limit -- the size the contract says is allowed.
+func TestLimitedReader_CapIsInclusive(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		body    string
+		left    int64
+		want    string
+		wantErr bool
+	}{
+		{name: "under the cap", body: "abcd", left: 8, want: "abcd"},
+		{name: "exactly the cap", body: "abcd", left: 4, want: "abcd"},
+		{name: "one byte over", body: "abcde", left: 4, wantErr: true},
+		{name: "empty at a zero cap", body: "", left: 0, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			_, err := io.Copy(&out, &limitedReader{r: strings.NewReader(tc.body), left: tc.left})
+			if tc.wantErr {
+				if !errors.Is(err, errUploadTooLarge) {
+					t.Fatalf("err = %v, want errUploadTooLarge", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("copy: %v", err)
+			}
+			if out.String() != tc.want {
+				t.Fatalf("copied %q, want %q", out.String(), tc.want)
+			}
+		})
+	}
+}

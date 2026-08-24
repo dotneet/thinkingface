@@ -80,9 +80,26 @@ type limitedReader struct {
 	left int64
 }
 
+// Read enforces an *inclusive* cap: a file of exactly the limit is fine, only
+// a byte past it is too large. That distinction has to be made by asking for
+// one more byte rather than by assuming, because io.Copy always issues a
+// follow-up Read after filling its buffer, and a part that ends exactly on the
+// cap answers that Read with EOF. Failing on `left == 0` alone would reject
+// every upload of exactly the documented ceiling.
 func (l *limitedReader) Read(p []byte) (int, error) {
 	if l.left <= 0 {
-		return 0, errUploadTooLarge
+		var probe [1]byte
+		for {
+			n, err := l.r.Read(probe[:])
+			if n > 0 {
+				return 0, errUploadTooLarge
+			}
+			if err != nil {
+				return 0, err
+			}
+			// (0, nil) is legal but says nothing; ask again rather than
+			// reading it as either an overflow or an end.
+		}
 	}
 	if int64(len(p)) > l.left {
 		p = p[:l.left]
