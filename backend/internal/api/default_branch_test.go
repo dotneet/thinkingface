@@ -34,15 +34,16 @@ type enqueueCall struct {
 }
 
 // recordingEnqueuer captures every Enqueue call instead of running a real
-// sync worker, so a test can assert whether (and with what ref/old/new) a
-// reindex was requested -- in particular, that the idempotent no-op path
-// enqueues nothing at all.
+// sync worker, so a test can assert whether -- and with what ref/old/new -- a
+// reindex was requested. It is the api package's one sync-job recorder;
+// refs_test.go asserts against it too.
 type recordingEnqueuer struct {
 	mu    sync.Mutex
 	calls []enqueueCall
 	// fail, when set, is returned by every Enqueue after the call is
-	// recorded -- the queue write failing on an otherwise-successful
-	// request, which the handler has to undo rather than leave half-applied.
+	// recorded: the queue write failing on a request whose other writes
+	// already landed, which is the case the handler has to leave consistent
+	// rather than half-undone.
 	fail error
 }
 
@@ -167,7 +168,9 @@ func (f *defaultBranchFixture) token(u *store.User, scope string) string {
 	if err != nil {
 		f.t.Fatalf("new token: %v", err)
 	}
-	if _, err := f.st.CreateToken(context.Background(), u.ID, "test", scope, hash); err != nil {
+	// nil expiry: these fixtures care about scope, not about the token
+	// ageing out mid-test.
+	if _, err := f.st.CreateToken(context.Background(), u.ID, "test", scope, hash, nil); err != nil {
 		f.t.Fatalf("create token: %v", err)
 	}
 	return tok
@@ -243,7 +246,7 @@ func TestUpdateRepoDefaultBranch_SwitchesAndReindexesTargetRef(t *testing.T) {
 	}
 }
 
-func TestUpdateRepoDefaultBranch_SameValueIsIdempotentAndEnqueuesNothing(t *testing.T) {
+func TestUpdateRepoDefaultBranch_SameValueStillQueuesTheReindex(t *testing.T) {
 	f := newDefaultBranchFixture(t)
 	r := f.repo("alice", "foo", "model")
 	f.commit(r, "main", "README.md", "hello")
@@ -258,19 +261,28 @@ func TestUpdateRepoDefaultBranch_SameValueIsIdempotentAndEnqueuesNothing(t *test
 	if body.Repo.DefaultBranch != "main" {
 		t.Fatalf("default_branch = %q, want main", body.Repo.DefaultBranch)
 	}
-	if calls := f.sync.snapshot(); len(calls) != 0 {
-		t.Fatalf("enqueue calls = %d, want 0 for a no-op switch: %+v", len(calls), calls)
+	// Setting the branch that is already the default writes nothing, but it
+	// does queue the reindex -- that is what makes retrying the request a
+	// repair after an earlier attempt updated the row and then failed to
+	// queue the job. Skipping it here would make such a retry a silent no-op.
+	calls := f.sync.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("enqueue calls = %d, want 1 even for an already-default branch: %+v", len(calls), calls)
+	}
+	if calls[0].Ref != "main" {
+		t.Fatalf("enqueue call = %+v, want a reindex of main", calls[0])
 	}
 }
 
-// TestUpdateRepoDefaultBranch_RollsBackWhenTheReindexCannotBeQueued pins the
-// reason the handler undoes its own writes instead of leaving them, the way
-// commit.go and edit.go leave theirs. Those heal: any later push to the ref
-// re-enqueues the index. This one does not -- once the row and HEAD agree on
-// the new branch, the idempotent no-op path answers 200 and enqueues nothing,
-// so a retry would silently do nothing and the stale head_sha/card/lineage
-// would survive until someone happened to push to that branch.
-func TestUpdateRepoDefaultBranch_RollsBackWhenTheReindexCannotBeQueued(t *testing.T) {
+// TestUpdateRepoDefaultBranch_LeavesTheSwitchInPlaceWhenTheReindexCannotBeQueued
+// pins the failure shape the handler deliberately chooses. HEAD and the row
+// are already consistent by the time the enqueue runs, so a failure there
+// leaves a working repository with a stale index -- not a half-applied one.
+// Undoing the switch would mean writing to the store that just refused a
+// write, and the outage that failed the enqueue fails the undo too, which is
+// how HEAD and the row end up naming different branches. The retry below is
+// what actually repairs the index.
+func TestUpdateRepoDefaultBranch_LeavesTheSwitchInPlaceWhenTheReindexCannotBeQueued(t *testing.T) {
 	f := newDefaultBranchFixture(t)
 	r := f.repo("alice", "foo", "model")
 	f.commit(r, "main", "README.md", "hello")
@@ -284,16 +296,17 @@ func TestUpdateRepoDefaultBranch_RollsBackWhenTheReindexCannotBeQueued(t *testin
 		t.Fatalf("status = %d, want 500, body = %s", resp.status(), resp.rec.Body.String())
 	}
 
+	// The row moved and stayed moved.
 	stored, err := f.st.GetRepoByID(context.Background(), r.ID)
 	if err != nil {
 		t.Fatalf("reload repo: %v", err)
 	}
-	if stored.DefaultBranch != "main" {
-		t.Fatalf("stored default_branch = %q, want it rolled back to main", stored.DefaultBranch)
+	if stored.DefaultBranch != "release" {
+		t.Fatalf("stored default_branch = %q, want release to stay applied", stored.DefaultBranch)
 	}
 
-	// HEAD on disk has to come back too, or a clone would check out release
-	// while every listing still reads main.
+	// And HEAD agrees with it -- the invariant that matters, since a clone
+	// follows HEAD while every listing reads the row.
 	gitRepo, err := f.git.Open(r.StoragePath)
 	if err != nil {
 		t.Fatalf("open git repository: %v", err)
@@ -302,12 +315,13 @@ func TestUpdateRepoDefaultBranch_RollsBackWhenTheReindexCannotBeQueued(t *testin
 	if err != nil {
 		t.Fatalf("read HEAD: %v", err)
 	}
-	if got := strings.TrimSpace(string(head)); got != "ref: refs/heads/main" {
-		t.Fatalf("HEAD = %q, want it rolled back to ref: refs/heads/main", got)
+	if got := strings.TrimSpace(string(head)); got != "ref: refs/heads/release" {
+		t.Fatalf("HEAD = %q, want it to agree with the row on release", got)
 	}
 
-	// And with both rolled back, a retry is a real switch again rather than a
-	// no-op: the whole point of undoing the half-applied state.
+	// Retrying now takes the already-default path, which still queues the
+	// reindex: the request repairs itself rather than answering 200 with
+	// nothing done.
 	f.sync.fail = nil
 	if resp := f.patch("model", "alice", "foo", tok, apitypes.RepoUpdateRequest{DefaultBranch: strPtr("release")}); resp.status() != 200 {
 		t.Fatalf("retry status = %d, want 200, body = %s", resp.status(), resp.rec.Body.String())

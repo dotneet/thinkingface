@@ -570,12 +570,16 @@ future fields: every field is a pointer and absent ones are left alone.
     ref. This also means the response's `head_sha` / `card` / `parquet_files` can be momentarily
     stale until that job finishes (`RepoDetail.indexing` reports it, same as right after repository
     creation).
-  - All-or-nothing: if that enqueue fails, `HEAD` and `repositories.default_branch` are both put
-    back and the request answers 500. `commit`/`edit` leave their own enqueue failures
-    half-applied because any later push to the ref re-enqueues and heals them; nothing heals this
-    one — once the row and `HEAD` agree, a retry takes the idempotent no-op path above and
-    enqueues nothing, so the stale metadata would survive until someone happened to push to that
-    branch. Rolling back is what keeps the retry meaningful.
+  - The reindex is queued **even when the branch is already the default**, where nothing else is
+    written. That is what makes retrying the request a repair: if an earlier attempt updated
+    `HEAD` and the row and then failed to queue the job (500), repeating it queues the job and
+    the metadata catches up.
+  - A failed enqueue is **not** rolled back. `HEAD` and the row already agree on the new branch
+    by that point, so the repository is consistent and only its index is stale. Undoing the
+    switch would mean writing to the store that just refused a write, and the outage that failed
+    the enqueue fails the undo too — leaving `HEAD` and the row naming different branches, which
+    is worse than a stale index. If the **row** write fails, `HEAD` is put back, since that is the
+    one pair that must never disagree: a clone follows `HEAD` while every listing reads the row.
   - Webhook: no dedicated event was added for this. `repo.push` fires once the reindex above
     completes (payload as documented in §9), which is enough signal for a mirroring consumer that
     the default branch's effective content may have changed; a purpose-built event would carry

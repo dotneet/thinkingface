@@ -393,13 +393,6 @@ func (s *Server) handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Idempotent no-op: same value, nothing to touch on disk, in the index,
-	// or in the queue.
-	if branch == repo.DefaultBranch {
-		writeJSON(w, http.StatusOK, apitypes.RepoDetailResponse{Repo: s.buildDetail(r.Context(), repo)})
-		return
-	}
-
 	gitRepo, err := s.git.Open(repo.StoragePath)
 	if err != nil {
 		internalError(w, "open repository", err)
@@ -411,19 +404,30 @@ func (s *Server) handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// HEAD first, then the row: if the process dies between them a retry of
-	// this same request still succeeds (SetHead is idempotent and the branch
-	// == repo.DefaultBranch check above only short-circuits once the row
-	// agrees), whereas the reverse order could leave the row pointing at a
-	// branch HEAD was never repointed to.
-	if err := gitRepo.SetHead(r.Context(), branch); err != nil {
-		internalError(w, "update HEAD", err)
-		return
-	}
-	updated, err := s.store.SetRepoDefaultBranch(r.Context(), repo.ID, branch)
-	if err != nil {
-		internalError(w, "update repository", err)
-		return
+	// Already the default: neither HEAD nor the row needs touching, and the
+	// request is idempotent. The reindex below still runs, and that is the
+	// point -- it is what turns a retry into a repair after an earlier
+	// attempt got as far as the row and then failed to queue the job. The
+	// cost when nothing went wrong is one redundant pass over a ref that is
+	// already indexed.
+	updated := repo
+	if branch != repo.DefaultBranch {
+		// HEAD before the row, and HEAD back again if the row write fails:
+		// the two must never name different branches, or a clone checks out
+		// one while every listing reads the other.
+		if err := gitRepo.SetHead(r.Context(), branch); err != nil {
+			internalError(w, "update HEAD", err)
+			return
+		}
+		updated, err = s.store.SetRepoDefaultBranch(r.Context(), repo.ID, branch)
+		if err != nil {
+			if rbErr := gitRepo.SetHead(r.Context(), repo.DefaultBranch); rbErr != nil {
+				slog.Error("roll back HEAD after a failed default-branch write",
+					"repo", repo.FullName(), "branch", repo.DefaultBranch, "err", rbErr)
+			}
+			internalError(w, "update repository", err)
+			return
+		}
 	}
 
 	// Re-run the post-push pipeline for the newly-default branch: the syncer
@@ -442,22 +446,14 @@ func (s *Server) handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 	// webhook event type was deliberately not added for this
 	// (docs/dev/api-contract.md "Changing the default branch" explains why).
 	if err := s.sync.Enqueue(r.Context(), repo.ID, branch, tip.String(), tip.String()); err != nil {
-		// Undo the switch so the request is all-or-nothing. commit.go and
-		// edit.go leave their own enqueue failures half-applied, and can
-		// afford to: their damage is a stale index on a ref that any later
-		// push re-enqueues. Nothing heals this one. Once the row and HEAD
-		// agree on the new branch, a retry hits the idempotent no-op above
-		// and returns 200 without ever enqueueing, so the stale
-		// head_sha/card/lineage would survive until someone happened to
-		// push to that branch. Rolling back keeps the retry meaningful.
-		if rbErr := gitRepo.SetHead(r.Context(), repo.DefaultBranch); rbErr != nil {
-			slog.Error("roll back HEAD after failed reindex enqueue",
-				"repo", repo.FullName(), "branch", repo.DefaultBranch, "err", rbErr)
-		}
-		if _, rbErr := s.store.SetRepoDefaultBranch(r.Context(), repo.ID, repo.DefaultBranch); rbErr != nil {
-			slog.Error("roll back default branch after failed reindex enqueue",
-				"repo", repo.FullName(), "branch", repo.DefaultBranch, "err", rbErr)
-		}
+		// Nothing is undone here, deliberately. HEAD and the row already
+		// agree on the new branch, so the repository is consistent -- only
+		// its index is stale. Undoing the switch would mean a second write to
+		// the very store that just refused one, and the outage that failed
+		// the enqueue fails that too: HEAD would go back while the row stayed
+		// put, leaving the two naming different branches, which is a worse
+		// state than a stale index. Retrying the request repairs it instead,
+		// because the already-default path above still queues the job.
 		internalError(w, "enqueue reindex", err)
 		return
 	}
