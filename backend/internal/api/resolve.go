@@ -121,10 +121,12 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, kind stri
 		return
 	}
 
-	// One resolve request is one count for the 30-day download-stats table,
-	// whether it is a HEAD, a plain GET, or a redirect to an LFS signed URL --
-	// the client's actual transfer against GCS never touches this server, so
-	// this is the only point that ever sees the request.
+	// One resolve request is one count for both download counters, whether it
+	// is a HEAD, a plain GET, or a redirect to an LFS signed URL -- the
+	// client's actual transfer against GCS never touches this server, so this
+	// is the only point that ever sees the request. Counting the two at
+	// different points is what let the 30-day window exceed the all-time
+	// total the UI shows it against.
 	s.recordDownload(r.Context(), repo.ID)
 
 	w.Header().Set("X-Repo-Commit", commit.String())
@@ -147,8 +149,11 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, kind stri
 
 	w.Header().Set("ETag", `"`+entry.Hash.String()+`"`)
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Length", strconv.FormatInt(entry.Size, 10))
 	if r.Method == http.MethodHead {
+		// A HEAD reports the whole file even when a Range is attached (same as
+		// the LFS path): huggingface_hub reads Content-Length here to learn the
+		// real size before it decides how to fetch the body.
+		w.Header().Set("Content-Length", strconv.FormatInt(entry.Size, 10))
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -159,19 +164,63 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, kind stri
 		return
 	}
 	defer rc.Close()
-	s.store.IncrementDownloads(r.Context(), repo.ID)
-	if _, err := io.Copy(w, rc); err != nil {
+
+	// Honour a single Range, the same way serveLFSFile does. An unparseable or
+	// unsatisfiable one falls back to the whole body with a 200 rather than a
+	// 416, again matching that path.
+	body := io.Reader(rc)
+	if offset, length, partial := parseRange(r.Header.Get("Range"), entry.Size); partial {
+		// go-git blob readers are sequential, so the prefix has to be read
+		// past rather than seeked over -- and these blobs run to gigabytes, so
+		// it is discarded as it streams instead of being buffered.
+		if _, err := io.CopyN(io.Discard, rc, offset); err != nil {
+			internalError(w, "read blob", err)
+			return
+		}
+		span := writePartialContent(w, offset, length, entry.Size)
+		body = io.LimitReader(rc, span)
+	} else {
+		w.Header().Set("Content-Length", strconv.FormatInt(entry.Size, 10))
+	}
+	if _, err := io.Copy(w, body); err != nil {
 		// The client hung up mid-transfer; nothing useful left to do.
 		return
 	}
 }
 
-// recordDownload records a resolve hit off the request path. It must never
-// delay the response, so it hands the write to a goroutine detached from the
-// request context (the request may already be finished by the time this
-// runs); RecordDownload itself only logs on failure.
+// writePartialContent writes the 206 status line and the range headers for one
+// satisfiable range, and reports how many bytes the body must carry. A length
+// of -1 means "through the end of the object".
+func writePartialContent(w http.ResponseWriter, offset, length, size int64) int64 {
+	end := size - 1
+	if length >= 0 {
+		end = offset + length - 1
+	}
+	span := end - offset + 1
+	w.Header().Set("Content-Range", "bytes "+strconv.FormatInt(offset, 10)+"-"+
+		strconv.FormatInt(end, 10)+"/"+strconv.FormatInt(size, 10))
+	w.Header().Set("Content-Length", strconv.FormatInt(span, 10))
+	w.WriteHeader(http.StatusPartialContent)
+	return span
+}
+
+// recordDownload records a resolve hit off the request path, advancing both
+// counters the UI shows side by side: the repository's running total
+// (repositories.downloads) and today's bucket in the 30-day stats table. They
+// are written from this one place so a single rule -- one resolve request is
+// one count -- governs both; counting them under different rules is what let
+// a 30-day window come out larger than the all-time total it is a window of.
+//
+// Neither write may delay the response, so both go to a goroutine detached
+// from the request context (the request may well be finished by the time this
+// runs), and neither can fail a download: IncrementDownloads and
+// RecordDownload only log.
 func (s *Server) recordDownload(ctx context.Context, repoID int64) {
-	go s.store.RecordDownload(context.WithoutCancel(ctx), repoID)
+	detached := context.WithoutCancel(ctx)
+	go func() {
+		s.store.IncrementDownloads(detached, repoID)
+		s.store.RecordDownload(detached, repoID)
+	}()
 }
 
 // lfsObjectOwned guards every path that turns a pointer in a repository's
@@ -248,7 +297,6 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 			internalError(w, "sign download url", err)
 			return
 		}
-		s.store.IncrementDownloads(r.Context(), repo.ID)
 		// Content-Length must not describe the redirect body.
 		w.Header().Del("Content-Length")
 		http.Redirect(w, r, url, http.StatusFound)
@@ -270,16 +318,8 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 	defer rc.Close()
 
 	if partial {
-		end := entry.LFS.Size - 1
-		if length >= 0 {
-			end = offset + length - 1
-		}
-		w.Header().Set("Content-Range", "bytes "+strconv.FormatInt(offset, 10)+"-"+
-			strconv.FormatInt(end, 10)+"/"+strconv.FormatInt(entry.LFS.Size, 10))
-		w.Header().Set("Content-Length", strconv.FormatInt(end-offset+1, 10))
-		w.WriteHeader(http.StatusPartialContent)
+		writePartialContent(w, offset, length, entry.LFS.Size)
 	}
-	s.store.IncrementDownloads(r.Context(), repo.ID)
 	_, _ = io.Copy(w, rc)
 }
 
@@ -299,6 +339,11 @@ func parseRange(header string, size int64) (offset, length int64, ok bool) {
 		}
 		if n > size {
 			n = size
+		}
+		if n == 0 {
+			// An empty file: there is no last byte to hand back, and a
+			// "bytes 0--1/0" would be nonsense.
+			return 0, -1, false
 		}
 		return size - n, n, true
 	}

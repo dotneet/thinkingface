@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -686,9 +687,42 @@ func (s *Store) SetRepoHead(ctx context.Context, repoID int64, headSHA string) e
 	return err
 }
 
+// SetRepoDefaultBranch switches which branch clone, tree listings, the
+// repository card, lineage and the parquet index treat as the repository's
+// default, and returns the row as it now stands. updated_at is bumped --
+// unlike SetRepoArchived's bookkeeping columns, this changes what a plain
+// visit to the repository shows (README, tags, license, file list all follow
+// the new branch), so it belongs in "recently updated" like an ordinary push
+// does.
+//
+// This only flips the column; it does not touch the bare repository's HEAD
+// symref (gitrepo.Repo.SetHead, called by the caller in the same request) or
+// re-run the post-push indexers for the newly-default ref (the caller
+// enqueues a sync job for that -- see docs/dev/api-contract.md "Changing the
+// default branch").
+func (s *Store) SetRepoDefaultBranch(ctx context.Context, repoID int64, branch string) (*Repo, error) {
+	if _, err := s.db.Exec(ctx,
+		`UPDATE repositories SET default_branch = $2, updated_at = now() WHERE id = $1`,
+		repoID, branch); err != nil {
+		return nil, err
+	}
+	return s.GetRepoByID(ctx, repoID)
+}
+
+// IncrementDownloads advances a repository's all-time download counter. It is
+// called from the same detached goroutine as RecordDownload (see
+// api.Server.recordDownload) and for the same request, so the two counters
+// move together.
+//
+// Best effort: a lost download count never justifies failing a download, so
+// the error is swallowed rather than returned -- but it is logged, the way
+// RecordDownload logs, so a counter that has silently stopped moving is
+// visible somewhere.
 func (s *Store) IncrementDownloads(ctx context.Context, repoID int64) {
-	// Best effort: a lost download count never justifies failing a download.
-	_, _ = s.db.Exec(ctx, `UPDATE repositories SET downloads = downloads + 1 WHERE id = $1`, repoID)
+	_, err := s.db.Exec(ctx, `UPDATE repositories SET downloads = downloads + 1 WHERE id = $1`, repoID)
+	if err != nil {
+		slog.Error("increment downloads", "repo_id", repoID, "error", err)
+	}
 }
 
 type Stats struct {

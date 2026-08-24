@@ -32,6 +32,55 @@ Every instance also seeds one admin account on first boot, from `TF_ADMIN_USERNA
 `admin@example.com` if the operator hasn't changed them — change these before exposing an
 instance to anyone else).
 
+## Changing your password
+
+Change your own password at **Settings → Account** (`/settings/account`). The form asks for your
+current password, the new one, and the new one again. The current password is always verified:
+being signed in isn't on its own permission to replace the credential the session was minted
+from. A new password must be at least 8 characters and at most 72 bytes — the same rule signup
+applies.
+
+Changing it **signs out every other browser**. The session cookie carries a revocation counter
+that the change bumps, so anything still holding an old cookie is rejected on its next request;
+the tab you changed it in is re-issued a fresh one and stays signed in.
+
+Your **access tokens keep working**. A token is a separate credential with its own list and its
+own delete button, and a routine password change says nothing about any of them — revoking them
+all would break unattended clients (CI jobs, `git`, the `tf` CLI) for no gain. If a token itself
+leaked, delete that token at **Settings → Access tokens**.
+
+## When an admin resets a password
+
+`TF_ADMIN_PASSWORD` only ever creates the very first account, on an instance whose user table is
+empty; changing it afterwards has no effect. So a forgotten password is fixed by an
+administrator, not by editing an environment variable.
+
+Accounts with site administrator rights get a **Settings → Users** entry
+(`/settings/admin/users`) listing every account on the instance, with a search box over
+usernames and email addresses. Each row offers:
+
+- **Reset password** — set a new password for that account. It signs out every browser they have
+  open; their access tokens are untouched, exactly as for a self-service change. There is no
+  email round trip, so hand the new password over out of band and let them change it themselves
+  at **Settings → Account**.
+- **Make admin** / **Revoke admin** — grant or remove site administrator rights. This is how an
+  instance gets a second administrator, and therefore how it stays recoverable if the first one
+  loses their password.
+
+**Add user** at the top of the same screen creates an account outright: a username, an email
+address, a password, and optionally the administrator flag. It works **whether or not
+self-service signup is open** — that is the point of it. On an instance running
+`TF_ALLOW_SIGNUP=false` this is the only way anyone new gets an account, so closing signup is
+not a one-way door. The username becomes that account's namespace (`dana/*`) and can never be
+changed, so it goes through the same rules signup applies, reserved names included. As with a
+reset, there is no invitation email: pass the password on out of band and have them change it
+at **Settings → Account**.
+
+Two rules stop an instance from locking itself out: you can't revoke your own administrator
+access (ask another administrator), and the last remaining administrator can't be demoted at
+all. The restriction is enforced by the server for every one of these actions, not merely hidden
+by the UI.
+
 ## Access tokens
 
 An access token (`tf_xxxxxxxxxxxx`) is what every non-browser client uses: `huggingface_hub`,

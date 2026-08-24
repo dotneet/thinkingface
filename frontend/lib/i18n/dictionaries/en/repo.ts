@@ -321,6 +321,18 @@ export const repo = {
         nameGitSuffix: 'A repository name can\'t end in ".git".',
       },
     },
+    defaultBranch: {
+      hint: "Saving the branch that is already the default re-runs indexing for it.",
+      title: "Default branch",
+      description:
+        "The branch clone checks out, and that the file list, README, and lineage are read from.",
+      label: "Branch",
+      save: "Save",
+      saving: "Saving…",
+      saved: "Default branch updated.",
+      blockedByArchive: "Unarchive this repository before changing its default branch.",
+      noBranches: "This repository has no commits yet, so there is no branch to switch to.",
+    },
     archive: {
       title: "Archive this repository",
       description:

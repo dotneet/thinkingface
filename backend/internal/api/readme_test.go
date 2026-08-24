@@ -6,10 +6,12 @@
 package api
 
 import (
+	"context"
 	"testing"
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
+	"github.com/dotneet/thinkingface/backend/internal/repocard"
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
 
@@ -69,6 +71,56 @@ func TestRepoDetail_ReadmeWithinLimitIsNotFlagged(t *testing.T) {
 	resp.json(t, &body)
 	if body.Repo.ReadmeTooLarge {
 		t.Fatalf("readme_too_large = true, want false for a small README")
+	}
+}
+
+// TestCreateRepoSeedsReadmeWithoutLicense pins the fix for the seeded
+// README asserting a licence the creator never chose (it used to hardcode
+// "license: unknown", which then rendered verbatim in the repo card and
+// polluted the license facet with a bogus first-class value). A freshly
+// created repository's README frontmatter must carry no license key at all,
+// so store.Repo.License() reports "" and the repository stays out of the
+// license facet -- exactly the "unset" case docs/dev/api-contract.md already
+// models for the license field.
+//
+// This reads the seeded README straight from git (rather than through the
+// repo-detail HTTP endpoint) because the endpoint's Card comes from the
+// store's index, which archiveFixture's noopEnqueuer never populates.
+func TestCreateRepoSeedsReadmeWithoutLicense(t *testing.T) {
+	f := newArchiveFixture(t)
+	tok := f.token(f.alice, "write")
+	ctx := context.Background()
+
+	resp := f.do("POST", "/api/v1/repos", tok, map[string]any{
+		"kind": "model", "namespace": "alice", "name": "fresh-repo", "description": "a fresh repo",
+	})
+	if resp.status() != 200 {
+		t.Fatalf("create status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+
+	r, err := f.st.GetRepo(ctx, "model", "alice", "fresh-repo")
+	if err != nil {
+		t.Fatalf("get repo: %v", err)
+	}
+	repo, err := f.git.Open(r.StoragePath)
+	if err != nil {
+		t.Fatalf("open git repo: %v", err)
+	}
+	readme, err := repo.ReadFile(r.DefaultBranch, "README.md", maxReadmeBytes)
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	card := repocard.Parse(readme)
+	if v, ok := card.Data["license"]; ok {
+		t.Fatalf("seeded README frontmatter = %+v, want no license key, got %q", card.Data, v)
+	}
+	if _, ok := card.Data["tags"]; !ok {
+		t.Fatalf("seeded README frontmatter = %+v, want the tags: [] key to survive", card.Data)
+	}
+
+	r.Card = card.Data
+	if got := r.License(); got != "" {
+		t.Fatalf("License() = %q, want empty for a freshly created repo", got)
 	}
 }
 

@@ -8,7 +8,9 @@ import {
   Globe,
   HardDrive,
   KeyRound,
+  Lock,
   User,
+  Users,
   Webhook,
 } from "lucide-react";
 import Link from "next/link";
@@ -17,8 +19,14 @@ import { cn } from "@/lib/cn";
 import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
 
-const ITEMS: { segment: string; labelKey: MessageKey; icon: LucideIcon }[] = [
+type NavItem = { segment: string; labelKey: MessageKey; icon: LucideIcon };
+
+const ITEMS: NavItem[] = [
   { segment: "/profile", labelKey: "settings.nav.profile", icon: User },
+  // "Account" is the credential (the password); "Profile" is how the account
+  // is presented. Adjacent because a visitor looking for one often means the
+  // other.
+  { segment: "/account", labelKey: "settings.account.navLabel", icon: Lock },
   { segment: "/tokens", labelKey: "settings.nav.tokens", icon: KeyRound },
   { segment: "/ssh-keys", labelKey: "settings.nav.sshKeys", icon: Fingerprint },
   { segment: "/storage", labelKey: "settings.nav.storage", icon: HardDrive },
@@ -28,14 +36,32 @@ const ITEMS: { segment: string; labelKey: MessageKey; icon: LucideIcon }[] = [
   { segment: "/language", labelKey: "settings.nav.language", icon: Globe },
 ];
 
-/** Side navigation shared by every /settings/* screen (mirrors OrgSettingsNav). */
-export function SettingsNav() {
+/**
+ * Instance-wide administration, shown only to accounts carrying
+ * `users.is_admin`. Kept out of ITEMS and appended last so that whether it is
+ * there or not, nothing above it moves.
+ */
+const ADMIN_ITEMS: NavItem[] = [
+  { segment: "/admin/users", labelKey: "settings.adminUsers.navLabel", icon: Users },
+];
+
+/**
+ * Side navigation shared by every /settings/* screen (mirrors OrgSettingsNav).
+ *
+ * `isSiteAdmin` is resolved by the layout, on the server, rather than fetched
+ * here: an entry that appears one render later would move the rest of the
+ * list under the pointer (DESIGN.md §8). It only decides what is *shown* —
+ * every /admin route is enforced by the backend, which answers 403 to anyone
+ * without the flag.
+ */
+export function SettingsNav({ isSiteAdmin = false }: { isSiteAdmin?: boolean }) {
   const t = useT();
   const pathname = usePathname();
+  const items = isSiteAdmin ? [...ITEMS, ...ADMIN_ITEMS] : ITEMS;
 
   return (
     <nav className="flex w-full shrink-0 flex-row gap-1 overflow-x-auto lg:w-56 lg:flex-col">
-      {ITEMS.map((item) => {
+      {items.map((item) => {
         const href = `/settings${item.segment}`;
         const active = pathname === href;
         return (

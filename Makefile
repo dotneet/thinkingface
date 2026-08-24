@@ -57,7 +57,7 @@ TERRAFORM ?= terraform
 
 .PHONY: build-web help up down up-sqlite down-sqlite logs rebuild psql check check-backend check-frontend check-python \
         check-types check-terraform gen-types test test-backend test-frontend test-store-pg test-e2e fmt lint clean tf \
-        dev-web dev-api gcs-proxy dev-stop docs docs-build
+        dev-web dev-api gcs-proxy dev-stop docs docs-build frontend-deps
 
 # The full SQLite override set. See the comment at the top of
 # docker-compose.sqlite.yml.
@@ -96,8 +96,15 @@ psql: ## Open a psql shell against the postgres service
 # the API: use `make dev-api` to try out a branch's backend without
 # rebuilding the docker image.
 
-dev-web: ## Run the Next.js dev server on the host, against the compose api (WEB_DEV_PORT, default 3100)
+# Every frontend target needs the dependency tree, and a fresh clone or a new
+# git worktree has none. Without this, `make check` fails on a wall of
+# "Cannot find module 'vitest'/'next'/'react'" TypeScript errors that read as
+# a code problem rather than a missing install -- so each frontend target
+# bootstraps rather than assuming somebody ran `bun install` first.
+frontend-deps: ## Install the frontend dependency tree if it is missing
 	@cd frontend && [ -d node_modules ] || $(BUN) install
+
+dev-web: frontend-deps ## Run the Next.js dev server on the host, against the compose api (WEB_DEV_PORT, default 3100)
 	@cd frontend && $(BUN) scripts/copy-duckdb-assets.mjs
 	@echo "==> next dev on http://localhost:$(WEB_DEV_PORT) (api: $${NEXT_PUBLIC_API_URL:-http://localhost:8080})"
 	cd frontend && $(BUN) node_modules/next/dist/bin/next dev -p $(WEB_DEV_PORT)
@@ -178,7 +185,7 @@ check-backend: ## gofmt check + go vet + go test
 	@echo "==> backend: go test"
 	cd backend && go test ./...
 
-check-frontend: ## typecheck + lint + format:check + check:ui + test (bun)
+check-frontend: frontend-deps ## typecheck + lint + format:check + check:ui + test (bun)
 	@echo "==> frontend: typecheck / lint / format:check / check:ui / test"
 	cd frontend && $(BUN) run typecheck
 	cd frontend && $(BUN) run lint
@@ -222,14 +229,14 @@ test: test-backend test-frontend ## Run backend and frontend unit tests
 test-backend: ## Run the Go test suite
 	cd backend && go test ./...
 
-test-frontend: ## Run the frontend unit tests
+test-frontend: frontend-deps ## Run the frontend unit tests
 	cd frontend && $(BUN) run test
 
 # `make check` deliberately leaves the production build out (it is the slowest
 # gate and CI runs it anyway), but when you do want it locally, run it through
 # make: `bun run build` on a bare PATH picks up Node 18 and next refuses to
 # start ("Node.js version ^18.18.0 || >= 20.0.0 is required").
-build-web: ## Production build of the Next.js app (the CI `build` step)
+build-web: frontend-deps ## Production build of the Next.js app (the CI `build` step)
 	cd frontend && $(BUN) run build
 
 # backend/internal/store's integration tests always run against SQLite, but

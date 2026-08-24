@@ -199,6 +199,12 @@ func (s *Server) Handler() http.Handler {
 		r.Post("/auth/logout", s.handleLogout)
 		r.Get("/me", s.handleMe)
 		r.Patch("/me/profile", s.handleUpdateMyProfile)
+		r.Patch("/me/password", s.handleChangeMyPassword)
+
+		// Site administration (users.is_admin only).
+		r.Get("/admin/users", s.handleAdminListUsers)
+		r.Post("/admin/users", s.handleAdminCreateUser)
+		r.Patch("/admin/users/{username}", s.handleAdminUpdateUser)
 
 		r.Get("/tokens", s.handleListTokens)
 		r.Post("/tokens", s.handleCreateToken)
@@ -213,6 +219,7 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/repos", s.handleListRepos)
 		r.Post("/repos", s.handleCreateRepo)
 		r.Get("/repos/{kind}/{ns}/{name}", s.handleRepoDetail)
+		r.Patch("/repos/{kind}/{ns}/{name}", s.handleUpdateRepo)
 		r.Delete("/repos/{kind}/{ns}/{name}", s.handleDeleteRepo)
 		r.Get("/repos/{kind}/{ns}/{name}/tree/{rev}/*", s.handleUITree)
 		r.Get("/repos/{kind}/{ns}/{name}/tree/{rev}", s.handleUITree)
@@ -364,8 +371,16 @@ func (s *Server) cors(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Headers",
 				"Authorization, Content-Type, X-Requested-With, Accept, Range")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
+			// Content-Range and Accept-Ranges are listed for the same reason
+			// Content-Length is: resolve answers 206 to a satisfiable Range,
+			// and a browser hides any response header the server does not
+			// name here from the JS that asked for it -- so a cross-origin
+			// range read would get the bytes without being able to tell which
+			// bytes they are. The Web UI is on a different origin from the API
+			// in every deployment shape this ships with.
 			w.Header().Set("Access-Control-Expose-Headers",
-				"ETag, X-Repo-Commit, X-Linked-Etag, X-Linked-Size, Content-Length, Location")
+				"ETag, X-Repo-Commit, X-Linked-Etag, X-Linked-Size, "+
+					"Content-Length, Content-Range, Accept-Ranges, Location")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
