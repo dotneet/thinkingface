@@ -18,9 +18,12 @@
 # The quarantine here also applies when Renovate refreshes bun.lock, and it
 # applies to an exactly pinned version too -- so a Renovate security PR (which
 # is exempt on Renovate's side) fails its lockfile update while the fix is
-# younger than a week. Regenerate it on the PR branch with the flag below.
+# younger than a week. Regenerate it on that PR branch with
+# `bun install --minimum-release-age=0`, which resolves the version Renovate
+# already wrote into package.json.
 #
-# To take a fresh release on purpose (a security fix, say), override it for
-# that one command: `bun update <pkg> --minimum-release-age=0`. There is no
-# environment-variable equivalent; only the CLI flag lifts it.
+# To take a fresh release on purpose (a security fix you are bumping yourself),
+# override it for that one command:
+# `bun update <pkg> --minimum-release-age=0`. It has to be the flag: on bun
+# 1.4.0 the BUN_CONFIG_MINIMUM_RELEASE_AGE environment variable has no effect.
 minimumReleaseAge = 604800

@@ -55,19 +55,24 @@ transitive updates too. The one exception is `vulnerabilityAlerts`, which sets
 That exception only relaxes Renovate's own choice of version — it does not lift
 bun's quarantine. Renovate refreshes `bun.lock` by running bun in `frontend/`,
 where `bunfig.toml` applies, and bun rejects a too-fresh version even when it is
-the exact version being asked for (`error: No version matching "<pkg>" found for
-specifier "<version>" (blocked by minimum-release-age: ...)`). So a security PR
-for a frontend package whose fix is less than a week old arrives with
-`package.json` bumped and the lockfile update failed, and CI's
-`bun install --frozen-lockfile` fails with it. Regenerate the lockfile on the PR
-branch:
+the exact version being asked for (`error: Version "<pkg>@<version>" was
+published within minimum release age of 604800 seconds`). So a security PR for a
+frontend package whose fix is less than a week old arrives with `package.json`
+bumped and the lockfile update failed, and CI's `bun install --frozen-lockfile`
+fails with it. Regenerate the lockfile on the PR branch:
 
 ```bash
-cd frontend && bun update <pkg> --minimum-release-age=0
+cd frontend && bun install --minimum-release-age=0
 ```
 
-To take a fresh release deliberately, it is the same command. Only that CLI flag
-lifts the setting — bun has no environment-variable override for it.
+`install`, not `update`: Renovate has already written the version it chose into
+`package.json`, and `bun update <pkg>` would walk to the newest release in the
+range instead of resolving what is written there.
+
+To take a fresh release deliberately when *you* are the one choosing it, the
+command is `bun update <pkg> --minimum-release-age=0`. Either way it has to be
+the CLI flag: on bun 1.4.0 `BUN_CONFIG_MINIMUM_RELEASE_AGE` has no effect at all
+(setting it to `0` fails identically to not setting it).
 
 ### Pinning, and how to move a pin
 
@@ -149,9 +154,10 @@ Renovate is in use: both would open PRs for the same advisory.
    Renovate treats the repository as configured and goes straight to work.
    The first sign it is alive is the **Dependency Dashboard** issue it opens.
 3. The schedule is `before 9am on monday` (Asia/Tokyo), so the first batch of
-   PRs may not appear until then. To see it sooner, tick *Check this box to
-   trigger a request for Renovate to run again on this repository* on the
-   dashboard issue.
+   PRs may not appear until then. The checkbox at the top of the dashboard only
+   asks Renovate to run again — the run still honours `schedule`. To pull one
+   update forward, tick that update's own checkbox in the dashboard list, which
+   is what forces a PR outside the schedule.
 4. Expect the first run to be the noisiest one — `pinDigests` fills in image
    digests and `helpers:pinGitHubActionDigests` refreshes action SHAs.
    `prConcurrentLimit: 5` keeps it to five PRs at a time.
