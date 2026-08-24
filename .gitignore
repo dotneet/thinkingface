@@ -44,9 +44,8 @@ dist/
 build/
 *.egg
 .python-version
-# e2e/uv.lock is deliberately NOT ignored: commit it so environments using uv
-# can reproduce the same dependencies (requirements.txt is also kept around
-# for compatibility).
+# e2e/uv.lock is deliberately NOT ignored: commit it so `uv run --locked`
+# reproduces the same dependencies everywhere.
 
 # ---- Terraform (infra) -------------------------------------------------------
 infra/.terraform/
