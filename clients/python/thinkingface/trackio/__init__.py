@@ -82,6 +82,7 @@ the server and so raises rather than silently starting from zero.
 from __future__ import annotations
 
 import atexit
+import copy
 import os
 import threading
 import time
@@ -193,7 +194,13 @@ class _Run:
         self._buffer: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self._finished = False
+        # Whether the config has ever been sent, and (once it has) a snapshot
+        # of exactly what was last sent -- so a later change to `self.config`
+        # (e.g. `run.config.update(...)` from ThinkingFaceLightningLogger) is
+        # detected and resent on the next flush, while an unchanged config is
+        # not re-posted on every tick. See flush().
         self._config_sent = False
+        self._last_sent_config: dict[str, Any] = {}
         self._timer: threading.Timer | None = None
 
         # Artifacts and produced models are gathered during the run and sent
@@ -316,7 +323,15 @@ class _Run:
             if not self._buffer:
                 return
             points, self._buffer = self._buffer, []
-            config = None if self._config_sent else self.config
+            # Resend the config whenever it differs from what was last sent
+            # successfully -- not just on the very first flush -- so a config
+            # mutated after that first flush (e.g. `run.config.update(...)`,
+            # or a hyperparameter logged after training started) still
+            # reaches the server instead of being silently dropped forever.
+            if not self._config_sent or self.config != self._last_sent_config:
+                config = copy.deepcopy(self.config)
+            else:
+                config = None
 
         payload: dict[str, Any] = {
             "run": self.name,
@@ -348,6 +363,8 @@ class _Run:
         if resp.ok:
             with self._lock:
                 self._config_sent = True
+                if config is not None:
+                    self._last_sent_config = config
             return
 
         # A 4xx (bad token, unknown repo, malformed payload) will not fix itself
