@@ -117,7 +117,15 @@ func NewServer(d Deps) *Server {
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 
+	// stripClientRequestID runs before middleware.RequestID so the ID it
+	// generates is always server-chosen, never a client-supplied header
+	// value (see stripClientRequestID's doc comment in requestid.go).
+	r.Use(stripClientRequestID)
 	r.Use(middleware.RequestID)
+	// setRequestIDHeader must sit after middleware.RequestID (the ID has to
+	// exist in the context first) and before every handler, since a header
+	// set after the response body starts writing is silently dropped.
+	r.Use(setRequestIDHeader)
 	// No middleware.RealIP here: it rewrites RemoteAddr from headers any client
 	// can set (GHSA-3fxj-6jh8-hvhx), and nothing in this server reads RemoteAddr
 	// anyway. Anything that starts to should resolve the peer against a known
@@ -331,9 +339,23 @@ func repoName(raw string) string {
 	return strings.TrimSuffix(raw, ".git")
 }
 
-// wildcardPath returns the chi "*" parameter, cleaned of leading slashes.
+// wildcardPath returns the chi "*" parameter -- the file path of every route
+// that ends in one -- decoded exactly once and cleaned of leading slashes.
+//
+// The decoding is conditional, and has to be: see pathParam in urlparams.go.
+// A request whose revision is percent-encoded ("feature%2Fx") makes chi route
+// on the escaped path, which leaves this parameter encoded as well; a request
+// without one leaves it already decoded, and unescaping it a second time
+// mangles any file name containing a literal "%".
 func wildcardPath(r *http.Request) string {
-	return strings.Trim(chi.URLParam(r, "*"), "/")
+	path, err := pathParam(r, "*")
+	if err != nil {
+		// Unreachable in practice (pathParam documents why). Keep the value
+		// chi gave us rather than inventing one: the lookup then simply misses
+		// and the handler answers 404 for a path that does not exist.
+		path = chi.URLParam(r, "*")
+	}
+	return strings.Trim(path, "/")
 }
 
 // originAllowed reports whether a browser origin may make credentialed calls.
@@ -472,8 +494,13 @@ func requestLogger(next http.Handler) http.Handler {
 		if ww.Status() >= 500 {
 			level = slog.LevelError
 		}
+		// middleware.RequestID always runs upstream of requestLogger (see
+		// Handler()), so the ID is present on every request this logs; the
+		// field is emitted unconditionally to match method/path/status/
+		// bytes/duration above, which are never omitted either.
 		slog.Log(r.Context(), level, "http",
 			"method", r.Method, "path", r.URL.Path, "status", ww.Status(),
-			"bytes", ww.BytesWritten(), "duration", time.Since(start).String())
+			"bytes", ww.BytesWritten(), "duration", time.Since(start).String(),
+			"request_id", middleware.GetReqID(r.Context()))
 	})
 }

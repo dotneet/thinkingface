@@ -191,6 +191,17 @@ func (s *Server) requireWrite(w http.ResponseWriter, r *http.Request) (*store.Us
 // name is a former name of a repository that has since moved
 // (docs/dev/repo-transfer-design.md §9), it answers according to mode instead of
 // a plain 404 -- see resolveRepo and redirectMoved.
+//
+// "No such repository" goes out as repoNotFound rather than a bare notFound:
+// huggingface_hub's hf_raise_for_status only turns a 404 into
+// RepositoryNotFoundError when X-Error-Code says RepoNotFound, and that is the
+// one exception HfApi.repo_exists / file_exists / revision_exists catch. Without
+// the header they raise HfHubHTTPError instead of answering False, and every
+// caller that probes for an optional repository or file -- transformers picking
+// the next candidate filename, for one -- fails instead of moving on. The 401
+// fallback in hf_raise_for_status is no help here: its REPO_API_REGEX is
+// anchored on `^https://`, so a self-hosted instance served over plain HTTP
+// never matches it.
 func (s *Server) loadRepoForRead(w http.ResponseWriter, r *http.Request, kind, ns, name string, mode redirectMode) (*store.Repo, bool) {
 	ctx := r.Context()
 	repo, err := s.resolveRepo(ctx, kind, ns, name)
@@ -198,14 +209,19 @@ func (s *Server) loadRepoForRead(w http.ResponseWriter, r *http.Request, kind, n
 		var moved *repoMovedError
 		if errors.As(err, &moved) {
 			if mode == redirectNone {
-				notFound(w, "repository "+ns+"/"+name+" not found")
+				// redirectNone means "answer exactly as if it never existed"
+				// (see redirect.go), so it gets the same signal as a genuine
+				// miss -- header included. Anything else here would leak the
+				// existence of the repository at its new name through a
+				// difference the message itself does not make.
+				repoNotFound(w, "repository "+ns+"/"+name+" not found")
 			} else {
 				redirectMoved(w, r, mode, ns, name, moved)
 			}
 			return nil, false
 		}
 		if errors.Is(err, store.ErrNotFound) {
-			notFound(w, "repository "+ns+"/"+name+" not found")
+			repoNotFound(w, "repository "+ns+"/"+name+" not found")
 		} else {
 			internalError(w, "load repository", err)
 		}
@@ -228,6 +244,11 @@ func (s *Server) loadRepoForWrite(w http.ResponseWriter, r *http.Request, kind, 
 	}
 	// After the permission check, so an archived repository does not answer
 	// differently to someone who could not write to it anyway.
+	//
+	// Deliberately *not* repoNotFound: the repository exists and this caller
+	// can read it. Tagging it RepoNotFound would make huggingface_hub raise
+	// RepositoryNotFoundError -- and repo_exists() answer False -- for a
+	// repository the very same client can still list and download.
 	if repo.Archived() {
 		writeError(w, http.StatusForbidden, "repository_archived",
 			repo.FullName()+" is archived and read-only; unarchive it in the repository settings to make changes")
@@ -244,6 +265,10 @@ func (s *Server) loadRepoForWriteAllowArchived(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return nil, false
 	}
+	// Also deliberately left as 401/403 rather than RepoNotFound. There is no
+	// private-repository concept here (nothing in this package filters reads on
+	// visibility), so a repository the caller cannot write is still one they can
+	// see -- hiding it behind a 404 would only teach clients that it is gone.
 	if !s.canWriteIgnoringArchive(r.Context(), repo) {
 		if currentUser(r.Context()) == nil {
 			unauthorized(w, "authentication required to write to "+repo.FullName())

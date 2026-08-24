@@ -174,13 +174,13 @@ func (s *Server) handleUploadFiles(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	rev := chi.URLParam(r, "rev")
+	rev, ok := revParam(w, r, "rev", repo)
+	if !ok {
+		return
+	}
 	if looksLikeSHA(rev) {
 		badRequest(w, "uploads must target a branch, not a commit SHA")
 		return
-	}
-	if rev == "" {
-		rev = repo.DefaultBranch
 	}
 
 	mr, err := r.MultipartReader()

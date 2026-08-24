@@ -130,6 +130,54 @@ func (s *Server) createRefThroughWAL(ctx context.Context, repo *store.Repo, refN
 	if err != nil {
 		return err
 	}
+	return s.createRefOn(ctx, repo, gitRepo, refName, target)
+}
+
+// createTagRefThroughWAL creates refs/tags/{tag}. An empty message makes a
+// lightweight tag pointing straight at commit; otherwise an annotated tag
+// object is written first and the ref names that, the way `git tag -m` does.
+//
+// The single Open is the reason this exists instead of the caller writing the
+// tag object and then calling createRefThroughWAL. A freshly written tag object
+// is *loose, local, and not yet in the WAL*: it lives only inside the
+// materialisation that produced it. Every gitrepo.Manager.Open runs EnsureLocal,
+// and in authoritative mode that can rebuild the directory from the index --
+// wal.Materialize's rebuild path starts with os.RemoveAll(gitDir), reached
+// after a compaction changed the base, after maybeEvict reclaimed the
+// directory, or whenever the local state file cannot be trusted. An Open
+// between the two writes therefore has a window in which the tag object is
+// deleted before CreateRef and pack-objects ever look for it: the entry pack
+// fails, the client gets a 500, and the tag it asked for was perfectly valid.
+// Doing both on one handle removes the window rather than narrowing it.
+//
+// It returns what the ref ended up pointing at (the commit, or the tag object).
+func (s *Server) createTagRefThroughWAL(ctx context.Context, repo *store.Repo, tag string,
+	commit plumbing.Hash, message string, tagger gitrepo.Signature,
+) (plumbing.Hash, error) {
+	gitRepo, err := s.git.Open(repo.StoragePath)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+	target := commit
+	if message != "" {
+		target, err = gitRepo.WriteTagObject(tag, commit, message, tagger)
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
+	}
+	if err := s.createRefOn(ctx, repo, gitRepo, gitrepo.TagRef(tag), target); err != nil {
+		return plumbing.ZeroHash, err
+	}
+	return target, nil
+}
+
+// createRefOn is the shared body: create the ref on an already-open handle and
+// record it, rolling the local ref back if the WAL refuses. Callers own the
+// Open so that everything one write needs -- a tag object included -- happens
+// against a single materialisation.
+func (s *Server) createRefOn(ctx context.Context, repo *store.Repo, gitRepo *gitrepo.Repo,
+	refName string, target plumbing.Hash,
+) error {
 	if err := gitRepo.CreateRef(refName, target); err != nil {
 		return err
 	}

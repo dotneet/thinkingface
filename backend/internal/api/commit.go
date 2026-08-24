@@ -38,10 +38,45 @@ type preuploadFile struct {
 	Size   int64  `json:"size"`
 }
 
+// rejectCreatePR refuses a commit that asked to be opened as a pull request,
+// and reports whether it did.
+//
+// thinkingface has no pull requests. huggingface_hub asks for one by adding
+// `?create_pr=1` to preupload and to commit (_commit_api.py), and both
+// endpoints used to read no query parameters at all -- so `create_pr=True`
+// wrote straight to the target branch and answered 200, and the caller went
+// away believing a reviewable PR existed while `main` had already moved. A
+// silently ignored safety flag is worse than an unsupported feature, so this
+// is an explicit 400.
+//
+// Any value other than the falsey spellings counts as asking for it: the
+// failure mode of guessing wrong in that direction is a clear error message,
+// and the failure mode of guessing wrong in the other is the silent overwrite
+// this exists to stop. huggingface_hub itself only ever sends "1", and only
+// when create_pr is true -- a client that does not want a PR omits the
+// parameter entirely.
+func rejectCreatePR(w http.ResponseWriter, r *http.Request) bool {
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("create_pr"))) {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+	badRequest(w, "this instance does not support pull requests: retry without create_pr, "+
+		"or commit to a branch of your own and merge it yourself")
+	return true
+}
+
 func (s *Server) handlePreupload(w http.ResponseWriter, r *http.Request) {
 	kind := kindFromURL(chi.URLParam(r, "repoType"))
 	repo, ok := s.loadRepoForWrite(w, r, kind, chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectHF)
 	if !ok {
+		return
+	}
+	// Refused before the body is read, and before any LFS object is uploaded
+	// against the answer this would give: huggingface_hub sends `?create_pr=1`
+	// to preupload as well as to commit, and letting preupload succeed would
+	// mean the client pushes its blobs to the bucket and only then learns the
+	// commit cannot happen.
+	if rejectCreatePR(w, r) {
 		return
 	}
 	var req struct {
@@ -55,7 +90,10 @@ func (s *Server) handlePreupload(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "open git repository", err)
 		return
 	}
-	rev := chi.URLParam(r, "rev")
+	rev, ok := revParam(w, r, "rev", repo)
+	if !ok {
+		return
+	}
 	rules := s.loadLFSRules(gitRepo, rev, repo.Kind)
 
 	// What each path already holds at this revision, so the answer can carry
@@ -213,10 +251,13 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if rejectCreatePR(w, r) {
+		return
+	}
 	user := currentUser(r.Context())
-	rev := chi.URLParam(r, "rev")
-	if rev == "" {
-		rev = repo.DefaultBranch
+	rev, ok := revParam(w, r, "rev", repo)
+	if !ok {
+		return
 	}
 	// Committing to a detached SHA is meaningless; the API only writes branches.
 	if looksLikeSHA(rev) {
