@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ApiResultError, queryErrorMessage } from "@/lib/api-error-message";
 import { expArtifactHref, listRunArtifacts } from "@/lib/experiments";
 import { formatBytes } from "@/lib/format";
 import { useT } from "@/lib/i18n/client";
@@ -59,7 +60,7 @@ export function RunArtifactsCard({
     queryKey: ["exp-artifacts", ns, repo, project, runName],
     queryFn: async () => {
       const result = await listRunArtifacts(ns, repo, project, runName);
-      if (!result.ok) throw new Error(result.message);
+      if (!result.ok) throw new ApiResultError(result);
       return result.data;
     },
   });
@@ -78,11 +79,7 @@ export function RunArtifactsCard({
     return (
       <ErrorState
         title={t("experiments.errorTitle")}
-        message={
-          artifacts.error instanceof Error
-            ? artifacts.error.message
-            : t("experiments.artifacts.loadFailed")
-        }
+        message={queryErrorMessage(t, artifacts.error, t("experiments.artifacts.loadFailed"))}
       />
     );
   }

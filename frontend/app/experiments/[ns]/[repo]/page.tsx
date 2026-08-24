@@ -5,6 +5,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { TimeText } from "@/components/ui/time-text";
 import { isNotFound } from "@/lib/api";
+import { errorMessage } from "@/lib/api-error-message";
 import { getExperimentRepo } from "@/lib/experiments";
 import { formatNumber } from "@/lib/format";
 import { getT } from "@/lib/i18n/server";
@@ -33,7 +34,7 @@ export default async function ExperimentRepoPage({
   );
   if (isNotFound(result)) notFound();
   if (!result.ok) {
-    return <ErrorState title={t("experiments.errorTitle")} message={result.message} />;
+    return <ErrorState title={t("experiments.errorTitle")} message={errorMessage(t, result)} />;
   }
 
   const { repo: repoInfo, projects } = result.data;

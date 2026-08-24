@@ -4,6 +4,7 @@ import Link from "next/link";
 import { LineageDependents } from "@/components/repo/lineage-dependents";
 import { Alert } from "@/components/ui/alert";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
+import { errorMessage } from "@/lib/api-error-message";
 import { expRunHref } from "@/lib/experiments";
 import type { Translator } from "@/lib/i18n";
 import { getT } from "@/lib/i18n/server";
@@ -42,7 +43,7 @@ export async function LineageSection({
   if (!result.ok) {
     return (
       <Alert tone="warning" title={t("repo.lineage.unavailable")}>
-        {result.message}
+        {errorMessage(t, result)}
       </Alert>
     );
   }
