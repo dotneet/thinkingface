@@ -91,6 +91,8 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh && \
 USER thinkingface
 WORKDIR /home/thinkingface
 
+# TF_VIEWER_CACHE_DIR is WAL compaction's scratch space; the parquet viewer
+# reads via storage range requests now and no longer caches to disk here.
 ENV TF_ADDR=:8080 \
     GIT_ROOT=/data/git \
     TF_VIEWER_CACHE_DIR=/data/cache

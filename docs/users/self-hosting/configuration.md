@@ -28,7 +28,8 @@ a variable is unset.
 | `GCS_BUCKET` | Target bucket name. | `thinkingface` | |
 | `GCS_PREFIX` | Optional key prefix inside the bucket, for sharing one bucket across environments. | *(empty)* | Leading/trailing slashes are stripped. |
 | `STORAGE_EMULATOR_HOST` | Address of the fake-gcs-server emulator. | *(empty)* | Required when `STORAGE_DRIVER=gcs-emulator`; startup fails without it. Not used, and should be left unset, with `STORAGE_DRIVER=gcs`. |
-| `TF_SIGNED_URL_TTL` | How long signed GCS URLs (LFS transfer, direct downloads) stay valid. | `1h` | Only meaningful with `STORAGE_DRIVER=gcs` — the emulator cannot verify signed URLs, so that mode proxies bytes through the server instead. |
+| `TF_SIGNED_URL_TTL` | Floor of how long a signed GCS URL (LFS transfer, direct download) stays valid. The actual lifetime is derived from the object's size and clamped into `[TF_SIGNED_URL_TTL, TF_SIGNED_URL_MAX_TTL]`, so this mainly governs small transfers. | `1h` | Only meaningful with `STORAGE_DRIVER=gcs` — the emulator cannot verify signed URLs, so that mode proxies bytes through the server instead. |
+| `TF_SIGNED_URL_MAX_TTL` | Ceiling of the same clamp, for large transfers. | `12h` | Same `STORAGE_DRIVER=gcs`-only caveat as `TF_SIGNED_URL_TTL`. |
 
 ## Database
 
@@ -85,8 +86,8 @@ git clone ssh://git@localhost:2222/admin/imdb-reviews.git
 | Variable | What it does | Default | Notes |
 |---|---|---|---|
 | `TF_SYNC_WORKERS` | Number of concurrent workers processing post-push jobs (publishing blobs, updating the metadata index). | `2` | Workers run different refs in parallel; jobs for one repository and ref always run one at a time, in order, so raising this is safe. |
-| `TF_VIEWER_CACHE_DIR` | Local directory for the Parquet viewer's cache. | `/data/cache` | |
-| `TF_VIEWER_CACHE_BYTES` | Byte budget for that cache. | `4294967296` (4 GiB) | On Cloud Run this directory is memory-backed (tmpfs) and shares the instance's memory budget, so it must be sized deliberately there. |
+| `TF_VIEWER_CACHE_DIR` | Local working directory for WAL compaction. The Parquet viewer reads objects directly from storage via range requests and no longer caches to disk here. | `/data/cache` | |
+| `TF_VIEWER_METADATA_CACHE_BYTES` | Byte budget for the Parquet viewer's in-process footer/metadata cache. | `268435456` (256 MiB) | This is process heap memory, not disk — it does not compete with `TF_VIEWER_CACHE_DIR`'s tmpfs budget. |
 | `TF_WAL_MODE` | How far the Continuity migration has progressed: `off`, `shadow`, or `authoritative`. | `off` (`shadow` under Compose) | `off`: on-disk repositories under `GIT_ROOT` are the source of truth. `shadow`: pushes are also mirrored into a GCS-backed write-ahead log, best-effort — disk stays authoritative and a WAL failure never fails a push. `authoritative`: the WAL is the truth, reads materialize from it, and `GIT_ROOT` becomes a bounded, rebuildable cache. Any other value fails startup. |
 | `TF_GIT_HOOKS_PATH` | `core.hooksPath` directory baked into the image, wiring pushes through the WAL. | *(empty)* | **Required whenever `TF_WAL_MODE` is not `off`** — startup fails otherwise, since without it pushes over git smart HTTP would silently bypass the WAL. Compose sets this to `/opt/thinkingface/hooks`. |
 | `TF_GIT_CACHE_BYTES` | Byte budget for the materialized-repository cache under `GIT_ROOT` when `TF_WAL_MODE=authoritative`. | `2147483648` (2 GiB) | `0` disables eviction. Unused when the WAL is not authoritative. |
