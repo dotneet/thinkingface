@@ -53,6 +53,21 @@ pre-commit:
       glob: "*.{ts,tsx}"
       run: node scripts/check-ui.mjs
 
+    # --- Terraform: fmt check for staged .tf files (does not rewrite them) ---
+    #
+    # fmt only. `terraform validate` needs an initialised infra/.terraform and
+    # a provider download, which is too much for a pre-commit hook -- it stays
+    # in `make check-terraform` and the CI terraform job.
+    terraform-fmt:
+      root: infra/
+      glob: "*.tf"
+      run: |
+        if terraform version >/dev/null 2>&1; then
+          terraform fmt -check -- {staged_files}
+        else
+          echo "skip: terraform not found"
+        fi
+
     # --- Python: ruff lint ----------------------------------------------------
     python-ruff:
       glob: "*.py"

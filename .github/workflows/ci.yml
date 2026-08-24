@@ -191,6 +191,56 @@ jobs:
       - name: ruff format --check
         run: ruff format --check e2e clients/python scripts
 
+  terraform:
+    name: terraform (infra)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: infra
+    # Static checks only, and that limit is worth being explicit about:
+    # `terraform validate` resolves the providers and checks the configuration
+    # against their *schemas* -- syntax, argument names, types, references. It
+    # never talks to GCP, so every server-side constraint is invisible to it.
+    # Cloud Run, for example, allows at most 4 GiB of memory per vCPU, so a
+    # service asking for 8 GiB on 1 vCPU validates cleanly here and is rejected
+    # at apply time. A green job means "this configuration is well-formed", not
+    # "this configuration will apply".
+    #
+    # `terraform plan` / `apply` are deliberately absent: both need GCP
+    # credentials, which this workflow does not have and should not be given.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Do not leave the job's GITHUB_TOKEN in .git/config: nothing here
+          # pushes, and the later steps run third-party tooling (tygo, bun,
+          # pip, docker build) that would otherwise have a credential within
+          # reach.
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          # Pinned rather than `latest`, like bun and golangci-lint above: a
+          # terraform release should break CI on a deliberate bump, not on the
+          # morning it ships. Keep this at or above infra/versions.tf's
+          # required_version.
+          terraform_version: "1.15.4"
+          # The default wrapper re-emits stdout/stderr as step outputs, which
+          # nothing here consumes; without it the log is the plain CLI output.
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+
+      # -backend=false: the real backend needs credentials and nothing here
+      # touches state. Providers are still installed (from the committed
+      # .terraform.lock.hcl), which is what validate needs.
+      - name: terraform init
+        run: terraform init -backend=false -input=false
+
+      - name: terraform validate
+        run: terraform validate
+
   e2e:
     name: e2e (huggingface_hub compat, ${{ matrix.backend }})
     # A heavy job that brings up the whole stack via docker compose, so only
