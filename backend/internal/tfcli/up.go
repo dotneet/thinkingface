@@ -134,7 +134,12 @@ func runUp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitError
 	}
 
-	files, err := local.Scan(path, local.Options{Include: opt.include.values, Exclude: opt.exclude.values})
+	// allPaths is every file actually on disk under path, ignoring
+	// --include/--exclude; it feeds Plan.LocalPaths below so --delete only
+	// ever removes remote files that are truly gone locally, not ones this
+	// run simply chose not to upload. One scan produces both files (what
+	// gets uploaded) and allPaths (what disk-vs-remote comparisons use).
+	files, allPaths, err := local.Scan(path, local.Options{Include: opt.include.values, Exclude: opt.exclude.values})
 	if err != nil {
 		fmt.Fprintf(stderr, "tf: %s\n", err)
 		return exitError
@@ -274,6 +279,7 @@ func runUp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		Ref:           ref,
 		Rev:           opt.rev,
 		Files:         uploadFiles,
+		LocalPaths:    allPaths,
 		DeleteMissing: opt.del,
 		Summary:       opt.message,
 		Workers:       opt.workers,

@@ -156,6 +156,8 @@ export const settings = {
     namespaceLabel: "Namespace",
     scopeLabel: "Scope",
     scopeHint: "Leave blank to fire for every repository",
+    scopeLoadFailed:
+      "Couldn't load {namespace}'s repositories — the list below may be incomplete, not empty.",
     allRepositories: "{namespace} (all repositories)",
     urlLabel: "URL",
     eventsLabel: "Events",

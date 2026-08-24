@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,7 @@ import type { MembersVisibility, Org } from "@/types/api";
  */
 export function OrgProfileForm({ org }: { org: Org }) {
   const t = useT();
+  const router = useRouter();
   const [displayName, setDisplayName] = useState(org.display_name);
   const [description, setDescription] = useState(org.description);
   const [website, setWebsite] = useState(org.website);
@@ -28,6 +30,16 @@ export function OrgProfileForm({ org }: { org: Org }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+
+  // Any edit after a save invalidates the "saved" notice (and a stale
+  // error) — otherwise it lingers on screen through further, unrelated
+  // changes and reads as "this too has been saved" (mirrors
+  // ProfileSettings.edit() in components/settings/profile-settings.tsx).
+  function edit<T>(setter: (v: T) => void, value: T) {
+    setter(value);
+    setSaved(false);
+    setError(null);
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -48,6 +60,10 @@ export function OrgProfileForm({ org }: { org: Org }) {
       return;
     }
     setSaved(true);
+    // Server Components elsewhere (the org header, the settings nav) render
+    // this same data — refresh them so a renamed/redescribed org doesn't
+    // look unsaved until the next full navigation.
+    router.refresh();
   }
 
   return (
@@ -65,19 +81,19 @@ export function OrgProfileForm({ org }: { org: Org }) {
           <Input value={org.name} readOnly disabled className="font-mono" />
         </Field>
         <Field label={t("org.settings.profile.displayNameLabel")}>
-          <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+          <Input value={displayName} onChange={(e) => edit(setDisplayName, e.target.value)} />
         </Field>
         <Field label={t("org.settings.profile.descriptionLabel")}>
           <Textarea
             value={description}
-            onChange={(e) => setDescription(e.target.value)}
+            onChange={(e) => edit(setDescription, e.target.value)}
             className="min-h-20"
           />
         </Field>
         <Field label={t("org.settings.profile.websiteLabel")}>
           <Input
             value={website}
-            onChange={(e) => setWebsite(e.target.value)}
+            onChange={(e) => edit(setWebsite, e.target.value)}
             type="url"
             placeholder="https://example.com"
           />
@@ -88,7 +104,7 @@ export function OrgProfileForm({ org }: { org: Org }) {
         >
           <Input
             value={avatarUrl}
-            onChange={(e) => setAvatarUrl(e.target.value)}
+            onChange={(e) => edit(setAvatarUrl, e.target.value)}
             type="url"
             placeholder="https://example.com/logo.png"
           />
@@ -108,7 +124,7 @@ export function OrgProfileForm({ org }: { org: Org }) {
           <Select
             value={membersVisibility}
             onChange={(e) =>
-              setMembersVisibility(e.target.value === "public" ? "public" : "members")
+              edit(setMembersVisibility, e.target.value === "public" ? "public" : "members")
             }
           >
             <option value="members">{t("org.settings.policy.membersVisibilityMembers")}</option>

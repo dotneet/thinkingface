@@ -47,19 +47,29 @@ export function OrgMembersManager({
 
   // Memoised because every mutation below re-reads through it and the mount
   // effect depends on it; without this the effect would re-run on every render.
-  const refresh = useCallback(async () => {
-    const result = await listMembers(org);
-    if (!result.ok) {
-      setLoadError(errorMessage(t, result));
-      setMembers(null);
-      return;
-    }
-    setLoadError(null);
-    setMembers(result.data.items);
-  }, [org]);
+  const refresh = useCallback(
+    async (isStale: () => boolean = () => false) => {
+      const result = await listMembers(org);
+      if (isStale()) return;
+      if (!result.ok) {
+        setLoadError(errorMessage(t, result));
+        setMembers(null);
+        return;
+      }
+      setLoadError(null);
+      setMembers(result.data.items);
+    },
+    [org],
+  );
 
+  // Guards against a stale response landing after a newer one if `org`
+  // changes while a request from the previous org is still in flight.
   useEffect(() => {
-    refresh();
+    let cancelled = false;
+    refresh(() => cancelled);
+    return () => {
+      cancelled = true;
+    };
   }, [refresh]);
 
   async function handleAdd(e: React.FormEvent) {

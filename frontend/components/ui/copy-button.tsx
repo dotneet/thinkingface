@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, Copy } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/cn";
 import { useT } from "@/lib/i18n/client";
 
@@ -31,12 +31,21 @@ export function CopyButton({
   const t = useT();
   const [copied, setCopied] = useState(false);
   const resolvedLabel = label ?? t("ui.copy");
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  // A timeout scheduled by a click has no owner once the component unmounts
+  // (navigating away right after copying, say) — clear it on unmount so it
+  // doesn't fire `setState` on a gone component.
+  useEffect(() => {
+    return () => clearTimeout(timeoutRef.current);
+  }, []);
 
   async function handleCopy() {
     try {
       await navigator.clipboard.writeText(typeof value === "function" ? value() : value);
       setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = setTimeout(() => setCopied(false), 1500);
     } catch {
       // clipboard API unavailable; silently ignore
     }

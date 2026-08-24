@@ -50,8 +50,10 @@ export function StorageUsage({
   const [needsLogin, setNeedsLogin] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       const result = await getUsage();
+      if (cancelled) return;
       if (!result.ok) {
         setNeedsLogin(isUnauthorized(result));
         setError(result);
@@ -62,6 +64,9 @@ export function StorageUsage({
       setError(null);
       setUsage(namespace ? narrowToNamespace(result.data, namespace) : result.data);
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [namespace]);
 
   if (usage === null && !error) {

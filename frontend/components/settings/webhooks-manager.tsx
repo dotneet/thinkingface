@@ -48,7 +48,8 @@ export function WebhooksManager({
   const [user, setUser] = useState<User | null | undefined>(undefined); // undefined = loading
   const [needsLogin, setNeedsLogin] = useState(false);
   const [namespace, setNamespace] = useState(fixedNamespace ?? "");
-  const [repos, setRepos] = useState<RepoSummary[]>([]);
+  const [repos, setRepos] = useState<RepoSummary[] | null>(null); // null = loading or failed
+  const [reposError, setReposError] = useState(false);
   const [webhooks, setWebhooks] = useState<Webhook[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -75,8 +76,14 @@ export function WebhooksManager({
     })();
   }, [fixedNamespace]);
 
-  async function refreshWebhooks(ns: string) {
+  // `isStale` lets a caller opt out of a response that arrived after the
+  // namespace (or the whole component) has moved on — see the effect below,
+  // which is the only caller that can race. The direct calls from
+  // `onChanged`/`onDeleted`/`handleCreate` are single, user-triggered
+  // refreshes with nothing else in flight, so they use the default no-op.
+  async function refreshWebhooks(ns: string, isStale: () => boolean = () => false) {
     const result = await listWebhooks(ns);
+    if (isStale()) return;
     if (!result.ok) {
       setError(errorMessage(t, result));
       setWebhooks(null);
@@ -88,11 +95,28 @@ export function WebhooksManager({
 
   useEffect(() => {
     if (!namespace) return;
+    let cancelled = false;
     setWebhooks(null);
-    refreshWebhooks(namespace);
+    setRepos(null);
+    setReposError(false);
+    refreshWebhooks(namespace, () => cancelled);
     listRepos({ author: namespace, limit: 100 }).then((result) => {
-      setRepos(result.ok ? result.data.items : []);
+      if (cancelled) return;
+      if (result.ok) {
+        setRepos(result.data.items);
+        setReposError(false);
+      } else {
+        // Failed, not empty: keep `repos` at null so the Select's "no
+        // repositories" reading isn't confused with "couldn't check"
+        // (DESIGN.md §9). The scope hint below tells the user instead.
+        setRepos(null);
+        setReposError(true);
+      }
     });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refreshWebhooks closes over `t`, which changing locale would otherwise needlessly refetch for.
   }, [namespace]);
 
   function toggleEvent(e: WebhookEvent) {
@@ -192,11 +216,16 @@ export function WebhooksManager({
           <Field
             label={t("settings.webhooks.scopeLabel")}
             className="min-w-[200px] flex-1"
-            hint={t("settings.webhooks.scopeHint")}
+            // A failed fetch says so instead of silently reading as "this
+            // namespace has no repositories" (DESIGN.md §9) — the option
+            // list would otherwise look identical to a genuinely empty one.
+            hint={
+              reposError ? t("settings.webhooks.scopeLoadFailed") : t("settings.webhooks.scopeHint")
+            }
           >
             <Select value={repoScope} onChange={(e) => setRepoScope(e.target.value)}>
               <option value="">{t("settings.webhooks.allRepositories", { namespace })}</option>
-              {repos.map((r) => (
+              {(repos ?? []).map((r) => (
                 <option key={`${r.kind}/${r.name}`} value={`${r.kind}/${r.name}`}>
                   {r.kind}/{r.name}
                 </option>

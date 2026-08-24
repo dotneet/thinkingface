@@ -48,6 +48,26 @@ export function WebhookRow({
     });
   }
 
+  // `url` / `events` / `active` are local edit buffers, not a mirror of the
+  // `webhook` prop: React only re-initializes `useState(webhook.active)` on
+  // mount, and `WebhooksManager` re-renders this row with the same `key`
+  // after every refetch, so the row never remounts. Without this reset,
+  // toggling Enable/Disable (which only updates the server and the parent's
+  // list, never these local buffers) leaves `active` permanently stale, and
+  // the next unrelated Save silently carries the old value back to the
+  // server — undoing the toggle. Re-seeding the buffers from the current
+  // prop every time the panel opens keeps them honest instead.
+  function toggleEditing() {
+    if (!editing) {
+      setUrl(webhook.url);
+      setEvents(new Set(webhook.events));
+      setActive(webhook.active);
+      setError(null);
+      setRotatedSecret(null);
+    }
+    setEditing((v) => !v);
+  }
+
   async function handleSave(rotateSecret: boolean) {
     if (events.size === 0) {
       setError(t("settings.webhooks.selectAtLeastOneEvent"));
@@ -135,7 +155,7 @@ export function WebhookRow({
           <Button size="sm" disabled={saving} onClick={handleToggleActive}>
             {webhook.active ? t("settings.webhooks.disable") : t("settings.webhooks.enable")}
           </Button>
-          <Button size="sm" onClick={() => setEditing((v) => !v)}>
+          <Button size="sm" onClick={toggleEditing}>
             {editing ? t("settings.webhooks.close") : t("settings.webhooks.edit")}
           </Button>
           <Button

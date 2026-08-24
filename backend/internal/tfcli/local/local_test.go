@@ -41,7 +41,7 @@ func TestScanDirectory(t *testing.T) {
 		}
 	}
 
-	files, err := Scan(root, Options{})
+	files, _, err := Scan(root, Options{})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestScanSingleFile(t *testing.T) {
 	p := filepath.Join(root, "model.safetensors")
 	writeFile(t, p, "weights")
 
-	files, err := Scan(p, Options{})
+	files, _, err := Scan(p, Options{})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestScanSingleFile(t *testing.T) {
 }
 
 func TestScanMissingRoot(t *testing.T) {
-	if _, err := Scan(filepath.Join(t.TempDir(), "nope"), Options{}); err == nil {
+	if _, _, err := Scan(filepath.Join(t.TempDir(), "nope"), Options{}); err == nil {
 		t.Fatal("Scan() on missing root: want error, got nil")
 	}
 }
@@ -102,7 +102,7 @@ func TestScanIncludeExclude(t *testing.T) {
 	writeFile(t, filepath.Join(root, "data", "test.parquet"), "x")
 	writeFile(t, filepath.Join(root, "notes.txt"), "x")
 
-	files, err := Scan(root, Options{
+	files, _, err := Scan(root, Options{
 		Include: []string{"**/*.parquet"},
 		Exclude: []string{"**/test.parquet"},
 	})

@@ -3,6 +3,7 @@ package tfcli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -72,7 +73,7 @@ func dirWithFiles(t *testing.T, names ...string) string {
 
 func TestResolveUpTargetDefaults(t *testing.T) {
 	dir := dirWithFiles(t, "data/train.parquet")
-	files, err := local.Scan(dir, local.Options{})
+	files, _, err := local.Scan(dir, local.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +99,7 @@ func TestResolveUpTargetDefaults(t *testing.T) {
 
 func TestResolveUpTargetToWithNamespace(t *testing.T) {
 	dir := dirWithFiles(t, "data/train.parquet")
-	files, _ := local.Scan(dir, local.Options{})
+	files, _, _ := local.Scan(dir, local.Options{})
 
 	ref, pinned, err := resolveUpTarget("myns/myname", "", dir, "alice", files)
 	if err != nil {
@@ -114,7 +115,7 @@ func TestResolveUpTargetToWithNamespace(t *testing.T) {
 
 func TestResolveUpTargetToWithoutNamespaceUsesSelf(t *testing.T) {
 	dir := dirWithFiles(t, "data/train.parquet")
-	files, _ := local.Scan(dir, local.Options{})
+	files, _, _ := local.Scan(dir, local.Options{})
 
 	ref, _, err := resolveUpTarget("myname", "", dir, "alice", files)
 	if err != nil {
@@ -127,7 +128,7 @@ func TestResolveUpTargetToWithoutNamespaceUsesSelf(t *testing.T) {
 
 func TestResolveUpTargetToPrefixPinsKind(t *testing.T) {
 	dir := dirWithFiles(t, "data/train.parquet") // would otherwise infer dataset anyway
-	files, _ := local.Scan(dir, local.Options{})
+	files, _, _ := local.Scan(dir, local.Options{})
 
 	ref, pinned, err := resolveUpTarget("models/myns/myname", "", dir, "alice", files)
 	if err != nil {
@@ -143,7 +144,7 @@ func TestResolveUpTargetToPrefixPinsKind(t *testing.T) {
 
 func TestResolveUpTargetKindFlagWinsOverInference(t *testing.T) {
 	dir := dirWithFiles(t, "model.safetensors") // would infer model
-	files, _ := local.Scan(dir, local.Options{})
+	files, _, _ := local.Scan(dir, local.Options{})
 
 	ref, pinned, err := resolveUpTarget("", "dataset", dir, "alice", files)
 	if err != nil {
@@ -159,7 +160,7 @@ func TestResolveUpTargetKindFlagWinsOverInference(t *testing.T) {
 
 func TestResolveUpTargetKindFlagWinsOverToPrefix(t *testing.T) {
 	dir := dirWithFiles(t, "data/train.parquet")
-	files, _ := local.Scan(dir, local.Options{})
+	files, _, _ := local.Scan(dir, local.Options{})
 
 	ref, pinned, err := resolveUpTarget("datasets/ns/name", "model", dir, "alice", files)
 	if err != nil {
@@ -175,7 +176,7 @@ func TestResolveUpTargetKindFlagWinsOverToPrefix(t *testing.T) {
 
 func TestResolveUpTargetInvalidToIsError(t *testing.T) {
 	dir := dirWithFiles(t, "data/train.parquet")
-	files, _ := local.Scan(dir, local.Options{})
+	files, _, _ := local.Scan(dir, local.Options{})
 
 	if _, _, err := resolveUpTarget("a/b/c", "", dir, "alice", files); err == nil {
 		t.Error("expected an error for a --to value with two slashes")
@@ -184,7 +185,7 @@ func TestResolveUpTargetInvalidToIsError(t *testing.T) {
 
 func TestBuildUploadFilesNoCardOptionsLeavesReadmeAlone(t *testing.T) {
 	dir := dirWithFiles(t, "README.md", "data.txt")
-	files, err := local.Scan(dir, local.Options{})
+	files, _, err := local.Scan(dir, local.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +201,7 @@ func TestBuildUploadFilesNoCardOptionsLeavesReadmeAlone(t *testing.T) {
 
 func TestBuildUploadFilesGeneratesReadmeWhenMissing(t *testing.T) {
 	dir := dirWithFiles(t, "data.txt")
-	files, err := local.Scan(dir, local.Options{})
+	files, _, err := local.Scan(dir, local.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +240,7 @@ func TestBuildUploadFilesMergesExistingReadme(t *testing.T) {
 	if err := os.WriteFile(readmePath, []byte("---\nlicense: apache-2.0\n---\n\n# Hello\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	files, err := local.Scan(dir, local.Options{})
+	files, _, err := local.Scan(dir, local.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,4 +402,144 @@ func TestUpEndToEndCreatesAndCommits(t *testing.T) {
 	if jr.Files != 1 {
 		t.Errorf("files = %d, want 1", jr.Files)
 	}
+}
+
+// fakeUpDeleteServer is an existing-repository counterpart to fakeUpServer:
+// it has a remote tree to diff against, so `tf up --delete` has something to
+// act on. deletedPaths records every "deletedFile" op the commit body carried,
+// for TestUpDeleteExcludeKeepsFilesStillOnDisk to check against.
+type fakeUpDeleteServer struct {
+	t   *testing.T
+	srv *httptest.Server
+
+	deletedPaths []string
+}
+
+func newFakeUpDeleteServer(t *testing.T, treeEntries string) *fakeUpDeleteServer {
+	t.Helper()
+	f := &fakeUpDeleteServer{t: t}
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /api/whoami-v2", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, map[string]any{
+			"name":     "alice",
+			"fullname": "Alice",
+			"email":    "alice@example.com",
+			"orgs":     []any{},
+			"auth":     map[string]any{"accessToken": map[string]any{"role": "write"}},
+		})
+	})
+
+	// The repository already exists, so runUp never calls create.
+	mux.HandleFunc("GET /api/datasets/alice/x", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, map[string]any{"ok": true})
+	})
+
+	mux.HandleFunc("GET /api/datasets/alice/x/tree/main", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, treeEntries)
+	})
+
+	mux.HandleFunc("POST /api/datasets/alice/x/preupload/main", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Files []struct {
+				Path string `json:"path"`
+			} `json:"files"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("preupload decode: %v", err)
+		}
+		resp := struct {
+			Files []map[string]string `json:"files"`
+		}{}
+		for _, rf := range req.Files {
+			resp.Files = append(resp.Files, map[string]string{"path": rf.Path, "uploadMode": "regular"})
+		}
+		writeJSON(t, w, resp)
+	})
+
+	mux.HandleFunc("POST /api/datasets/alice/x/commit/main", func(w http.ResponseWriter, r *http.Request) {
+		dec := json.NewDecoder(r.Body)
+		for {
+			var line struct {
+				Key   string `json:"key"`
+				Value struct {
+					Path string `json:"path"`
+				} `json:"value"`
+			}
+			if err := dec.Decode(&line); err != nil {
+				break
+			}
+			if line.Key == "deletedFile" {
+				f.deletedPaths = append(f.deletedPaths, line.Value.Path)
+			}
+		}
+		writeJSON(t, w, map[string]any{
+			"success":   true,
+			"commitUrl": "http://example.invalid/datasets/alice/x/commit/abc1234def",
+			"commitOid": "abc1234def5678",
+		})
+	})
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	f.srv = httptest.NewServer(mux)
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+// TestUpDeleteExcludeKeepsFilesStillOnDisk is the regression test for the
+// data-loss bug: `tf up --exclude PATTERN --delete` must not treat a file
+// that --exclude filtered out of the upload as "gone locally" and delete it
+// from the remote, since it is sitting right there on disk. A remote path
+// that is genuinely absent from disk must still be deleted.
+func TestUpDeleteExcludeKeepsFilesStillOnDisk(t *testing.T) {
+	dir := dirWithFiles(t, "data/train.parquet", "data/train.parquet.bak")
+
+	srv := newFakeUpDeleteServer(t, `[
+		{"type":"file","path":".gitattributes","oid":"a1","size":10},
+		{"type":"file","path":"data/train.parquet.bak","oid":"b2","size":1},
+		{"type":"file","path":"data/gone.txt","oid":"c3","size":1}
+	]`)
+
+	var out, errOut bytes.Buffer
+	code := Main([]string{
+		"up", dir,
+		"--endpoint", srv.srv.URL,
+		"--token", "t",
+		"--to", "alice/x",
+		"--exclude", "*.bak",
+		"--delete",
+		"--quiet",
+		"--json",
+	}, nil, &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut.String())
+	}
+
+	var jr upResultJSON
+	if err := json.Unmarshal(out.Bytes(), &jr); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v (stdout=%s)", err, out.String())
+	}
+	if jr.Deleted != 1 {
+		t.Errorf("deleted count = %d, want 1", jr.Deleted)
+	}
+	if !equalStringSlices(srv.deletedPaths, []string{"data/gone.txt"}) {
+		t.Fatalf("deletedFile ops = %v, want [data/gone.txt] (data/train.parquet.bak is excluded from upload but still on disk, and must survive)", srv.deletedPaths)
+	}
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

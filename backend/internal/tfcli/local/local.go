@@ -43,15 +43,23 @@ func (f File) Open() (io.ReadCloser, error) {
 // ".DS_Store", "Thumbs.db", "__pycache__" directories, and symlinks that point
 // at directories (to avoid loops; symlinked files are followed). Results are
 // sorted by RepoPath. A root that does not exist is an error.
-func Scan(root string, opts Options) ([]File, error) {
+//
+// allPaths reports every RepoPath the walk visited (subject only to the
+// always-skipped names above, never to Include/Exclude): callers that need to
+// know what actually exists on disk -- as opposed to what --include/--exclude
+// selected for upload -- use this instead of re-scanning. `tf up --delete`
+// is the motivating case: a file excluded from the upload but still on disk
+// must not be treated as "gone locally" and deleted from the remote. A single
+// walk produces both slices so scanning a large tree twice is never needed.
+func Scan(root string, opts Options) (files []File, allPaths []string, err error) {
 	info, err := os.Stat(root)
 	if err != nil {
-		return nil, fmt.Errorf("local: scan %s: %w", root, err)
+		return nil, nil, fmt.Errorf("local: scan %s: %w", root, err)
 	}
 
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
-		return nil, fmt.Errorf("local: scan %s: %w", root, err)
+		return nil, nil, fmt.Errorf("local: scan %s: %w", root, err)
 	}
 
 	if !info.IsDir() {
@@ -60,14 +68,13 @@ func Scan(root string, opts Options) ([]File, error) {
 			AbsPath:  rootAbs,
 			Size:     info.Size(),
 		}
-		var files []File
+		allPaths = append(allPaths, f.RepoPath)
 		if matchFilters(f.RepoPath, opts) {
 			files = append(files, f)
 		}
-		return files, nil
+		return files, allPaths, nil
 	}
 
-	var files []File
 	walkErr := filepath.WalkDir(rootAbs, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -102,6 +109,7 @@ func Scan(root string, opts Options) ([]File, error) {
 				return relErr
 			}
 			f := File{RepoPath: filepath.ToSlash(rel), AbsPath: p, Size: target.Size()}
+			allPaths = append(allPaths, f.RepoPath)
 			if matchFilters(f.RepoPath, opts) {
 				files = append(files, f)
 			}
@@ -124,17 +132,19 @@ func Scan(root string, opts Options) ([]File, error) {
 			return relErr
 		}
 		f := File{RepoPath: filepath.ToSlash(rel), AbsPath: p, Size: entryInfo.Size()}
+		allPaths = append(allPaths, f.RepoPath)
 		if matchFilters(f.RepoPath, opts) {
 			files = append(files, f)
 		}
 		return nil
 	})
 	if walkErr != nil {
-		return nil, walkErr
+		return nil, nil, walkErr
 	}
 
 	sort.Slice(files, func(i, j int) bool { return files[i].RepoPath < files[j].RepoPath })
-	return files, nil
+	sort.Strings(allPaths)
+	return files, allPaths, nil
 }
 
 func matchFilters(repoPath string, opts Options) bool {
