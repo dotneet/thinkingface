@@ -126,7 +126,7 @@ func (f *archiveFixture) token(u *store.User, scope string) string {
 	if err != nil {
 		f.t.Fatalf("new token: %v", err)
 	}
-	if _, err := f.st.CreateToken(context.Background(), u.ID, "test", scope, hash); err != nil {
+	if _, err := f.st.CreateToken(context.Background(), u.ID, "test", scope, hash, nil); err != nil {
 		f.t.Fatalf("create token: %v", err)
 	}
 	return tok
