@@ -32,6 +32,21 @@ Homepage = "https://github.com/dotneet/thinkingface"
 # thinkingface.trackio.integrations imports cleanly with neither installed
 # (`_HAS_TRANSFORMERS is False`), and it fakes both via sys.modules to cover the
 # autolog behavior. Installing them here would silently void that contract.
+[tool.uv]
+# Do not build this project to run its own tests.
+#
+# `uv run --locked` otherwise builds the package first, and a build resolves
+# `[build-system] requires` from PyPI at that moment -- uv.lock does not record
+# build dependencies. That would put an unpinned hatchling into every `make
+# check` and every CI run, which is exactly the "let a registry decide the
+# version" that CLAUDE.md invariant 6 forbids, in the same commit that claims
+# this suite resolves from a lockfile.
+#
+# The tests import `thinkingface` from the source tree next to them, so nothing
+# needs installing. This only affects how uv runs the suite here; the
+# `[build-system]` above is still what builds a wheel for distribution.
+package = false
+
 [dependency-groups]
 dev = ["pytest>=8.0"]
 
@@ -42,6 +57,11 @@ packages = ["thinkingface"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-ra"
+# Import `thinkingface` from the source tree rather than an installed copy.
+# `[tool.uv] package = false` (above) keeps uv from building the project to run
+# these tests, which is what keeps an unpinned build backend out of every CI
+# run; without this the suite then has nothing to import.
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100

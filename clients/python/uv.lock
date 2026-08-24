@@ -1944,7 +1944,7 @@ wheels = [
 [[package]]
 name = "thinkingface"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "pyarrow" },

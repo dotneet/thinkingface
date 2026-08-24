@@ -57,7 +57,8 @@ make up-sqlite     # bring up the full stack in SQLite mode (no postgres; docker
 make down          # stop
 make logs          # tail logs
 make check         # ★always run after code changes (full backend + frontend + python verification)
-make test          # backend go test + frontend unit tests
+make test          # backend go test + frontend unit tests + clients/python unit tests
+make test-clients-python # just the clients/python unit tests (trackio resume contract, grouping, artifacts)
 make test-store-pg # also run backend/internal/store integration tests against PostgreSQL (requires make up)
 make test-e2e      # huggingface_hub-compatible E2E (requires make up first)
 make fmt / lint    # format / static analysis
@@ -85,7 +86,8 @@ cd e2e      && uv run --locked pytest -v
 
 `make check` breaks down into `check-backend` (gofmt / go vet / go test), `check-frontend`
 (typecheck / lint / format:check / check:ui / test), `check-python` (ruff check +
-ruff format --check), `check-types` (tygo regeneration + zero-diff verification), and
+ruff format --check, then the `clients/python` pytest suite via `uv run --locked`),
+`check-types` (tygo regeneration + zero-diff verification), and
 `check-terraform` (terraform fmt -check + init -backend=false + validate on `infra/`; skipped
 when terraform is not installed, since it is an optional prerequisite). It is kept aligned with
 the backend / frontend / python / contract / terraform jobs in CI (`.github/workflows/ci.yml`).

@@ -27,6 +27,7 @@ import os
 import shutil
 import subprocess
 import urllib.parse
+import warnings
 from pathlib import Path
 
 import pytest
@@ -298,7 +299,16 @@ def registered_ssh_key(hf_endpoint: str, hf_token: str, tmp_path):
     try:
         yield ssh_command
     finally:
-        requests.delete(f"{hf_endpoint}/api/v1/me/ssh-keys/{key_id}", headers=headers, timeout=10)
+        # Best-effort, like the token revocation in conftest: a cleanup that
+        # raises stacks a teardown ERROR on top of whatever the test actually
+        # reported, which buries the result that matters. A key left behind is
+        # tidiness, not correctness.
+        try:
+            requests.delete(
+                f"{hf_endpoint}/api/v1/me/ssh-keys/{key_id}", headers=headers, timeout=10
+            )
+        except requests.RequestException as exc:
+            warnings.warn(f"could not delete the e2e ssh key {key_id}: {exc}", stacklevel=1)
 
 
 def test_git_clone_and_push_over_ssh(
@@ -422,5 +432,14 @@ def test_ssh_push_is_rejected_without_a_registered_key(
             timeout=60,
         )
         assert proc.returncode != 0, "an unregistered ssh key was allowed to clone"
+        # A non-zero exit alone would also be satisfied by a server that fails
+        # every SSH request for an unrelated reason -- a broken path parser,
+        # say -- and this case would then keep reporting that authentication
+        # works. Insist the refusal is specifically about the key.
+        stderr = proc.stderr.lower()
+        assert "publickey" in stderr or "permission denied" in stderr, (
+            "the clone failed, but not because the key was unregistered; "
+            f"stderr was: {proc.stderr.strip()!r}"
+        )
     finally:
         hf_api.delete_repo(repo_id=repo_id, repo_type="model")
