@@ -866,3 +866,89 @@ func TestBigFileThresholdMatchesLFSThreshold(t *testing.T) {
 			gitexec.BigFileThreshold, LFSInlineThreshold)
 	}
 }
+
+// ------------------------------------------------------------ OpCopy / parent
+
+// A copy is a hash copy, so the one thing it must never do is write a tree
+// entry for an object the repository does not hold: that is a corrupt commit
+// rather than a failed one, and every later read of the path -- and every
+// clone -- breaks on it. Nothing in the API can produce this (the source is
+// resolved from this repository first), which is exactly why the guard needs a
+// test of its own.
+func TestCommit_OpCopyRefusesAnAbsentSourceBlob(t *testing.T) {
+	_, repo := newTestRepo(t)
+	mustCommit(t, repo, "main", "seed", addOp("a.txt", "hi\n"))
+	head, _ := repo.Resolve("main")
+
+	absent := plumbing.NewHash("1111111111111111111111111111111111111111")
+	_, _, err := repo.Commit(CommitRequest{
+		Branch:  "main",
+		Message: "copy from nowhere",
+		Author:  Signature{Name: "tester", Email: "tester@example.com"},
+		Ops:     []Op{{Kind: OpCopy, Path: "b.txt", SrcHash: absent}},
+	})
+	if err == nil {
+		t.Fatal("Commit accepted a copy from a blob that is not here")
+	}
+	if got, _ := repo.Resolve("main"); got != head {
+		t.Errorf("head = %s, want it unmoved at %s", got, head)
+	}
+	assertRepoHealthy(t, repo.Dir())
+}
+
+// The branch-level optimistic lock huggingface_hub's parent_commit asks for.
+func TestCommit_ParentCommit(t *testing.T) {
+	_, repo := newTestRepo(t)
+	first := mustCommit(t, repo, "main", "seed", addOp("a.txt", "v1\n"))
+
+	// The shorthand form the client's docstring documents.
+	if _, _, err := repo.Commit(CommitRequest{
+		Branch: "main", Message: "on top of first",
+		Author:       Signature{Name: "tester", Email: "tester@example.com"},
+		Ops:          []Op{addOp("b.txt", "v1\n")},
+		ParentCommit: first.String()[:7],
+	}); err != nil {
+		t.Fatalf("matching parent was refused: %v", err)
+	}
+	head, _ := repo.Resolve("main")
+
+	var stale *StaleParentError
+	_, _, err := repo.Commit(CommitRequest{
+		Branch: "main", Message: "blind write",
+		Author:       Signature{Name: "tester", Email: "tester@example.com"},
+		Ops:          []Op{addOp("c.txt", "v1\n")},
+		ParentCommit: first.String(),
+	})
+	if !errors.As(err, &stale) {
+		t.Fatalf("err = %v, want StaleParentError", err)
+	}
+	if stale.Actual != head.String() {
+		t.Errorf("StaleParentError.Actual = %s, want the current head %s", stale.Actual, head)
+	}
+	if got, _ := repo.Resolve("main"); got != head {
+		t.Errorf("head = %s, want it unmoved at %s", got, head)
+	}
+}
+
+// An unborn branch is not "any parent": its head reads as forty zeroes, and a
+// prefix of zeroes must not be mistaken for a match.
+func TestCommit_ParentCommitOnAnUnbornBranchNeverMatches(t *testing.T) {
+	_, repo := newTestRepo(t)
+	mustCommit(t, repo, "main", "seed", addOp("a.txt", "v1\n"))
+
+	for _, parent := range []string{"0000000", strings.Repeat("0", 40), "abcdef1"} {
+		_, _, err := repo.Commit(CommitRequest{
+			Branch: "draft", Message: "first on a new branch",
+			Author:       Signature{Name: "tester", Email: "tester@example.com"},
+			Ops:          []Op{addOp("b.txt", "v1\n")},
+			ParentCommit: parent,
+		})
+		var stale *StaleParentError
+		if !errors.As(err, &stale) {
+			t.Fatalf("parent %q: err = %v, want StaleParentError", parent, err)
+		}
+		if _, err := repo.Resolve("draft"); err == nil {
+			t.Fatalf("parent %q: refs/heads/draft was created", parent)
+		}
+	}
+}

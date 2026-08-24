@@ -257,3 +257,323 @@ func TestWriteEndpoints_StillCreateABranchThatDoesNotExistYet(t *testing.T) {
 		})
 	}
 }
+
+// -------------------------------------------------------------- unknown keys
+
+// The switch over `key` had no default, so a line naming an operation this
+// server does not implement was skipped in silence. Mixed with one it does,
+// the commit applied half of what was sent and answered 200 `success` -- the
+// caller had no way to learn the rest never happened.
+func TestCommit_RefusesAnUnknownOperationKey(t *testing.T) {
+	f := newArchiveFixture(t)
+	r := f.repo("alice", "weights", "model")
+	seedFile(t, f, r, "README.md", []byte("# hi\n"))
+	before := refTargetOf(t, f, r, gitrepo.BranchRef("main"))
+	tok := f.token(f.alice, "write")
+
+	resp := commitNDJSON(t, f, "/api/models/alice/weights/commit/main", tok,
+		`{"key":"header","value":{"summary":"half a commit"}}`,
+		`{"key":"file","value":{"path":"a.txt","content":"aGkK","encoding":"base64"}}`,
+		`{"key":"movedFile","value":{"path":"b.txt","srcPath":"a.txt"}}`)
+
+	if resp.status() != 400 {
+		t.Fatalf("status = %d, body = %s; want 400", resp.status(), resp.rec.Body.String())
+	}
+	if !strings.Contains(resp.rec.Body.String(), "movedFile") {
+		t.Errorf("body = %s, want it to name the unsupported operation", resp.rec.Body.String())
+	}
+	if got := refTargetOf(t, f, r, gitrepo.BranchRef("main")); got != before {
+		t.Errorf("head = %s, want it unmoved at %s", got, before)
+	}
+	if !fileMissing(t, f, r, "main", "a.txt") {
+		t.Error("the add alongside the unknown operation was committed anyway")
+	}
+}
+
+// A header that will not parse takes the parentCommit lock down with it, so it
+// is an error rather than a header that was never there.
+func TestCommit_RefusesAMalformedHeader(t *testing.T) {
+	f := newArchiveFixture(t)
+	r := f.repo("alice", "weights", "model")
+	seedFile(t, f, r, "README.md", []byte("# hi\n"))
+	tok := f.token(f.alice, "write")
+
+	resp := commitNDJSON(t, f, "/api/models/alice/weights/commit/main", tok,
+		`{"key":"header","value":"just a string"}`,
+		`{"key":"file","value":{"path":"a.txt","content":"aGkK","encoding":"base64"}}`)
+	if resp.status() != 400 {
+		t.Fatalf("status = %d, body = %s; want 400", resp.status(), resp.rec.Body.String())
+	}
+	if !fileMissing(t, f, r, "main", "a.txt") {
+		t.Error("the commit was applied despite the unreadable header")
+	}
+}
+
+// ------------------------------------------------------------------ copyFile
+
+// huggingface_hub's CommitOperationCopy. The mixed commit is the point: a
+// copy that was dropped from a commit that also added a file used to answer
+// 200 with the copy simply missing.
+func TestCommit_CopyFileDuplicatesAFileAlongsideAnAdd(t *testing.T) {
+	f := newArchiveFixture(t)
+	r := f.repo("alice", "weights", "model")
+	seedFile(t, f, r, "src.txt", []byte("payload\n"))
+	tok := f.token(f.alice, "write")
+
+	resp := commitNDJSON(t, f, "/api/models/alice/weights/commit/main", tok,
+		`{"key":"header","value":{"summary":"copy and add"}}`,
+		`{"key":"copyFile","value":{"path":"copy.txt","srcPath":"src.txt","srcRevision":null}}`,
+		`{"key":"file","value":{"path":"a.txt","content":"aGkK","encoding":"base64"}}`)
+	if resp.status() != 200 {
+		t.Fatalf("status = %d, body = %s; want 200", resp.status(), resp.rec.Body.String())
+	}
+	if got := string(readFile(t, f, r, "main", "copy.txt")); got != "payload\n" {
+		t.Errorf("copy.txt = %q, want the source's content", got)
+	}
+	if got := string(readFile(t, f, r, "main", "a.txt")); got != "hi\n" {
+		t.Errorf("a.txt = %q, want hi", got)
+	}
+	if got := string(readFile(t, f, r, "main", "src.txt")); got != "payload\n" {
+		t.Errorf("src.txt = %q, want the source left alone", got)
+	}
+}
+
+// A copy on its own is a commit: it used to fall through to "commit contains
+// no file operations" and 400.
+func TestCommit_CopyFileOnItsOwnIsACommit(t *testing.T) {
+	f := newArchiveFixture(t)
+	r := f.repo("alice", "weights", "model")
+	seedFile(t, f, r, "src.txt", []byte("payload\n"))
+	tok := f.token(f.alice, "write")
+
+	resp := commitNDJSON(t, f, "/api/models/alice/weights/commit/main", tok,
+		`{"key":"header","value":{"summary":"copy only"}}`,
+		`{"key":"copyFile","value":{"path":"copy.txt","srcPath":"src.txt"}}`)
+	if resp.status() != 200 {
+		t.Fatalf("status = %d, body = %s; want 200", resp.status(), resp.rec.Body.String())
+	}
+	if got := string(readFile(t, f, r, "main", "copy.txt")); got != "payload\n" {
+		t.Errorf("copy.txt = %q, want the source's content", got)
+	}
+}
+
+// The Hub's own copy operation is documented for LFS files, so this is the
+// case that matters most: what git holds is the pointer, and copying the
+// pointer is what makes the copy resolve to the same object.
+func TestCommit_CopyFilePreservesAnLFSPointer(t *testing.T) {
+	f := newArchiveFixture(t)
+	r := f.repo("alice", "weights", "model")
+	tok := f.token(f.alice, "write")
+	content := bytes.Repeat([]byte("w"), 4096)
+	oid := seedLFSObject(t, f, r, content)
+
+	resp := commitNDJSON(t, f, "/api/models/alice/weights/commit/main", tok,
+		`{"key":"header","value":{"summary":"add weights"}}`,
+		fmt.Sprintf(`{"key":"lfsFile","value":{"path":"model.safetensors","algo":"sha256","oid":%q}}`, oid))
+	if resp.status() != 200 {
+		t.Fatalf("seed commit status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+
+	resp = commitNDJSON(t, f, "/api/models/alice/weights/commit/main", tok,
+		`{"key":"header","value":{"summary":"copy the weights"}}`,
+		`{"key":"copyFile","value":{"path":"model-copy.safetensors","srcPath":"model.safetensors"}}`)
+	if resp.status() != 200 {
+		t.Fatalf("status = %d, body = %s; want 200", resp.status(), resp.rec.Body.String())
+	}
+	pointer, ok := gitrepo.ParseLFSPointer(readFile(t, f, r, "main", "model-copy.safetensors"))
+	if !ok {
+		t.Fatalf("the copy is not an LFS pointer: %q", readFile(t, f, r, "main", "model-copy.safetensors"))
+	}
+	if pointer.OID != oid || pointer.Size != int64(len(content)) {
+		t.Errorf("pointer = %s/%d, want %s/%d", pointer.OID, pointer.Size, oid, len(content))
+	}
+}
+
+// srcRevision names where the copy is taken from, which is the whole reason
+// the operation exists: restoring a file as it was at an earlier commit.
+func TestCommit_CopyFileFromAnEarlierRevision(t *testing.T) {
+	f := newArchiveFixture(t)
+	r := f.repo("alice", "weights", "model")
+	seedFile(t, f, r, "notes.txt", []byte("v1\n"))
+	v1 := refTargetOf(t, f, r, gitrepo.BranchRef("main"))
+	seedFile(t, f, r, "notes.txt", []byte("v2\n"))
+	tok := f.token(f.alice, "write")
+
+	resp := commitNDJSON(t, f, "/api/models/alice/weights/commit/main", tok,
+		`{"key":"header","value":{"summary":"restore v1 alongside v2"}}`,
+		fmt.Sprintf(`{"key":"copyFile","value":{"path":"notes-v1.txt","srcPath":"notes.txt","srcRevision":%q}}`, v1))
+	if resp.status() != 200 {
+		t.Fatalf("status = %d, body = %s; want 200", resp.status(), resp.rec.Body.String())
+	}
+	if got := string(readFile(t, f, r, "main", "notes-v1.txt")); got != "v1\n" {
+		t.Errorf("notes-v1.txt = %q, want the content at %s", got, v1)
+	}
+	if got := string(readFile(t, f, r, "main", "notes.txt")); got != "v2\n" {
+		t.Errorf("notes.txt = %q, want v2 untouched", got)
+	}
+}
+
+// Every way a copy source can fail to name one file, and the answer for each.
+// The X-Error-Code matters: it is what makes huggingface_hub raise
+// EntryNotFoundError / RevisionNotFoundError rather than a bare HTTP error.
+func TestCommit_CopyFileRejectsSourcesItCannotResolve(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     string
+		status    int
+		errorCode string
+		message   string
+	}{
+		{"missing path", `{"path":"copy.txt","srcPath":"nope.txt"}`, 404, "EntryNotFound", "does not exist"},
+		{"unknown revision", `{"path":"copy.txt","srcPath":"src.txt","srcRevision":"no-such-branch"}`,
+			404, "RevisionNotFound", "source revision"},
+		{"directory", `{"path":"copy","srcPath":"dir"}`, 400, "", "is a directory"},
+		{"no srcPath", `{"path":"copy.txt"}`, 400, "", "srcPath"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newArchiveFixture(t)
+			r := f.repo("alice", "weights", "model")
+			seedFile(t, f, r, "src.txt", []byte("payload\n"))
+			seedFile(t, f, r, "dir/inner.txt", []byte("inner\n"))
+			before := refTargetOf(t, f, r, gitrepo.BranchRef("main"))
+			tok := f.token(f.alice, "write")
+
+			resp := commitNDJSON(t, f, "/api/models/alice/weights/commit/main", tok,
+				`{"key":"header","value":{"summary":"bad copy"}}`,
+				`{"key":"file","value":{"path":"a.txt","content":"aGkK","encoding":"base64"}}`,
+				`{"key":"copyFile","value":`+tt.value+`}`)
+
+			if resp.status() != tt.status {
+				t.Fatalf("status = %d, body = %s; want %d", resp.status(), resp.rec.Body.String(), tt.status)
+			}
+			if got := resp.rec.Header().Get("X-Error-Code"); got != tt.errorCode {
+				t.Errorf("X-Error-Code = %q, want %q", got, tt.errorCode)
+			}
+			if !strings.Contains(resp.rec.Body.String(), tt.message) {
+				t.Errorf("body = %s, want it to mention %q", resp.rec.Body.String(), tt.message)
+			}
+			// The rest of the commit must not survive the refused line.
+			if got := refTargetOf(t, f, r, gitrepo.BranchRef("main")); got != before {
+				t.Errorf("head = %s, want it unmoved at %s", got, before)
+			}
+			if !fileMissing(t, f, r, "main", "a.txt") {
+				t.Error("the add alongside the refused copy was committed")
+			}
+		})
+	}
+}
+
+// -------------------------------------------------------------- parentCommit
+
+// create_commit(parent_commit=...) is an optimistic lock, and the one thing it
+// must never do is answer 200 for a branch that moved: the caller asked
+// precisely not to write on top of somebody else's push.
+func TestCommit_ParentCommitLetsAMatchingParentThrough(t *testing.T) {
+	for _, shorten := range []bool{false, true} {
+		name := "full hash"
+		if shorten {
+			name = "shorthand"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newArchiveFixture(t)
+			r := f.repo("alice", "weights", "model")
+			seedFile(t, f, r, "README.md", []byte("# hi\n"))
+			head := refTargetOf(t, f, r, gitrepo.BranchRef("main"))
+			parent := head
+			if shorten {
+				parent = head[:7]
+			}
+			tok := f.token(f.alice, "write")
+
+			resp := commitNDJSON(t, f, "/api/models/alice/weights/commit/main", tok,
+				fmt.Sprintf(`{"key":"header","value":{"summary":"on top of the head I saw","parentCommit":%q}}`, parent),
+				`{"key":"file","value":{"path":"a.txt","content":"aGkK","encoding":"base64"}}`)
+			if resp.status() != 200 {
+				t.Fatalf("status = %d, body = %s; want 200", resp.status(), resp.rec.Body.String())
+			}
+			if got := string(readFile(t, f, r, "main", "a.txt")); got != "hi\n" {
+				t.Errorf("a.txt = %q, want hi", got)
+			}
+		})
+	}
+}
+
+// 412 rather than the 409 the WAL uses for contention: a stale parent cannot
+// be fixed by sending the identical request again, so it must not read as the
+// retryable conflict.
+func TestCommit_ParentCommitRefusesABranchThatMoved(t *testing.T) {
+	f := newArchiveFixture(t)
+	r := f.repo("alice", "weights", "model")
+	seedFile(t, f, r, "README.md", []byte("# hi\n"))
+	stale := refTargetOf(t, f, r, gitrepo.BranchRef("main"))
+	// Somebody else pushes between the caller reading the head and committing.
+	seedFile(t, f, r, "other.txt", []byte("theirs\n"))
+	head := refTargetOf(t, f, r, gitrepo.BranchRef("main"))
+	tok := f.token(f.alice, "write")
+
+	resp := commitNDJSON(t, f, "/api/models/alice/weights/commit/main", tok,
+		fmt.Sprintf(`{"key":"header","value":{"summary":"blind write","parentCommit":%q}}`, stale),
+		`{"key":"file","value":{"path":"a.txt","content":"aGkK","encoding":"base64"}}`)
+
+	if resp.status() != 412 {
+		t.Fatalf("status = %d, body = %s; want 412", resp.status(), resp.rec.Body.String())
+	}
+	if got := errorType(t, resp); got != "stale_parent" {
+		t.Errorf("error type = %q, want stale_parent (distinct from the WAL's conflict)", got)
+	}
+	if !strings.Contains(resp.rec.Body.String(), head) {
+		t.Errorf("body = %s, want it to name the head the branch is actually at", resp.rec.Body.String())
+	}
+	if got := refTargetOf(t, f, r, gitrepo.BranchRef("main")); got != head {
+		t.Errorf("head = %s, want it unmoved at %s", got, head)
+	}
+	if !fileMissing(t, f, r, "main", "a.txt") {
+		t.Error("the commit landed despite the stale parentCommit")
+	}
+}
+
+// A branch that does not exist yet is not "any parent": committing to it with
+// a parentCommit means the caller believes it is there.
+func TestCommit_ParentCommitRefusesAnUnbornBranch(t *testing.T) {
+	f := newArchiveFixture(t)
+	r := f.repo("alice", "weights", "model")
+	seedFile(t, f, r, "README.md", []byte("# hi\n"))
+	head := refTargetOf(t, f, r, gitrepo.BranchRef("main"))
+	tok := f.token(f.alice, "write")
+
+	for _, parent := range []string{head, strings.Repeat("0", 40)} {
+		resp := commitNDJSON(t, f, "/api/models/alice/weights/commit/draft", tok,
+			fmt.Sprintf(`{"key":"header","value":{"summary":"new branch","parentCommit":%q}}`, parent),
+			`{"key":"file","value":{"path":"a.txt","content":"aGkK","encoding":"base64"}}`)
+		if resp.status() != 412 {
+			t.Fatalf("parentCommit %s: status = %d, body = %s; want 412",
+				parent, resp.status(), resp.rec.Body.String())
+		}
+		if got := refTargetOf(t, f, r, gitrepo.BranchRef("draft")); got != "" {
+			t.Errorf("refs/heads/draft = %s, want it never created", got)
+		}
+	}
+}
+
+// A parentCommit that is not a hash at all is the caller's typo, not a branch
+// that moved -- 400, and a different sentence.
+func TestCommit_ParentCommitMustLookLikeAHash(t *testing.T) {
+	f := newArchiveFixture(t)
+	r := f.repo("alice", "weights", "model")
+	seedFile(t, f, r, "README.md", []byte("# hi\n"))
+	tok := f.token(f.alice, "write")
+
+	for _, parent := range []string{"main", "abc", "not-a-hash-at-all", "ZZZZZZZ"} {
+		resp := commitNDJSON(t, f, "/api/models/alice/weights/commit/main", tok,
+			fmt.Sprintf(`{"key":"header","value":{"summary":"typo","parentCommit":%q}}`, parent),
+			`{"key":"file","value":{"path":"a.txt","content":"aGkK","encoding":"base64"}}`)
+		if resp.status() != 400 {
+			t.Fatalf("parentCommit %q: status = %d, body = %s; want 400",
+				parent, resp.status(), resp.rec.Body.String())
+		}
+		if !fileMissing(t, f, r, "main", "a.txt") {
+			t.Fatalf("parentCommit %q: the commit landed anyway", parent)
+		}
+	}
+}

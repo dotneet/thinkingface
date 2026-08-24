@@ -1109,3 +1109,35 @@ func TestHFCommits_OwnCursorIsAccepted(t *testing.T) {
 		t.Fatalf("second page is empty; the cursor did not resume the walk")
 	}
 }
+
+// ---------------------------------------------------------------- refs shape
+
+// list_repo_refs(include_pull_requests=True) subscripts `pullRequests` on this
+// response instead of using .get(), so the key missing was not "no pull
+// requests" but a KeyError -- a crash for asking a question whose honest
+// answer is an empty list. `converts` is here for the same reason and has been
+// all along.
+func TestHFRefs_AlwaysCarriesConvertsAndPullRequests(t *testing.T) {
+	f := newRefsFixture(t)
+	f.repo("alice", "foo", "model")
+
+	resp := f.do("GET", "/api/models/alice/foo/refs", "", nil)
+	if resp.status() != 200 {
+		t.Fatalf("status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+	var body map[string]json.RawMessage
+	resp.json(t, &body)
+	for _, key := range []string{"branches", "tags", "converts", "pullRequests"} {
+		raw, ok := body[key]
+		if !ok {
+			t.Errorf("%q is missing from the refs response", key)
+			continue
+		}
+		// Every one of them is a list, empty or not -- never null, which
+		// would fail the same subscript for the same reason.
+		var list []json.RawMessage
+		if err := json.Unmarshal(raw, &list); err != nil {
+			t.Errorf("%q = %s, want a JSON array", key, raw)
+		}
+	}
+}
