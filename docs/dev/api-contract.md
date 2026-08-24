@@ -151,9 +151,22 @@ experiment repository is a dataset, and it also appears in `GET /api/datasets`. 
 `GET /api/v1/namespaces/{ns}`, conversely, splits `num_datasets` and `num_experiments` (§1.2).
 
 ### Token management
-- `GET /api/v1/tokens` → `{"items": [{id, name, scope, created_at, last_used_at}]}`
-- `POST /api/v1/tokens` req `{"name","scope":"read"|"write"}` → `{id, name, scope, token}` (`token` is returned only at creation time, with a `tf_` prefix)
-- `DELETE /api/v1/tokens/{id}` → 204
+- `GET /api/v1/tokens` → `{"items": [{id, name, scope, created_at, last_used_at, expires_at}]}`.
+  Includes expired tokens (`expires_at` in the past) -- the list never filters on expiry, so the
+  owner can see why a token stopped working and still delete it.
+- `POST /api/v1/tokens` req `{"name","scope":"read"|"write","expires_in_days"?: number | null}` →
+  `{id, name, scope, expires_at, token}` (`token` is returned only at creation time, with a `tf_`
+  prefix)
+- `DELETE /api/v1/tokens/{id}` → 204. Works on an expired token the same as a live one.
+
+`expires_in_days` omitted, `null`, or `0` means the token never expires (`expires_at` is `null`).
+Otherwise it must be a positive integer up to **365**; anything negative or over that cap is 400
+`bad_request`. The expiry is resolved to an absolute UTC instant in Go at request time
+(`time.Now().UTC().AddDate(0, 0, days)`) rather than left to the database's own date arithmetic,
+so PostgreSQL and SQLite cannot disagree about it. `LookupToken` (used by every authenticated
+request) rejects a token once `expires_at` has passed, indistinguishably from a token that never
+existed -- an unauthenticated caller learns nothing about whether a given token string used to be
+valid.
 
 ### 1.1 Organizations
 

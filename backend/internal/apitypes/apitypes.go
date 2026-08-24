@@ -194,6 +194,8 @@ type TokenItem struct {
 	CreatedAt time.Time `json:"created_at"`
 	// LastUsedAt is null until the token authenticates a request.
 	LastUsedAt *time.Time `json:"last_used_at" tstype:"string | null,required"`
+	// ExpiresAt is null for a token that never expires.
+	ExpiresAt *time.Time `json:"expires_at" tstype:"string | null,required"`
 }
 
 // TokenListResponse is the body of GET /api/v1/tokens.
