@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
 
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
 	"github.com/dotneet/thinkingface/backend/internal/storage"
@@ -54,7 +55,23 @@ func (s *Server) handlePreupload(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "open git repository", err)
 		return
 	}
-	rules := s.loadLFSRules(gitRepo, chi.URLParam(r, "rev"), repo.Kind)
+	rev := chi.URLParam(r, "rev")
+	rules := s.loadLFSRules(gitRepo, rev, repo.Kind)
+
+	// What each path already holds at this revision, so the answer can carry
+	// an oid the client can diff against. Deliberately best-effort: preupload
+	// is the step *before* a write, and the revision it names is routinely one
+	// the following commit is about to create, so a revision that does not
+	// resolve is normal and means only that there is nothing to compare with.
+	// Answering 404 here would break creating a branch by committing to it.
+	paths := make([]string, 0, len(req.Files))
+	for _, f := range req.Files {
+		paths = append(paths, f.Path)
+	}
+	existing, _, err := gitRepo.StatMany(rev, paths)
+	if err != nil {
+		existing = nil
+	}
 
 	type result struct {
 		Path         string `json:"path"`
@@ -68,9 +85,58 @@ func (s *Server) handlePreupload(w http.ResponseWriter, r *http.Request) {
 		if rules.ShouldUseLFS(f.Path, f.Size) {
 			mode = "lfs"
 		}
-		out = append(out, result{Path: f.Path, UploadMode: mode, ShouldIgnore: false, OID: nil})
+		out = append(out, result{
+			Path:         f.Path,
+			UploadMode:   mode,
+			ShouldIgnore: false,
+			OID:          preuploadOID(existing[f.Path], mode),
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"files": out})
+}
+
+// preuploadOID is the oid huggingface_hub compares against the hash it computes
+// locally, and the reason it can skip re-uploading a file that has not changed
+// (_commit_api.py sets CommitOperationAdd._remote_oid from it; create_commit
+// drops any addition whose _remote_oid equals its _local_oid).
+//
+// Which hash that is follows from the uploadMode *we* just returned, not from
+// what the repository happens to hold: _local_oid is the git blob sha1 of the
+// content for "regular" and the sha256 of the content for "lfs". So the only
+// safe values are ones from the matching hash space -- the entry's own blob
+// sha1 for a regular file, the pointer's sha256 for an LFS file.
+//
+// Anything else must be nil. A value from the wrong hash space would not merely
+// fail to match; it would make the comparison meaningless, and a collision in
+// the wrong direction means a file that *did* change is quietly dropped from
+// the commit. nil only costs one re-upload of an unchanged file, so every case
+// that is not exactly right falls back to it: directories, missing paths, and
+// the two mismatched pairings (an LFS pointer answered as "regular" because the
+// new content is small, a regular file answered as "lfs" because it is not).
+func preuploadOID(e gitrepo.Entry, mode string) any {
+	if e.IsDir || e.Hash.IsZero() {
+		return nil
+	}
+	// A symlink's blob holds the target path, not the file's bytes, while the
+	// client hashes whatever the link resolves to. The two disagree in all but
+	// a contrived case -- and that case is exactly the one that would drop a
+	// real change from the commit, so it is not worth the one saved upload.
+	if e.Mode == filemode.Symlink {
+		return nil
+	}
+	switch mode {
+	case "regular":
+		if e.LFS != nil {
+			return nil
+		}
+		return e.Hash.String()
+	case "lfs":
+		if e.LFS == nil {
+			return nil
+		}
+		return e.LFS.OID
+	}
+	return nil
 }
 
 // looksLikeSHA reports whether rev is a full commit hash rather than a branch
