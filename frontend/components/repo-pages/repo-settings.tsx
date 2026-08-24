@@ -1,4 +1,5 @@
 import { Archive } from "lucide-react";
+import { DefaultBranchForm } from "@/components/repo/default-branch-form";
 import { RepoBreadcrumb } from "@/components/repo/repo-breadcrumb";
 import { RepoDangerZone } from "@/components/repo/repo-danger-zone";
 import { RepoNotFoundOrLogin } from "@/components/repo/repo-not-found";
@@ -75,6 +76,25 @@ export async function RepoSettings({
         />
       ) : (
         <>
+          <Card>
+            <CardHeader>
+              <CardTitle>{t("repo.settings.defaultBranch.title")}</CardTitle>
+            </CardHeader>
+            <p className="mt-1 text-sm text-fg-subtle">
+              {t("repo.settings.defaultBranch.description")}
+            </p>
+            <div className="mt-4">
+              <DefaultBranchForm
+                kind={kind}
+                ns={ns}
+                name={name}
+                branches={repo.branches}
+                defaultBranch={repo.default_branch}
+                archived={repo.archived}
+              />
+            </div>
+          </Card>
+
           <Card>
             <CardHeader>
               <CardTitle>{t("repo.settings.transfer.title")}</CardTitle>

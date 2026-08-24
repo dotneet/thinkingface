@@ -156,9 +156,22 @@ experiment repository is a dataset, and it also appears in `GET /api/datasets`. 
 `GET /api/v1/namespaces/{ns}`, conversely, splits `num_datasets` and `num_experiments` (§1.2).
 
 ### Token management
-- `GET /api/v1/tokens` → `{"items": [{id, name, scope, created_at, last_used_at}]}`
-- `POST /api/v1/tokens` req `{"name","scope":"read"|"write"}` → `{id, name, scope, token}` (`token` is returned only at creation time, with a `tf_` prefix)
-- `DELETE /api/v1/tokens/{id}` → 204
+- `GET /api/v1/tokens` → `{"items": [{id, name, scope, created_at, last_used_at, expires_at}]}`.
+  Includes expired tokens (`expires_at` in the past) -- the list never filters on expiry, so the
+  owner can see why a token stopped working and still delete it.
+- `POST /api/v1/tokens` req `{"name","scope":"read"|"write","expires_in_days"?: number | null}` →
+  `{id, name, scope, expires_at, token}` (`token` is returned only at creation time, with a `tf_`
+  prefix)
+- `DELETE /api/v1/tokens/{id}` → 204. Works on an expired token the same as a live one.
+
+`expires_in_days` omitted, `null`, or `0` means the token never expires (`expires_at` is `null`).
+Otherwise it must be a positive integer up to **365**; anything negative or over that cap is 400
+`bad_request`. The expiry is resolved to an absolute UTC instant in Go at request time
+(`time.Now().UTC().AddDate(0, 0, days)`) rather than left to the database's own date arithmetic,
+so PostgreSQL and SQLite cannot disagree about it. `LookupToken` (used by every authenticated
+request) rejects a token once `expires_at` has passed, indistinguishably from a token that never
+existed -- an unauthenticated caller learns nothing about whether a given token string used to be
+valid.
 
 ### 1.1 Organizations
 
@@ -525,6 +538,74 @@ jump to the top of "recently updated").
   `can_admin` stays true — the owner can unarchive.
 - Webhook: delivers `repo.archived` / `repo.unarchived`.
 
+### Changing the default branch
+```
+PATCH /api/v1/repos/{kind}/{ns}/{name}   req RepoUpdateRequest {default_branch?: string}
+      → 200 {"repo": RepoDetail}
+```
+A partial update over repository configuration; `default_branch` is the only field today, and the
+request must set it (400 `bad_request` otherwise). Fixes the common "pushed to `master`, meant
+`main`" mistake without a re-push; before this the column was only ever set by `CreateRepo`, so
+there was no way to correct it short of editing the database. `RepoUpdateRequest` is shaped for
+future fields: every field is a pointer and absent ones are left alone.
+
+- Permission: namespace admin (the owner of a personal namespace, or an org admin) and site admin
+  only — the same line drawn for archive/transfer/delete, not a plain write member. Unlike
+  archive/unarchive, this is **not** allowed while the repository is archived (403
+  `repository_archived`) — switching branches changes what clone/tree/card/lineage read, which is
+  a content-adjacent change, not the unarchive escape hatch.
+- 404 `not_found` if `default_branch` names a branch that does not exist in the repository
+  (checked against `refs/heads/{branch}`, not merely "some ref with this name" — a tag of the same
+  name does not count). Idempotent: setting it to its current value returns 200 and does nothing
+  else described below.
+- Effect:
+  - The bare repository's `HEAD` symref is repointed at `refs/heads/{branch}` (`gitrepo.Repo.SetHead`,
+    the same mechanism `--initial-branch=` sets at creation time) — this is what a plain `git clone`
+    of the repository checks out afterwards.
+  - `repositories.default_branch` is updated (`store.SetRepoDefaultBranch`), bumping `updated_at`
+    like an ordinary push does (unlike archiving, which leaves it alone).
+  - A sync job is enqueued for the new default branch with `old_sha == new_sha` (its current tip):
+    `head_sha` / the parsed README card / lineage / `is_experiment` are only refreshed by the sync
+    worker for `job.Ref == repositories.default_branch` (`internal/syncer/syncer.go`), so a branch
+    pushed to before it became the default — the case this endpoint exists for — still carries the
+    *previous* default branch's metadata until this runs; `repo_files` and the parquet index are
+    refreshed unconditionally by the same job, so re-running them when the branch was already
+    indexed is harmless. Because `old_sha == new_sha`, the resulting `repo.push` webhook (below)
+    reports `changed_files: 0` — a subscriber can tell this apart from an actual push to the same
+    ref. This also means the response's `head_sha` / `card` / `parquet_files` can be momentarily
+    stale until that job finishes (`RepoDetail.indexing` reports it, same as right after repository
+    creation).
+  - The reindex is queued **even when the branch is already the default**, where nothing else is
+    written. That is what makes retrying the request a repair: if an earlier attempt updated
+    `HEAD` and the row and then failed to queue the job (500), repeating it queues the job and
+    the metadata catches up.
+  - A failed enqueue is **not** rolled back. `HEAD` and the row already agree on the new branch
+    by that point, so the repository is consistent and only its index is stale. Undoing the
+    switch would mean writing to the store that just refused a write, and the outage that failed
+    the enqueue fails the undo too — leaving `HEAD` and the row naming different branches, which
+    is worse than a stale index. If the **row** write fails, `HEAD` is put back, since that is the
+    one pair that must never disagree: a clone follows `HEAD` while every listing reads the row.
+  - **Not atomic across the two stores.** `HEAD` (a file) and `default_branch` (a row) are
+    separate writes with no lock spanning them, so two concurrent `PATCH`es naming *different*
+    branches can interleave and leave the two disagreeing. It is bounded and self-healing — any
+    later `PATCH` (including a same-value one) puts them back in step — and it is not worth a
+    cross-store lock: under `TF_WAL_MODE=authoritative` the bare repository is per-instance local
+    state materialised from the WAL, so "the" `HEAD` is not a single shared object to begin with,
+    which is the same reason `alignHEAD` below cannot resolve it either.
+  - Webhook: no dedicated event was added for this. `repo.push` fires once the reindex above
+    completes (payload as documented in §9), which is enough signal for a mirroring consumer that
+    the default branch's effective content may have changed; a purpose-built event would carry
+    marginal value over that plus the response's own `default_branch`.
+  - Not touched: `wal.materialize.alignHEAD`'s cache-rebuild heuristic (`internal/wal/materialize.go`)
+    still does not know about `repositories.default_branch` — it keeps `HEAD` if its current target
+    still exists in the index, else prefers `refs/heads/main`, else the alphabetically first branch.
+    That is a pre-existing limitation (its own `TODO(continuity-design)`), not something this
+    endpoint changes, but it is more likely to be visibly wrong now that a repository's default
+    branch can deliberately be something other than `main`: a WAL cache rebuild of such a
+    repository can reset its bare-repo `HEAD` to the heuristic's answer rather than the configured
+    default until the next push realigns it. Fixing this needs the symref recorded in the WAL index
+    itself (a format change), which is out of scope here.
+
 ### `POST /api/repos/move`  (HF-compatible: `HfApi.move_repo`)
 req: `{"fromRepo":"alice/foo","toRepo":"team/foo","type":"model"|"dataset"}`
 - 200 `{"url":"http://localhost:8080/team/foo"}`: completes immediately (the actor has write on
@@ -608,6 +689,96 @@ req: `{"paths": ["a.txt", "data/"], "expand": false}` → res 200: `hfTreeEntry[
 
 ### `GET /api/{datasets|models}/{ns}/{name}/refs`  (HF-compatible)
 res: `{"branches":[{"name":"main","ref":"refs/heads/main","targetCommit":"<sha>"}],"tags":[],"converts":[]}`
+
+### Branch and tag writes  (HF-compatible)
+
+The four routes `huggingface_hub`'s `create_branch` / `delete_branch` / `create_tag` /
+`delete_tag` call. The URL shapes — including the asymmetry in the tag routes — come from the
+client and are not ours to tidy: `{rev}` is **the revision being tagged** on `POST /tag/{rev}`
+and **the tag name** on `DELETE /tag/{rev}`.
+
+Names arrive percent-encoded (`quote(name, safe="")`), so `feature/x` is `feature%2Fx` in the
+path; chi routes on the escaped path, so the handlers unescape the parameter themselves.
+
+| Route | Body | Success |
+|---|---|---|
+| `POST /api/{datasets\|models}/{ns}/{name}/branch/{branch}` | `{"startingPoint": "<rev>"}` (optional; defaults to the repository's default branch) | 201 |
+| `DELETE /api/{datasets\|models}/{ns}/{name}/branch/{branch}` | — | 200 |
+| `POST /api/{datasets\|models}/{ns}/{name}/tag/{rev}` | `{"tag": "<name>", "message": "<annotation>"}` (`message` optional) | 201 |
+| `DELETE /api/{datasets\|models}/{ns}/{name}/tag/{rev}` | — | 200 |
+
+The success body is `{"name","ref","targetCommit"}`. `huggingface_hub` ignores it (these calls
+return `None`); it is there for callers driving the API by hand.
+
+Errors — **the status codes are a compatibility contract, not a style choice**:
+
+- **409** for a ref that already exists. This is the only status `create_branch(exist_ok=True)`
+  and `create_tag(exist_ok=True)` swallow; anything else turns a tolerated duplicate into a
+  raised exception.
+- **409** for `DELETE .../branch/{default branch}`. The default branch is what HEAD, the
+  metadata index and every revision-less read depend on. `huggingface_hub` documents this case
+  ("`main` cannot be deleted") and raises `HfHubHTTPError` for it.
+- **409** when a concurrent writer wins the WAL CAS on the same ref (`TF_WAL_MODE=authoritative`
+  only). Unlike a commit there is nothing to rebuild, so it is never retried server-side.
+- **404 + `X-Error-Code: RevisionNotFound`** for a `startingPoint` / `{rev}` that does not
+  resolve, and for deleting a ref that is not there. The header is what makes `huggingface_hub`
+  raise `RevisionNotFoundError` instead of a bare `HfHubHTTPError`.
+- **400** for a name that is not a valid git reference — `..`, control characters, whitespace,
+  `~^:?*[`, `\`, `@{`, a leading or trailing `/`, a component starting with `.`, a `.lock` or
+  `.` suffix, `HEAD`, or more than 255 bytes.
+- Authorization is `loadRepoForWrite`, exactly as for a commit: a write-scoped token held by
+  someone with at least `write` in the namespace, and **403 `repository_archived`** on an
+  archived repository.
+
+`message` on a tag produces a real annotated tag object (what `git tag -m` makes), so
+`refs` reports the *tag object* as `targetCommit` for it while every revision lookup peels it to
+the tagged commit. Without a message the tag is lightweight.
+
+Server-side effects:
+
+- **Creating a branch enqueues a sync job for it** (`repo_files` is keyed by
+  `(repo_id, ref, path)`, so a branch with no job would have no file index and its GCS access
+  script would be empty). The job fires the existing `repo.push` webhook — there is no new
+  webhook event for branch or tag writes.
+- **Creating a tag enqueues nothing**, matching `git push v1.0`: the indexing worker is driven
+  by branch tips (`HeadsAfterPush` lists branches only).
+- **Deleting a ref enqueues nothing and leaves its `repo_files` rows behind**, matching
+  `git push --delete`. The rows are unreachable once the revision stops resolving, and go with
+  the repository.
+- In `TF_WAL_MODE=shadow` / `authoritative` the ref update goes through the WAL exactly as a push
+  does (`docs/dev/continuity-design.md` §6): authoritative mode acknowledges only after the CAS
+  is won, and rolls the on-disk ref back otherwise. A ref written to disk alone would be deleted
+  by the next materialisation.
+
+### `GET /api/{datasets|models}/{ns}/{name}/commits/{rev}`  (HF-compatible)
+
+`huggingface_hub.HfApi.list_repo_commits()`. Read authorization, the same as every other
+HF-compatible GET on a repository.
+
+query: `limit` (default 50, max 100), `after` (a full commit hash cursor), `path` (restrict to
+commits that changed that file or directory)
+
+res 200 (an array, newest first):
+```json
+[ {"id": "<sha>",
+   "authors": [{"user": "alice"}],
+   "date": "2026-08-21T00:00:00.000Z",
+   "title": "Add notes",
+   "message": "A longer explanation of the change."} ]
+```
+
+- `authors` elements are **objects**: the client reads `author["user"]` from each one.
+- `title` is the commit's subject line, `message` everything after it (`""` for a one-line
+  message). `huggingface_hub` indexes both keys directly, so neither may be omitted.
+- `date` must end in a literal `Z`. The client parses it with `%Y-%m-%dT%H:%M:%S.%fZ`, so a
+  numeric `+00:00` offset raises `ValueError` there.
+- Paging follows GitHub's `Link` header convention, which is what the client's `paginate()`
+  helper understands: a further page is advertised as
+  `Link: <{PublicURL}/api/…/commits/{rev}?…&after={sha}>; rel="next"`, absolute because the
+  client follows the URL verbatim. The last page carries no `Link` header.
+- A revision that does not resolve is 404 + `X-Error-Code: RevisionNotFound`. (The UI's own
+  `GET /api/v1/repos/{kind}/{ns}/{name}/commits/{rev}` is unchanged and keeps its own
+  `{commits, next_cursor}` shape.)
 
 ### `GET /api/v1/repos/{kind}/{ns}/{name}/tree/{rev}/{path...}`  (for the UI)
 res:

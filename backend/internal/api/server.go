@@ -167,6 +167,15 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/", s.handleHFRepoInfo)
 		r.Get("/revision/{rev}", s.handleHFRepoInfo)
 		r.Get("/refs", s.handleHFRefs)
+		// HfApi.create_branch / delete_branch / create_tag / delete_tag /
+		// list_repo_commits (refs.go). The tag routes look inconsistent
+		// because huggingface_hub is: {rev} is the revision being tagged on
+		// POST and the tag name on DELETE.
+		r.Post("/branch/{branch}", s.handleHFCreateBranch)
+		r.Delete("/branch/{branch}", s.handleHFDeleteBranch)
+		r.Post("/tag/{rev}", s.handleHFCreateTag)
+		r.Delete("/tag/{rev}", s.handleHFDeleteTag)
+		r.Get("/commits/{rev}", s.handleHFCommits)
 		r.Get("/tree/{rev}/*", s.handleHFTree)
 		r.Get("/tree/{rev}", s.handleHFTree)
 		r.Post("/paths-info/{rev}", s.handleHFPathsInfo)
@@ -204,6 +213,7 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/repos", s.handleListRepos)
 		r.Post("/repos", s.handleCreateRepo)
 		r.Get("/repos/{kind}/{ns}/{name}", s.handleRepoDetail)
+		r.Patch("/repos/{kind}/{ns}/{name}", s.handleUpdateRepo)
 		r.Delete("/repos/{kind}/{ns}/{name}", s.handleDeleteRepo)
 		r.Get("/repos/{kind}/{ns}/{name}/tree/{rev}/*", s.handleUITree)
 		r.Get("/repos/{kind}/{ns}/{name}/tree/{rev}", s.handleUITree)

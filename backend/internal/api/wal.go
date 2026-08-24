@@ -116,6 +116,102 @@ func (s *Server) commitThroughWAL(ctx context.Context, repo *store.Repo, req git
 	return newHash, oldHash, errWALConflict
 }
 
+// createRefThroughWAL creates refName pointing at target, obeying the same
+// acknowledgement rule commitThroughWAL does. It is the branch/tag API's only
+// write path: a ref created straight on disk would be invisible to the WAL,
+// and in authoritative mode the next materialisation -- a new Cloud Run
+// instance, a cache rebuild -- would simply delete it again, because the index
+// is what refs are reconstructed from (§9).
+//
+// An existing ref is gitrepo.ErrRefExists and never a force: the caller maps
+// that to the 409 huggingface_hub's `exist_ok=True` swallows.
+func (s *Server) createRefThroughWAL(ctx context.Context, repo *store.Repo, refName string, target plumbing.Hash) error {
+	gitRepo, err := s.git.Open(repo.StoragePath)
+	if err != nil {
+		return err
+	}
+	if err := gitRepo.CreateRef(refName, target); err != nil {
+		return err
+	}
+	update := wal.RefUpdate{Ref: refName, Old: "", New: target.String()}
+	return s.recordRefUpdate(ctx, repo, update, func() error {
+		_, derr := gitRepo.DeleteRef(refName)
+		return derr
+	})
+}
+
+// deleteRefThroughWAL removes refName and records the removal, returning the
+// object it pointed at. A missing ref is gitrepo.ErrRefNotFound.
+func (s *Server) deleteRefThroughWAL(ctx context.Context, repo *store.Repo, refName string) (plumbing.Hash, error) {
+	gitRepo, err := s.git.Open(repo.StoragePath)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+	old, err := gitRepo.DeleteRef(refName)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+	update := wal.RefUpdate{Ref: refName, Old: old.String(), New: ""}
+	if err := s.recordRefUpdate(ctx, repo, update, func() error {
+		return gitRepo.CreateRef(refName, old)
+	}); err != nil {
+		return plumbing.ZeroHash, err
+	}
+	return old, nil
+}
+
+// recordRefUpdate mirrors commitThroughWAL's mode handling for an update that
+// carries no new commit. The differences from a commit are both deliberate:
+//
+//   - there is no retry-on-stale loop. A commit that loses the CAS can be
+//     rebuilt on the fresh head and still mean what the client asked for; a
+//     ref creation cannot -- losing the CAS means somebody else already
+//     created (or moved, or deleted) that exact ref, which is a conflict the
+//     client has to see, not paper over.
+//   - the entry pack is usually empty, because the target commit is normally
+//     already in the WAL. wal.packAndUpload notices that and skips the upload,
+//     so a branch pointing at existing history costs one index CAS and no
+//     object bytes at all.
+//
+// rollback undoes the local ref change on any failure, for the reason
+// commitThroughWAL rolls back a commit: a ref the WAL never accepted must not
+// be served to readers, and the index generation did not change, so no
+// materialisation would ever repair it.
+func (s *Server) recordRefUpdate(ctx context.Context, repo *store.Repo, update wal.RefUpdate, rollback func() error) error {
+	dir := s.git.Dir(repo.StoragePath)
+	updates := []wal.RefUpdate{update}
+
+	switch s.cfg.WALMode {
+	case "off":
+		return nil
+	case "shadow":
+		// Disk is authoritative: a WAL failure is logged, never surfaced.
+		if werr := wal.ShadowPush(ctx, s.storage, dir, repo.StoragePath, updates); werr != nil {
+			slog.Warn("wal shadow write failed for api ref update",
+				"repo", repo.FullName(), "ref", update.Ref, "error", werr)
+		}
+		return nil
+	default: // authoritative
+		werr := wal.AuthoritativePush(ctx, s.storage, dir, repo.StoragePath, updates)
+		if werr == nil {
+			if aerr := s.git.AdoptLocal(ctx, repo.StoragePath); aerr != nil {
+				slog.Warn("wal adopt after api ref update", "repo", repo.FullName(), "error", aerr)
+			}
+			return nil
+		}
+		if rerr := rollback(); rerr != nil {
+			slog.Error("roll back local ref after failed WAL write",
+				"repo", repo.FullName(), "ref", update.Ref, "error", rerr)
+		}
+		switch {
+		case errors.Is(werr, wal.ErrStaleRef), errors.Is(werr, wal.ErrRetryExhausted):
+			return errWALConflict
+		default:
+			return fmt.Errorf("record ref update in WAL: %w", werr)
+		}
+	}
+}
+
 // ensureRepoLocal materialises the on-disk copy before a git smart-HTTP
 // operation touches it. A no-op unless the WAL is authoritative.
 func (s *Server) ensureRepoLocal(ctx context.Context, repo *store.Repo) error {

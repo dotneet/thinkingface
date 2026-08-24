@@ -172,6 +172,25 @@ git tag v1.0
 git push origin v1.0
 ```
 
+`huggingface_hub` can do the same without a clone, and those calls work against thinkingface
+too:
+
+```python
+from huggingface_hub import HfApi
+
+api = HfApi()
+api.create_branch("admin/my-model", branch="experiment")
+api.create_tag("admin/my-model", tag="v1.0", tag_message="first release")
+api.delete_branch("admin/my-model", branch="experiment")
+api.delete_tag("admin/my-model", tag="v1.0")
+```
+
+`create_branch(..., revision=...)` starts the branch from any revision, and
+`create_tag(..., revision=...)` tags one. `exist_ok=True` makes a repeat call a no-op. The
+repository's **default branch cannot be deleted** — HEAD, the repository card and every
+revision-less read depend on it. Creating a branch or a tag needs the same write access a push
+does, and is refused on an archived repository.
+
 Anywhere the API or the UI asks for a revision — `hf_hub_download(revision=...)`, a `resolve`
 URL, the file browser's revision selector — you can name a branch, a tag or a commit SHA.
 Annotated tags are resolved to the commit they point at.
@@ -182,10 +201,26 @@ Two behaviours to keep in mind:
   storage and refreshes the file index for that branch. What only the default branch updates
   is the repository's own metadata: the card parsed from `README.md`, the license and tags,
   the size shown in listings, and the lineage graph.
-- **Pushing only a tag schedules no indexing.** The indexing worker is triggered by branch
-  tips moving. A tag pointing at a commit that is already on a branch is fine — the files are
-  indexed already — but a revision that exists nowhere else may not appear in the file index
-  that the bucket-access script is generated from.
+- **Creating only a tag schedules no indexing.** The indexing worker is triggered by branch
+  tips moving, whether they move by `git push` or through `create_branch()`. A tag pointing at
+  a commit that is already on a branch is fine — the files are indexed already — but a revision
+  that exists nowhere else may not appear in the file index that the bucket-access script is
+  generated from.
+
+### Changing the default branch
+
+Pushed to `master` when you meant `main`? You don't need to re-push anything to fix it. Open
+the repository's **Settings** tab (shown when you can administer the repository) and pick the
+right branch under **Default branch**, then save. The branch you choose must already exist —
+push it first if it doesn't yet.
+
+This repoints what a plain `git clone` of the repository checks out, and switches which branch
+the file list, the README card (tags, license, description), and the lineage graph read from —
+the same "default branch only" metadata called out above. If the branch was pushed before it
+became the default, that metadata may take a moment to catch up; the repository page shows an
+indexing indicator while it does. Changing the default branch requires namespace-admin access
+(the same level as archiving or transferring the repository) and is refused while the
+repository is archived — unarchive it first.
 
 ## What a push triggers on the server
 

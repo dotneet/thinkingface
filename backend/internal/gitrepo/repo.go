@@ -211,3 +211,19 @@ func (r *Repo) RefTarget(refName string) (plumbing.Hash, error) {
 	}
 	return ref.Hash(), nil
 }
+
+// SetHead repoints the bare repository's HEAD symref at branch, which is
+// what a `git clone` of this repository checks out by default. It is the
+// on-disk half of changing the repository's default branch; the caller is
+// expected to have already confirmed branch exists (RefTarget) and to update
+// store.Repo.DefaultBranch in the same request. Through gitexec, like every
+// other git invocation in this package -- never exec.Command directly.
+func (r *Repo) SetHead(ctx context.Context, branch string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	name := plumbing.NewBranchReferenceName(branch)
+	if err := name.Validate(); err != nil {
+		return fmt.Errorf("set head: invalid branch name %q", branch)
+	}
+	return gitexec.SetHead(ctx, r.dir, branch)
+}
