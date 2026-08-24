@@ -150,8 +150,10 @@ func (s *Store) CreateRepo(ctx context.Context, nsID int64, name, kind, descript
 	if err := tx.QueryRow(ctx, `SELECT name FROM namespaces WHERE id = $1`, nsID).Scan(&nsName); err != nil {
 		return nil, norm(err)
 	}
+	// Folded on the namespace, exactly as ResolveRepoRedirect matches: a
+	// redirect this create cannot see is a redirect it cannot clear.
 	if _, err := tx.Exec(ctx,
-		`DELETE FROM repo_redirects WHERE kind = $1 AND from_namespace = $2 AND from_name = $3`,
+		`DELETE FROM repo_redirects WHERE kind = $1 AND LOWER(from_namespace) = LOWER($2) AND from_name = $3`,
 		kind, nsName, name); err != nil {
 		return nil, err
 	}
@@ -473,6 +475,37 @@ type RepoFacets struct {
 
 const facetLimit = 40
 
+// The listing page size, as docs/dev/api-contract.md documents it
+// ("limit (default 30, max 100)").
+const (
+	defaultRepoPageSize = 30
+	maxRepoPageSize     = 100
+)
+
+// repoOrderBy renders the ORDER BY for a listing sort. Every sort ends in
+// r.id so that the ordering is *total*. Without a unique last key, LIMIT /
+// OFFSET may cut anywhere inside a run of tied rows, and neither engine
+// promises to order that run the same way twice: a repository would then show
+// up on two consecutive pages, or on none at all. Ties are the norm here, not
+// an edge case -- total_size is 0 until a push is indexed, a bulk import
+// shares one updated_at (SQLite keeps milliseconds), and (n.name, r.name) is
+// unique only per kind, so a model and a dataset of one name tie in a listing
+// that does not filter by kind.
+func repoOrderBy(sort string) string {
+	switch sort {
+	case "created":
+		return "r.created_at DESC, r.id DESC"
+	case "downloads":
+		return "r.downloads DESC, r.updated_at DESC, r.id DESC"
+	case "name":
+		return "n.name ASC, r.name ASC, r.id ASC"
+	case "size":
+		return "r.total_size DESC, r.id DESC"
+	default:
+		return "r.updated_at DESC, r.id DESC"
+	}
+}
+
 // RepoRef is the minimal identity of one repository, for operational commands
 // that walk every repository (wal-seed / wal-verify / compact) without paying
 // for the full row or the list-endpoint's visibility filtering.
@@ -515,27 +548,8 @@ func (s *Store) ListRepos(ctx context.Context, f RepoFilter) ([]Repo, int64, Rep
 		return nil, 0, RepoFacets{}, fmt.Errorf("count repositories: %w", err)
 	}
 
-	order := "r.updated_at DESC"
-	switch f.Sort {
-	case "created":
-		order = "r.created_at DESC"
-	case "downloads":
-		order = "r.downloads DESC, r.updated_at DESC"
-	case "name":
-		order = "n.name ASC, r.name ASC"
-	case "size":
-		order = "r.total_size DESC"
-	}
-	limit := f.Limit
-	if limit <= 0 || limit > 100 {
-		limit = 30
-	}
-	// Postgres rejects a negative OFFSET outright, so a hand-edited query
-	// string would turn into a 500 rather than a first page.
-	offset := f.Offset
-	if offset < 0 {
-		offset = 0
-	}
+	order := repoOrderBy(f.Sort)
+	limit, offset := pageWindow(f.Limit, f.Offset, defaultRepoPageSize, maxRepoPageSize)
 
 	listArgs := append(append([]any{}, args...), limit, offset)
 	rows, err := s.db.Query(ctx,
@@ -586,13 +600,16 @@ func (s *Store) repoFacets(ctx context.Context, f RepoFilter) (RepoFacets, error
 	return facets, nil
 }
 
+// tagFacet counts repositories, not tag occurrences: the join over the card's
+// `tags` array fans one repository out into one row per element, so a card
+// that repeats a tag would otherwise be counted twice for it.
 func (s *Store) tagFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem, error) {
 	clause, args := buildRepoWhere(s.d, f, repoFilterScope{license: true, task: true})
 	from, elem := s.d.jsonArrayElements("r.card", "tags")
-	query := `SELECT ` + elem + `, count(*) FROM repositories r
+	query := `SELECT ` + elem + ` AS value, count(DISTINCT r.id) AS repos FROM repositories r
 		JOIN namespaces n ON n.id = r.namespace_id
 		` + from + clause + `
-		GROUP BY ` + elem + ` ORDER BY count(*) DESC, ` + elem + ` ASC LIMIT ` + strconv.Itoa(facetLimit)
+		GROUP BY value ORDER BY repos DESC, value ASC LIMIT ` + strconv.Itoa(facetLimit)
 	return s.queryFacet(ctx, query, args)
 }
 
@@ -610,18 +627,24 @@ func (s *Store) licenseFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem
 // (and therefore the same bound args) is used in both halves of the UNION,
 // which both engines allow since a placeholder like $1 may appear more than
 // once.
+//
+// The halves overlap -- a card may declare the same task in both keys, and a
+// task_categories list may repeat one -- so the repository id is carried
+// through and counted distinctly. UNION ALL only removes the cost of
+// deduplicating whole rows; it is count(DISTINCT id) that makes the number
+// "repositories with this task" rather than "mentions of this task".
 func (s *Store) taskFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem, error) {
 	clause, args := buildRepoWhere(s.d, f, repoFilterScope{tags: true, license: true})
 	pipelineClause := andClause(clause, `r.card->>'pipeline_tag' IS NOT NULL AND r.card->>'pipeline_tag' <> ''`)
 	from, elem := s.d.jsonArrayElements("r.card", "task_categories")
-	query := `SELECT value, count(*) FROM (
-			SELECT r.card->>'pipeline_tag' AS value FROM repositories r
+	query := `SELECT value, count(DISTINCT repo_id) AS repos FROM (
+			SELECT r.id AS repo_id, r.card->>'pipeline_tag' AS value FROM repositories r
 			JOIN namespaces n ON n.id = r.namespace_id` + pipelineClause + `
 			UNION ALL
-			SELECT ` + elem + ` AS value FROM repositories r
+			SELECT r.id AS repo_id, ` + elem + ` AS value FROM repositories r
 			JOIN namespaces n ON n.id = r.namespace_id
 			` + from + clause + `
-		) t GROUP BY value ORDER BY count(*) DESC, value ASC LIMIT ` + strconv.Itoa(facetLimit)
+		) t GROUP BY value ORDER BY repos DESC, value ASC LIMIT ` + strconv.Itoa(facetLimit)
 	return s.queryFacet(ctx, query, args)
 }
 
@@ -631,9 +654,20 @@ func (s *Store) taskFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem, e
 // not three.
 func (s *Store) relationFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem, error) {
 	clause, args := buildRepoWhere(s.d, f, repoFilterScope{tags: true, license: true, task: true})
+	bind := binder(&args)
+	// With a base model selected, only the edges pointing at *it* may be
+	// counted. baseModelClause constrains BaseModel and Relation to the same
+	// edge, and the EXISTS it renders binds its own `l`, so an unrestricted
+	// join here would count a repository's other base models too: clicking
+	// "finetune (1)" would then return nothing, because the one repository in
+	// that bucket is a finetune of something else entirely.
+	edge := `JOIN repo_lineage l ON l.repo_id = r.id AND l.edge_kind = '` + LineageKindBaseModel + `'`
+	if ns, name, ok := splitRepoRef(f.BaseModel); ok {
+		edge += ` AND LOWER(l.target_namespace) = LOWER(` + bind(ns) + `) AND l.target_name = ` + bind(name)
+	}
 	query := `SELECT ` + relationExpr + ` AS value, count(DISTINCT r.id) AS repos FROM repositories r
 		JOIN namespaces n ON n.id = r.namespace_id
-		JOIN repo_lineage l ON l.repo_id = r.id AND l.edge_kind = '` + LineageKindBaseModel + `'` + clause + `
+		` + edge + clause + `
 		GROUP BY value ORDER BY repos DESC, value ASC LIMIT ` + strconv.Itoa(facetLimit)
 	return s.queryFacet(ctx, query, args)
 }

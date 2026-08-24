@@ -100,7 +100,7 @@ func (s *Store) CountUsers(ctx context.Context) (int64, error) {
 // The password hash is deliberately not selected. Nothing above this layer
 // needs it for a listing, and a column that is never read cannot leak.
 func (s *Store) ListUsers(ctx context.Context, search string, limit, offset int) ([]User, int64, error) {
-	limit, offset = pageWindow(limit, offset)
+	limit, offset = pageWindow(limit, offset, defaultUserPageSize, maxUserPageSize)
 
 	// ILIKE is rewritten to LIKE for SQLite (dialect.go), whose LIKE is
 	// already case-insensitive for ASCII -- the same compromise the
@@ -146,16 +146,30 @@ func (s *Store) ListUsers(ctx context.Context, search string, limit, offset int)
 	return out, total, rows.Err()
 }
 
-// pageWindow clamps an offset-based page request. A limit outside the range
-// falls back to the default rather than erroring, matching ListOrgs.
-func pageWindow(limit, offset int) (int, int) {
-	if limit <= 0 || limit > maxUserPageSize {
-		limit = defaultUserPageSize
+// pageLimit resolves a requested page size. Nothing (or nonsense) asked for
+// means the endpoint's default; more than the maximum is served *at* the
+// maximum. It is deliberately a clamp and not a fallback: "max 100" reads as
+// a ceiling, so answering ?limit=200 with 30 rows -- fewer than a caller who
+// asked for nothing would get -- is the opposite of what was requested.
+func pageLimit(limit, defaultSize, maxSize int) int {
+	switch {
+	case limit <= 0:
+		return defaultSize
+	case limit > maxSize:
+		return maxSize
+	default:
+		return limit
 	}
+}
+
+// pageWindow is pageLimit plus the offset half. A negative offset is the
+// first page: Postgres rejects a negative OFFSET outright, so a hand-edited
+// query string would otherwise be a 500 rather than a first page.
+func pageWindow(limit, offset, defaultSize, maxSize int) (int, int) {
 	if offset < 0 {
 		offset = 0
 	}
-	return limit, offset
+	return pageLimit(limit, defaultSize, maxSize), offset
 }
 
 const (

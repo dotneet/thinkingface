@@ -119,6 +119,11 @@ const orgRepoCount = `(SELECT count(*) FROM repositories r WHERE r.namespace_id 
 
 const orgMemberCount = `(SELECT count(*) FROM org_members m WHERE m.namespace_id = n.id)`
 
+const (
+	defaultOrgPageSize = 50
+	maxOrgPageSize     = 200
+)
+
 // binder hands out $N placeholders while collecting the values they bind.
 func binder(args *[]any) func(any) string {
 	return func(v any) string {
@@ -298,12 +303,7 @@ func (s *Store) ListOrgsForUser(ctx context.Context, userID int64) ([]OrgSummary
 // the viewer's own membership where they have one, so a directory page can
 // badge the organisations they belong to without a query per row.
 func (s *Store) ListOrgs(ctx context.Context, search string, viewerID *int64, limit, offset int) ([]OrgSummary, int64, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
-	if offset < 0 {
-		offset = 0
-	}
+	limit, offset = pageWindow(limit, offset, defaultOrgPageSize, maxOrgPageSize)
 
 	where := `WHERE n.kind = 'org'`
 	var countArgs []any
@@ -543,9 +543,7 @@ func (s *Store) AppendOrgAudit(ctx context.Context, id int64, e AuditEntry) erro
 // ListOrgAudit returns one page of the log, newest first. beforeID > 0
 // continues after a previous page's last id.
 func (s *Store) ListOrgAudit(ctx context.Context, id int64, beforeID int64, limit int) ([]AuditEntry, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
+	limit = pageLimit(limit, defaultOrgPageSize, maxOrgPageSize)
 	args := []any{id}
 	bind := binder(&args)
 	where := `WHERE namespace_id = $1`

@@ -145,6 +145,7 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
+	e := &envReader{}
 	c := &Config{
 		Addr:          env("TF_ADDR", ":8080"),
 		PublicURL:     strings.TrimSuffix(env("TF_PUBLIC_URL", "http://localhost:8080"), "/"),
@@ -156,36 +157,43 @@ func Load() (*Config, error) {
 		EmulatorHost:  env("STORAGE_EMULATOR_HOST", ""),
 		WALMode:       env("TF_WAL_MODE", "off"),
 		GitHooksPath:  env("TF_GIT_HOOKS_PATH", ""),
-		GitCacheBytes: envInt64("TF_GIT_CACHE_BYTES", 2<<30),
+		GitCacheBytes: e.int64("TF_GIT_CACHE_BYTES", 2<<30),
 
-		ViewerMetadataCacheBytes: envInt64("TF_VIEWER_METADATA_CACHE_BYTES", 256<<20),
-		SignedURLTTL:             envDuration("TF_SIGNED_URL_TTL", time.Hour),
-		SignedURLMaxTTL:          envDuration("TF_SIGNED_URL_MAX_TTL", 12*time.Hour),
+		ViewerMetadataCacheBytes: e.int64("TF_VIEWER_METADATA_CACHE_BYTES", 256<<20),
+		SignedURLTTL:             e.duration("TF_SIGNED_URL_TTL", time.Hour),
+		SignedURLMaxTTL:          e.duration("TF_SIGNED_URL_MAX_TTL", 12*time.Hour),
 		AdminUsername:            env("TF_ADMIN_USERNAME", "admin"),
 		AdminPassword:            env("TF_ADMIN_PASSWORD", DefaultAdminPassword),
 		AdminEmail:               env("TF_ADMIN_EMAIL", "admin@example.com"),
 		OrgCreation:              env("TF_ORG_CREATION", "anyone"),
 		SessionSecret:            env("TF_SESSION_SECRET", DefaultSessionSecret),
-		SessionTTL:               envDuration("TF_SESSION_TTL", 7*24*time.Hour),
+		SessionTTL:               e.duration("TF_SESSION_TTL", 7*24*time.Hour),
 		ViewerCacheDir:           env("TF_VIEWER_CACHE_DIR", "/data/cache"),
-		SyncWorkers:              envInt("TF_SYNC_WORKERS", 2),
-		AllowSignup:              envBool("TF_ALLOW_SIGNUP", true),
-		ExpFlushInterval:         envDuration("TF_EXP_FLUSH_INTERVAL", time.Minute),
+		SyncWorkers:              e.int("TF_SYNC_WORKERS", 2),
+		AllowSignup:              e.bool("TF_ALLOW_SIGNUP", true),
+		ExpFlushInterval:         e.duration("TF_EXP_FLUSH_INTERVAL", time.Minute),
 
-		SSHEnabled:     envBool("TF_SSH_ENABLED", false),
+		SSHEnabled:     e.bool("TF_SSH_ENABLED", false),
 		SSHAddr:        env("TF_SSH_ADDR", ":2222"),
 		SSHHostKeyPath: env("TF_SSH_HOST_KEY_PATH", "/data/ssh/host_ed25519"),
-		SSHIdleTimeout: envDuration("TF_SSH_IDLE_TIMEOUT", 10*time.Minute),
+		SSHIdleTimeout: e.duration("TF_SSH_IDLE_TIMEOUT", 10*time.Minute),
 
-		WebhookWorkers:             envInt("TF_WEBHOOK_WORKERS", 1),
-		AllowPrivateWebhookTargets: envBool("TF_WEBHOOKS_ALLOW_PRIVATE_TARGETS", false),
+		WebhookWorkers:             e.int("TF_WEBHOOK_WORKERS", 1),
+		AllowPrivateWebhookTargets: e.bool("TF_WEBHOOKS_ALLOW_PRIVATE_TARGETS", false),
 
-		CookieSecure:           envBoolPtr("TF_COOKIE_SECURE"),
-		AuthRateLimitPerMinute: envInt("TF_AUTH_RATE_LIMIT_PER_MIN", 10),
-		TrustProxyIPs:          envBool("TF_TRUST_PROXY_IPS", false),
+		CookieSecure:           e.boolPtr("TF_COOKIE_SECURE"),
+		AuthRateLimitPerMinute: e.int("TF_AUTH_RATE_LIMIT_PER_MIN", 10),
+		TrustProxyIPs:          e.bool("TF_TRUST_PROXY_IPS", false),
 	}
 	c.AllowedOrigins = parseOrigins(env("TF_ALLOWED_ORIGINS", ""), c.PublicURL)
 
+	// A malformed number/boolean/duration is a configuration error, not a
+	// reason to fall back: an operator who typed TF_SYNC_WORKERS=two must not
+	// be left believing the value took effect. Checked before the rest so the
+	// first thing reported is the value that could not even be read.
+	if e.err != nil {
+		return nil, e.err
+	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
@@ -258,33 +266,82 @@ func env(key, def string) string {
 	return def
 }
 
-func envInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
+// envReader reads the typed settings, remembering the first variable whose
+// value did not parse. Accumulating instead of returning per call keeps
+// Load()'s struct literal readable, and Load() reports the failure before it
+// validates anything else. An unset (empty) variable is not a failure: it
+// keeps the documented default.
+type envReader struct{ err error }
+
+func (r *envReader) fail(key string, err error) {
+	if r.err == nil {
+		r.err = fmt.Errorf("%s: %w", key, err)
 	}
-	return def
 }
 
-func envInt64(key string, def int64) int64 {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			return n
-		}
+func (r *envReader) int(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
 	}
-	return def
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		r.fail(key, err)
+		return def
+	}
+	return n
 }
 
-// envBoolPtr distinguishes "unset" from "explicitly false", which matters for
+func (r *envReader) int64(key string, def int64) int64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		r.fail(key, err)
+		return def
+	}
+	return n
+}
+
+func (r *envReader) bool(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		r.fail(key, err)
+		return def
+	}
+	return b
+}
+
+func (r *envReader) duration(key string, def time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		r.fail(key, err)
+		return def
+	}
+	return d
+}
+
+// boolPtr distinguishes "unset" from "explicitly false", which matters for
 // settings whose unset behaviour is an inference rather than a fixed default.
-func envBoolPtr(key string) *bool {
+// An unparseable value is an error rather than another spelling of unset.
+func (r *envReader) boolPtr(key string) *bool {
 	v := os.Getenv(key)
 	if v == "" {
 		return nil
 	}
 	b, err := strconv.ParseBool(v)
 	if err != nil {
+		r.fail(key, err)
 		return nil
 	}
 	return &b
@@ -328,22 +385,4 @@ func originOf(raw string) string {
 		return ""
 	}
 	return u.Scheme + "://" + u.Host
-}
-
-func envBool(key string, def bool) bool {
-	if v := os.Getenv(key); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			return b
-		}
-	}
-	return def
-}
-
-func envDuration(key string, def time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
-	}
-	return def
 }

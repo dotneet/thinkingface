@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, registered as "sqlite"
@@ -106,26 +105,24 @@ func openSQLite(ctx context.Context, databaseURL string) (*sqliteQuerier, error)
 	return q, nil
 }
 
-// sqliteTranslate rewrites the handful of Postgres spellings the shared
+// sqliteReplacer rewrites the handful of Postgres spellings the shared
 // queries use into their SQLite equivalents. Neither token ever appears
 // inside a string literal in this package, so plain substitution is safe;
 // anything more structural goes through the dialect instead.
-var sqliteTranslate = struct {
-	sync.Map // string -> string
-}{}
-
 var sqliteReplacer = strings.NewReplacer(
 	"now()", sqliteNow,
 	" ILIKE ", " LIKE ",
 )
 
+// translateSQLite deliberately does not memoise. Query text is not a bounded
+// set: a filtered listing grows one EXISTS clause per requested tag
+// (sqliteDialect.jsonArrayContainsAll), so a cache keyed by the whole query
+// would grow without bound as callers vary the tag count -- an unevictable
+// leak driven straight from request parameters. strings.Replacer scans the
+// text once with a precompiled trie, which is cheap next to parsing and
+// running the statement (see BenchmarkTranslateSQLite).
 func translateSQLite(query string) string {
-	if v, ok := sqliteTranslate.Load(query); ok {
-		return v.(string)
-	}
-	out := sqliteReplacer.Replace(query)
-	sqliteTranslate.Store(query, out)
-	return out
+	return sqliteReplacer.Replace(query)
 }
 
 // sqliteArgs converts the values the Store binds into what the driver should

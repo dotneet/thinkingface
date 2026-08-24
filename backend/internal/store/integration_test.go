@@ -1223,6 +1223,22 @@ func TestIntegrationExperiments(t *testing.T) {
 		if !equalStrings(runNames, []string{"run-a", "run-c"}) {
 			t.Fatalf("runs after prune = %v", runNames)
 		}
+		// A nil keep set is not an empty one: it is what a failed export
+		// looks like, and the two engines would disagree about it (Postgres
+		// deletes nothing, SQLite would delete everything), so the store
+		// refuses it outright.
+		if err := s.DeleteProjectRunsNotIn(ctx, pid, nil); err != nil {
+			t.Fatal(err)
+		}
+		runs, _ = s.ListExpRuns(ctx, pid)
+		runNames = runNames[:0]
+		for _, r := range runs {
+			runNames = append(runNames, r.Name)
+		}
+		if !equalStrings(runNames, []string{"run-a", "run-c"}) {
+			t.Fatalf("a nil keep set pruned runs = %v", runNames)
+		}
+		// An empty slice really does say "the export lists no runs".
 		if err := s.DeleteProjectRunsNotIn(ctx, pid, []string{}); err != nil {
 			t.Fatal(err)
 		}
