@@ -34,6 +34,13 @@ const (
 	maxWalkDepth = 8
 	// maxSequenceItems bounds how far into a list this reader descends.
 	maxSequenceItems = 1024
+	// maxWalkVisits bounds the *total* number of nodes the walk touches.
+	// Depth alone does not bound the work: the pickle memo lets a file point a
+	// container at itself, and a self-referential dict of N entries is then
+	// visited N^maxWalkDepth times -- a 50 byte pickle with ten entries costs
+	// 10^8 visits. Real checkpoints stay five orders of magnitude below this
+	// limit, so it only ever fires on a hostile or corrupt file.
+	maxWalkVisits = 1_000_000
 )
 
 // torchTensor is a tensor recovered from a rebuild call: everything the
@@ -328,6 +335,9 @@ func buildTorchInfo(info *Info, root any) {
 	if c.overflowed {
 		warn(info, "checkpoint holds more than %d tensors; the rest were skipped", maxCollectedTensors)
 	}
+	if c.exhausted {
+		warn(info, "checkpoint's object graph is larger than %d nodes; the rest was skipped", maxWalkVisits)
+	}
 	if _, isObject := root.(*pickleObject); isObject {
 		warn(info, "this checkpoint stores a pickled object rather than a plain state_dict")
 	}
@@ -336,20 +346,49 @@ func buildTorchInfo(info *Info, root any) {
 }
 
 type collector struct {
-	tensors    []Tensor
-	meta       map[string]string
+	tensors []Tensor
+	meta    map[string]string
+	// visits counts every node the walk has entered, across the whole graph.
+	visits int
+	// overflowed reports that the tensor list filled up, exhausted that the
+	// visit budget ran out. Either one stops the walk.
 	overflowed bool
+	exhausted  bool
 }
 
+// stopped reports whether the walk has hit one of its budgets and should
+// unwind without descending any further.
+func (c *collector) stopped() bool { return c.overflowed || c.exhausted }
+
+// walk descends the decoded graph. Cycles are handled by the visit budget
+// rather than by a set of already-seen pointers: a state dict legitimately
+// shares subtrees (tied embeddings point at one tensor from two keys), and a
+// seen-set would report those once instead of under every name they have.
 func (c *collector) walk(prefix string, v any, depth int) {
-	if depth > maxWalkDepth || c.overflowed {
+	if depth > maxWalkDepth || c.stopped() {
+		return
+	}
+	c.visits++
+	if c.visits > maxWalkVisits {
+		c.exhausted = true
 		return
 	}
 	switch node := v.(type) {
 	case *torchTensor:
 		c.addTensor(prefix, node)
 	case *pickleDict:
+		// A container sitting at the depth limit is not iterated at all. Each
+		// child would be turned away on entry anyway, but naming it first is
+		// real work the visit budget never sees: a wide cyclic graph spent
+		// nearly all of its time building keys it immediately discarded, which
+		// left the walk bounded in visits but linear in the graph's width.
+		if depth >= maxWalkDepth {
+			return
+		}
 		for i, key := range node.Keys {
+			if c.stopped() {
+				return
+			}
 			c.walk(joinKey(prefix, keyString(key, i)), node.Values[i], depth+1)
 		}
 	case *pickleList:
@@ -367,8 +406,13 @@ func (c *collector) walk(prefix string, v any, depth int) {
 }
 
 func (c *collector) walkSequence(prefix string, items []any, depth int) {
+	// Same as the dict case: at the depth limit there is nothing to gain from
+	// naming children that cannot be entered.
+	if depth >= maxWalkDepth {
+		return
+	}
 	for i, item := range items {
-		if i >= maxSequenceItems {
+		if i >= maxSequenceItems || c.stopped() {
 			return
 		}
 		c.walk(joinKey(prefix, strconv.Itoa(i)), item, depth+1)

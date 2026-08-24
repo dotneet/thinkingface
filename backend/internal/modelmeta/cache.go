@@ -7,9 +7,11 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// DefaultCacheEntries is how many inspected checkpoints a Cache keeps. Each
-// entry is a few hundred kilobytes at most (the tensor listing is capped), so
-// this stays well inside a few hundred megabytes even when full.
+// DefaultCacheEntries is how many inspected checkpoints a Cache keeps. Every
+// part of an entry that a file controls is capped -- the tensor listing by
+// maxTensors, the metadata map by maxMetadataBytes -- so an entry is a few
+// hundred kilobytes at most and a full cache stays inside a few hundred
+// megabytes.
 const DefaultCacheEntries = 256
 
 // Cache memoises inspections. Keys are content-addressed -- an LFS OID or a
@@ -37,6 +39,7 @@ func NewCache(max int) *Cache {
 // through fetch on a miss. Concurrent callers asking for the same key share
 // one parse.
 func (c *Cache) Inspect(ctx context.Context, key string, format Format, size int64, fetch Fetcher) (*Info, error) {
+	key = cacheKey(format, key)
 	if info, ok := c.lookup(key); ok {
 		return info, nil
 	}
@@ -58,6 +61,13 @@ func (c *Cache) Inspect(ctx context.Context, key string, format Format, size int
 	}
 	return v.(*Info), nil
 }
+
+// cacheKey qualifies a content address with the format it was read as. The
+// caller derives the format from the file's name rather than its bytes, so the
+// same blob committed as both `model.bin` and `model.safetensors` is one
+// content address but two inspections; without the qualifier whichever one ran
+// first answered for both, Format field included.
+func cacheKey(format Format, key string) string { return string(format) + ":" + key }
 
 func (c *Cache) lookup(key string) (*Info, bool) {
 	c.mu.Lock()

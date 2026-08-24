@@ -6,10 +6,22 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
+
+// hasWarning reports whether any of i's warnings mentions substr.
+func hasWarning(i *Info, substr string) bool {
+	for _, w := range i.Warnings {
+		if strings.Contains(w, substr) {
+			return true
+		}
+	}
+	return false
+}
 
 // fetcherFor serves ranged reads out of an in-memory file.
 func fetcherFor(data []byte) (int64, Fetcher) {
@@ -127,6 +139,96 @@ func TestInspectSafetensorsRejectsBadHeader(t *testing.T) {
 	}
 }
 
+func TestInspectSafetensorsCapsMetadataSize(t *testing.T) {
+	// Regression: `__metadata__` had no ceiling, so one file could park tens
+	// of megabytes in the inspection cache -- times DefaultCacheEntries.
+	meta := map[string]any{}
+	for i := 0; i < 2000; i++ {
+		meta[fmt.Sprintf("k%04d", i)] = strings.Repeat("v", 1024)
+	}
+	data := buildSafetensors(t, map[string]any{
+		"__metadata__": meta,
+		"weight":       tensorEntry("F32", []int64{2, 2}, 0, 16),
+	})
+	size, fetch := fetcherFor(data)
+
+	info, err := Inspect(context.Background(), FormatSafetensors, size, fetch)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	total := 0
+	for k, v := range info.Metadata {
+		total += len(k) + len(v)
+	}
+	if total > maxMetadataBytes {
+		t.Errorf("metadata is %d bytes, over the %d byte cap", total, maxMetadataBytes)
+	}
+	if len(info.Metadata) == 0 {
+		t.Error("the whole metadata map was dropped, want the entries that fit")
+	}
+	if !hasWarning(info, "over the") {
+		t.Errorf("warnings = %v, want one reporting the dropped entries", info.Warnings)
+	}
+	// The kept subset must not depend on map iteration order.
+	again, err := Inspect(context.Background(), FormatSafetensors, size, fetch)
+	if err != nil {
+		t.Fatalf("second Inspect: %v", err)
+	}
+	if len(again.Metadata) != len(info.Metadata) {
+		t.Fatalf("kept %d entries then %d: the cut is not deterministic", len(info.Metadata), len(again.Metadata))
+	}
+	for k, v := range info.Metadata {
+		if again.Metadata[k] != v {
+			t.Fatalf("entry %q survived only one of two reads: the cut is not deterministic", k)
+		}
+	}
+	// Small metadata still comes through whole.
+	plain := buildSafetensors(t, map[string]any{
+		"__metadata__": map[string]any{"format": "pt"},
+		"weight":       tensorEntry("F32", []int64{2, 2}, 0, 16),
+	})
+	size, fetch = fetcherFor(plain)
+	info, err = Inspect(context.Background(), FormatSafetensors, size, fetch)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if info.Metadata["format"] != "pt" || len(info.Warnings) != 0 {
+		t.Errorf("metadata = %v, warnings = %v, want an untouched map", info.Metadata, info.Warnings)
+	}
+}
+
+func TestInspectSafetensorsCapsHeaderEntries(t *testing.T) {
+	// Regression: every entry of the header was materialised before the
+	// listing was cut down to maxTensors, so a header full of tiny tensors
+	// cost several times its own size in live objects.
+	header := map[string]any{}
+	for i := 0; i < maxHeaderEntries+64; i++ {
+		// The names sort before "__metadata__", so the fixture also proves a
+		// metadata block written after the tensors is still reached.
+		header[fmt.Sprintf("T%06d", i)] = tensorEntry("F32", []int64{1}, int64(i)*4, int64(i)*4+4)
+	}
+	header["__metadata__"] = map[string]any{"format": "pt"}
+	data := buildSafetensors(t, header)
+	size, fetch := fetcherFor(data)
+
+	info, err := Inspect(context.Background(), FormatSafetensors, size, fetch)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if info.NumTensors != maxHeaderEntries {
+		t.Errorf("num tensors = %d, want %d", info.NumTensors, maxHeaderEntries)
+	}
+	if len(info.Tensors) != maxTensors || !info.Truncated {
+		t.Errorf("listed %d tensors (truncated=%v), want %d and truncated", len(info.Tensors), info.Truncated, maxTensors)
+	}
+	if !hasWarning(info, "were skipped") {
+		t.Errorf("warnings = %v, want one reporting the skipped entries", info.Warnings)
+	}
+	if info.Metadata["format"] != "pt" {
+		t.Errorf("metadata = %v, want the block that follows the tensors", info.Metadata)
+	}
+}
+
 // ------------------------------------------------------------- torch fixtures
 
 // pickleWriter emits the opcode sequence `torch.save` produces, so the tests
@@ -162,6 +264,11 @@ func (p *pickleWriter) str(s string) {
 }
 
 func (p *pickleWriter) int1(n int) { p.buf.Write([]byte{'K', byte(n)}) }
+
+// put and get are BINPUT / BINGET: the memo, which is how a pickle names a
+// value it has already written and so how it can point a value at itself.
+func (p *pickleWriter) put(slot byte) { p.buf.Write([]byte{'q', slot}) }
+func (p *pickleWriter) get(slot byte) { p.buf.Write([]byte{'h', slot}) }
 
 func (p *pickleWriter) ints(values ...int) {
 	p.mark()
@@ -217,6 +324,25 @@ func buildTorchPickle() []byte {
 	p.str("epoch")
 	p.int1(7)
 
+	p.setItems()
+	p.stop()
+	return p.buf.Bytes()
+}
+
+// buildCyclicTorchPickle writes a dict whose every value is the dict itself:
+// the dict is memoised, then read back out of the memo once per entry.
+// `torch.save` never produces this, but a handcrafted file can, and it is the
+// shape that turns a depth-limited walk into an N^depth explosion.
+func buildCyclicTorchPickle(entries int) []byte {
+	p := &pickleWriter{}
+	p.proto()
+	p.emptyDict()
+	p.put(1)
+	p.mark()
+	for i := 0; i < entries; i++ {
+		p.str(fmt.Sprintf("k%d", i))
+		p.get(1)
+	}
 	p.setItems()
 	p.stop()
 	return p.buf.Bytes()
@@ -330,6 +456,62 @@ func TestInspectPyTorchReadsOnlyTheHeader(t *testing.T) {
 	}
 }
 
+func TestInspectPyTorchCyclicPickleTerminates(t *testing.T) {
+	// Regression: a dict that points at itself has no bottom, and the walk's
+	// depth limit alone does not bound it -- even a 12-entry cycle is 12^8
+	// (about 4x10^11) visits, so a sub-kilobyte file used to hold a request
+	// open and a core busy indefinitely. The cycle here is deliberately wide:
+	// a budget on visits alone still left the walk linear in the width,
+	// because naming children it then refused was work nothing counted.
+	data := buildTorchZip(t, buildCyclicTorchPickle(4000))
+	size, fetch := fetcherFor(data)
+
+	type result struct {
+		info *Info
+		err  error
+	}
+	done := make(chan result, 1)
+	started := time.Now()
+	go func() {
+		info, err := Inspect(context.Background(), FormatPyTorch, size, fetch)
+		done <- result{info: info, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("Inspect: %v", got.err)
+		}
+		if elapsed := time.Since(started); elapsed > 10*time.Second {
+			t.Errorf("a %d byte cyclic checkpoint took %v to inspect", len(data), elapsed)
+		}
+		if !hasWarning(got.info, "object graph") {
+			t.Errorf("warnings = %v, want one reporting the cut-short walk", got.info.Warnings)
+		}
+	case <-time.After(30 * time.Second):
+		// The walk is unbounded again; leaving it running is the point.
+		t.Fatalf("Inspect never returned for a %d byte cyclic checkpoint", len(data))
+	}
+}
+
+func TestCollectorWalkVisitsAreBudgeted(t *testing.T) {
+	// The budget is a total, not a per-level one: a graph that fans out
+	// legitimately still stops after maxWalkVisits nodes rather than after
+	// maxWalkVisits per branch.
+	root, err := newUnpickler(bytes.NewReader(buildCyclicTorchPickle(8)), torchReduce).load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	c := &collector{meta: map[string]string{}}
+	c.walk("", root, 0)
+	if !c.exhausted {
+		t.Fatal("walk finished a cyclic graph without exhausting its budget")
+	}
+	if c.visits > maxWalkVisits+1 {
+		t.Errorf("walk made %d visits, want at most %d", c.visits, maxWalkVisits+1)
+	}
+}
+
 func TestCollectorAddMetadata_TruncatesASCIIAtRuneLimit(t *testing.T) {
 	// Regression: plain ASCII text must still be cut at exactly 512
 	// characters, same as before rune-aware truncation.
@@ -409,6 +591,30 @@ func TestCacheReusesInspection(t *testing.T) {
 	}
 }
 
+func TestCacheKeyIsQualifiedByFormat(t *testing.T) {
+	// Regression: the key is a content address, but the format comes from the
+	// file's *name*. The same bytes committed as both `model.bin` and
+	// `model.safetensors` therefore share a key, and the first inspection used
+	// to answer for the second -- here a torch checkpoint reported as a
+	// successful safetensors read.
+	data := buildTorchZip(t, buildTorchPickle())
+	size, fetch := fetcherFor(data)
+	cache := NewCache(4)
+
+	info, err := cache.Inspect(context.Background(), "blob:abc", FormatPyTorch, size, fetch)
+	if err != nil {
+		t.Fatalf("Inspect as pytorch: %v", err)
+	}
+	if info.Format != FormatPyTorch {
+		t.Fatalf("format = %q, want pytorch", info.Format)
+	}
+	// A zip is not a safetensors file, so reading the same bytes under the
+	// other format has to fail rather than hand back the cached answer.
+	if got, err := cache.Inspect(context.Background(), "blob:abc", FormatSafetensors, size, fetch); err == nil {
+		t.Fatalf("Inspect as safetensors returned %+v, want an error", got)
+	}
+}
+
 func TestCacheEvictsOldestEntries(t *testing.T) {
 	data := buildSafetensors(t, map[string]any{"weight": tensorEntry("F32", []int64{1}, 0, 4)})
 	size, fetch := fetcherFor(data)
@@ -419,10 +625,10 @@ func TestCacheEvictsOldestEntries(t *testing.T) {
 			t.Fatalf("Inspect %s: %v", key, err)
 		}
 	}
-	if _, ok := cache.lookup("a"); ok {
+	if _, ok := cache.lookup(cacheKey(FormatSafetensors, "a")); ok {
 		t.Error("oldest entry survived eviction")
 	}
-	if _, ok := cache.lookup("c"); !ok {
+	if _, ok := cache.lookup(cacheKey(FormatSafetensors, "c")); !ok {
 		t.Error("newest entry was evicted")
 	}
 }
