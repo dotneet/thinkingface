@@ -126,10 +126,28 @@ func internalError(w http.ResponseWriter, op string, err error) {
 
 // handleStoreError maps the common domain errors onto responses so handlers do
 // not repeat the same three checks.
+//
+// gitrepo.ErrEmptyRepo is in the 404 branch despite its name saying "empty":
+// gitrepo.Resolve reports an unborn HEAD and a revision that names nothing with
+// that one error, because go-git answers plumbing.ErrReferenceNotFound for
+// both. Leaving it out is what made /raw, /model-meta and /parquet -- the three
+// single-file reads that map their errors through this helper instead of
+// checking themselves -- answer 500 internal_error for a revision that does not
+// exist, which reads as "the server is broken" rather than "that is not there".
+//
+// Folding the two cases into one 404 is right for those callers in particular:
+// each asks for one named file, and in a repository with no commits that file is
+// exactly as absent as it is at a revision that does not resolve. They are also
+// Web UI routes, so nothing picks a huggingface_hub exception type off an
+// X-Error-Code here. The endpoints that do need the distinction (repo-info /
+// tree / paths-info, whose answer for an empty repository is a 200 rather than a
+// 404) resolve through Server.revisionOrEmpty and never reach this helper with
+// ErrEmptyRepo.
 func handleStoreError(w http.ResponseWriter, op string, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, gitrepo.ErrRepoNotFound),
-		errors.Is(err, gitrepo.ErrPathNotFound), errors.Is(err, storage.ErrNotFound):
+		errors.Is(err, gitrepo.ErrPathNotFound), errors.Is(err, gitrepo.ErrEmptyRepo),
+		errors.Is(err, storage.ErrNotFound):
 		notFound(w, op+": not found")
 	case errors.Is(err, store.ErrConflict):
 		conflict(w, op+": already exists")

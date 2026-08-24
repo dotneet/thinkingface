@@ -865,15 +865,28 @@ res 200 (an array):
 ### `POST /api/{datasets|models}/{ns}/{name}/paths-info/{rev}`  (HF-compatible)
 req: `{"paths": ["a.txt", "data/"], "expand": false}` → res 200: `hfTreeEntry[]` (same shape as `tree`)
 
+- **Two request encodings are accepted, and the `Content-Type` picks between them.**
+  `application/x-www-form-urlencoded` is parsed as a form (`paths` repeated once per element);
+  anything else is parsed as JSON. The form branch is not a nicety — it is the encoding
+  `huggingface_hub` actually uses: `get_paths_info` posts `data={"paths": [...], "expand": ...}`,
+  which `requests` sends form-encoded. While only JSON was understood, every real client's batch
+  decoded to zero paths and the endpoint answered 200 `[]` to all of them, which
+  `HfFileSystem.info()` / `.exists()` turn into a `FileNotFoundError` (breaking `datasets` and
+  `pandas.read_parquet("hf://...")`) and `CommitOperationCopy` into an unresolvable source.
+- `expand` is accepted in both encodings and ignored: the extra fields it selects (`lastCommit`,
+  `securityFileStatus`) aren't produced here, and `huggingface_hub`'s `RepoFile` / `RepoFolder`
+  read both with a default, so omitting them is safe.
 - `paths` allows **at most 1000 elements**; each element must be at most 4096 bytes and contain no
   NUL. Violations return 400 (each element triggers a commit resolution plus a tree walk, and a
-  public repository can be hit without authentication).
-- The overall body size limit is 8MiB. Exceeding it returns 413 `payload_too_large`.
-- A body that can't be read as JSON is treated as "`paths` is empty" and returns 200.
-  `huggingface_hub`'s `get_paths_info` sends this form-encoded (via `requests`'s `data=`), so
-  returning 400 here would break the client.
+  public repository can be hit without authentication). Both limits apply to the form branch too.
+- The overall body size limit is 8MiB, in both encodings. Exceeding it returns 413
+  `payload_too_large`.
+- A body that can't be read in the encoding its `Content-Type` names is treated as "`paths` is
+  empty" and returns 200 rather than 400. This tolerance is now only about genuinely malformed
+  bodies — it is no longer what a normal `huggingface_hub` request runs into.
 - Same `{rev}` handling as `repo-info` / `tree` above: 404 + `X-Error-Code: RevisionNotFound` when
   the repository has commits but `{rev}` doesn't resolve; 200 for a repository with zero commits.
+  The revision is checked ahead of the batch, so it answers the same way in either encoding.
 
 ### `GET /api/{datasets|models}/{ns}/{name}/refs`  (HF-compatible)
 res: `{"branches":[{"name":"main","ref":"refs/heads/main","targetCommit":"<sha>"}],"tags":[],"converts":[]}`
@@ -1022,6 +1035,13 @@ res:
 `last_commit` is resolved by walking history in first-parent order; an entry not found within the
 cap (1000 commits) becomes `null`.
 
+- `{rev}` handling matches the HF-compatible `tree` above, and for the same reason spelled out in
+  `frontend/DESIGN.md` §9 (never conflate empty, zero and failure): a repository that **has**
+  commits but whose `{rev}` doesn't resolve is **404 + `X-Error-Code: RevisionNotFound`**, not a
+  200 with `entries: []` — a typo'd or deleted branch must not render as "this repository has no
+  files". A repository with **zero** commits keeps its 200 with `entries: []`, `readme: null` and
+  `latest_commit: null`; the file browser's empty state depends on it.
+
 ### `GET /api/v1/repos/{kind}/{ns}/{name}/gcs/{rev}`  (for the UI: direct GCS fetch script)
 Built from `repo_files` (the index for that ref, which the sync worker rebuilds on every push).
 Since `repo_files` — not git itself — is the source of truth, the response exactly matches what has
@@ -1109,6 +1129,10 @@ res:
 ```
 When `path` is given, at most 1000 commits are scanned per request; once that cap is hit, the page
 is returned with fewer than `limit` entries (possibly zero) along with a `next_cursor` to continue.
+
+- Same `{rev}` handling as the UI `tree` above: 404 + `X-Error-Code: RevisionNotFound` when the
+  repository has commits but `{rev}` doesn't resolve; 200 with `commits: []` for a repository with
+  zero commits.
 
 ---
 
@@ -1415,9 +1439,21 @@ Content-Disposition the way `resolve` does (this is what the Web UI preview uses
 When returning the content of an LFS pointer's target, it goes through the same ownership check as
 `resolve`.
 
+<a id="single-file-read-bad-rev"></a>
+**A `{rev}` that doesn't resolve is a 404** here, in `model-meta` (§6) and in both `parquet`
+endpoints (§5) — the three single-file reads that map their errors through `handleStoreError`.
+A repository with zero commits is a 404 on these three as well: each names one file, and a file
+that isn't there is not there whichever of the two reasons applies. (They differ from the listing
+endpoints on that point, which answer 200 for a zero-commit repository because "there is nothing
+to list" is a real answer.) These are Web UI routes, so no `X-Error-Code` distinction is made —
+nothing here picks a `huggingface_hub` exception type off the header.
+
 ---
 
 ## 5. Parquet viewer
+
+Both endpoints below resolve one named file, so a `{rev}` that doesn't resolve — and a repository
+with zero commits — is a 404, exactly as described for `raw` in §4.
 
 ### `GET /api/v1/parquet/{kind}/{ns}/{name}/schema/{rev}/{path...}`
 res:
@@ -1473,6 +1509,7 @@ res:
 ### `GET /api/v1/model-meta/{kind}/{ns}/{name}/{rev}/{path...}`
 
 Targets `.safetensors` / `.bin` / `.pt` / `.pth` / `.ckpt`. Any other extension returns 400.
+A `{rev}` that doesn't resolve — and a repository with zero commits — is a 404, as for `raw` in §4.
 
 No weights are ever downloaded. For safetensors, only the leading `<u64 header length><JSON
 header>` is range-read; for PyTorch, only the `data.pkl` member inside the zip is range-read.
