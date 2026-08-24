@@ -158,6 +158,8 @@ export const settings = {
     namespaceLabel: "名前空間",
     scopeLabel: "スコープ",
     scopeHint: "空欄にするとすべてのリポジトリで発火します",
+    scopeLoadFailed:
+      "{namespace} のリポジトリ一覧を取得できませんでした — 下の一覧は空ではなく不完全な可能性があります。",
     allRepositories: "{namespace}（すべてのリポジトリ）",
     urlLabel: "URL",
     eventsLabel: "イベント",
