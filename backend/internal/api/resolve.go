@@ -275,10 +275,12 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 	w.Header().Set("ETag", `"`+oid+`"`)
 	w.Header().Set("X-Linked-Etag", `"`+oid+`"`)
 	w.Header().Set("X-Linked-Size", strconv.FormatInt(entry.LFS.Size, 10))
-	w.Header().Set("Content-Length", strconv.FormatInt(entry.LFS.Size, 10))
 	w.Header().Set("Content-Type", contentType)
 
 	if r.Method == http.MethodHead {
+		// Unlike GET below, a HEAD never touches storage, so nothing here can
+		// fail after this point -- Content-Length is safe to set unconditionally.
+		w.Header().Set("Content-Length", strconv.FormatInt(entry.LFS.Size, 10))
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -297,14 +299,19 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 			internalError(w, "sign download url", err)
 			return
 		}
-		// Content-Length must not describe the redirect body.
-		w.Header().Del("Content-Length")
+		// Content-Length is never set on this path, so there is nothing to
+		// strip before the redirect: it must not describe the redirect body.
 		http.Redirect(w, r, url, http.StatusFound)
 		return
 	}
 
 	// Emulator mode: stream the object through, honouring Range so partial
-	// reads (parquet footers, resumed downloads) still work.
+	// reads (parquet footers, resumed downloads) still work. Content-Length
+	// is set only once storage has confirmed the object still exists --
+	// setting it earlier would leave it describing entry.LFS.Size even when
+	// GetRange fails below and a JSON error body (a different length) is
+	// written instead, corrupting the response the same way a redirect body
+	// would be corrupted by it.
 	offset, length, partial := parseRange(r.Header.Get("Range"), entry.LFS.Size)
 	rc, err := s.storage.GetRange(r.Context(), key, offset, length)
 	if err != nil {
@@ -319,6 +326,8 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 
 	if partial {
 		writePartialContent(w, offset, length, entry.LFS.Size)
+	} else {
+		w.Header().Set("Content-Length", strconv.FormatInt(entry.LFS.Size, 10))
 	}
 	_, _ = io.Copy(w, rc)
 }
