@@ -28,10 +28,18 @@ export HF_HUB_DISABLE_XET=1
 | `delete_repo()` | Yes |
 | `list_organization_members()` | Yes |
 | `get_user_overview()` / `get_organization_overview()` | Yes, and each 404s for the other kind of namespace |
+| `list_repo_refs()` | Yes, branches and tags with their tips |
+| `create_branch()` / `delete_branch()` | Yes, including `exist_ok=True` and branch names containing `/`. The default branch cannot be deleted |
+| `create_tag()` / `delete_tag()` | Yes, including `exist_ok=True`. A `tag_message` creates a real annotated tag |
+| `list_repo_commits()` | Yes, newest first, with `revision=` and pagination |
 
 `upload_folder()` and `snapshot_download()` are not exercised by the test suite, so they are
 left out of this table rather than assumed. If you rely on either, verify against your own
 instance before depending on it.
+
+One thing to know about branches and tags created through the API: **creating a branch schedules
+the same background indexing a push does, and creating a tag does not** — exactly like
+`git push <branch>` versus `git push <tag>`. See [Working with Git](../guides/git.md#branches-tags-and-revisions).
 
 ## `datasets`
 

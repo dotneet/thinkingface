@@ -127,3 +127,162 @@ def test_model_upload_download_and_delete(hf_api: HfApi, namespace: str, unique_
 
     with pytest.raises(HfHubHTTPError):
         hf_api.repo_info(repo_id=repo_id, repo_type="model")
+
+
+def test_branch_lifecycle(hf_api: HfApi, namespace: str, unique_name: str) -> None:
+    """`create_branch` / `delete_branch` against a repo created moments before.
+
+    The status codes matter as much as the happy path here: `exist_ok=True`
+    only swallows a 409, so a server answering anything else turns a tolerated
+    duplicate into a raised exception.
+    """
+    repo_id = f"{namespace}/{unique_name}-branches"
+    hf_api.create_repo(repo_id=repo_id, repo_type="model", private=False)
+    try:
+        hf_api.create_branch(repo_id=repo_id, branch="experiment")
+
+        refs = hf_api.list_repo_refs(repo_id=repo_id)
+        names = {branch.name for branch in refs.branches}
+        assert "experiment" in names
+        assert "main" in names
+        tips = {branch.name: branch.target_commit for branch in refs.branches}
+        assert tips["experiment"] == tips["main"]
+
+        # A duplicate is a 409, which exist_ok=True is defined to absorb.
+        with pytest.raises(HfHubHTTPError):
+            hf_api.create_branch(repo_id=repo_id, branch="experiment")
+        hf_api.create_branch(repo_id=repo_id, branch="experiment", exist_ok=True)
+
+        # A branch may start from an explicit revision, not just the tip.
+        initial = hf_api.list_repo_commits(repo_id=repo_id)[-1]
+        hf_api.create_branch(repo_id=repo_id, branch="from-initial", revision=initial.commit_id)
+        tips = {b.name: b.target_commit for b in hf_api.list_repo_refs(repo_id=repo_id).branches}
+        assert tips["from-initial"] == initial.commit_id
+
+        # A revision that does not exist is a RevisionNotFoundError, not a 500.
+        with pytest.raises(HfHubHTTPError):
+            hf_api.create_branch(repo_id=repo_id, branch="nowhere", revision="no-such-revision")
+
+        hf_api.delete_branch(repo_id=repo_id, branch="experiment")
+        names = {branch.name for branch in hf_api.list_repo_refs(repo_id=repo_id).branches}
+        assert "experiment" not in names
+
+        # Deleting it twice, and deleting the default branch, both fail.
+        with pytest.raises(HfHubHTTPError):
+            hf_api.delete_branch(repo_id=repo_id, branch="experiment")
+        with pytest.raises(HfHubHTTPError):
+            hf_api.delete_branch(repo_id=repo_id, branch="main")
+        assert "main" in {b.name for b in hf_api.list_repo_refs(repo_id=repo_id).branches}
+    finally:
+        hf_api.delete_repo(repo_id=repo_id, repo_type="model")
+
+
+def test_branch_with_a_slash_in_its_name(hf_api: HfApi, namespace: str, unique_name: str) -> None:
+    """huggingface_hub percent-encodes the branch name (`quote(..., safe="")`).
+
+    A server that routes on the decoded path would 404 here, and one that never
+    unescapes would create a ref literally called `feature%2Fx`.
+    """
+    repo_id = f"{namespace}/{unique_name}-slashed"
+    hf_api.create_repo(repo_id=repo_id, repo_type="dataset", private=False)
+    try:
+        hf_api.create_branch(repo_id=repo_id, repo_type="dataset", branch="feature/tokenizer")
+        names = {
+            b.name for b in hf_api.list_repo_refs(repo_id=repo_id, repo_type="dataset").branches
+        }
+        assert "feature/tokenizer" in names
+
+        hf_api.delete_branch(repo_id=repo_id, repo_type="dataset", branch="feature/tokenizer")
+        names = {
+            b.name for b in hf_api.list_repo_refs(repo_id=repo_id, repo_type="dataset").branches
+        }
+        assert "feature/tokenizer" not in names
+    finally:
+        hf_api.delete_repo(repo_id=repo_id, repo_type="dataset")
+
+
+def test_tag_lifecycle(hf_api: HfApi, namespace: str, unique_name: str) -> None:
+    """`create_tag` / `delete_tag`, both lightweight and annotated.
+
+    Note the asymmetry in huggingface_hub's own URLs: create puts the *revision*
+    in the path and the tag name in the body, delete puts the tag name in the
+    path.
+    """
+    repo_id = f"{namespace}/{unique_name}-tags"
+    hf_api.create_repo(repo_id=repo_id, repo_type="model", private=False)
+    try:
+        hf_api.create_tag(repo_id=repo_id, tag="v1.0")
+        hf_api.create_tag(repo_id=repo_id, tag="v1.1", tag_message="the second release")
+
+        tags = {tag.name for tag in hf_api.list_repo_refs(repo_id=repo_id).tags}
+        assert {"v1.0", "v1.1"} <= tags
+
+        # An annotated tag still resolves to the commit it tags everywhere a
+        # revision is accepted.
+        head = hf_api.repo_info(repo_id=repo_id).sha
+        assert hf_api.repo_info(repo_id=repo_id, revision="v1.1").sha == head
+        assert hf_api.repo_info(repo_id=repo_id, revision="v1.0").sha == head
+
+        with pytest.raises(HfHubHTTPError):
+            hf_api.create_tag(repo_id=repo_id, tag="v1.0")
+        hf_api.create_tag(repo_id=repo_id, tag="v1.0", exist_ok=True)
+
+        with pytest.raises(HfHubHTTPError):
+            hf_api.create_tag(repo_id=repo_id, tag="v2.0", revision="no-such-revision")
+
+        hf_api.delete_tag(repo_id=repo_id, tag="v1.0")
+        tags = {tag.name for tag in hf_api.list_repo_refs(repo_id=repo_id).tags}
+        assert "v1.0" not in tags
+        assert "v1.1" in tags
+
+        with pytest.raises(HfHubHTTPError):
+            hf_api.delete_tag(repo_id=repo_id, tag="v1.0")
+    finally:
+        hf_api.delete_repo(repo_id=repo_id, repo_type="model")
+
+
+def test_list_repo_commits(hf_api: HfApi, namespace: str, unique_name: str) -> None:
+    """`list_repo_commits` must fill in every GitCommitInfo field.
+
+    The client indexes `id`, `authors`, `date`, `title` and `message` directly
+    -- a missing key is a KeyError -- parses `date` with a format that only
+    accepts a trailing "Z", and reads `user` out of each author *object*.
+    """
+    repo_id = f"{namespace}/{unique_name}-commits"
+    hf_api.create_repo(repo_id=repo_id, repo_type="dataset", private=False)
+    try:
+        hf_api.upload_file(
+            path_or_fileobj=b"first\n",
+            path_in_repo="notes.txt",
+            repo_id=repo_id,
+            repo_type="dataset",
+            commit_message="Add notes",
+            commit_description="A longer explanation of the change.",
+        )
+
+        commits = hf_api.list_repo_commits(repo_id=repo_id, repo_type="dataset")
+        assert len(commits) >= 2  # the initial commit plus the upload
+
+        # Newest first, so the upload is at the head and the initial commit is
+        # the last element.
+        newest = commits[0]
+        assert newest.title == "Add notes"
+        assert "A longer explanation of the change." in newest.message
+        assert len(newest.commit_id) == 40
+        assert newest.authors  # parsed out of the `authors` array of objects
+        assert newest.created_at is not None
+        assert newest.created_at.tzinfo is not None
+
+        # Every commit is reachable from the default branch, and asking for it
+        # explicitly gives the same answer.
+        by_revision = hf_api.list_repo_commits(
+            repo_id=repo_id, repo_type="dataset", revision="main"
+        )
+        assert [c.commit_id for c in by_revision] == [c.commit_id for c in commits]
+
+        with pytest.raises(HfHubHTTPError):
+            hf_api.list_repo_commits(
+                repo_id=repo_id, repo_type="dataset", revision="no-such-revision"
+            )
+    finally:
+        hf_api.delete_repo(repo_id=repo_id, repo_type="dataset")
