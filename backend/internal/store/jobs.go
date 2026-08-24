@@ -82,6 +82,18 @@ func (s *Store) EnqueueSync(ctx context.Context, repoID int64, ref, oldSHA, newS
 	// the fresh commit would have exported cleanly. This cannot spin: the
 	// budget is reset by a push, not by the worker, so the retry rate is
 	// bounded by how often somebody actually pushes.
+	//
+	// The trade-off is real and worth naming. Because the budget only ever
+	// runs out between pushes, a repository pushed more often than the
+	// backoff is long (30s, then 2m, 8m, 32m) can fail every single sync and
+	// never reach 'failed' -- so it stays out of ListFailedSyncJobs and
+	// FailedSyncCount, and the operator surface added alongside this shows
+	// nothing while that repository's index sits frozen. The alternative,
+	// carrying the count across pushes, trades that for parking repositories
+	// whose next commit would have worked, which is the worse failure: a
+	// parked job needs a human, an unparked one keeps trying. The gap is
+	// covered from the other side instead -- `thinkingface resync` finds an
+	// index that has drifted regardless of what the queue thinks.
 	n, err := s.db.Exec(ctx,
 		`UPDATE sync_jobs
 		 SET new_sha = $3, attempts = 0, next_attempt_at = NULL, last_error = '', updated_at = now()
@@ -114,14 +126,16 @@ func (s *Store) EnqueueSync(ctx context.Context, repoID int64, ref, oldSHA, newS
 // see the migration (postgres 0030) and the disjoint-blobs hazard below.
 //
 // The NOT EXISTS clause serialises work per repo+ref, and both of its halves
-// are load bearing. Syncer.publishBlob walks the OldSHA..NewSHA diff rather
-// than the whole tree, so two jobs for one ref running at once publish two
-// disjoint sets of blobs; a file touched only by the job that finishes first
-// (.gitattributes and the seeded README, which only ever appear in the
-// repo-creation commit) is then left with no blobs/{sha} object at all, and
-// nothing republishes it afterwards. EnqueueSync collapses repeated pushes
-// into a single pending row, but only while that row is still pending -- a
-// push arriving while the previous job runs inserts a second row for the ref.
+// are load bearing. Two jobs for one ref running at once each rebuild that
+// ref's index from the tree they read, and Syncer.processPush finishes by
+// replacing the whole index for the ref -- so whichever job commits last wins
+// outright, and if that is the one that started from the *older* commit the
+// repository is left indexed at a state it has moved past. The file listing,
+// the search entry and the gcloud script then describe a push that is no
+// longer the tip, and nothing recomputes them until somebody pushes again.
+// EnqueueSync collapses repeated pushes into a single pending row, but only
+// while that row is still pending -- a push arriving while the previous job
+// runs inserts a second row for the ref.
 //
 //   - No 'running' sibling: the ordinary case, once the earlier claim committed.
 //     An expired sibling still blocks here rather than being stolen inline; the
@@ -171,46 +185,49 @@ func (s *Store) ClaimSyncJob(ctx context.Context, leaseDuration time.Duration) (
 // It touches only a row this worker still holds: once the sweeper has taken
 // the job back the status is no longer 'running' and the update matches
 // nothing, so a heartbeat arriving late cannot resurrect a stolen claim.
-func (s *Store) HeartbeatSyncJob(ctx context.Context, id int64, leaseDuration time.Duration) error {
+func (s *Store) HeartbeatSyncJob(ctx context.Context, id int64, attempts int, leaseDuration time.Duration) error {
 	_, err := s.db.Exec(ctx,
-		`UPDATE sync_jobs SET lease_expires_at = `+s.d.nowPlusSeconds("$2")+`
-		 WHERE id = $1 AND status = 'running'`, id, leaseDuration.Seconds())
+		`UPDATE sync_jobs SET lease_expires_at = `+s.d.nowPlusSeconds("$3")+`
+		 WHERE id = $1 AND status = 'running' AND attempts = $2`,
+		id, attempts, leaseDuration.Seconds())
 	return err
 }
 
 // FinishSyncJob records the outcome of a claimed job and drops its lease.
-func (s *Store) FinishSyncJob(ctx context.Context, id int64, jobErr error) error {
+//
+// attempts is the count the claim returned, and it is the fencing token: every
+// statement here also requires status = 'running' AND attempts = that value, so
+// a worker can only write the outcome of the claim it still holds. Without it
+// the lease closes only half the race. A worker whose lease lapsed, was swept
+// back to 'pending' and reclaimed by somebody else would still write 'done'
+// over the row the new holder is working -- and once that ref has no 'running'
+// row, ClaimSyncJob's NOT EXISTS lets a third worker start on it alongside the
+// second, which is exactly the concurrent-index-rebuild the lease exists to
+// prevent.
+//
+// A no-op update therefore means the claim was lost, which is not an error:
+// whoever holds it now is responsible for the outcome.
+func (s *Store) FinishSyncJob(ctx context.Context, id int64, attempts int, jobErr error) error {
 	if jobErr == nil {
 		_, err := s.db.Exec(ctx,
 			`UPDATE sync_jobs
 			 SET status = 'done', last_error = '', lease_expires_at = NULL, updated_at = now()
-			 WHERE id = $1`, id)
-		return err
-	}
-	// Read the attempt count back rather than trusting the caller's copy:
-	// the claim incremented it, and the retry pacing has to follow the row.
-	var attempts int
-	if err := s.db.QueryRow(ctx,
-		`SELECT attempts FROM sync_jobs WHERE id = $1`, id).Scan(&attempts); err != nil {
-		if isNoRows(err) {
-			// The repository was deleted while the job ran; the row went
-			// with it (ON DELETE CASCADE) and there is nothing to record.
-			return nil
-		}
+			 WHERE id = $1 AND status = 'running' AND attempts = $2`, id, attempts)
 		return err
 	}
 	if attempts >= SyncMaxAttempts {
 		_, err := s.db.Exec(ctx,
 			`UPDATE sync_jobs
-			 SET status = 'failed', last_error = $2, lease_expires_at = NULL, updated_at = now()
-			 WHERE id = $1`, id, jobErr.Error())
+			 SET status = 'failed', last_error = $3, lease_expires_at = NULL, updated_at = now()
+			 WHERE id = $1 AND status = 'running' AND attempts = $2`, id, attempts, jobErr.Error())
 		return err
 	}
 	_, err := s.db.Exec(ctx,
 		`UPDATE sync_jobs
-		 SET status = 'pending', last_error = $2, lease_expires_at = NULL, updated_at = now(),
-		     next_attempt_at = `+s.d.nowPlusSeconds("$3")+`
-		 WHERE id = $1`, id, jobErr.Error(), retryDelay(attempts).Seconds())
+		 SET status = 'pending', last_error = $3, lease_expires_at = NULL, updated_at = now(),
+		     next_attempt_at = `+s.d.nowPlusSeconds("$4")+`
+		 WHERE id = $1 AND status = 'running' AND attempts = $2`,
+		id, attempts, jobErr.Error(), retryDelay(attempts).Seconds())
 	return err
 }
 

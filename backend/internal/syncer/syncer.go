@@ -208,7 +208,7 @@ func (s *Syncer) step(ctx context.Context) (bool, error) {
 	// the sweeper would hand the ref to a second worker while this one is
 	// still walking the diff -- the exact double-publish ClaimSyncJob's
 	// NOT EXISTS clause exists to prevent.
-	stopHeartbeat := s.heartbeat(ctx, job.ID)
+	stopHeartbeat := s.heartbeat(ctx, job.ID, job.Attempts)
 	jobErr := s.process(ctx, job)
 	stopHeartbeat()
 
@@ -226,7 +226,7 @@ func (s *Syncer) step(ctx context.Context) (bool, error) {
 		finishCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 	}
-	if err := s.store.FinishSyncJob(finishCtx, job.ID, jobErr); err != nil {
+	if err := s.store.FinishSyncJob(finishCtx, job.ID, job.Attempts, jobErr); err != nil {
 		return true, fmt.Errorf("finish sync job %d: %w", job.ID, err)
 	}
 	return true, nil
@@ -235,7 +235,7 @@ func (s *Syncer) step(ctx context.Context) (bool, error) {
 // heartbeat keeps a claimed job's lease alive until the returned function is
 // called. The returned stop is idempotent and waits for the goroutine, so the
 // caller can be sure no heartbeat lands after FinishSyncJob.
-func (s *Syncer) heartbeat(ctx context.Context, jobID int64) func() {
+func (s *Syncer) heartbeat(ctx context.Context, jobID int64, attempts int) func() {
 	done := make(chan struct{})
 	stopped := make(chan struct{})
 	go func() {
@@ -250,7 +250,7 @@ func (s *Syncer) heartbeat(ctx context.Context, jobID int64) func() {
 				return
 			case <-ticker.C:
 			}
-			if err := s.store.HeartbeatSyncJob(ctx, jobID, syncLease); err != nil {
+			if err := s.store.HeartbeatSyncJob(ctx, jobID, attempts, syncLease); err != nil {
 				if !errors.Is(err, context.Canceled) {
 					slog.Warn("heartbeat sync job", "job", jobID, "error", err)
 				}
