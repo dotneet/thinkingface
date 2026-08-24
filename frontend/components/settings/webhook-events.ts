@@ -22,6 +22,26 @@ export const WEBHOOK_EVENT_OPTIONS: {
     hintKey: "settings.webhookEvents.repoDeleted.hint",
   },
   {
+    value: "repo.moved",
+    labelKey: "settings.webhookEvents.repoMoved.label",
+    hintKey: "settings.webhookEvents.repoMoved.hint",
+  },
+  {
+    value: "repo.transfer_requested",
+    labelKey: "settings.webhookEvents.repoTransferRequested.label",
+    hintKey: "settings.webhookEvents.repoTransferRequested.hint",
+  },
+  {
+    value: "repo.archived",
+    labelKey: "settings.webhookEvents.repoArchived.label",
+    hintKey: "settings.webhookEvents.repoArchived.hint",
+  },
+  {
+    value: "repo.unarchived",
+    labelKey: "settings.webhookEvents.repoUnarchived.label",
+    hintKey: "settings.webhookEvents.repoUnarchived.hint",
+  },
+  {
     value: "run.finished",
     labelKey: "settings.webhookEvents.runFinished.label",
     hintKey: "settings.webhookEvents.runFinished.hint",

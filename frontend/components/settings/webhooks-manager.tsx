@@ -20,11 +20,14 @@ import { listRepos } from "@/lib/repos";
 import { createWebhook, listWebhooks } from "@/lib/webhooks";
 import type { RepoSummary, User, Webhook, WebhookEvent } from "@/types/api";
 
-// Only members who can push to a namespace may see or manage its webhooks —
-// mirrors the "write"/"admin" bar the backend enforces on every webhook
-// endpoint (requireNamespaceWrite in backend/internal/api/webhooks.go).
-function writableNamespaces(user: User): string[] {
-  return user.namespaces.filter((n) => n.role === "admin" || n.role === "write").map((n) => n.name);
+// Only namespace admins may see or manage webhooks — mirrors the admin-only
+// bar the backend enforces on every webhook endpoint (requireNamespaceAdmin
+// in backend/internal/api/webhooks.go). A webhook carries the namespace's
+// secrets to an external URL, which the backend treats as an administrative
+// act; "write" members get a 403 from the API, so they must not see the
+// namespace as an option here either.
+function adminNamespaces(user: User): string[] {
+  return user.namespaces.filter((n) => n.role === "admin").map((n) => n.name);
 }
 
 export function WebhooksManager({
@@ -66,7 +69,7 @@ export function WebhooksManager({
       }
       setUser(result.data.user);
       if (fixedNamespace) return;
-      const namespaces = writableNamespaces(result.data.user);
+      const namespaces = adminNamespaces(result.data.user);
       const first = namespaces[0];
       if (first) setNamespace(first);
     })();
@@ -156,7 +159,7 @@ export function WebhooksManager({
     );
   }
 
-  const namespaces = writableNamespaces(user);
+  const namespaces = adminNamespaces(user);
   if (!fixedNamespace && namespaces.length === 0) {
     return (
       <EmptyState
