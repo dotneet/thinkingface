@@ -943,6 +943,13 @@ func TestHFDeleteBranch_ContentionIsNot409(t *testing.T) {
 	if _, ok := branches["topic"]; !ok {
 		t.Fatalf("branches = %v, want topic restored after a refused delete", branches)
 	}
+	// The create and delete handlers share writeRefError, so its contention
+	// message has to be true of a removal as well. Asserting the absence of
+	// "written" pins the defect rather than the phrasing: a refused delete
+	// did not fail to write anything.
+	if body := resp.rec.Body.String(); strings.Contains(body, "written") {
+		t.Fatalf("body = %s, want a message that does not describe a refused delete as a failed write", body)
+	}
 }
 
 // ------------------------------------------- annotated tags and materialisation

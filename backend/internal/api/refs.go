@@ -131,10 +131,16 @@ func writeRefError(w http.ResponseWriter, what, name string, err error) {
 	case errors.Is(err, gitrepo.ErrInvalidRefName):
 		badRequest(w, what+" "+strconv.Quote(name)+" "+err.Error())
 	case errors.Is(err, errWALConflict):
-		// Never 409 here: see the doc comment. Nothing was written -- the
-		// local ref was rolled back -- so the operation is safe to repeat.
+		// Never 409 here: see the doc comment. The local change was rolled
+		// back, so the operation is safe to repeat.
+		//
+		// "unchanged" rather than "not written": the delete handlers share
+		// this helper, and a refused delete did not fail to write anything --
+		// it failed to remove something. Unchanged is the one word true of
+		// both, and it is also the fact the caller needs: whatever they asked
+		// for did not happen, and retrying cannot double-apply.
 		serviceOverloadedWith(w, refContentionRetryAfter,
-			what+" "+name+" was not written: another writer is updating this repository; retry")
+			what+" "+name+" is unchanged: another writer is updating this repository; retry")
 	default:
 		internalError(w, "write "+what, err)
 	}
