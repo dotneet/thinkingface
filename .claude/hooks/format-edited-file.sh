@@ -58,10 +58,13 @@ case "$file" in
 		fi
 		;;
 	"$project"/frontend/*.ts | "$project"/frontend/*.tsx)
+		# Only the biome from node_modules -- the version bun.lock pins. The
+		# `bunx --bun @biomejs/biome` fallback that used to sit here fetched an
+		# unpinned biome from the registry and ran it on the working tree
+		# (docs/dev/supply-chain.md). Without node_modules the file is simply
+		# left unformatted; `make check` still catches it.
 		if [ -x "$project/frontend/node_modules/.bin/biome" ]; then
 			(cd "$project/frontend" && ./node_modules/.bin/biome format --write "$file" >/dev/null 2>&1) || true
-		elif command -v bunx >/dev/null 2>&1; then
-			(cd "$project/frontend" && bunx --bun @biomejs/biome format --write "$file" >/dev/null 2>&1) || true
 		fi
 		;;
 esac
