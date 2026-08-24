@@ -78,7 +78,14 @@ export function DeleteFileButton({
       </Button>
       <ConfirmDialog
         open={open}
-        onClose={() => setOpen(false)}
+        // Ignored while the delete is in flight, the same way the upload
+        // dialog refuses to close mid-send. Escape or a backdrop click would
+        // otherwise hide the dialog while deleteFile kept running and still
+        // navigated on success -- a dismiss that reads as a cancel for a
+        // destructive action that was never cancelled.
+        onClose={() => {
+          if (!deleting) setOpen(false);
+        }}
         onConfirm={() => void confirm()}
         title={t("repo.deleteFile.title")}
         description={

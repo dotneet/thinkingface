@@ -46,15 +46,18 @@ export function FileDropZone({
   return (
     <label
       onDragOver={(e) => {
-        if (disabled) return;
-        // Without preventDefault the browser navigates to the dropped file.
+        // preventDefault before the disabled check, not after: without it the
+        // browser navigates to the dropped file, and being disabled is
+        // exactly when that hurts most -- an upload is in flight, so the
+        // navigation aborts the XHR and strands whatever it had staged.
         e.preventDefault();
+        if (disabled) return;
         setDragging(true);
       }}
       onDragLeave={() => setDragging(false)}
       onDrop={(e) => {
-        if (disabled) return;
         e.preventDefault();
+        if (disabled) return;
         setDragging(false);
         emit(e.dataTransfer?.files ?? null);
       }}
