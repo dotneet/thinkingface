@@ -94,6 +94,7 @@ export async function RepoTree({
             path={path}
             refs={refsResult.ok ? refsResult.data : undefined}
             target="tree"
+            canCreateBranch={repo.can_write}
           />
         </div>
         {/* Above the listing rather than inside it, so an empty repository --

@@ -1,5 +1,6 @@
 import { Archive } from "lucide-react";
 import { DefaultBranchForm } from "@/components/repo/default-branch-form";
+import { RefsManager } from "@/components/repo/refs-manager";
 import { RepoBreadcrumb } from "@/components/repo/repo-breadcrumb";
 import { RepoDangerZone } from "@/components/repo/repo-danger-zone";
 import { RepoNotFoundOrLogin } from "@/components/repo/repo-not-found";
@@ -13,7 +14,7 @@ import { errorMessage } from "@/lib/api-error-message";
 import { getT } from "@/lib/i18n/server";
 import { repoBase } from "@/lib/paths";
 import { redirectIfRepoMoved } from "@/lib/repo-redirect";
-import { getRepo } from "@/lib/repos";
+import { getRefs, getRepo } from "@/lib/repos";
 import { authHeaders } from "@/lib/server-auth";
 import type { RepoKind } from "@/types/api";
 
@@ -28,8 +29,10 @@ export async function RepoSettings({
 }) {
   // Forward the tf_session cookie so the request is authenticated and
   // resolves instead of 404ing (see lib/server-auth.ts).
-  const [result, t] = await Promise.all([
-    getRepo(kind, ns, name, { headers: await authHeaders() }),
+  const headers = await authHeaders();
+  const [result, refsResult, t] = await Promise.all([
+    getRepo(kind, ns, name, { headers }),
+    getRefs(kind, ns, name, { headers }),
     getT(),
   ]);
 
@@ -92,6 +95,40 @@ export async function RepoSettings({
                 defaultBranch={repo.default_branch}
                 archived={repo.archived}
               />
+            </div>
+          </Card>
+
+          {/* Branches and tags. The four HF-compatible endpoints behind this
+              have always existed; only the UI for them was missing. */}
+          <Card>
+            <CardHeader>
+              <CardTitle>{t("repo.refs.manageTitle")}</CardTitle>
+            </CardHeader>
+            <p className="mt-1 text-sm text-fg-subtle">{t("repo.refs.manageDescription")}</p>
+            <div className="mt-4">
+              {repo.archived ? (
+                <p className="text-sm text-fg-subtle">{t("repo.refs.blockedByArchive")}</p>
+              ) : !repo.can_write ? (
+                <p className="text-sm text-fg-subtle">{t("repo.refs.noPermission")}</p>
+              ) : !refsResult.ok ? (
+                // A failed refs fetch is not an empty repository: say which
+                // one it is rather than rendering two empty lists
+                // (DESIGN.md §9).
+                <ErrorState
+                  title={t("ui.errorStateTitle")}
+                  message={errorMessage(t, refsResult)}
+                  hint={t("repo.overview.backendHint")}
+                />
+              ) : (
+                <RefsManager
+                  kind={kind}
+                  ns={ns}
+                  name={name}
+                  defaultBranch={repo.default_branch}
+                  branches={refsResult.data.branches}
+                  tags={refsResult.data.tags}
+                />
+              )}
             </div>
           </Card>
 

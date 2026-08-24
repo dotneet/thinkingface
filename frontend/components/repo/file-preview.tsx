@@ -1,6 +1,7 @@
 import { ChartNoAxesCombined, Download, FileImage } from "lucide-react";
 import Link from "next/link";
 import { ModelInspector } from "@/components/model/model-inspector";
+import { MarkdownPreview } from "@/components/repo/markdown-preview";
 import { TabularPreview } from "@/components/repo/tabular-preview";
 import { TextPreview, TruncatedNotice } from "@/components/repo/text-preview";
 import { buttonClass } from "@/components/ui/button";
@@ -173,19 +174,30 @@ export async function FilePreview({
 
   if (entry.preview === "markdown") {
     return (
-      <div className="rounded-lg border border-border bg-bg-raised p-6">
-        <Markdown
-          source={content}
-          assetBaseUrl={assetBaseUrl}
-          repoRootUrl={repoRootUrl}
-          linkContext={linkContext}
-          // Without this a README opened from the file tree starts with the
-          // card's `---\nlicense: mit\n---`, which CommonMark reads as a
-          // thematic break plus a setext heading rather than metadata.
-          stripFrontmatter
-        />
-        {raw.truncated && <TruncatedNotice downloadUrl={downloadUrl} />}
-      </div>
+      <MarkdownPreview
+        source={content}
+        truncated={raw.truncated}
+        downloadUrl={downloadUrl}
+        fileName={entry.name}
+        // Rendered here rather than inside the client wrapper so react-markdown
+        // and its plugin chain stay on the server; the toggle only chooses
+        // which of the two already-built panels is on screen.
+        rendered={
+          <div className="rounded-lg border border-border bg-bg-raised p-6">
+            <Markdown
+              source={content}
+              assetBaseUrl={assetBaseUrl}
+              repoRootUrl={repoRootUrl}
+              linkContext={linkContext}
+              // Without this a README opened from the file tree starts with the
+              // card's `---\nlicense: mit\n---`, which CommonMark reads as a
+              // thematic break plus a setext heading rather than metadata.
+              stripFrontmatter
+            />
+            {raw.truncated && <TruncatedNotice downloadUrl={downloadUrl} />}
+          </div>
+        }
+      />
     );
   }
 
@@ -206,5 +218,14 @@ export async function FilePreview({
     );
   }
 
-  return <TextPreview content={content} truncated={raw.truncated} downloadUrl={downloadUrl} />;
+  return (
+    <TextPreview
+      content={content}
+      truncated={raw.truncated}
+      downloadUrl={downloadUrl}
+      // Drives the syntax highlighting: the extension (or a well-known
+      // extensionless name) is the only signal used, never the contents.
+      fileName={entry.name}
+    />
+  );
 }

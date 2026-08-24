@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Figtree, IBM_Plex_Mono } from "next/font/google";
+import { pageTitle } from "@/app/page-metadata";
 import { Providers } from "@/app/providers";
 import { ThemeScript } from "@/app/theme-script";
 import { SiteHeader } from "@/components/site-header";
@@ -23,7 +24,7 @@ const monoFont = IBM_Plex_Mono({
 export async function generateMetadata(): Promise<Metadata> {
   const t = await getT();
   return {
-    title: "🤔 Thinking Face",
+    title: pageTitle(),
     description: t("meta.description"),
   };
 }

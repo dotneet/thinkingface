@@ -1,6 +1,8 @@
 import { FlaskConical } from "lucide-react";
+import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { titleMetadata } from "@/app/page-metadata";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { TimeText } from "@/components/ui/time-text";
@@ -14,6 +16,15 @@ import { redirectIfRepoMoved } from "@/lib/repo-redirect";
 import { authHeaders } from "@/lib/server-auth";
 
 export const dynamic = "force-dynamic";
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ ns: string; repo: string }>;
+}): Promise<Metadata> {
+  const [{ ns, repo }, t] = await Promise.all([params.then(decodeRouteParams), getT()]);
+  return titleMetadata(t("meta.experiments"), `${ns}/${repo}`);
+}
 
 export default async function ExperimentRepoPage({
   params,

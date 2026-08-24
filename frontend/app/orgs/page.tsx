@@ -1,6 +1,8 @@
 import { Building2, Plus } from "lucide-react";
+import type { Metadata } from "next";
 import Link from "next/link";
 import { Suspense } from "react";
+import { titleMetadata } from "@/app/page-metadata";
 import { OrgCard } from "@/components/orgs/org-card";
 import { OrgSearch } from "@/components/orgs/org-search";
 import { buttonClass } from "@/components/ui/button";
@@ -15,6 +17,11 @@ import { listOrgs } from "@/lib/orgs";
 import { authHeaders } from "@/lib/server-auth";
 
 export const dynamic = "force-dynamic";
+
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getT();
+  return titleMetadata(t("meta.organizations"));
+}
 
 const LIMIT = 30;
 

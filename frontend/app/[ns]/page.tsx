@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { notFound, permanentRedirect } from "next/navigation";
+import { pageTitle } from "@/app/page-metadata";
 import { NamespaceOverview, type NamespaceSearch } from "@/components/namespace/namespace-overview";
 import { ErrorState } from "@/components/ui/error-state";
 import { isNotFound } from "@/lib/api";
@@ -18,10 +19,10 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { ns } = decodeRouteParams(await params);
   const result = await getNamespace(ns, { headers: await authHeaders() });
-  if (!result.ok) return { title: `${ns} · 🤔 Thinking Face` };
+  if (!result.ok) return { title: pageTitle(ns) };
   const { name, display_name, description } = result.data.namespace;
   return {
-    title: `${display_name || name} · 🤔 Thinking Face`,
+    title: pageTitle(display_name || name),
     description: description || undefined,
   };
 }

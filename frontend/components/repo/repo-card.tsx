@@ -68,7 +68,14 @@ export async function RepoCard({ repo }: { repo: RepoSummary }) {
       )}
 
       <div className="mt-1 flex items-center gap-3 text-xs font-medium text-fg-subtle">
-        <span className="flex items-center gap-1 tabular-nums">
+        {/* A bare number next to a download glyph reads as "how many people
+            took this repository", which is not what the server counts — only
+            single-file reads through the resolve endpoint land here. The
+            tooltip is the same one the repository sidebar carries. */}
+        <span
+          className="flex items-center gap-1 tabular-nums"
+          title={t("repo.sidebar.downloadsHint")}
+        >
           <Download size={12} />
           {formatCompactNumber(repo.downloads)}
         </span>

@@ -1,4 +1,6 @@
+import type { Metadata } from "next";
 import Link from "next/link";
+import { titleMetadata } from "@/app/page-metadata";
 import { RunDetail } from "@/components/experiments/run-detail";
 import { ErrorState } from "@/components/ui/error-state";
 import { errorMessage } from "@/lib/api-error-message";
@@ -10,6 +12,18 @@ import { getRepo } from "@/lib/repos";
 import { authHeaders } from "@/lib/server-auth";
 
 export const dynamic = "force-dynamic";
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ ns: string; repo: string; project: string; run: string }>;
+}): Promise<Metadata> {
+  // The run is the whole point of this screen, so it goes in even though that
+  // means dropping the "Experiments" root the breadcrumb starts with — four
+  // parts plus the brand is longer than any tab will show.
+  const { ns, repo, project, run } = decodeRouteParams(await params);
+  return titleMetadata(`${ns}/${repo}`, project, run);
+}
 
 export default async function ExperimentRunPage({
   params,

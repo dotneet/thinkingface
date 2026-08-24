@@ -38,14 +38,20 @@ export const repo = {
   sidebar: {
     organization: "組織",
     userNamespace: "ユーザー",
-    downloads: "ダウンロード",
-    downloads30d: "ダウンロード（30日）",
+    // 「ダウンロード」ではなく「ファイルダウンロード」。カウント対象は resolve
+    // エンドポイントだけなので、リポジトリ全体の指標のように見せない。
+    downloads: "ファイルダウンロード",
+    downloads30d: "ファイルダウンロード（30日）",
+    downloadsHint:
+      "このサーバーが配信した単一ファイルのダウンロード数です（resolve URL・hf_hub_download・snapshot_download）。git clone・git lfs pull・バケットからの直接取得は数えていません。",
     size: "サイズ",
     files: "ファイル数",
     license: "ライセンス",
     updated: "更新日",
-    tags: "タグ",
+    // カードのトピックタグ。git のタグとは別物。
+    tags: "トピック",
     branches: "ブランチ",
+    gitTags: "git タグ",
     gcsAccess: {
       label: "GCS アクセス",
       emptyTitle: "インデックス済みファイルがありません",
@@ -59,6 +65,78 @@ export const repo = {
       duckdbLabel: "DuckDB",
       copyDuckdb: "クエリをコピー",
     },
+  },
+  // clone URL のブロック。SSH 鍵を登録できるのに、その鍵で使う URL が
+  // どこにも出ていなかった（ポートは環境依存で推測できない）。
+  clone: {
+    title: "クローン",
+    protocolLabel: "クローンのプロトコル",
+    http: "HTTP",
+    ssh: "SSH",
+    sshHint: "SSH の認証は公開鍵のみです。設定 → SSH 鍵 で公開鍵を登録してください。",
+    sshLfsHint:
+      "Git LFS の転送は常に HTTP 経由です。LFS ファイルを含むリポジトリは HTTP でクローンしてください。",
+  },
+  // 「このモデル / データセットを使う」: huggingface_hub・datasets・transformers を
+  // このサーバーに向けるスニペット。
+  usage: {
+    labelModel: "このモデルを使う",
+    labelDataset: "このデータセットを使う",
+    intro:
+      "huggingface_hub・datasets・transformers はコードを変えずにそのまま動きます。HF_ENDPOINT でこのサーバーを指すだけです。",
+    envLabel: "環境変数",
+    envHint:
+      "Python の起動前に export してください。huggingface_hub はエンドポイントを import 時に一度だけ読み込みます。",
+    copyEnv: "環境変数をコピー",
+    tokenHint: "トークン認証を使う場合は HF_TOKEN=… も併せて設定してください。",
+    datasetsLabel: "datasets",
+    downloadLabel: "huggingface_hub",
+    transformersLabel: "transformers",
+    transformersHint:
+      "AutoModel / AutoTokenizer は、このモデルに合ったタスク別クラスに置き換えてください。",
+    copySnippet: "スニペットをコピー",
+    revisionHint: "revision=… でブランチ・タグ・コミットを固定できます。ここでは {rev} です。",
+  },
+  // Web UI からのブランチ / タグの作成・削除。HF 互換 API には最初から
+  // 4 本そろっていて、UI だけが無かった。
+  refs: {
+    newBranch: "新しいブランチ",
+    newBranchTitle: "ブランチを作成",
+    newBranchBody: "新しいブランチは {rev} を起点に作成されます。",
+    branchNameLabel: "ブランチ名",
+    branchNamePlaceholder: "feature/my-change",
+    createBranch: "ブランチを作成",
+    creating: "作成中…",
+    cancel: "キャンセル",
+    manageTitle: "ブランチとタグ",
+    manageDescription:
+      "タグはリビジョンに名前を付け、その名前でダウンロードできるようにします。ref を削除しても消えるのは名前だけで、コミットは残ります。",
+    branchesTitle: "ブランチ",
+    tagsTitle: "タグ",
+    noBranches: "このリポジトリにはまだブランチがありません。",
+    noTags: "このリポジトリにはまだタグがありません。",
+    defaultBadge: "デフォルト",
+    defaultUndeletable: "デフォルトブランチは削除できません。",
+    newTagTitle: "タグを作成",
+    tagNameLabel: "タグ名",
+    tagNamePlaceholder: "v1.0",
+    tagRevLabel: "タグを付けるリビジョン",
+    tagMessageLabel: "メッセージ（任意）",
+    tagMessageHint: "メッセージを付けると、git tag -m と同じく注釈付きタグになります。",
+    createTag: "タグを作成",
+    deleteBranchAction: "ブランチ {name} を削除",
+    deleteTagAction: "タグ {name} を削除",
+    deleteBranchTitle: "このブランチを削除しますか？",
+    deleteBranchBody:
+      "ブランチ {name} を {repo} から削除します。コミット自体は、どこからも参照されなくなったものを git が GC するまで残ります。",
+    deleteTagTitle: "このタグを削除しますか？",
+    deleteTagBody:
+      "タグ {name} を {repo} から削除します。この名前で固定している参照は解決できなくなります。",
+    confirmDelete: "削除",
+    deleting: "削除中…",
+    blockedByArchive:
+      "ブランチやタグを変更する前に、このリポジトリのアーカイブを解除してください。",
+    noPermission: "ブランチとタグを変更するには、このリポジトリへの書き込み権限が必要です。",
   },
   readme: {
     emptyTitle: "README がありません",
@@ -131,6 +209,8 @@ export const repo = {
     tags: "タグ",
     filterLabel: "ブランチ・タグを絞り込み",
     noMatches: "該当するブランチ・タグがありません",
+    // 各 ref が指すコミット。API は最初から返していた（RefUI.target_oid）。
+    targetTitle: "コミット {oid} を指しています",
   },
   commitBar: {
     history: "履歴",
@@ -149,6 +229,21 @@ export const repo = {
   blob: {
     fileNotFound: "ツリー一覧にファイルが見つかりません。",
     edit: "編集",
+    raw: "Raw",
+    download: "ダウンロード",
+  },
+  // ソースファイルのプレビュー。行番号の欄と、強調表示を諦めた理由。
+  codePreview: {
+    lineLink: "{line} 行目",
+    tooManyLines:
+      "このファイルは {lines} 行あり、プレビューで強調表示できる {limit} 行を超えています。行番号なしのプレーンテキストとして表示しています。",
+    tooLarge:
+      "このファイルはブラウザで強調表示するには大きすぎるため、行番号なしのプレーンテキストとして表示しています。",
+  },
+  markdownPreview: {
+    previewMode: "プレビュー表示",
+    modeRendered: "レンダリング",
+    modeRaw: "Raw",
   },
   preview: {
     emptyFile: "このファイルは空です",

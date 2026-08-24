@@ -1,7 +1,14 @@
+import type { Metadata } from "next";
+import { titleMetadata } from "@/app/page-metadata";
 import { TransfersManager } from "@/components/settings/transfers-manager";
 import { getT } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
+
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getT();
+  return titleMetadata(t("meta.settings"), t("meta.transfers"));
+}
 
 export default async function TransfersPage() {
   const t = await getT();

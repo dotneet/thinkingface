@@ -3,9 +3,6 @@
 // `as const` (doing so would turn it into literal types and force ja to use
 // the exact same strings).
 export const common = {
-  meta: {
-    description: "Datasets, models, and experiment tracking.",
-  },
   nav: {
     datasets: "Datasets",
     models: "Models",

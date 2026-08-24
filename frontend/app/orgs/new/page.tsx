@@ -1,4 +1,6 @@
+import type { Metadata } from "next";
 import Link from "next/link";
+import { titleMetadata } from "@/app/page-metadata";
 import { CreateOrgForm } from "@/components/orgs/create-org-form";
 import { buttonClass } from "@/components/ui/button";
 import { ErrorState } from "@/components/ui/error-state";
@@ -6,6 +8,11 @@ import { getT } from "@/lib/i18n/server";
 import { getCurrentUser } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
+
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getT();
+  return titleMetadata(t("meta.newOrganization"));
+}
 
 export default async function NewOrgPage() {
   const [user, t] = await Promise.all([getCurrentUser(), getT()]);

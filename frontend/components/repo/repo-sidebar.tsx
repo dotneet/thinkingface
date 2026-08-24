@@ -7,9 +7,10 @@ import {
   User as UserIcon,
 } from "lucide-react";
 import Link from "next/link";
+import { CloneUrlPanel } from "@/components/repo/clone-url-panel";
 import { GcsAccessDialog } from "@/components/repo/gcs-access-dialog";
+import { UsageDialog } from "@/components/repo/usage-dialog";
 import { badgeClass } from "@/components/ui/badge";
-import { CodeBlock } from "@/components/ui/code-block";
 import { TimeText } from "@/components/ui/time-text";
 import { formatBytes, formatNumber } from "@/lib/format";
 import { getT } from "@/lib/i18n/server";
@@ -38,14 +39,22 @@ export async function RepoSidebar({ repo }: { repo: RepoDetail }) {
             {repo.namespace}
           </Link>
         </div>
+        {/* Both counters carry the same hint: the number comes from the
+            resolve endpoint alone, so a `git clone` of the whole repository
+            adds nothing to it while opening a README with five images used
+            to add five. Naming the row "File downloads" and spelling out
+            what is counted is the honest version of a figure this
+            prominent (it is also a sort key on the listings). */}
         <MetaRow
           icon={Download}
           label={t("repo.sidebar.downloads")}
+          hint={t("repo.sidebar.downloadsHint")}
           value={formatNumber(repo.downloads)}
         />
         <MetaRow
           icon={Download}
           label={t("repo.sidebar.downloads30d")}
+          hint={t("repo.sidebar.downloadsHint")}
           value={formatNumber(repo.downloads_last_30_days)}
         />
         <MetaRow
@@ -89,6 +98,13 @@ export async function RepoSidebar({ repo }: { repo: RepoDetail }) {
         </div>
       )}
 
+      <UsageDialog
+        kind={repo.kind}
+        ns={repo.namespace}
+        name={repo.name}
+        rev={repo.default_branch}
+      />
+
       <GcsAccessDialog
         kind={repo.kind}
         ns={repo.namespace}
@@ -96,7 +112,7 @@ export async function RepoSidebar({ repo }: { repo: RepoDetail }) {
         rev={repo.default_branch}
       />
 
-      <CodeBlock value={`git clone ${repo.clone_url}`} label="git clone" />
+      <CloneUrlPanel cloneUrl={repo.clone_url} sshCloneUrl={repo.ssh_clone_url} />
 
       {repo.branches.length > 0 && (
         <div>
@@ -122,6 +138,31 @@ export async function RepoSidebar({ repo }: { repo: RepoDetail }) {
           </div>
         </div>
       )}
+
+      {/* git tags, which the API has always returned as `tags_refs` and which
+          nothing rendered. The "Tags" heading above is the card's topics — a
+          different thing entirely, now labelled as such. */}
+      {repo.tags_refs.length > 0 && (
+        <div>
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-fg-subtle">
+            {t("repo.sidebar.gitTags")}
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {repo.tags_refs.map((tag) => (
+              <Link
+                key={tag}
+                href={repoTreeHref(repo.kind, repo.namespace, repo.name, tag)}
+                className={badgeClass({
+                  className: "bg-transparent hover:border-border-strong hover:text-fg",
+                })}
+              >
+                <TagIcon size={11} />
+                {tag}
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
     </aside>
   );
 }
@@ -129,14 +170,22 @@ export async function RepoSidebar({ repo }: { repo: RepoDetail }) {
 function MetaRow({
   icon: Icon,
   label,
+  hint,
   value,
 }: {
   icon: typeof Download;
   label: string;
+  /**
+   * What the number actually measures, when the label alone would overstate
+   * it. `title` on the row rather than a bespoke tooltip: there is no tooltip
+   * primitive, and inventing one here would break DESIGN.md §5's rule that a
+   * new look goes into `components/ui/` first.
+   */
+  hint?: string;
   value: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between">
+    <div className="flex items-center justify-between" title={hint}>
       <span className="flex items-center gap-1.5 text-fg-subtle">
         <Icon size={13} />
         {label}

@@ -33,7 +33,7 @@ export type MarkdownProps = {
   linkContext?: MarkdownLinkContext;
   /** Drop a leading YAML front matter block instead of rendering it as text. */
   stripFrontmatter?: boolean;
-  /** Extra classes on the wrapping element (the wrapper always carries `tf-markdown`). */
+  /** Extra classes on the wrapper (which always carries `tf-markdown tf-hljs`). */
   className?: string;
 };
 
@@ -143,7 +143,9 @@ export function Markdown({
   className,
 }: MarkdownProps) {
   return (
-    <div className={cn("tf-markdown", className)}>
+    // `tf-hljs` carries the highlight.js token colours, which the source-file
+    // preview needs too and which therefore no longer hang off `tf-markdown`.
+    <div className={cn("tf-markdown tf-hljs", className)}>
       <ReactMarkdown
         remarkPlugins={markdownRemarkPlugins(stripFrontmatter)}
         rehypePlugins={markdownRehypePlugins()}

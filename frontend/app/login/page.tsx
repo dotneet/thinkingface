@@ -1,7 +1,14 @@
+import type { Metadata } from "next";
+import { titleMetadata } from "@/app/page-metadata";
 import { LoginForm } from "@/components/auth/login-form";
 import { getT } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
+
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getT();
+  return titleMetadata(t("meta.signIn"));
+}
 
 export default async function LoginPage({
   searchParams,

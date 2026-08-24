@@ -1,4 +1,4 @@
-import { Pencil } from "lucide-react";
+import { Download, FileCode2, Pencil } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { CommitBar } from "@/components/repo/commit-bar";
@@ -104,31 +104,60 @@ export async function RepoBlob({
           <div className="flex flex-wrap items-center gap-2 text-sm text-fg-subtle">
             <span className="tabular-nums">{formatBytes(entry.size)}</span>
             {entry.lfs && <Badge tone="accent">LFS</Badge>}
-            {repo.can_write && repo.branches.includes(rev) && (
-              <div className="ml-auto flex items-center gap-3">
-                {/* Editing is limited to text this browser can round-trip;
-                    deleting only drops a tree entry, so it is offered for
-                    every file, LFS pointers included. */}
-                {(entry.preview === "text" || entry.preview === "markdown") && !entry.lfs && (
-                  <Link
-                    href={repoEditHref(kind, ns, name, rev, entry.path)}
-                    className="flex items-center gap-1.5 text-accent hover:underline"
-                  >
-                    <Pencil size={14} />
-                    {t("repo.blob.edit")}
-                  </Link>
-                )}
-                <DeleteFileButton
-                  kind={kind}
-                  ns={ns}
-                  name={name}
-                  rev={rev}
-                  path={path}
-                  baseOid={entry.oid}
-                  lfs={entry.lfs}
-                />
-              </div>
-            )}
+            {/* Always present, whatever the file type and whoever is looking:
+                the text and Markdown previews used to offer no way out at all,
+                so "open config.json, take the contents" dead-ended on screen.
+                Both point at the canonical resolve URL — the one a `curl` would
+                use — and the group keeps its place in the row so the Edit and
+                Delete controls beside it never shift (DESIGN.md §8). */}
+            <div className="ml-auto flex items-center gap-3">
+              <a
+                href={downloadUrl}
+                // The API serves every blob as Content-Disposition: attachment
+                // (backend/internal/api/resolve.go), so this saves the file
+                // rather than rendering it; the new tab keeps the reader on the
+                // page either way.
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 text-accent hover:underline"
+              >
+                <FileCode2 size={14} />
+                {t("repo.blob.raw")}
+              </a>
+              <a
+                href={downloadUrl}
+                download={entry.name}
+                className="flex items-center gap-1.5 text-accent hover:underline"
+              >
+                <Download size={14} />
+                {t("repo.blob.download")}
+              </a>
+              {repo.can_write && repo.branches.includes(rev) && (
+                <>
+                  {/* Editing is limited to text this browser can round-trip;
+                      deleting only drops a tree entry, so it is offered for
+                      every file, LFS pointers included. */}
+                  {(entry.preview === "text" || entry.preview === "markdown") && !entry.lfs && (
+                    <Link
+                      href={repoEditHref(kind, ns, name, rev, entry.path)}
+                      className="flex items-center gap-1.5 text-accent hover:underline"
+                    >
+                      <Pencil size={14} />
+                      {t("repo.blob.edit")}
+                    </Link>
+                  )}
+                  <DeleteFileButton
+                    kind={kind}
+                    ns={ns}
+                    name={name}
+                    rev={rev}
+                    path={path}
+                    baseOid={entry.oid}
+                    lfs={entry.lfs}
+                  />
+                </>
+              )}
+            </div>
           </div>
           {lastCommit && (
             <CommitBar

@@ -93,6 +93,7 @@ export async function RepoCommits({
         path={pathSegments}
         refs={refsResult.ok ? refsResult.data : undefined}
         target="commits"
+        canCreateBranch={repo.can_write}
       />
 
       {path && (

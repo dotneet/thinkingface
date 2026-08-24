@@ -1,9 +1,16 @@
+import type { Metadata } from "next";
 import { headers } from "next/headers";
+import { titleMetadata } from "@/app/page-metadata";
 import { LanguageSettings } from "@/components/settings/language-settings";
 import { matchAcceptLanguage } from "@/lib/i18n";
 import { getLocalePreference, getT } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
+
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getT();
+  return titleMetadata(t("meta.settings"), t("meta.language"));
+}
 
 export default async function LanguagePage() {
   const [t, pref, h] = await Promise.all([getT(), getLocalePreference(), headers()]);
