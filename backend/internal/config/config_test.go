@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // setBase supplies the minimum environment Load requires, so each test only
@@ -89,8 +90,37 @@ func TestLoad_CacheBudgetsHaveDefaultsAndParse(t *testing.T) {
 	if c.GitCacheBytes != 1<<20 {
 		t.Fatalf("GitCacheBytes = %d, want %d", c.GitCacheBytes, 1<<20)
 	}
-	if c.ViewerCacheBytes != 4<<30 {
-		t.Fatalf("ViewerCacheBytes default = %d, want %d", c.ViewerCacheBytes, int64(4<<30))
+	if c.ViewerMetadataCacheBytes != 256<<20 {
+		t.Fatalf("ViewerMetadataCacheBytes default = %d, want %d", c.ViewerMetadataCacheBytes, int64(256<<20))
+	}
+}
+
+// SignedURLTTL is the floor and SignedURLMaxTTL the ceiling of a signed
+// transfer URL's size-derived lifetime; the ceiling must default well above
+// the floor or every upload would clamp to the same duration.
+func TestLoad_SignedURLTTLDefaultsToFloorAndCeiling(t *testing.T) {
+	setBase(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.SignedURLTTL != time.Hour {
+		t.Fatalf("SignedURLTTL default = %v, want %v", c.SignedURLTTL, time.Hour)
+	}
+	if c.SignedURLMaxTTL != 12*time.Hour {
+		t.Fatalf("SignedURLMaxTTL default = %v, want %v", c.SignedURLMaxTTL, 12*time.Hour)
+	}
+}
+
+func TestLoad_SignedURLMaxTTLParsesFromEnv(t *testing.T) {
+	setBase(t)
+	t.Setenv("TF_SIGNED_URL_MAX_TTL", "6h")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.SignedURLMaxTTL != 6*time.Hour {
+		t.Fatalf("SignedURLMaxTTL = %v, want %v", c.SignedURLMaxTTL, 6*time.Hour)
 	}
 }
 

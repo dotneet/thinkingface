@@ -2,9 +2,25 @@
 // backend and exposes their schema and row data as plain Go values that are
 // always safe to pass to encoding/json.
 //
-// Reader downloads Parquet files into a local disk cache (an LRU keyed by
-// object key) before reading them with github.com/parquet-go/parquet-go, a
-// pure-Go Parquet implementation -- no cgo or external processes involved.
+// Reader never downloads an object. It opens each file through an
+// io.ReaderAt that turns every read into a ranged GET against the object
+// store (objectreader.go), and hands that to
+// github.com/parquet-go/parquet-go, a pure-Go Parquet implementation -- no
+// cgo or external processes involved. That is not a micro-optimisation: this
+// hub serves datasets well past 10 GB, the scratch filesystem on Cloud Run is
+// memory-backed, and Schema() is called on every parquet file of every push
+// by the syncer. Downloading a file to answer "what are its columns?" meant
+// one 10 GB dataset could take the process down without anyone opening a
+// browser.
+//
+// Round trips are what a ranged design has to pay for instead, so they are
+// budgeted deliberately: parquet-go is opened with OptimisticRead so the
+// footer arrives in one large read rather than a chain of small ones, that
+// read is sized to match the object tail Reader has already cached in
+// memory (an LRU across keys, so repeated opens of the same file are free),
+// and pages are prefetched asynchronously. The page index is deliberately
+// *not* skipped -- prune.go reads its min/max statistics.
+//
 // Two kinds of row-group skipping keep callers from paying for data they did
 // not ask for. Rows() skips by *position*: row groups entirely outside the
 // requested [offset, offset+limit) window are never decoded. Scan() skips by
@@ -17,11 +33,8 @@ package viewer
 import (
 	"context"
 	"fmt"
-	"os"
-	"sync"
 
 	"github.com/parquet-go/parquet-go"
-	"golang.org/x/sync/singleflight"
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
 	"github.com/dotneet/thinkingface/backend/internal/storage"
@@ -57,58 +70,76 @@ type Rows struct {
 }
 
 // Reader reads parquet files referenced by object keys in a storage.Storage
-// backend, transparently caching downloaded files on local disk.
+// backend, over ranged reads, holding only their metadata in memory.
 //
 // A Reader is safe for concurrent use by multiple goroutines.
 type Reader struct {
-	st            storage.Storage
-	cacheDir      string
-	maxCacheBytes int64
-
-	group singleflight.Group
-	mu    sync.Mutex // guards cache eviction bookkeeping
+	st   storage.Storage
+	meta *tailCache
 }
 
-// New returns a Reader that downloads parquet files referenced by st into
-// cacheDir (created if necessary), evicting the least-recently-used cache
-// entries once the directory's total size would exceed maxCacheBytes. A
-// maxCacheBytes <= 0 disables the size limit.
-func New(st storage.Storage, cacheDir string, maxCacheBytes int64) *Reader {
-	_ = os.MkdirAll(cacheDir, 0o755)
-	return &Reader{st: st, cacheDir: cacheDir, maxCacheBytes: maxCacheBytes}
+// New returns a Reader that reads the parquet objects in st through range
+// requests, keeping at most metadataCacheBytes of parquet metadata (object
+// tails: footer and page index) on the heap across keys. The bound is a heap
+// bound, not a disk one -- nothing is written to the filesystem. A
+// metadataCacheBytes <= 0 turns the cache off rather than making it
+// unbounded.
+func New(st storage.Storage, metadataCacheBytes int64) *Reader {
+	return &Reader{st: st, meta: newTailCache(metadataCacheBytes)}
 }
 
-// openParquetFile ensures key is cached locally and opens it. The returned
-// *os.File must be closed by the caller once done with the *parquet.File
-// (which holds it as its backing reader).
-func (r *Reader) openParquetFile(ctx context.Context, key string) (*parquet.File, *os.File, error) {
-	path, size, err := r.ensureCached(ctx, key)
+// openParquetFile opens key for reading over range requests. The returned
+// *parquet.File owns no OS resources, so there is nothing for the caller to
+// close; it must not outlive ctx, which every range request it makes is
+// issued under.
+func (r *Reader) openParquetFile(ctx context.Context, key string) (*parquet.File, error) {
+	entry, err := r.meta.load(ctx, r.st, key)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, nil, fmt.Errorf("viewer: open cache file for %s: %w", key, err)
+	rd := &objectReader{
+		ctx:        ctx,
+		st:         r.st,
+		key:        key,
+		size:       entry.size,
+		tailOffset: entry.tailOffset,
+		tail:       entry.tail,
 	}
 
-	pf, err := parquet.OpenFile(f, size)
+	pf, err := parquet.OpenFile(rd, entry.size,
+		// Read the footer region in one large read instead of an 8-byte
+		// probe followed by a second read, and size that read to the tail
+		// already cached in memory so it costs no request at all.
+		parquet.OptimisticRead(true),
+		parquet.ReadBufferSize(int(footerProbeSize(entry.size))),
+		// Prefetch pages in the background: with a network round trip
+		// between pages, waiting for each one in turn dominates.
+		parquet.FileReadMode(parquet.ReadModeAsync),
+		// Nothing here probes bloom filters, and reading their headers costs
+		// a seek per column chunk. The page index is *not* skipped: prune.go
+		// prunes row groups on the min/max statistics it carries.
+		parquet.SkipBloomFilters(true),
+		// The header magic was already checked against the cached tail in
+		// fetchTail; letting parquet-go re-read it would cost a range request
+		// per open, including opens the tail cache would otherwise answer
+		// without touching the network at all.
+		parquet.SkipMagicBytes(true),
+	)
 	if err != nil {
-		f.Close()
-		return nil, nil, fmt.Errorf("viewer: open parquet file %s: %w", key, err)
+		return nil, fmt.Errorf("viewer: open parquet file %s: %w", key, err)
 	}
 
-	return pf, f, nil
+	return pf, nil
 }
 
 // Schema returns the schema and file-level metadata of the parquet object
 // at key.
 func (r *Reader) Schema(ctx context.Context, key string) (*Schema, error) {
-	pf, f, err := r.openParquetFile(ctx, key)
+	pf, err := r.openParquetFile(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
 
 	fields := pf.Schema().Fields()
 	features := parquetFeatureHints(pf)
@@ -145,11 +176,10 @@ func (r *Reader) Rows(ctx context.Context, key string, offset int64, limit int, 
 		limit = 0
 	}
 
-	pf, f, err := r.openParquetFile(ctx, key)
+	pf, err := r.openParquetFile(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
 
 	plan, err := newRowPlan(pf, columns)
 	if err != nil {
@@ -225,11 +255,10 @@ type ScanRequest struct {
 // optimisations, and a file that supports neither (no page index, unknown
 // column) is simply read in full.
 func (r *Reader) Scan(ctx context.Context, key string, req ScanRequest, fn func(row map[string]any) error) error {
-	pf, f, err := r.openParquetFile(ctx, key)
+	pf, err := r.openParquetFile(ctx, key)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
 	plan, err := newRowPlan(pf, req.Columns)
 	if err != nil {

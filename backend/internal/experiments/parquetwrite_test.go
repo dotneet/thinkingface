@@ -28,7 +28,7 @@ func readBackRows(t *testing.T, columns []flushColumn, rows []map[string]any,
 	if err := obj.Put(ctx, key, bytes.NewReader(data), "application/octet-stream"); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	r := viewer.New(obj, t.TempDir(), 0)
+	r := viewer.New(obj, 8<<20)
 
 	schema, err := r.Schema(ctx, key)
 	if err != nil {

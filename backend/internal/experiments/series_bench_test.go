@@ -120,7 +120,7 @@ func setupBenchIndexer(b *testing.B, rows []map[string]any, metrics int, layout 
 
 	git := gitrepo.NewManager(b.TempDir())
 	obj := newMemStorage()
-	parquet := viewer.New(obj, b.TempDir(), 0)
+	parquet := viewer.New(obj, 8<<20)
 
 	if _, err := st.CreateUser(ctx, "bench", "bench@example.com", "x", false); err != nil {
 		b.Fatalf("create user: %v", err)
@@ -324,7 +324,7 @@ func setupBenchLive(b *testing.B, points int) (*Indexer, *store.Repo) {
 
 	git := gitrepo.NewManager(b.TempDir())
 	obj := newMemStorage()
-	parquet := viewer.New(obj, b.TempDir(), 0)
+	parquet := viewer.New(obj, 8<<20)
 
 	if _, err := st.CreateUser(ctx, "bench", "bench@example.com", "x", false); err != nil {
 		b.Fatalf("create user: %v", err)

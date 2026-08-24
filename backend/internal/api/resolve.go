@@ -17,6 +17,7 @@ import (
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
+	"github.com/dotneet/thinkingface/backend/internal/lfs"
 	"github.com/dotneet/thinkingface/backend/internal/storage"
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
@@ -238,7 +239,11 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 	// bytes.
 	key := storage.LFSKey(oid)
 	if s.storage.SupportsSignedURL() {
-		url, err := s.storage.SignedGetURL(r.Context(), key, s.cfg.SignedURLTTL, path.Base(entry.Path))
+		// One object, so the URL only has to outlive this single transfer --
+		// but a 10 GiB file over a slow link still needs far more than the
+		// base TTL.
+		ttl := lfs.TTLFor(s.cfg.SignedURLTTL, s.cfg.SignedURLMaxTTL, entry.LFS.Size)
+		url, err := s.storage.SignedGetURL(r.Context(), key, ttl, path.Base(entry.Path))
 		if err != nil {
 			internalError(w, "sign download url", err)
 			return
