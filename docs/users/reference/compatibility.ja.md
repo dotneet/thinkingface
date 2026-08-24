@@ -28,10 +28,19 @@ export HF_HUB_DISABLE_XET=1
 | `delete_repo()` | Yes |
 | `list_organization_members()` | Yes |
 | `get_user_overview()` / `get_organization_overview()` | Yes。それぞれ、もう一方の種類のネームスペースに対しては 404 になる |
+| `list_repo_refs()` | Yes。ブランチとタグを、それぞれの先端（tip）とともに返す |
+| `create_branch()` / `delete_branch()` | Yes。`exist_ok=True` も、`/` を含むブランチ名も動作する。デフォルトブランチは削除できない |
+| `create_tag()` / `delete_tag()` | Yes。`exist_ok=True` も動作する。`tag_message` を渡すと本物の注釈付きタグ（annotated tag）が作られる |
+| `list_repo_commits()` | Yes。新しい順で、`revision=` とページングにも対応 |
 
 `upload_folder()` と `snapshot_download()` はテストスイートで検証されていないため、推測でこの表に含
 めることはせず、あえて除外しています。どちらかに依存する場合は、利用前に自分のインスタンスで動作を確
 認してください。
+
+API 経由で作成したブランチ・タグについて 1 点だけ知っておくべきことがあります。**ブランチの作成は
+プッシュと同じバックグラウンドのインデックス処理をスケジュールしますが、タグの作成はしません** —
+`git push <branch>` と `git push <tag>` の違いとまったく同じです。[Git を使う](../guides/git.md#branches-tags-and-revisions)
+を参照してください。
 
 ## `datasets` { #datasets }
 
