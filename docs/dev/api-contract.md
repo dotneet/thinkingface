@@ -24,8 +24,10 @@ The confirmed specification between the backend (Go) and frontend (Next.js), and
   bare `HfHubHTTPError` — and, for `RepositoryNotFoundError` specifically, what makes
   `repo_exists()` / `file_exists()` / `revision_exists()` answer `False` instead of raising, since
   those three only catch that one exception:
-  - `RepoNotFound` — the repository does not exist, or exists but the caller cannot see it
-    (private/gated and unauthenticated or unauthorized). Applies uniformly across every
+  - `RepoNotFound` — the repository does not exist. That is the whole of it: there is no
+    private/gated visibility in this system, so no repository is ever hidden from a caller who
+    could otherwise reach the server, and an authenticated caller never sees a repository an
+    anonymous one does not (`docs/dev/thinkingface-design.md` §11). Applies uniformly across every
     HF-compatible read *and* write on a repository (repo-info, tree, paths-info, resolve, commits,
     preupload, commit, LFS batch) and to the equivalent Web UI route, whether the miss is the
     repository or the whole namespace — see `backend/internal/api/errors_signal_test.go`. **Not**
@@ -391,6 +393,7 @@ type AdminUser = {
   username: string
   email: string
   is_admin: boolean        // the instance-wide flag, not an organization role
+  disabled: boolean        // suspended: authenticates on no path at all
   created_at: string
 }
 ```
@@ -398,8 +401,36 @@ type AdminUser = {
 `AdminUser` deliberately has no password field of any kind. The stored bcrypt hash lives on
 `store.User` and is never copied onto a wire type.
 
-All three endpoints below run bcrypt, so all three answer the two throttling responses §1's login
-endpoint documents, and they mean the same things here: **429 `rate_limited`** when the caller's own
+#### Every `/api/v1/admin` endpoint accepts the session cookie only
+
+`requireSiteAdmin` refuses every credential except `tf_session`. An access token — of either
+scope — and HTTP Basic are **403 `session_required`**, whose message names the browser session as
+the way in. `PATCH /api/v1/me/password` and everything outside `/admin` are unaffected.
+
+A `write` token is a coarse instrument here: there are no fine-grained scopes, so before this
+check one leaked administrator token was enough to create accounts, force-reset anyone's password
+and register an SSH key that outlives the token's own revocation. Confining site administration to
+a browser someone actually signed into costs an operator nothing — the screens are in the web UI —
+and takes automation out of the blast radius entirely. Scripted administration, if it is ever
+wanted, should arrive as a token scope rather than by widening this.
+
+Two ordering details follow from where the check sits, and both are deliberate:
+
+- The `is_admin` check runs **first**, so a caller who is not an administrator gets 403
+  `forbidden` whatever credential they hold. Answering `session_required` there would be
+  misleading (signing in would not help them) and would confirm that the account behind the token
+  is an administrator.
+- On a state-changing route the read/write scope check runs **before** the session check, so an
+  administrator's *read-scoped* token is refused as 403 `forbidden` ("this token is read-only")
+  rather than `session_required`. Both are 403 and neither reaches the handler; only the sentence
+  differs.
+
+A session always carries the write scope, so there is no read-only session and the `write` flag on
+`requireSiteAdmin` no longer distinguishes anything for a caller who gets that far.
+
+The three password-writing endpoints below (`PATCH /api/v1/me/password` and the administrator's
+create and reset) run bcrypt, so all three answer the two throttling responses §1's login endpoint
+documents, and they mean the same things here: **429 `rate_limited`** when the caller's own
 per-address failure budget is spent, and **503 `overloaded`** when no bcrypt slot came free. The
 second is the server's capacity, not the caller's conduct, and must not be reported as the first.
 
@@ -432,7 +463,7 @@ Write scope required. req `{"current_password": string, "new_password": string}`
 #### `GET /api/v1/admin/users`
 
 Site administrators only (`users.is_admin`); **403** for anyone else, said out loud rather than
-hidden behind a 404. Reading is enough — a read-scoped token works.
+hidden behind a 404. Session cookie only (403 `session_required` for a token or HTTP Basic).
 
 Query: `search` (case-insensitive substring of the username *or* the email), `limit` (default
 50, capped at 200), `offset`. res 200:
@@ -445,7 +476,7 @@ Query: `search` (case-insensitive substring of the username *or* the email), `li
 
 #### `POST /api/v1/admin/users`
 
-Site administrators only, write scope. req:
+Site administrators only, session cookie, write scope. req:
 
 ```json
 { "username": "dana", "email": "dana@example.com", "password": "…", "is_admin": false }
@@ -475,22 +506,24 @@ res **201** `{"user": AdminUser}`.
 
 #### `PATCH /api/v1/admin/users/{username}`
 
-Site administrators only, write scope. req — both fields optional, an absent one is left
-unchanged:
+Site administrators only, session cookie, write scope. req — every field optional, an absent one
+is left unchanged:
 
 ```json
-{ "password": "…", "is_admin": true }
+{ "password": "…", "is_admin": true, "disabled": true }
 ```
 
 res 200 `{"user": AdminUser}`. Errors:
 
 | Status | Type | When |
 |---|---|---|
-| 400 | `bad_request` | Neither field set (a body that changes nothing is refused rather than answered 200), or an invalid `password` |
+| 400 | `bad_request` | No field set (a body that changes nothing is refused rather than answered 200), or an invalid `password` |
 | 400 | `self_demote` | An attempt to clear **your own** `is_admin`. Its own type so the UI can translate it; the web UI leaves the control off your own row, so it answers a race or a hand-made request |
+| 400 | `self_disable` | An attempt to set `disabled` on **your own** account. Same reasoning, one step stronger: the write revokes the session the request arrived on, so the mistake would lock you out mid-click with nothing left to undo it with |
 | 403 | `forbidden` | The caller is not a site administrator, or holds a read-only token |
+| 403 | `session_required` | The caller presented a token or HTTP Basic rather than a session cookie |
 | 404 | `not_found` | No account with that username |
-| 409 | `last_admin` | Clearing `is_admin` would leave the instance with no site administrator |
+| 409 | `last_admin` | Clearing `is_admin`, or setting `disabled`, would leave the instance with no usable site administrator |
 
 Everything that can fail on its own terms — validation, the target lookup, the self-demotion rule,
 and the bcrypt hash — completes before the first durable write, so a refused request cannot have
@@ -502,12 +535,140 @@ failure that an identical retry converges from.
 Setting `password` revokes the *target's* sessions (their tokens, again, survive). The
 self-demotion 400 makes the 409 unreachable through this endpoint in practice — any other
 account the caller could demote implies a second administrator exists — so `store.ErrLastSiteAdmin`
-is a guard against a concurrent demotion rather than an everyday answer.
+is a guard against a concurrent demotion rather than an everyday answer. `self_disable` does the
+same for suspension, and the disabled-administrator count is what makes it true: a suspended
+administrator does not count towards the last-administrator total, since an account that cannot
+authenticate cannot administer anything.
+
+##### `disabled`: the offboarding switch
+
+Setting `disabled` is what actually cuts an account off. It is the answer to a problem the rest of
+this section deliberately creates: a password reset does not revoke access tokens, so before this
+existed the only thing an administrator could do to a departed colleague was change a password
+that colleague no longer needed.
+
+- Suspension stops **every** identity path at once — session cookie, password login (403
+  `account_disabled` from `POST /api/v1/auth/login`, only ever reachable with the *correct*
+  password, so it enumerates nothing), HTTP Basic, access token, and registered SSH key. The check
+  lives at the single exit of credential resolution (`resolveIdentity`) rather than in each
+  branch, precisely because the usual way such a switch fails is by covering three ways in out of
+  four. The two paths that do not pass through there carry it themselves: `store.LookupSSHKey`
+  filters on `disabled_at IS NULL` (`internal/sshserver` authenticates before this package runs)
+  and `handleLogin` answers `passwordDisabled`. `ServeGit` re-checks it as well, because it takes
+  its user from another package.
+- `session_epoch` is incremented in the same statement, so cookies already issued stop working
+  immediately rather than at their TTL.
+- **Nothing is destroyed.** Restoring clears `disabled_at` and the account is exactly what it was:
+  its password, tokens and SSH keys all work again. What does *not* come back is anything revoked
+  separately (below), and the sessions cut off by the epoch bump — a sign-out has to be permanent
+  or it means nothing.
+- Setting the state an account is already in is a no-op, so a retried request does not bump the
+  epoch a second time.
+- A credential presented for a suspended account is logged at `slog.Warn` (naming the account, the
+  auth method, the client IP and the path) and the request simply proceeds as anonymous.
+
+#### `POST /api/v1/admin/users/{username}/revoke-credentials`
+
+Site administrators only, session cookie, write scope. No body. res **204**.
+
+Deletes every access token and every registered SSH key the account holds, and bumps its session
+epoch. 204 rather than the counts: reporting "3 tokens, 1 key" invites reading it as a result when
+the meaningful state afterwards is simply "none", and a retried request would then report zero for
+work it genuinely completed.
+
+| Status | Type | When |
+|---|---|---|
+| 400 | `self_revoke` | Your own account. The session revocation would include the cookie the request arrived on, and re-issuing it here would half-undo what was asked for; your own tokens and keys are managed from `/settings` |
+| 403 | `forbidden` | The caller is not a site administrator, or holds a read-only token |
+| 403 | `session_required` | The caller presented a token or HTTP Basic rather than a session cookie |
+| 404 | `not_found` | No account with that username |
+
+It is a separate endpoint rather than another field on the PATCH because the two actions differ in
+kind. Suspension is reversible and destroys nothing; this deletes credentials permanently, and an
+irreversible deletion must not be reachable as a side effect of a partial update somebody meant to
+use for a password reset.
+
+Neither implies the other, in either direction. Suspending is what stops access; this is for the
+case where the credentials themselves are suspected — a laptop lost, a token pasted into a build
+log — on an account that is meant to keep working once new ones are issued. A restore after both
+brings the account back **without** the revoked tokens and keys.
+
+The two deletions are separate statements rather than one transaction: each is idempotent on its
+own and a partial failure leaves strictly fewer credentials than before, so an identical retry
+converges.
 
 **Audit**: there is no site-wide audit table. `org_audit_log` is keyed by namespace and these
-actions have none, and three verbs do not justify a migration, so every account created, every
-password reset and every `is_admin` change is recorded as a structured `slog.Info` line naming
-the actor, the target, and what changed — never the password itself, in either direction.
+actions have none, and a handful of verbs do not justify a migration, so every account created,
+every password reset and every `is_admin` change is recorded as a structured `slog.Info` line
+naming the actor, the target, and what changed — never the password itself, in either direction.
+Suspension changes and credential revocations are logged the same way at `slog.Warn`, the latter
+carrying counts rather than identifiers and never a token value or a prefix of one. A requeued
+sync job (below) is logged as `slog.Info`, naming the actor and the job id.
+
+#### Failed sync jobs
+
+Post-push work — publishing a ref's blobs into `blobs/` and re-indexing its metadata — is queued
+in `sync_jobs`. A job that keeps failing is retried with a growing backoff and, after
+`store.SyncMaxAttempts` (5) claims, parks as `status = 'failed'` and is never picked up again.
+
+That state is quiet and consequential: the repository keeps serving its previous push, so the
+instance looks healthy while that repository's **file listing, search entry and `blobs/` export
+stay frozen**. Before these two endpoints the only trace was one log line, and the only way back
+was an `UPDATE` against the database by hand.
+
+```ts
+type SyncJob = {
+  id: number
+  repo: string          // "datasets/acme/imdb-ja" — includes the kind segment
+  ref: string           // "refs/heads/main"
+  attempts: number      // claims made before it parked
+  last_error: string    // the final attempt's error, verbatim
+  updated_at: string
+}
+```
+
+##### `GET /api/v1/admin/sync-jobs`
+
+Site administrators only (**403** for anyone else, **401** when anonymous). Session cookie only,
+like every `/admin` endpoint: a token of either scope is 403 `session_required`.
+
+Query: `limit` (default 50, capped at 200), `offset`. res 200:
+
+```json
+{ "items": [ /* SyncJob */ ], "total": 3 }
+```
+
+- **Only `failed` rows are listed.** A job still retrying is not an operator's problem yet, and
+  `pending` / `running` / `done` are high churn — a listing dominated by ordinary traffic would
+  bury the one row that matters.
+- Ordered newest failure first (`updated_at DESC, id DESC`); `total` counts every failed job,
+  ignoring the page window.
+- `repo` carries the kind segment so the listed name can be opened directly, rather than leaving
+  the reader to guess which of the two kinds it is.
+
+##### `POST /api/v1/admin/sync-jobs/{id}/retry`
+
+Site administrators only, session cookie, **write scope** — this changes state, so a read-scoped
+token is 403. No body. res **204**.
+
+| Status | Type | When |
+|---|---|---|
+| 400 | `bad_request` | `{id}` is not an integer |
+| 403 | `forbidden` | The caller is not a site administrator, or holds a read-only token |
+| 403 | `session_required` | The caller presented a token or HTTP Basic rather than a session cookie |
+| 404 | `not_found` | No job with that id **that is still `failed`** |
+
+- The update matches `status = 'failed'` only, and puts the row back to `pending` with
+  `attempts = 0`, `last_error` cleared and both `next_attempt_at` and `lease_expires_at` unset.
+  Restricting it to parked rows is what keeps a stray retry from resetting the attempt counter of
+  work already in flight, and it is why a second retry of the same id — a double click, or a
+  colleague on the same screen — is a 404 rather than a silent 204.
+- The attempt budget is deliberately reset rather than nudged: a job requeued with its counter
+  intact would park again on its first claim without having been given a real chance.
+- **Nothing is signalled to the worker.** The sync loop polls every ten seconds as a safety net
+  beside its wake channel, so a requeued job is claimed within that window; the response says the
+  job was requeued, not that it has since succeeded. If it fails again it parks again and
+  reappears in the listing.
 
 ---
 
@@ -541,6 +702,11 @@ type RepoDetail = RepoSummary & {
   readme: string                  // README body (front matter stripped), 256KB max
   readme_too_large: boolean       // README.md exists but exceeds 256KB, so readme stays empty (card is unaffected since it's sourced from the index)
   clone_url: string               // "http://localhost:8080/datasets/ns/name.git"
+  ssh_clone_url: string           // "ssh://git@localhost:2222/datasets/ns/name.git",
+                                  // "" when TF_SSH_ENABLED is off. Served because the
+                                  // host and port are deployment-specific and cannot be
+                                  // derived from clone_url; the UI must not offer an SSH
+                                  // option when this is empty.
   branches: string[]
   tags_refs: string[]
   parquet_files: ParquetSummary[] // This repository's parquet listing (default branch)
@@ -626,6 +792,70 @@ Notes on the `relations` facet:
   two base models counts as 1 under `merge`.
 - Combined with `base_only=true`, everything is naturally 0, and `relations` comes back as an
   empty array.
+
+### `GET /api/models` and `GET /api/datasets`  (HF-compatible)
+
+What `HfApi.list_models` / `list_datasets` call. The response is a bare JSON array of listing
+entries (`_id` `id` `author` `sha` `lastModified` `createdAt` `private` `tags` `downloads` `likes`,
+plus `modelId` for models), not the `{items, total, facets}` envelope the Web UI endpoint uses.
+`private` is always `false` and `likes` always `0`: neither concept exists here, and both fields
+are read unconditionally off every entry by the client.
+
+query:
+
+- `search` (substring match over name / namespace / description — HF's own `search`, and the same
+  matching as `q=` on the Web UI endpoint. The full-text `search=` of `GET /api/v1/repos` is a
+  different filter and is not reachable from here)
+- `author` (namespace)
+- `filter` (repeatable, **ANDed**, matched against the card's `tags`. This is where
+  `huggingface_hub` puts `library` / `language` / `task_categories` / `size_categories` and the
+  rest — it folds them into prefixed tags such as `task_categories:summarization` before sending.
+  `tags=` is accepted as a synonym and merged with it)
+- `pipeline_tag` (matches the card's `pipeline_tag` or `task_categories`, i.e. the same filter as
+  `task=` on the Web UI endpoint)
+- `sort` + `direction`, `limit`, `offset`, `full` / `cardData` — below.
+
+**Sorting.** `sort=` is mapped onto the listing's own orderings, and `direction=-1` means
+descending exactly as it does on the Hub (any other value, including an absent one, means
+ascending). The store's orderings each run in one direction only, so a request for the other one
+is a **400** rather than a page silently sorted the wrong way — "most downloaded" and "least
+downloaded" are different questions, and a listing that answers the wrong one looks like data.
+
+| `sort` | Direction it is available in | Ordering |
+|---|---|---|
+| `downloads` | `direction=-1` | `downloads` DESC |
+| `lastModified` | `direction=-1` | `updated_at` DESC (the default when `sort` is absent) |
+| `createdAt` | `direction=-1` | `created_at` DESC |
+| `id` / `name` / `author` | ascending (no `direction`) | `(namespace, name)` ASC |
+
+Keys are matched case-insensitively with `_` ignored, so `lastModified` and `last_modified` are
+the same key. `sort=likes` and `sort=trending_score` are a **400** naming the metric: this server
+tracks neither, and answering them with the default order would hand back a page that looks
+ranked and is not.
+
+**Pagination.** `limit` (default 30, max 100) is the page size, and a page with more behind it
+carries a `Link: <...>; rel="next"` header — the same mechanism as the commit listing, and the
+only one `huggingface_hub` knows: its `paginate()` follows that header, so before it existed
+every repository past the 30th looked as though it did not exist. The cursor in that URL is
+`offset=`, which is not part of HF's protocol and is meant to be reached only by following the
+link. `limit` is *also* the client's total cap (`list_models` slices the concatenated pages to
+it), so `limit=500` walks five pages of 100.
+
+**`full=true` / `cardData=true`** add `cardData` (the README front matter) to every entry. Either
+parameter is enough, and their values are read Python-style (`True` counts). Without them the key
+is absent rather than `null`.
+
+**Refused parameters.** `expand`, `gated`, `inference` and `emissions_thresholds` return
+**400**. Each of them narrows a listing in a way this server cannot reproduce, so ignoring one
+would answer with a *superset* of what was asked for — `gated=True` would come back full of
+repositories that are not gated, `expand=[...]` missing exactly the fields the caller asked to be
+given — and a wrong result set is indistinguishable from a right one at the call site. `facets`
+are never computed for these endpoints.
+
+`config` (`list_models(fetch_config=True)`) is the one parameter that is accepted and does
+nothing: it only ever *adds* a field, and no entry carries a model `config` either way, so the
+client sees `None` rather than a result set that is quietly wrong. It is not rejected because
+doing so would break an otherwise perfectly serviceable call.
 
 ### `GET /api/v1/repos/{kind}/{ns}/{name}`
 res: `{"repo": RepoDetail}`
@@ -889,7 +1119,14 @@ req: `{"paths": ["a.txt", "data/"], "expand": false}` → res 200: `hfTreeEntry[
   The revision is checked ahead of the batch, so it answers the same way in either encoding.
 
 ### `GET /api/{datasets|models}/{ns}/{name}/refs`  (HF-compatible)
-res: `{"branches":[{"name":"main","ref":"refs/heads/main","targetCommit":"<sha>"}],"tags":[],"converts":[]}`
+res:
+`{"branches":[{"name":"main","ref":"refs/heads/main","targetCommit":"<sha>"}],"tags":[],"converts":[],"pullRequests":[]}`
+
+`converts` and `pullRequests` are **always present and always empty**. Neither feature exists on
+this server, but `huggingface_hub`'s `list_repo_refs` subscripts them rather than reading them
+with `.get()`, so `include_pull_requests=True` raised `KeyError` while `pullRequests` was absent —
+a crash for asking a question whose honest answer is "there are none". They are lists, never
+`null`, for the same reason.
 
 ### Branch and tag writes  (HF-compatible)
 
@@ -1045,8 +1282,9 @@ cap (1000 commits) becomes `null`.
 ### `GET /api/v1/repos/{kind}/{ns}/{name}/gcs/{rev}`  (for the UI: direct GCS fetch script)
 Built from `repo_files` (the index for that ref, which the sync worker rebuilds on every push).
 Since `repo_files` — not git itself — is the source of truth, the response exactly matches what has
-actually been published to object storage. Authorization is the same as an ordinary read (a
-private repository needs a token with write or higher; public is open to anonymous access).
+actually been published to object storage. Authorization is the same as an ordinary read, which is
+to say none: reads are open to anonymous callers (§11 of the design doc). Note that the script this
+returns still needs GCS credentials to run — bucket IAM, not this endpoint, is what gates the bytes.
 
 ```ts
 type RepoGCSFile = {
@@ -1180,12 +1418,19 @@ is never skipped by mistake.
 Content-Type: `application/x-ndjson`. One operation per line.
 
 ```jsonl
-{"key":"header","value":{"summary":"Upload data","description":""}}
+{"key":"header","value":{"summary":"Upload data","description":"","parentCommit":"<sha>"}}
 {"key":"file","value":{"path":"README.md","content":"<base64>","encoding":"base64"}}
 {"key":"lfsFile","value":{"path":"data/a.parquet","algo":"sha256","oid":"<sha256>","size":98765}}
 {"key":"deletedFile","value":{"path":"old.txt"}}
 {"key":"deletedFolder","value":{"path":"old/"}}
+{"key":"copyFile","value":{"path":"new.bin","srcPath":"old.bin","srcRevision":null}}
 ```
+
+Those six keys are the whole set. **A line naming any other `key` is a 400**, and so is a `header`
+that will not parse. There used to be no such check, and an unknown operation was skipped in
+silence: a commit that mixed one supported operation with one unsupported one applied half of what
+was sent and still answered `200 {"success": true}`, leaving the caller no way to find out. Same
+trade as `create_pr` below — an error the caller can act on beats a partial write they cannot see.
 res 200:
 ```json
 {"success":true,"commitUrl":"http://.../commit/<sha>","commitOid":"<sha>",
@@ -1210,6 +1455,33 @@ looks completely downloaded (`net/http` truncates the body at the declared lengt
 one would hang the connection, and `repo_files.size` and the repository's total size are indexed
 from the same number.
 
+`copyFile` is `huggingface_hub`'s `CommitOperationCopy`: it puts the file at `srcPath` (as of
+`srcRevision`, defaulting to the revision being committed to) at a second path, without the client
+uploading anything. The copy is done by blob hash rather than by bytes, so it costs the same for a
+2KB README and for the pointer of a 40GB LFS file — and copying an LFS file copies its *pointer*,
+which is what makes the copy resolve to the same object. The source's executable bit is preserved.
+Failure modes, none of which commit anything:
+
+- `srcRevision` does not resolve → **404** with `X-Error-Code: RevisionNotFound`.
+- `srcPath` does not exist at that revision → **404** with `X-Error-Code: EntryNotFound`
+  (`EntryNotFoundError` / `RevisionNotFoundError` in the client, rather than a bare HTTP error).
+- `srcPath` is a directory, or a symlink (whose blob holds a path, not content, so copying it
+  elsewhere would silently change what it resolves to), or either path is missing → **400**.
+
+`parentCommit` in the `header` is the optimistic lock behind
+`create_commit(..., parent_commit=<sha>)`: the commit applies only if the branch's head is that
+commit. It accepts a full hash or its first 7 or more characters (the shorthand the client
+documents); anything else is a **400**, since a typo is the caller's mistake rather than a branch
+that moved. A parent that does not match — including *any* value on a branch that does not exist
+yet — is **412 `stale_parent`**, and the message names the head the branch is actually at.
+
+412 rather than the **409 `conflict`** a lost WAL race answers with, because the two ask for
+different things next. 409 means another writer won a race this request could still win: send it
+again. 412 means the branch is not where the caller believed it was, so re-sending the identical
+request can only fail again — they have to look at what landed in between and decide whether their
+change still applies. `huggingface_hub` raises `HfHubHTTPError` for both and reads the sentence out
+of `X-Error-Message` either way, so the distinction costs the client nothing.
+
 `{rev}` is a **branch name**. A full commit SHA returns 400, and a `{rev}` that resolves to
 something in this repository that is *not* a branch — a tag, an abbreviated SHA, `HEAD` — returns
 **409 `conflict`** (`{rev} is a tag, not a branch; commits must target a branch`). Without this,
@@ -1220,9 +1492,9 @@ still accepted and creates the branch — that's the first commit on a new branc
 status apply to `PUT`/`DELETE /api/v1/edit/...` and to `POST /api/v1/upload/...`.
 
 An NDJSON line that can't be parsed returns 400 `bad_request`. The message is one of the fixed
-strings `commit body must be newline-delimited JSON` / `invalid file entry` /
-`invalid lfsFile entry`; the decoder's internal error text is never returned (the same policy as
-`decodeJSON`).
+strings `commit body must be newline-delimited JSON` / `invalid header entry` /
+`invalid file entry` / `invalid lfsFile entry` / `invalid copyFile entry`; the decoder's internal
+error text is never returned (the same policy as `decodeJSON`).
 
 **Pull requests are not implemented.** `huggingface_hub`'s `create_commit(..., create_pr=True)`
 (and therefore `upload_file` / `upload_folder` / `delete_file` with the same flag) sends this as a
@@ -1921,8 +2193,7 @@ Re-enqueues a new delivery with the same event/payload as an existing one. res: 
   8m... capped at 15m) up to 5 times; if it still fails, it's finalized with `status: "failed"`.
 - Events fired, and their payloads:
   - `repo.push` (when post-push processing completes): `{namespace, repo, full_name, kind, ref, old_sha, new_sha, changed_files}`
-  - `repo.created` / `repo.deleted`: `{namespace, name, kind, full_name}` (`repo.deleted` does not
-    include `private`)
+  - `repo.created` / `repo.deleted`: `{namespace, name, kind, full_name}`
   - `repo.moved` (when a transfer/rename completes; delivered to subscriptions on the **new**
     namespace): `{kind, from: {namespace, name}, to: {namespace, name}, full_name}`
   - `repo.transfer_requested` (when a transfer becomes pending approval; delivered to
@@ -1943,8 +2214,8 @@ Re-enqueues a new delivery with the same event/payload as an existing one. res: 
   for the commit, so this doesn't affect compatibility. Body size cap is 1MiB (exceeding it returns
   413 `payload_too_large`).
 - `GET /api/v1/stats` → `{"datasets":n,"models":n,"experiments":n,"total_size":n}`
-  (only public repositories when not logged in; includes visible private repositories when there's
-  a cookie session)
+  (instance-wide totals, identical for every caller: there is no repository visibility to filter
+  on, so signing in does not bring more repositories into the count — see §11 of the design doc)
 - CORS / CSRF / security headers: see the shared specification at the top of this document
   (the `TF_ALLOWED_ORIGINS` allowlist approach)
 
@@ -1959,7 +2230,7 @@ breakdown). Plain git blobs (like README) never reach GCS, so they're not includ
 type UsageNamespace = { namespace: string; lfs_size: number; num_files: number; num_repos: number }
 type UsageRepo = {
   namespace: string; name: string; kind: "dataset" | "model"; full_name: string
-  private: boolean; lfs_size: number; num_files: number
+  lfs_size: number; num_files: number
 }
 type UsageResponse = {
   namespaces: UsageNamespace[]
@@ -2146,8 +2417,8 @@ lineage:
   declaring repository** (a model's successor is a model, a dataset's successor is a dataset).
 - Up to 64 references per list. Duplicates and empty strings are dropped.
 - **A reference that can't be resolved is still kept as a raw string** (dangling). A nonexistent
-  repository, one not yet pushed, or a private one the viewer can't see are all treated the same
-  way — the UI shows text plus a note instead of a link.
+  repository and one that exists but has never been pushed are treated the same way — the UI shows
+  text plus a note instead of a link.
 
 The index is updated only on a push to the default branch. An edge removed from the card is also
 removed from the index on that push (wholesale replacement).
@@ -2315,12 +2586,12 @@ res 200: `{"upstream": LineageRef[], "downstream": LineageDependent[], "new_vers
   `frontend/lib/lineage.ts`). The order is `new_version` (older versions) → `finetune` → `adapter`
   → `quantized` → `merge` → other → `eval_dataset` → no kind. A `base_model` edge with an empty
   `relation` (a row indexed before this feature existed) is treated as `finetune`.
-- Visibility is based on the viewer. A private repository the viewer can't read is treated as
-  dangling with `exists: false`, and doesn't appear in `downstream` either.
+- The graph is the same for every viewer. There is no repository visibility to filter on (§11 of
+  the design doc), so `exists: false` means the target genuinely is not there, never that the
+  viewer lacks permission.
 - `produced_by` only has content **for a model repository** (`[]` otherwise). It's the list of runs
   that pointed at this repository via `trackio.log_model` — a reverse lookup of the run-side record
-  (§7), not `repo_lineage`. Newest-updated first, at most 100 entries. If the run lives in a
-  private experiment repository, it doesn't appear for a viewer who can't read that run.
+  (§7), not `repo_lineage`. Newest-updated first, at most 100 entries.
 
 ```ts
 type ExpRunProducer = {
@@ -2379,3 +2650,49 @@ objects that no repository references anymore.
   back while the client never re-uploads, permanently losing the bytes).
 - The core reference-detection logic is `store.OrphanedLFSObjects` (a pure function, no DB
   required, with unit tests).
+
+### `thinkingface resync`
+The consistency check `docs/dev/thinkingface-design.md` §17 promises against the risk that a sync
+failure lets git and the index drift apart. It is the inverse of `gc`: `gc` starts from the bucket
+and asks what nothing references any more, `resync` starts from the database and asks whether what
+it promises is actually there. Three cross-checks, run per repository and per branch:
+
+1. **`repo_files` ⇄ `blobs/`** — every indexed non-LFS row must have its `blobs/{sha…}` object.
+   The sync worker publishes a revision's blobs *before* it writes that revision's rows, so a row
+   whose object is absent means the publish was undone or never happened.
+2. **`repo_files` (LFS rows) ⇄ `lfs/`** — every indexed LFS row must have its `lfs/{oid…}` object.
+   `repo_lfs_objects` is the reference table `gc` counts with; what this pass verifies is the file
+   the user would download.
+3. **git tree ⇄ `repo_files`** — the ref's real tree, converted exactly the way
+   `syncer.runPushPipeline` converts it, against the indexed listing. A non-empty difference
+   (`missing` / `extra` / `changed` paths) is the shape a failed sync job leaves behind: the ref
+   moved and the index froze at the previous push.
+
+- `--dry-run` (default `true`): report only. `--yes`: allow repairs. Passing `--dry-run=false`
+  alone is treated the same way, exactly as in `gc`.
+- `--repo {ns}/{name}` or `--repo {kind}/{ns}/{name}` restricts the run to one repository (the kind
+  is accepted in the singular the database stores and the plural the URLs use). Without it, every
+  repository is checked. A selector matching nothing is an error, not an empty run.
+- **Repairs are only ever regeneration from something that still exists.** A missing blob is
+  re-published from the git object database through `gitrepo.PublishBlob` — the same single write
+  path of the `blobs/` layer the sync worker uses. Re-enqueuing the job would *not* fix it:
+  `Syncer.publishBlobs` skips every sha the ref's index already covers, which is exactly the broken
+  set. A drifted index is repaired by enqueuing an ordinary sync job (`store.EnqueueSync`, with an
+  empty `old_sha` so the whole tree counts as changed) rather than by writing rows from the CLI —
+  the worker is the pipeline that also re-reads the repo card and re-indexes parquet, lineage and
+  experiments.
+- **A missing LFS object is never repaired, in any mode.** Its bytes only ever lived in the bucket
+  (git holds a pointer), so nothing on the instance can regenerate them; the command names the
+  repository, ref, path and oid and leaves the file for a human to re-upload.
+- Both storage layers are listed once, before any repository is read, and reduced to a set keyed by
+  the content identifier (`storage.BlobKey` / `storage.LFSKey` shard by identifier and end in it).
+  That ordering can only produce a false *report* — of an object published while the scan ran —
+  never a false repair: re-publishing an object that is already there is a no-op, and staleness is
+  decided against git, not against the listings.
+- Output is one line per finding plus progress every 25 repositories, closing with a summary
+  (repositories, refs, missing blobs, missing LFS objects, stale ref indexes, and what was
+  repaired). **The exit status is the verdict**, as with `wal-verify`: non-zero when findings
+  remain unrepaired, so the command can be scheduled.
+- The decision logic is pure and unit tested (`parseRepoSelector`, `storedSet`, `missingObjects`,
+  `diffIndex`); the run itself does no git state changes at all — it only reads trees and writes
+  content-addressed objects that are byte-identical to what is already promised.

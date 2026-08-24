@@ -288,10 +288,15 @@ type RepoDetail struct {
 	// size limit for rendering, in which case Readme is left empty instead of
 	// silently looking like "no README". Card is unaffected: it comes from the
 	// index built at push time, not from this read.
-	ReadmeTooLarge bool     `json:"readme_too_large"`
-	CloneURL       string   `json:"clone_url"`
-	Branches       []string `json:"branches"`
-	TagsRefs       []string `json:"tags_refs"`
+	ReadmeTooLarge bool   `json:"readme_too_large"`
+	CloneURL       string `json:"clone_url"`
+	// SSHCloneURL is the git-over-SSH remote, empty when TF_SSH_ENABLED is
+	// off. It is served because the port is deployment-specific and cannot be
+	// guessed: the UI happily let people register an SSH key at
+	// /settings/ssh-keys while showing no URL that key could be used against.
+	SSHCloneURL string   `json:"ssh_clone_url"`
+	Branches    []string `json:"branches"`
+	TagsRefs    []string `json:"tags_refs"`
 	// ParquetFiles lists the indexed parquet files on the default branch.
 	ParquetFiles []ParquetSummary `json:"parquet_files"`
 	// Indexing reports that a background index of this repository is running,
@@ -1280,7 +1285,13 @@ type AdminUser struct {
 	Email    string `json:"email"`
 	// IsAdmin is the instance-wide administrator flag (users.is_admin), not
 	// a role in any organisation.
-	IsAdmin   bool      `json:"is_admin"`
+	IsAdmin bool `json:"is_admin"`
+	// Disabled reports whether the account is suspended. A disabled account
+	// authenticates on no path at all -- not password, not access token, not
+	// SSH key -- which is what makes it the offboarding switch. Resetting a
+	// password deliberately does not revoke tokens, so before this existed
+	// there was no way to actually cut somebody off.
+	Disabled  bool      `json:"disabled"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -1320,6 +1331,41 @@ type AdminUserUpdateRequest struct {
 	// IsAdmin grants or revokes site administrator rights. Revoking your
 	// own is 400; revoking the last one on the instance is 409.
 	IsAdmin *bool `json:"is_admin,omitempty"`
+	// Disabled suspends or restores the account. Suspending it stops every
+	// identity path at once (session, password, access token, SSH key) and
+	// revokes its sessions; disabling your own account is 400, and so is
+	// disabling the last site administrator. Restoring does not bring back
+	// credentials revoked separately.
+	Disabled *bool `json:"disabled,omitempty"`
+}
+
+// SyncJob is one row of the post-push queue as GET /api/v1/admin/sync-jobs
+// lists it. Only jobs that exhausted their attempts are listed: a job still
+// retrying is not an operator's problem yet, and the queue is otherwise high
+// churn.
+//
+// A failed job means the repository's file index, search entry and blobs/
+// export are frozen at the previous push. Nothing republishes it on its own,
+// which is why this listing exists at all -- before it, the only trace was a
+// single log line.
+type SyncJob struct {
+	ID int64 `json:"id"`
+	// Repo is the full name including the kind segment, e.g.
+	// "datasets/acme/imdb-ja", so an operator can open it directly.
+	Repo string `json:"repo"`
+	Ref  string `json:"ref"`
+	// Attempts is how many times the job was claimed before it parked.
+	Attempts int `json:"attempts"`
+	// LastError is the error from the final attempt, verbatim.
+	LastError string    `json:"last_error"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// SyncJobListResponse is one page of failed sync jobs. Total counts every
+// failed job, ignoring the page window.
+type SyncJobListResponse struct {
+	Items []SyncJob `json:"items"`
+	Total int64     `json:"total"`
 }
 
 // ------------------------------------------------------------------ errors

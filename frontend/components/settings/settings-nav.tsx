@@ -9,6 +9,7 @@ import {
   HardDrive,
   KeyRound,
   Lock,
+  RefreshCw,
   User,
   Users,
   Webhook,
@@ -43,6 +44,7 @@ const ITEMS: NavItem[] = [
  */
 const ADMIN_ITEMS: NavItem[] = [
   { segment: "/admin/users", labelKey: "settings.adminUsers.navLabel", icon: Users },
+  { segment: "/admin/sync-jobs", labelKey: "settings.adminSyncJobs.navLabel", icon: RefreshCw },
 ];
 
 /**

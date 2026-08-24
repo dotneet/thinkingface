@@ -16,12 +16,17 @@ deliberate design goal.
   in the destination side of the `gcloud storage cp` script
   `GET /api/v1/repos/{kind}/{ns}/{name}/gcs/{rev}` generates), and `wal/` (the
   git write-ahead log — primary persistence for git data, see
-  `docs/dev/continuity-design.md` §3; noncurrent versions are kept indefinitely,
-  since old `index.json` generations are the recovery path for the WAL's
-  single point of failure, §13/§16). Object lifecycle for `lfs/`/`blobs/` is
-  reference-counted GC (`thinkingface gc`), not a bucket lifecycle rule —
-  versioning and soft delete stay purely as a safety net against operator
-  error
+  `docs/dev/continuity-design.md` §3; noncurrent versions of `wal/` objects are
+  kept indefinitely, since old `index.json` generations are the recovery path
+  for the WAL's single point of failure — §13/§16, recovery procedure in
+  `docs/dev/wal-index-recovery.md`). Which *live* `lfs/`/`blobs/` objects get
+  deleted is reference-counted GC (`thinkingface gc`), never a bucket
+  lifecycle rule keyed on object age — but because the bucket has versioning
+  enabled, a gc delete only makes an object noncurrent, so a separate
+  lifecycle rule (`var.lfs_blobs_noncurrent_retention_days`, default 30 days,
+  scoped to `lfs/`/`blobs/` only — never `wal/`) deletes those noncurrent
+  versions so gc's deletes actually free storage. Versioning and soft delete
+  otherwise stay purely as a safety net against operator error
 - `google_artifact_registry_repository.images` — Docker repo for
   backend/frontend images
 - `google_sql_database_instance.main` — Cloud SQL for PostgreSQL 17, private

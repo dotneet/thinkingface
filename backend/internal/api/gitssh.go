@@ -38,6 +38,14 @@ func (s *Server) ServeGit(ctx context.Context, user *store.User, service gitserv
 	if user == nil {
 		return refuse("authentication required")
 	}
+	// Belt and braces. store.LookupSSHKey already refuses to resolve a key
+	// whose owner is suspended, so an offboarded account never authenticates
+	// far enough to reach this -- but ServeGit takes the user as an argument
+	// from another package, and the whole point of the suspension switch is
+	// that no path may be the one that forgot.
+	if user.Disabled() {
+		return refuse("this account has been disabled")
+	}
 	// Re-use the HTTP identity keys so canRead / canWrite behave exactly as
 	// they do for a request. An SSH key is a full-strength credential like a
 	// password login, so it carries the write scope; whether the user may

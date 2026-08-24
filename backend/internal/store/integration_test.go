@@ -824,13 +824,29 @@ func TestIntegrationDeleteUntrackedLFSObjectBlocksAConcurrentRecord(t *testing.T
 	})
 }
 
+// testLease is long enough that no claim in these tests expires while the
+// test runs. Cases that want an expired lease pass a negative duration.
+const testLease = time.Minute
+
 func TestIntegrationSyncJobs(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s *Store) {
 		f := newFixture(t, s)
 		ctx := f.ctx
 		r := f.repo(t, "alice", "data", "dataset", nil)
 
-		if j, err := s.ClaimSyncJob(ctx); err != nil || j != nil {
+		// clearBackoff simulates the retry delay elapsing. FinishSyncJob
+		// pushes next_attempt_at into the future on every failure, so without
+		// this the test would have to sleep for the real backoff (30s and up)
+		// to exercise the attempt budget.
+		clearBackoff := func() {
+			t.Helper()
+			if _, err := s.db.Exec(ctx,
+				`UPDATE sync_jobs SET next_attempt_at = NULL WHERE status = 'pending'`); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if j, err := s.ClaimSyncJob(ctx, testLease); err != nil || j != nil {
 			t.Fatalf("claim on empty queue = %+v, %v", j, err)
 		}
 		if err := s.EnqueueSync(ctx, r.ID, "main", "", "s1"); err != nil {
@@ -846,7 +862,7 @@ func TestIntegrationSyncJobs(t *testing.T) {
 		if n, err := s.PendingSyncCount(ctx, r.ID); err != nil || n != 2 {
 			t.Fatalf("PendingSyncCount = %d, %v", n, err)
 		}
-		j, err := s.ClaimSyncJob(ctx)
+		j, err := s.ClaimSyncJob(ctx, testLease)
 		if err != nil || j == nil || j.Ref != "main" || j.OldSHA != "" || j.NewSHA != "s2" || j.Attempts != 1 {
 			t.Fatalf("ClaimSyncJob = %+v, %v", j, err)
 		}
@@ -858,41 +874,144 @@ func TestIntegrationSyncJobs(t *testing.T) {
 		if n, _ := s.PendingSyncCount(ctx, r.ID); n != 2 {
 			t.Fatalf("PendingSyncCount while running = %d", n)
 		}
-		if err := s.FinishSyncJob(ctx, j.ID, errors.New("boom")); err != nil {
+		// A live lease is not swept: this is the whole point of the lease.
+		// The predecessor reset every running row unconditionally, which is
+		// how a booting replica stole a job another one was still running.
+		if n, err := s.RequeueExpiredSyncJobs(ctx); err != nil || n != 0 {
+			t.Fatalf("sweeper took a live claim: n=%d, %v", n, err)
+		}
+		if err := s.FinishSyncJob(ctx, j.ID, j.Attempts, errors.New("boom")); err != nil {
 			t.Fatal(err)
 		}
-		// Failed once: back to pending, claimable again, attempts grow.
-		j2, err := s.ClaimSyncJob(ctx)
+		// Failed once: back to pending, but paced. The 'dev' job is the only
+		// other pending row, so a claim right now has to hand out that one
+		// rather than the job still inside its retry delay.
+		if next, err := s.ClaimSyncJob(ctx, -time.Second); err != nil || next == nil || next.ID == j.ID {
+			t.Fatalf("claimed a job still inside its retry backoff: %+v, %v", next, err)
+		}
+		if n, err := s.RequeueExpiredSyncJobs(ctx); err != nil || n != 1 {
+			t.Fatalf("requeue the dev job = %d, %v", n, err)
+		}
+		clearBackoff()
+		j2, err := s.ClaimSyncJob(ctx, testLease)
 		if err != nil || j2 == nil || j2.ID != j.ID || j2.Attempts != 2 {
 			t.Fatalf("re-claim = %+v, %v", j2, err)
 		}
-		if err := s.FinishSyncJob(ctx, j2.ID, nil); err != nil {
+		if err := s.FinishSyncJob(ctx, j2.ID, j2.Attempts, nil); err != nil {
 			t.Fatal(err)
 		}
-		j3, err := s.ClaimSyncJob(ctx)
+
+		// An expired lease means the worker is gone, so the sweeper reclaims
+		// it. A lease in the past is how the test gets there without waiting.
+		j3, err := s.ClaimSyncJob(ctx, -time.Second)
 		if err != nil || j3 == nil || j3.Ref != "dev" {
 			t.Fatalf("claim dev = %+v, %v", j3, err)
 		}
-		// Interrupted process: running jobs go back to pending.
-		if n, err := s.RequeueRunningJobs(ctx); err != nil || n != 1 {
-			t.Fatalf("RequeueRunningJobs = %d, %v", n, err)
+		if n, err := s.RequeueExpiredSyncJobs(ctx); err != nil || n != 1 {
+			t.Fatalf("RequeueExpiredSyncJobs = %d, %v", n, err)
 		}
-		j4, err := s.ClaimSyncJob(ctx)
-		if err != nil || j4 == nil || j4.ID != j3.ID || j4.Attempts != 2 {
+		j4, err := s.ClaimSyncJob(ctx, testLease)
+		if err != nil || j4 == nil || j4.ID != j3.ID || j4.Attempts != j3.Attempts+1 {
 			t.Fatalf("claim after requeue = %+v, %v", j4, err)
 		}
-		// Three failures park the job.
-		_ = s.FinishSyncJob(ctx, j4.ID, errors.New("x"))
-		j5, _ := s.ClaimSyncJob(ctx)
-		if j5 == nil || j5.Attempts != 3 {
-			t.Fatalf("third claim = %+v", j5)
+
+		// Exhausting the attempt budget parks the job.
+		last := j4
+		for last.Attempts < SyncMaxAttempts {
+			if err := s.FinishSyncJob(ctx, last.ID, last.Attempts, errors.New("x")); err != nil {
+				t.Fatal(err)
+			}
+			clearBackoff()
+			next, err := s.ClaimSyncJob(ctx, testLease)
+			if err != nil || next == nil {
+				t.Fatalf("claim attempt %d = %+v, %v", last.Attempts+1, next, err)
+			}
+			if next.Attempts != last.Attempts+1 {
+				t.Fatalf("attempts = %d, want %d", next.Attempts, last.Attempts+1)
+			}
+			last = next
 		}
-		_ = s.FinishSyncJob(ctx, j5.ID, errors.New("x"))
-		if j6, err := s.ClaimSyncJob(ctx); err != nil || j6 != nil {
+		if err := s.FinishSyncJob(ctx, last.ID, last.Attempts, errors.New("x")); err != nil {
+			t.Fatal(err)
+		}
+		clearBackoff()
+		if j6, err := s.ClaimSyncJob(ctx, testLease); err != nil || j6 != nil {
 			t.Fatalf("failed job was claimable: %+v, %v", j6, err)
 		}
 		if n, _ := s.PendingSyncCount(ctx, r.ID); n != 0 {
 			t.Fatalf("PendingSyncCount after failure = %d", n)
+		}
+
+		// The parked job is what the operator listing shows, and retrying it
+		// hands back a fresh budget. Before this existed, a failed job was
+		// invisible and the only way to rerun it was an UPDATE by hand.
+		failed, total, err := s.ListFailedSyncJobs(ctx, 0, 0)
+		if err != nil || total != 1 || len(failed) != 1 {
+			t.Fatalf("ListFailedSyncJobs = %d items, total %d, %v", len(failed), total, err)
+		}
+		if failed[0].Ref != "dev" || failed[0].Namespace != "alice" || failed[0].Name != "data" ||
+			failed[0].RepoKind != "dataset" || failed[0].LastError != "x" ||
+			failed[0].Attempts != SyncMaxAttempts {
+			t.Fatalf("ListFailedSyncJobs entry = %+v", failed[0])
+		}
+		if n, err := s.FailedSyncCount(ctx); err != nil || n != 1 {
+			t.Fatalf("FailedSyncCount = %d, %v", n, err)
+		}
+		if ok, err := s.RetrySyncJob(ctx, failed[0].ID); err != nil || !ok {
+			t.Fatalf("RetrySyncJob = %v, %v", ok, err)
+		}
+		// Retrying is restricted to parked rows, so a second call is a no-op
+		// rather than resetting the budget of work already back in flight.
+		if ok, err := s.RetrySyncJob(ctx, failed[0].ID); err != nil || ok {
+			t.Fatalf("RetrySyncJob on a requeued job = %v, %v", ok, err)
+		}
+		retried, err := s.ClaimSyncJob(ctx, testLease)
+		if err != nil || retried == nil || retried.ID != failed[0].ID || retried.Attempts != 1 {
+			t.Fatalf("claim after retry = %+v, %v", retried, err)
+		}
+		if err := s.FinishSyncJob(ctx, retried.ID, retried.Attempts, nil); err != nil {
+			t.Fatal(err)
+		}
+
+		// A worker that lost its claim cannot write the outcome. This is what
+		// keeps the lease from closing only half the race: without the fencing
+		// token the straggler's write clears the 'running' row the new holder
+		// is working under, and ClaimSyncJob's NOT EXISTS would then let a
+		// third worker start on the same ref alongside it.
+		r4 := f.repo(t, "alice", "fenced", "dataset", nil)
+		if err := s.EnqueueSync(ctx, r4.ID, "main", "", "f1"); err != nil {
+			t.Fatal(err)
+		}
+		stale, err := s.ClaimSyncJob(ctx, -time.Second) // lease already expired
+		if err != nil || stale == nil {
+			t.Fatalf("claim to be fenced = %+v, %v", stale, err)
+		}
+		if n, err := s.RequeueExpiredSyncJobs(ctx); err != nil || n != 1 {
+			t.Fatalf("sweep the expired claim = %d, %v", n, err)
+		}
+		holder, err := s.ClaimSyncJob(ctx, testLease)
+		if err != nil || holder == nil || holder.ID != stale.ID ||
+			holder.Attempts != stale.Attempts+1 {
+			t.Fatalf("reclaim = %+v, %v", holder, err)
+		}
+		// The straggler reports success against its own (now superseded) claim.
+		if err := s.FinishSyncJob(ctx, stale.ID, stale.Attempts, nil); err != nil {
+			t.Fatalf("stale finish returned an error: %v", err)
+		}
+		fencedOut, err := s.ClaimSyncJob(ctx, testLease)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fencedOut != nil {
+			t.Fatalf("the stale finish released the ref: claimed %+v while %d still holds it",
+				fencedOut, holder.ID)
+		}
+		// The real holder still owns it and its outcome still lands.
+		if err := s.FinishSyncJob(ctx, holder.ID, holder.Attempts, nil); err != nil {
+			t.Fatal(err)
+		}
+		if n, _ := s.PendingSyncCount(ctx, r4.ID); n != 0 {
+			t.Fatalf("PendingSyncCount after the real holder finished = %d", n)
 		}
 
 		// One ref at a time. EnqueueSync only collapses into a row that is
@@ -903,7 +1022,7 @@ func TestIntegrationSyncJobs(t *testing.T) {
 		if err := s.EnqueueSync(ctx, r2.ID, "main", "", "a1"); err != nil {
 			t.Fatal(err)
 		}
-		first, err := s.ClaimSyncJob(ctx)
+		first, err := s.ClaimSyncJob(ctx, testLease)
 		if err != nil || first == nil || first.Ref != "main" {
 			t.Fatalf("claim first = %+v, %v", first, err)
 		}
@@ -913,28 +1032,28 @@ func TestIntegrationSyncJobs(t *testing.T) {
 		if n, _ := s.PendingSyncCount(ctx, r2.ID); n != 2 {
 			t.Fatalf("second push did not queue a second row: PendingSyncCount = %d", n)
 		}
-		if blocked, err := s.ClaimSyncJob(ctx); err != nil || blocked != nil {
+		if blocked, err := s.ClaimSyncJob(ctx, testLease); err != nil || blocked != nil {
 			t.Fatalf("claimed a second job for a ref already syncing: %+v, %v", blocked, err)
 		}
 		// A different ref of the same repository is not blocked by it.
 		if err := s.EnqueueSync(ctx, r2.ID, "dev", "", "d1"); err != nil {
 			t.Fatal(err)
 		}
-		other, err := s.ClaimSyncJob(ctx)
+		other, err := s.ClaimSyncJob(ctx, testLease)
 		if err != nil || other == nil || other.Ref != "dev" {
 			t.Fatalf("claim other ref = %+v, %v", other, err)
 		}
-		_ = s.FinishSyncJob(ctx, other.ID, nil)
+		_ = s.FinishSyncJob(ctx, other.ID, other.Attempts, nil)
 		// Once the running job finishes, the queued one becomes claimable, and
 		// it carries the old_sha the finished job left behind.
-		if err := s.FinishSyncJob(ctx, first.ID, nil); err != nil {
+		if err := s.FinishSyncJob(ctx, first.ID, first.Attempts, nil); err != nil {
 			t.Fatal(err)
 		}
-		queued, err := s.ClaimSyncJob(ctx)
+		queued, err := s.ClaimSyncJob(ctx, testLease)
 		if err != nil || queued == nil || queued.Ref != "main" || queued.OldSHA != "a1" || queued.NewSHA != "a2" {
 			t.Fatalf("claim after finish = %+v, %v", queued, err)
 		}
-		_ = s.FinishSyncJob(ctx, queued.ID, nil)
+		_ = s.FinishSyncJob(ctx, queued.ID, queued.Attempts, nil)
 
 		// ... and never hold two jobs for one ref at the same time, which on
 		// Postgres also has to survive the window where the first claim has
@@ -944,7 +1063,10 @@ func TestIntegrationSyncJobs(t *testing.T) {
 			if err := s.EnqueueSync(ctx, r3.ID, ref, "", "x1"); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.ClaimSyncJob(ctx); err != nil {
+			// Claimed with a lease already in the past so the sweep below
+			// puts all six rows back in the queue at once, which is the
+			// state this case wants: two claimable jobs per ref.
+			if _, err := s.ClaimSyncJob(ctx, -time.Second); err != nil {
 				t.Fatal(err)
 			}
 			// Collapses only into a pending row, so this queues a second one.
@@ -952,7 +1074,7 @@ func TestIntegrationSyncJobs(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if _, err := s.RequeueRunningJobs(ctx); err != nil {
+		if _, err := s.RequeueExpiredSyncJobs(ctx); err != nil {
 			t.Fatal(err)
 		}
 		var activeMu sync.Mutex
@@ -964,7 +1086,7 @@ func TestIntegrationSyncJobs(t *testing.T) {
 			go func() {
 				defer wg2.Done()
 				for {
-					j, err := s.ClaimSyncJob(ctx)
+					j, err := s.ClaimSyncJob(ctx, testLease)
 					if err != nil {
 						t.Errorf("same-ref claim: %v", err)
 						return
@@ -984,7 +1106,7 @@ func TestIntegrationSyncJobs(t *testing.T) {
 					activeMu.Lock()
 					active[j.Ref] = false
 					activeMu.Unlock()
-					_ = s.FinishSyncJob(ctx, j.ID, nil)
+					_ = s.FinishSyncJob(ctx, j.ID, j.Attempts, nil)
 				}
 			}()
 		}
@@ -1010,7 +1132,7 @@ func TestIntegrationSyncJobs(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				for {
-					j, err := s.ClaimSyncJob(ctx)
+					j, err := s.ClaimSyncJob(ctx, testLease)
 					if err != nil {
 						t.Errorf("concurrent claim: %v", err)
 						return
@@ -1021,7 +1143,7 @@ func TestIntegrationSyncJobs(t *testing.T) {
 					mu.Lock()
 					seen[j.ID]++
 					mu.Unlock()
-					_ = s.FinishSyncJob(ctx, j.ID, nil)
+					_ = s.FinishSyncJob(ctx, j.ID, j.Attempts, nil)
 				}
 			}()
 		}
@@ -1651,7 +1773,7 @@ func TestIntegrationRepoTransfer(t *testing.T) {
 
 		// A transfer moves nothing in object storage -- every key is
 		// content-addressed -- so it must not queue any sync work either.
-		if job, err := s.ClaimSyncJob(ctx); err != nil || job != nil {
+		if job, err := s.ClaimSyncJob(ctx, testLease); err != nil || job != nil {
 			t.Fatalf("transfer enqueued a sync job = %+v, %v", job, err)
 		}
 

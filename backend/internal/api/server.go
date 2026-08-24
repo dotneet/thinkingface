@@ -130,7 +130,7 @@ func (s *Server) Handler() http.Handler {
 	// can set (GHSA-3fxj-6jh8-hvhx), and nothing in this server reads RemoteAddr
 	// anyway. Anything that starts to should resolve the peer against a known
 	// proxy list rather than trusting X-Forwarded-For.
-	r.Use(requestLogger)
+	r.Use(s.requestLogger)
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeaders)
 	r.Use(s.cors)
@@ -213,6 +213,9 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/admin/users", s.handleAdminListUsers)
 		r.Post("/admin/users", s.handleAdminCreateUser)
 		r.Patch("/admin/users/{username}", s.handleAdminUpdateUser)
+		r.Post("/admin/users/{username}/revoke-credentials", s.handleAdminRevokeCredentials)
+		r.Get("/admin/sync-jobs", s.handleAdminListSyncJobs)
+		r.Post("/admin/sync-jobs/{id}/retry", s.handleAdminRetrySyncJob)
 
 		r.Get("/tokens", s.handleListTokens)
 		r.Post("/tokens", s.handleCreateToken)
@@ -485,10 +488,38 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-func requestLogger(next http.Handler) http.Handler {
+// authRecord is the identity the access log wants to report. requestLogger
+// runs upstream of identify (it has to: a request rejected by CORS or the
+// same-origin check must still be logged), so it cannot read the identity out
+// of the context the way a handler does -- the values identify sets live on a
+// *derived* request that never comes back. It therefore installs this empty
+// record on the way down and reads it on the way back up, and identify fills
+// it in as it passes.
+type authRecord struct {
+	username string
+	method   authMethod
+}
+
+func authRecordFrom(ctx context.Context) *authRecord {
+	rec, _ := ctx.Value(ctxKeyAuthRecord).(*authRecord)
+	return rec
+}
+
+// requestLogger writes the access log line.
+//
+// It carries the client address and the authenticated subject as well as the
+// request's shape. Without those, a brute-force run against /auth/login was
+// indistinguishable in the log from ordinary traffic -- a column of 401s with
+// nothing to say who was sending them -- and there was no way to confirm the
+// rate limiter in ratelimit.go was doing anything at all. The address is
+// resolved by clientIP, the one place that decides whether
+// X-Forwarded-For may be believed.
+func (s *Server) requestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		rec := &authRecord{}
+		r = r.WithContext(context.WithValue(r.Context(), ctxKeyAuthRecord, rec))
 		next.ServeHTTP(ww, r)
 		level := slog.LevelInfo
 		if ww.Status() >= 500 {
@@ -498,9 +529,18 @@ func requestLogger(next http.Handler) http.Handler {
 		// Handler()), so the ID is present on every request this logs; the
 		// field is emitted unconditionally to match method/path/status/
 		// bytes/duration above, which are never omitted either.
-		slog.Log(r.Context(), level, "http",
+		attrs := []any{
 			"method", r.Method, "path", r.URL.Path, "status", ww.Status(),
 			"bytes", ww.BytesWritten(), "duration", time.Since(start).String(),
-			"request_id", middleware.GetReqID(r.Context()))
+			"request_id", middleware.GetReqID(r.Context()),
+			"client_ip", s.clientIP(r),
+		}
+		// Omitted rather than empty for an anonymous request: an absent field
+		// says "nobody was authenticated", where `user=""` reads like a
+		// subject whose name failed to render.
+		if rec.username != "" {
+			attrs = append(attrs, "user", rec.username, "auth", string(rec.method))
+		}
+		slog.Log(r.Context(), level, "http", attrs...)
 	})
 }

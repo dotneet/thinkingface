@@ -66,6 +66,16 @@ usernames and email addresses. Each row offers:
 - **Make admin** / **Revoke admin** — grant or remove site administrator rights. This is how an
   instance gets a second administrator, and therefore how it stays recoverable if the first one
   loses their password.
+- **Suspend** / **Restore** — turn an account off and back on. A suspended account authenticates
+  on *nothing*: not the web UI, not its password over HTTP Basic, not its access tokens, not its
+  registered SSH keys. This is what an offboarding needs, because a password reset on its own
+  leaves the departing account's tokens and keys working for `git push`. Suspending destroys
+  nothing, so restoring brings the account back as it was — minus its sessions, which stay
+  revoked.
+- **Revoke credentials** — delete every access token and SSH key the account holds, and sign it
+  out. Unlike suspension this cannot be undone, and it does not stop the account working: it is
+  for credentials you think have leaked (a lost laptop, a token in a build log) on an account
+  that should keep going once new ones are issued.
 
 **Add user** at the top of the same screen creates an account outright: a username, an email
 address, a password, and optionally the administrator flag. It works **whether or not
@@ -77,9 +87,28 @@ reset, there is no invitation email: pass the password on out of band and have t
 at **Settings → Account**.
 
 Two rules stop an instance from locking itself out: you can't revoke your own administrator
-access (ask another administrator), and the last remaining administrator can't be demoted at
-all. The restriction is enforced by the server for every one of these actions, not merely hidden
-by the UI.
+access or suspend your own account (ask another administrator), and the last administrator who
+is still active can't be demoted or suspended at all. A suspended administrator does not count
+towards that last one — an account that cannot sign in is no more able to recover the instance
+than a missing one. The restriction is enforced by the server for every one of these actions,
+not merely hidden by the UI.
+
+!!! note "Site administration is browser-only"
+    Every `/api/v1/admin` endpoint accepts the session cookie and nothing else. An access token
+    or HTTP Basic credentials are refused with 403 `session_required`, even when the account
+    behind them is an administrator. A single leaked write-scoped token used to be enough to
+    create accounts, reset anyone's password, and register an SSH key that outlives the token's
+    revocation; requiring a browser session keeps automation out of that blast radius. Use the
+    screens under **Settings**.
+
+## Failed background jobs
+
+Administrators also get **Settings → Sync jobs** (`/settings/admin/sync-jobs`). Every push
+schedules background work that rebuilds the repository's file listing, search entry and object
+storage export. When that work fails repeatedly it parks, and the repository stays indexed at
+its previous push — the files you see are stale even though the push succeeded. This screen
+lists the parked jobs with the error from their last attempt, and **Retry** puts one back in
+the queue with a fresh budget. An empty list is the healthy state.
 
 ## Access tokens
 

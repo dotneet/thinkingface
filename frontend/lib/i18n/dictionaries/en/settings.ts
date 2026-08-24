@@ -337,6 +337,9 @@ export const settings = {
     resetPassword: "Reset password",
     promote: "Make admin",
     demote: "Revoke admin",
+    suspend: "Suspend",
+    restore: "Restore",
+    revokeCredentials: "Revoke credentials",
     working: "Working…",
     // TF_ADMIN_PASSWORD only applies on an empty instance, so this screen is
     // the only way to fix a forgotten password after first boot.
@@ -358,6 +361,22 @@ export const settings = {
     demoteDescription: "{username} keeps their account and repositories, but loses this screen.",
     demoteConfirm: "Revoke admin",
     adminChanged: "{username}'s administrator access was updated.",
+    disabledBadge: "Suspended",
+    suspendTitle: "Suspend {username}?",
+    suspendDescription:
+      "{username} is signed out everywhere immediately, and stops being able to sign in, push over SSH, or use any access token. Nothing is deleted — restoring gives all of it back.",
+    suspendConfirm: "Suspend account",
+    restoreTitle: "Restore {username}?",
+    restoreDescription:
+      "{username} can sign in again, and their access tokens and SSH keys start working again. Sessions they had open before the suspension stay signed out.",
+    restoreConfirm: "Restore account",
+    suspendDone: "{username} was suspended.",
+    restoreDone: "{username} was restored.",
+    revokeTitle: "Revoke {username}'s credentials?",
+    revokeDescription:
+      "Permanently deletes every access token and SSH key {username} holds and signs them out everywhere. This cannot be undone, and it does not suspend the account — they can sign in with their password and issue new ones.",
+    revokeConfirm: "Revoke credentials",
+    revokeDone: "{username}'s tokens and SSH keys were revoked.",
     loadFailed: "Failed to load accounts",
     loadFailedHint: "The backend API may be unreachable. Try reloading the page.",
     emptyTitle: "No accounts match",
@@ -371,9 +390,47 @@ export const settings = {
       lastAdmin: "An instance needs at least one site administrator. Appoint someone else first.",
       selfDemote:
         "You can't revoke your own administrator access. Ask another administrator to do it.",
+      selfDisable: "You can't suspend your own account. Ask another administrator to do it.",
+      selfRevoke:
+        "Revoke your own tokens and SSH keys from Settings → Access tokens and Settings → SSH keys.",
+      sessionRequired: "Your session has expired. Sign in again to continue.",
       userNotFound: "No account with that username.",
       permissionDenied: "You don't have permission to do that.",
       loginRequired: "Log in to continue.",
+    },
+  },
+  // Site administration: the post-push jobs that gave up
+  // (docs/dev/api-contract.md §1.3, "Failed sync jobs").
+  adminSyncJobs: {
+    navLabel: "Sync jobs",
+    title: "Failed sync jobs",
+    description:
+      "Post-push indexing that ran out of retries. Until a job is retried, that repository's file listing, search entry and blobs/ export stay frozen at the previous push.",
+    countOne: "{count} failed job",
+    countOther: "{count} failed jobs",
+    refresh: "Refresh",
+    colRepo: "Repository",
+    colRef: "Ref",
+    colAttempts: "Attempts",
+    colLastError: "Last error",
+    colUpdated: "Failed",
+    colActions: "Actions",
+    retry: "Retry",
+    retrying: "Retrying…",
+    retryDone: "{repo} was put back in the queue.",
+    // A retry only requeues the work; the worker claims it on its next poll.
+    retryNote: "Retried jobs are picked up within about ten seconds.",
+    openRepo: "Open repository",
+    loadFailed: "Failed to load sync jobs",
+    loadFailedHint: "The backend API may be unreachable. Try reloading the page.",
+    emptyTitle: "No failed sync jobs",
+    emptyDescription:
+      "Every push has been indexed. Jobs only appear here after they run out of retries.",
+    accessDeniedTitle: "Site administrators only",
+    accessDeniedMessage:
+      "The sync queue covers every repository on the instance, so it's restricted to site administrators.",
+    errors: {
+      jobGone: "That job is no longer failed — someone may have retried it already.",
     },
   },
 };

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -17,6 +18,38 @@ type User struct {
 	// signed with an older epoch is refused, which is what makes logout and a
 	// password change actually invalidate outstanding sessions.
 	SessionEpoch int64 `json:"-"`
+	// DisabledAt is when the account was suspended, nil while it is active.
+	// It is the offboarding switch: every identity path in the server --
+	// session cookie, password (including HTTP Basic), access token and SSH
+	// public key -- refuses a user for which this is set. Nothing is deleted,
+	// so restoring the account is a matter of clearing it again.
+	DisabledAt *time.Time `json:"-"`
+	// DisabledBy is the site administrator who suspended the account, nil
+	// while it is active.
+	DisabledBy *int64 `json:"-"`
+}
+
+// Disabled reports whether the account is suspended. Read it rather than
+// comparing DisabledAt yourself: this is the predicate every identity path is
+// expected to consult, and having one spelling of it is what keeps the paths
+// from drifting apart.
+func (u *User) Disabled() bool { return u != nil && u.DisabledAt != nil }
+
+// userColumns is the SELECT list every query that materialises a User uses,
+// in the order scanUser reads them. It exists so a new column cannot be added
+// to one query and forgotten in the next -- which is exactly how an identity
+// path ends up not knowing an account is disabled.
+const userColumns = `id, username, email, password_hash, is_admin, created_at, session_epoch, disabled_at, disabled_by`
+
+// userColumnsOn qualifies userColumns with a table alias, for the queries
+// that join users to a credential table (LookupToken, LookupSSHKey).
+func userColumnsOn(alias string) string {
+	return alias + "." + strings.ReplaceAll(userColumns, ", ", ", "+alias+".")
+}
+
+func scanUser(row rowScanner, u *User) error {
+	return row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin,
+		&u.CreatedAt, &u.SessionEpoch, &u.DisabledAt, &u.DisabledBy)
 }
 
 type AccessToken struct {
@@ -40,12 +73,11 @@ func (s *Store) CreateUser(ctx context.Context, username, email, passwordHash st
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
 
 	u := &User{}
-	err = tx.QueryRow(ctx,
+	err = scanUser(tx.QueryRow(ctx,
 		`INSERT INTO users (username, email, password_hash, is_admin)
 		 VALUES ($1, $2, $3, $4)
-		 RETURNING id, username, email, password_hash, is_admin, created_at, session_epoch`,
-		username, email, passwordHash, isAdmin,
-	).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt, &u.SessionEpoch)
+		 RETURNING `+userColumns,
+		username, email, passwordHash, isAdmin), u)
 	if s.d.isUniqueViolation(err) {
 		return nil, ErrConflict
 	}
@@ -69,21 +101,19 @@ func (s *Store) CreateUser(ctx context.Context, username, email, passwordHash st
 
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (*User, error) {
 	u := &User{}
-	err := s.db.QueryRow(ctx,
+	err := scanUser(s.db.QueryRow(ctx,
 		// Case-insensitive to match the namespace uniqueness rule: "Alice"
 		// and "alice" are one identity, so logging in (and being added to an
 		// organisation by name) must not depend on how the name was typed.
-		`SELECT id, username, email, password_hash, is_admin, created_at, session_epoch FROM users WHERE LOWER(username) = LOWER($1)`,
-		username,
-	).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt, &u.SessionEpoch)
+		`SELECT `+userColumns+` FROM users WHERE LOWER(username) = LOWER($1)`,
+		username), u)
 	return u, norm(err)
 }
 
 func (s *Store) GetUserByID(ctx context.Context, id int64) (*User, error) {
 	u := &User{}
-	err := s.db.QueryRow(ctx,
-		`SELECT id, username, email, password_hash, is_admin, created_at, session_epoch FROM users WHERE id = $1`, id,
-	).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt, &u.SessionEpoch)
+	err := scanUser(s.db.QueryRow(ctx,
+		`SELECT `+userColumns+` FROM users WHERE id = $1`, id), u)
 	return u, norm(err)
 }
 
@@ -128,7 +158,7 @@ func (s *Store) ListUsers(ctx context.Context, search string, limit, offset int)
 	limitP, offsetP := bind(limit), bind(offset)
 
 	rows, err := s.db.Query(ctx,
-		`SELECT id, username, email, is_admin, created_at FROM users`+listWhere+
+		`SELECT id, username, email, is_admin, created_at, disabled_at FROM users`+listWhere+
 			` ORDER BY username LIMIT `+limitP+` OFFSET `+offsetP, args...)
 	if err != nil {
 		return nil, 0, err
@@ -138,7 +168,7 @@ func (s *Store) ListUsers(ctx context.Context, search string, limit, offset int)
 	out := []User{}
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.IsAdmin, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.IsAdmin, &u.CreatedAt, &u.DisabledAt); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, u)
@@ -223,8 +253,15 @@ func (s *Store) SetUserAdmin(ctx context.Context, userID int64, isAdmin bool) er
 		return norm(err)
 	}
 	if current && !isAdmin {
+		// Suspended administrators do not count. They cannot authenticate on
+		// any path, so leaving one as the only "remaining" administrator
+		// locks the instance out just as thoroughly as leaving none -- and
+		// SetUserDisabled applies the same predicate, so the two guards have
+		// to agree or one of them can be walked around by going through the
+		// other.
 		var admins int64
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM users WHERE is_admin`).Scan(&admins); err != nil {
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM users WHERE is_admin AND disabled_at IS NULL`).Scan(&admins); err != nil {
 			return err
 		}
 		if admins <= 1 {
@@ -235,6 +272,98 @@ func (s *Store) SetUserAdmin(ctx context.Context, userID int64, isAdmin bool) er
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// SetUserDisabled suspends or restores an account, named by username the way
+// the administration endpoint addresses it.
+//
+// Suspending is the offboarding switch this server previously did not have.
+// A password reset leaves the account's access tokens and registered SSH keys
+// working -- deliberately, see UpdateUserPassword -- so the only thing an
+// administrator could do to a departed colleague was change a password that
+// colleague no longer needed. Setting disabled_at stops **every** identity
+// path at once, and session_epoch is incremented in the same statement so the
+// cookies already issued stop working immediately rather than at their TTL.
+//
+// Restoring clears both columns. It brings back nothing that was revoked
+// separately: tokens and keys deleted by RevokeAllTokens / DeleteAllSSHKeys
+// are gone for good, which is the point of having the two actions apart.
+//
+// Suspending the last remaining site administrator is ErrLastSiteAdmin, for
+// exactly SetUserAdmin's reason -- an instance with no usable administrator
+// can only be repaired from the database -- and under the same advisory lock,
+// since the rule is about the *count* of administrators and two concurrent
+// suspensions must not both observe two. Disabled administrators do not count
+// towards it: an account that cannot authenticate cannot administer anything.
+//
+// Setting the state an account is already in is a no-op, so a retried request
+// does not bump the epoch a second time.
+func (s *Store) SetUserDisabled(ctx context.Context, username string, disabled bool, actorID int64) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+
+	if err := s.d.advisoryXactLock(ctx, tx, "site-admins", 0); err != nil {
+		return err
+	}
+	var (
+		id         int64
+		isAdmin    bool
+		disabledAt *time.Time
+	)
+	if err := tx.QueryRow(ctx,
+		`SELECT id, is_admin, disabled_at FROM users WHERE LOWER(username) = LOWER($1)`,
+		username).Scan(&id, &isAdmin, &disabledAt); err != nil {
+		return norm(err)
+	}
+	if disabled == (disabledAt != nil) {
+		return nil
+	}
+	if disabled && isAdmin {
+		var admins int64
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM users WHERE is_admin AND disabled_at IS NULL`).Scan(&admins); err != nil {
+			return err
+		}
+		if admins <= 1 {
+			return ErrLastSiteAdmin
+		}
+	}
+	if disabled {
+		_, err = tx.Exec(ctx,
+			`UPDATE users SET disabled_at = now(), disabled_by = $2,
+			        session_epoch = session_epoch + 1
+			 WHERE id = $1`, id, actorID)
+	} else {
+		_, err = tx.Exec(ctx,
+			`UPDATE users SET disabled_at = NULL, disabled_by = NULL WHERE id = $1`, id)
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// RevokeAllTokens deletes every access token an account holds and reports how
+// many rows went. Unlike DeleteToken it carries no ownership predicate,
+// because the caller is not the owner: this is the site administrator's
+// offboarding action, and the authorization for it lives in the handler.
+//
+// Deliberately not folded into SetUserDisabled. Suspension is reversible and
+// destroys nothing; revoking credentials is neither, and an irreversible
+// deletion must not ride along as a side effect of a partial update.
+func (s *Store) RevokeAllTokens(ctx context.Context, userID int64) (int64, error) {
+	return s.db.Exec(ctx, `DELETE FROM access_tokens WHERE user_id = $1`, userID)
+}
+
+// DeleteAllSSHKeys is RevokeAllTokens for registered public keys. The two are
+// separate statements rather than one transaction on purpose: each is
+// idempotent on its own and a partial failure leaves strictly fewer
+// credentials than before, so an identical retry converges.
+func (s *Store) DeleteAllSSHKeys(ctx context.Context, userID int64) (int64, error) {
+	return s.db.Exec(ctx, `DELETE FROM user_ssh_keys WHERE user_id = $1`, userID)
 }
 
 // CreateToken inserts a new access token. expiresAt is nil for a token that
@@ -255,18 +384,27 @@ func (s *Store) CreateToken(ctx context.Context, userID int64, name, scope, toke
 	return t, nil
 }
 
-// LookupToken resolves a hashed token to its owner, rejecting expired ones.
+// LookupToken resolves a hashed token to its owner, rejecting expired ones
+// and tokens belonging to a suspended account.
+//
+// The disabled_at predicate is defence in depth, not the only check: the API
+// layer refuses a suspended user on every identity path (see
+// resolveIdentity). It lives in the statement as well because a token that
+// resolves to nothing cannot be trusted by a future caller that forgets to
+// ask.
 func (s *Store) LookupToken(ctx context.Context, tokenHash string) (*User, *AccessToken, error) {
 	u := &User{}
 	t := &AccessToken{}
 	err := s.db.QueryRow(ctx,
 		`SELECT t.id, t.user_id, t.name, t.scope, t.last_used_at, t.created_at,
-		        u.id, u.username, u.email, u.password_hash, u.is_admin, u.created_at, u.session_epoch
+		        `+userColumnsOn("u")+`
 		 FROM access_tokens t JOIN users u ON u.id = t.user_id
-		 WHERE t.token_hash = $1 AND (t.expires_at IS NULL OR t.expires_at > now())`,
+		 WHERE t.token_hash = $1 AND (t.expires_at IS NULL OR t.expires_at > now())
+		   AND u.disabled_at IS NULL`,
 		tokenHash,
 	).Scan(&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.CreatedAt,
-		&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt, &u.SessionEpoch)
+		&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt, &u.SessionEpoch,
+		&u.DisabledAt, &u.DisabledBy)
 	if err != nil {
 		return nil, nil, norm(err)
 	}

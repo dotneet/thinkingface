@@ -217,26 +217,38 @@ func (g *authGuard) releaseBcrypt() {
 	}
 }
 
-// clientAddrKey identifies the caller for rate-limiting purposes.
+// clientIP resolves the caller's address.
 //
 // RemoteAddr by default, exactly as the note in Handler() prescribes:
 // X-Forwarded-For is client-controlled, and reading it unconditionally would
 // let an attacker pick a fresh bucket per request. TF_TRUST_PROXY_IPS opts in
 // for deployments where a proxy the operator controls rewrites the header.
-func (s *Server) clientAddrKey(r *http.Request) string {
+//
+// This is the *only* implementation of that rule. The rate limiter and the
+// authentication logs both need an address, and two readings of
+// TF_TRUST_PROXY_IPS would eventually disagree -- at which point the address
+// an operator sees in a log would not be the one the failure budget was
+// charged against, and a report of a guessing run would name the wrong host.
+func (s *Server) clientIP(r *http.Request) string {
 	if s.cfg != nil && s.cfg.TrustProxyIPs {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			first, _, _ := strings.Cut(xff, ",")
 			if first = strings.TrimSpace(first); first != "" {
-				return "addr:" + first
+				return first
 			}
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		host = r.RemoteAddr
+		return r.RemoteAddr
 	}
-	return "addr:" + host
+	return host
+}
+
+// clientAddrKey is clientIP as a failure-bucket key. The prefix keeps the
+// address space and the username space apart in one map (see rateFor).
+func (s *Server) clientAddrKey(r *http.Request) string {
+	return "addr:" + s.clientIP(r)
 }
 
 func usernameKey(username string) string {

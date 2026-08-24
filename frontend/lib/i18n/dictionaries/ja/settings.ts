@@ -343,6 +343,9 @@ export const settings = {
     resetPassword: "パスワードをリセット",
     promote: "管理者にする",
     demote: "管理者を解除",
+    suspend: "停止",
+    restore: "復帰",
+    revokeCredentials: "資格情報を失効",
     working: "処理中…",
     seededAdminNote:
       "`TF_ADMIN_PASSWORD` は空のインスタンスで最初のアカウントを作成するときにだけ使われます。以降のパスワード変更はこの画面から行います。",
@@ -363,6 +366,22 @@ export const settings = {
       "{username} のアカウントとリポジトリはそのまま残りますが、この画面は使えなくなります。",
     demoteConfirm: "管理者を解除",
     adminChanged: "{username} の管理者権限を更新しました。",
+    disabledBadge: "停止中",
+    suspendTitle: "{username} を停止しますか？",
+    suspendDescription:
+      "{username} はただちにすべての端末からサインアウトされ、ログイン・SSH での push・アクセストークンの利用がすべてできなくなります。削除されるものはなく、復帰すればすべて元どおりになります。",
+    suspendConfirm: "アカウントを停止",
+    restoreTitle: "{username} を復帰しますか？",
+    restoreDescription:
+      "{username} は再びログインできるようになり、アクセストークンと SSH 鍵も再び使えるようになります。停止前に開いていたセッションはサインアウトされたままです。",
+    restoreConfirm: "アカウントを復帰",
+    suspendDone: "{username} を停止しました。",
+    restoreDone: "{username} を復帰しました。",
+    revokeTitle: "{username} の資格情報を失効しますか？",
+    revokeDescription:
+      "{username} が持つアクセストークンと SSH 鍵をすべて完全に削除し、すべての端末からサインアウトさせます。取り消せません。アカウントの停止ではないため、本人はパスワードでログインして新しい資格情報を発行できます。",
+    revokeConfirm: "資格情報を失効",
+    revokeDone: "{username} のトークンと SSH 鍵を失効しました。",
     loadFailed: "アカウント一覧の読み込みに失敗しました",
     loadFailedHint:
       "バックエンド API に接続できない可能性があります。ページを再読み込みしてください。",
@@ -378,9 +397,45 @@ export const settings = {
       lastAdmin:
         "インスタンスには最低 1 人のサイト管理者が必要です。先に別の人を管理者にしてください。",
       selfDemote: "自分自身の管理者権限は解除できません。別の管理者に依頼してください。",
+      selfDisable: "自分自身のアカウントは停止できません。別の管理者に依頼してください。",
+      selfRevoke:
+        "自分のトークンと SSH 鍵は Settings → Access tokens と Settings → SSH keys から失効してください。",
+      sessionRequired: "セッションの有効期限が切れました。もう一度サインインしてください。",
       userNotFound: "そのユーザー名のアカウントはありません。",
       permissionDenied: "この操作を行う権限がありません。",
       loginRequired: "続けるにはログインしてください。",
+    },
+  },
+  adminSyncJobs: {
+    navLabel: "同期ジョブ",
+    title: "失敗した同期ジョブ",
+    description:
+      "リトライ回数を使い切った push 後のインデックス処理です。再実行するまで、そのリポジトリのファイル一覧・検索・blobs/ エクスポートは前回の push の状態で止まったままになります。",
+    countOne: "失敗したジョブ {count} 件",
+    countOther: "失敗したジョブ {count} 件",
+    refresh: "再読み込み",
+    colRepo: "リポジトリ",
+    colRef: "ref",
+    colAttempts: "試行回数",
+    colLastError: "最後のエラー",
+    colUpdated: "失敗日時",
+    colActions: "操作",
+    retry: "再実行",
+    retrying: "再実行中…",
+    retryDone: "{repo} をキューに戻しました。",
+    retryNote: "再実行したジョブは 10 秒ほどでワーカーに拾われます。",
+    openRepo: "リポジトリを開く",
+    loadFailed: "同期ジョブの読み込みに失敗しました",
+    loadFailedHint:
+      "バックエンド API に接続できない可能性があります。ページを再読み込みしてください。",
+    emptyTitle: "失敗した同期ジョブはありません",
+    emptyDescription:
+      "すべての push がインデックスされています。ジョブはリトライ回数を使い切ったときだけここに現れます。",
+    accessDeniedTitle: "サイト管理者専用",
+    accessDeniedMessage:
+      "同期キューはインスタンス上のすべてのリポジトリを対象とするため、サイト管理者のみが利用できます。",
+    errors: {
+      jobGone: "そのジョブはすでに失敗状態ではありません。誰かが再実行した可能性があります。",
     },
   },
 };

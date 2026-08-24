@@ -412,16 +412,22 @@ pure-Go parquet-go). A static binary makes the image smaller and cold starts fas
 | Crash after CAS succeeds, before the response | the client sees a failure, but it's actually already committed | re-pushing is idempotent (refs are already at the target value, objects are the same) and is a no-op |
 | An instance's tmpfs disappears | materialized on the next request | automatic. **This is exactly what the design aims for** |
 | A pack is corrupted | detected by `index-pack --strict`, materialize fails | returns 500. Ops alert |
-| The index is corrupted / deleted | the repository can't be read | **A single point of failure.** GCS versioning is enabled, so recovery from an older generation is possible |
+| The index is corrupted / deleted | the repository can't be read | **A single point of failure.** GCS versioning is enabled, so recovery from an older generation is possible — see `docs/dev/wal-index-recovery.md` |
 | Concurrent compaction | one wins the CAS, the other backs off | automatic |
 | Postgres is down | authorization can't happen, all requests fail | git consistency is untouched. Resumes as-is after recovery |
 
 The bucket holding `index.json` already has `versioning { enabled = true }` (`infra/main.tf`).
-Deletion of `lfs/` `blobs/` is delegated entirely to reference-counted GC (`thinkingface gc`,
-`docs/dev/content-addressed-storage-design.md`) rather than an age-based lifecycle rule, so the bucket
-has no rule that automatically prunes noncurrent versions in the first place. `wal/`'s index
-automatically gets the same treatment, so old generations are retained until explicitly deleted.
-**This is called out here as an intentional setting.**
+Deletion of *live* `lfs/` `blobs/` objects is delegated entirely to reference-counted GC
+(`thinkingface gc`, `docs/dev/content-addressed-storage-design.md`) rather than an age-based
+lifecycle rule — but a gc delete only makes an object noncurrent, and a separate lifecycle rule
+(`var.lfs_blobs_noncurrent_retention_days`, default 30 days) deletes the noncurrent version later
+so gc's deletes actually free storage (added for audit finding A-04: without it, gc's reported
+byte counts never showed up as a lower bill). **That rule is scoped to `lfs/`/`blobs/` only and
+deliberately never matches `wal/`** (there is no "everything except this prefix" lifecycle
+condition, so the inclusion list itself is the guarantee) — `wal/`'s index keeps every noncurrent
+version forever, since an old generation is the only recovery path for open issue 5 below. See
+`docs/dev/wal-index-recovery.md` for that recovery procedure and `infra/main.tf` /
+`infra/README.md` for the lifecycle rule itself. **This asymmetry is intentional.**
 
 ## 14. Changes to Existing Code
 
@@ -484,8 +490,11 @@ the two match, and only then** switch over. Don't skip this dual-write period.
    repositories
 4. materialize frequency due to the lack of cache locality across Cloud Run instances. Tuning
    min-instances and concurrency comes after real measurements
-5. `index.json`'s single point of failure. Recoverable via GCS versioning, but the recovery
-   procedure needs to be documented for operations
+5. ~~`index.json`'s single point of failure~~ **Documented (2026-08-25)**: recoverable via GCS
+   versioning (the bucket's noncurrent-version lifecycle rule deliberately never matches `wal/`,
+   see §13 above). The operational procedure — how to tell an index is corrupted or deleted, how
+   to list and choose a generation, how to validate and restore it, and what not to do — is
+   `docs/dev/wal-index-recovery.md`
 6. **A known residual risk (confirmed in the 2026-08-21 review, mitigated but not fully
    resolved)**: no repository lock is held while smart HTTP's `upload-pack` / `receive-pack` is
    running. Because of this, while one is in flight, (a) LRU eviction, or (b) a full materialize

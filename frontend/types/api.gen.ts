@@ -304,6 +304,13 @@ export interface RepoDetail extends RepoSummary {
    */
   readme_too_large: boolean;
   clone_url: string;
+  /**
+   * SSHCloneURL is the git-over-SSH remote, empty when TF_SSH_ENABLED is
+   * off. It is served because the port is deployment-specific and cannot be
+   * guessed: the UI happily let people register an SSH key at
+   * /settings/ssh-keys while showing no URL that key could be used against.
+   */
+  ssh_clone_url: string;
   branches: string[];
   tags_refs: string[];
   /**
@@ -1555,6 +1562,14 @@ export interface AdminUser {
    * a role in any organisation.
    */
   is_admin: boolean;
+  /**
+   * Disabled reports whether the account is suspended. A disabled account
+   * authenticates on no path at all -- not password, not access token, not
+   * SSH key -- which is what makes it the offboarding switch. Resetting a
+   * password deliberately does not revoke tokens, so before this existed
+   * there was no way to actually cut somebody off.
+   */
+  disabled: boolean;
   created_at: string;
 }
 /**
@@ -1604,6 +1619,50 @@ export interface AdminUserUpdateRequest {
    * own is 400; revoking the last one on the instance is 409.
    */
   is_admin?: boolean;
+  /**
+   * Disabled suspends or restores the account. Suspending it stops every
+   * identity path at once (session, password, access token, SSH key) and
+   * revokes its sessions; disabling your own account is 400, and so is
+   * disabling the last site administrator. Restoring does not bring back
+   * credentials revoked separately.
+   */
+  disabled?: boolean;
+}
+/**
+ * SyncJob is one row of the post-push queue as GET /api/v1/admin/sync-jobs
+ * lists it. Only jobs that exhausted their attempts are listed: a job still
+ * retrying is not an operator's problem yet, and the queue is otherwise high
+ * churn.
+ * A failed job means the repository's file index, search entry and blobs/
+ * export are frozen at the previous push. Nothing republishes it on its own,
+ * which is why this listing exists at all -- before it, the only trace was a
+ * single log line.
+ */
+export interface SyncJob {
+  id: number /* int64 */;
+  /**
+   * Repo is the full name including the kind segment, e.g.
+   * "datasets/acme/imdb-ja", so an operator can open it directly.
+   */
+  repo: string;
+  ref: string;
+  /**
+   * Attempts is how many times the job was claimed before it parked.
+   */
+  attempts: number /* int */;
+  /**
+   * LastError is the error from the final attempt, verbatim.
+   */
+  last_error: string;
+  updated_at: string;
+}
+/**
+ * SyncJobListResponse is one page of failed sync jobs. Total counts every
+ * failed job, ignoring the page window.
+ */
+export interface SyncJobListResponse {
+  items: SyncJob[];
+  total: number /* int64 */;
 }
 /**
  * ApiError describes what went wrong.
