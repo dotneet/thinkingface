@@ -168,6 +168,27 @@ Optionally install [lefthook](https://github.com/evilmartians/lefthook) for pre-
 feedback (`lefthook install`; `lefthook.yml` is at the root). It is not required — `make check`
 and CI are authoritative — and `git commit --no-verify` skips it for one commit.
 
+### Automated PR review
+
+`.github/workflows/claude-review.yml` runs [Claude Code
+Action](https://github.com/anthropics/claude-code-action) over the diff and leaves inline
+comments. It is a reviewer, not a second CI: it installs no toolchain and builds nothing,
+because `ci.yml` already covers the mechanical checks above.
+
+- **Triggers**: when a PR opens (or leaves draft, or reopens), and on demand by adding the
+  `claude-review` label — remove and re-add it to ask for another pass. Deliberately *not*
+  on every push. The automatic path skips drafts and Renovate/Dependabot PRs; the label
+  overrides both. Fork PRs are never reviewed — `pull_request` from a fork has no secrets,
+  and giving it any would be a pwn-request.
+- **Auth is a Claude subscription**, not the Anthropic API. Generate a token with
+  `claude setup-token` while logged in, and store it as the repository secret
+  `CLAUDE_CODE_OAUTH_TOKEN`. It expires — a job failing at the auth step usually just needs
+  it regenerated. Do not add `ANTHROPIC_API_KEY` as well; a static API key would take
+  precedence and bill the API instead.
+- The review prompt lives in the workflow file. It points at this repository's invariants
+  (`CLAUDE.md`) and UI conventions (`frontend/DESIGN.md`), so keep it in step when those
+  change.
+
 ## Tests
 
 | Command | Scope | Needs |
