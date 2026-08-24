@@ -52,7 +52,22 @@ it handles, with `internalChecksFilter: "strict"` so the age applies to
 transitive updates too. The one exception is `vulnerabilityAlerts`, which sets
 `minimumReleaseAge: null`: a fix for a known CVE should not wait a week.
 
-To take a fresh release deliberately: `bun update <pkg> --minimum-release-age=0`.
+That exception only relaxes Renovate's own choice of version — it does not lift
+bun's quarantine. Renovate refreshes `bun.lock` by running bun in `frontend/`,
+where `bunfig.toml` applies, and bun rejects a too-fresh version even when it is
+the exact version being asked for (`error: No version matching "<pkg>" found for
+specifier "<version>" (blocked by minimum-release-age: ...)`). So a security PR
+for a frontend package whose fix is less than a week old arrives with
+`package.json` bumped and the lockfile update failed, and CI's
+`bun install --frozen-lockfile` fails with it. Regenerate the lockfile on the PR
+branch:
+
+```bash
+cd frontend && bun update <pkg> --minimum-release-age=0
+```
+
+To take a fresh release deliberately, it is the same command. Only that CLI flag
+lifts the setting — bun has no environment-variable override for it.
 
 ### Pinning, and how to move a pin
 
@@ -125,6 +140,23 @@ Nothing in this directory can set these; they need a repository admin.
 
 Dependabot *security updates* (the automatic PRs) should stay off while
 Renovate is in use: both would open PRs for the same advisory.
+
+### Turning Renovate on
+
+1. Install <https://github.com/apps/renovate> and grant it this repository
+   (*Only select repositories*). Nothing else is needed on this side.
+2. There is no onboarding PR to merge: `renovate.json` already exists, so
+   Renovate treats the repository as configured and goes straight to work.
+   The first sign it is alive is the **Dependency Dashboard** issue it opens.
+3. The schedule is `before 9am on monday` (Asia/Tokyo), so the first batch of
+   PRs may not appear until then. To see it sooner, tick *Check this box to
+   trigger a request for Renovate to run again on this repository* on the
+   dashboard issue.
+4. Expect the first run to be the noisiest one — `pinDigests` fills in image
+   digests and `helpers:pinGitHubActionDigests` refreshes action SHAs.
+   `prConcurrentLimit: 5` keeps it to five PRs at a time.
+5. Confirm Dependabot security updates are off (the table above), or the two
+   will race on the same advisory.
 
 ## Deliberately not done
 
