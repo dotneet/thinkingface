@@ -65,6 +65,17 @@ export function RefsManager({
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
+  // Both lists feed the "revision to tag" picker: a tag may point at another
+  // tag's commit just as well as at a branch tip.
+  const revOptions = [...branches.map((b) => b.name), ...tags.map((tag) => tag.name)];
+
+  // Deleting the ref the picker was sitting on leaves `tagRev` naming
+  // something that is gone: the <select> renders blank (no matching option)
+  // while still holding the old value, so the next Create tag posts a
+  // revision the server no longer has and fails for a reason the screen never
+  // showed. Fall back to whatever is still there.
+  const selectedRev = revOptions.includes(tagRev) ? tagRev : (revOptions[0] ?? "");
+
   async function confirmDelete() {
     if (!pending || deleting) return;
     setDeleting(true);
@@ -93,7 +104,7 @@ export function RefsManager({
     if (trimmed === "" || creating) return;
     setCreating(true);
     setCreateError(null);
-    const result = await createTag(kind, ns, name, tagRev, trimmed, tagMessage.trim());
+    const result = await createTag(kind, ns, name, selectedRev, trimmed, tagMessage.trim());
     setCreating(false);
     if (!result.ok) {
       setCreateError(errorMessage(t, result));
@@ -108,10 +119,6 @@ export function RefsManager({
     setTagMessage("");
     router.refresh();
   }
-
-  // Both lists feed the "revision to tag" picker: a tag may point at another
-  // tag's commit just as well as at a branch tip.
-  const revOptions = [...branches.map((b) => b.name), ...tags.map((tag) => tag.name)];
 
   return (
     <div className="flex flex-col gap-6">
@@ -207,7 +214,7 @@ export function RefsManager({
           </Field>
           <Field label={t("repo.refs.tagRevLabel")} className="min-w-48 flex-1">
             <Select
-              value={tagRev}
+              value={selectedRev}
               onChange={(e) => setTagRev(e.target.value)}
               disabled={creating || revOptions.length === 0}
             >

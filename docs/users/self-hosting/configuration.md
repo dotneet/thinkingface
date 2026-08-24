@@ -86,6 +86,7 @@ a variable is unset.
 |---|---|---|---|
 | `TF_SSH_ENABLED` | Turns on the git-over-SSH listener. | `true` in Compose (`false` in the server's own default) | Opens a second port; needs a host key on persistent storage, so this is treated as an explicit deployment decision. |
 | `TF_SSH_ADDR` | Listen address for the SSH server. | `:2222` | Required (non-empty) when `TF_SSH_ENABLED=true`. |
+| `TF_SSH_PUBLIC_PORT` | The port clients should dial, when it differs from the one `TF_SSH_ADDR` binds. | *(the port from `TF_SSH_ADDR`)* | Set this whenever a port mapping or a load balancer publishes the listener elsewhere — compose and Kubernetes both do. It is what the repository page shows as the SSH clone URL, so a wrong value hands every user a URL that does not connect. `22` is rendered implicitly (`ssh://git@host/…`). |
 | `TF_SSH_HOST_KEY_PATH` | Where the server's SSH host key lives. | `/data/ssh/host_ed25519` | Generated on first start if missing. **Must be on persistent storage** — on an ephemeral filesystem, every restart mints a new identity and every client sees a host key mismatch warning. |
 | `TF_SSH_IDLE_TIMEOUT` | Closes an SSH connection that has gone quiet. | `10m` | `0` disables it. Only reaps abandoned connections — active clones keep streaming regardless. |
 | `TF_SSH_PORT` | Host port the SSH listener is published on. | `2222` | Compose-only (`docker-compose.yml` port mapping); not read by the server itself. |

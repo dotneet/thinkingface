@@ -185,6 +185,11 @@ api.delete_branch("admin/my-model", branch="experiment")
 api.delete_tag("admin/my-model", tag="v1.0")
 ```
 
+The web UI does all four as well: creating a branch is on the revision selector, and the
+repository's **Settings** tab lists both kinds of ref with controls to tag and to delete (see
+[The web interface](web-ui.md#manage-branches-and-tags)). Nothing here needs a shell or a
+Python session.
+
 `create_branch(..., revision=...)` starts the branch from any revision, and
 `create_tag(..., revision=...)` tags one. `exist_ok=True` makes a repeat call a no-op. The
 repository's **default branch cannot be deleted** — HEAD, the repository card and every

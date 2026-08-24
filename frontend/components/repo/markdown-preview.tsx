@@ -28,6 +28,7 @@ export function MarkdownPreview({
   downloadUrl,
   fileName,
   rendered,
+  highlighted,
 }: {
   /** The Markdown source, shown as-is in Raw mode. */
   source: string;
@@ -37,6 +38,11 @@ export function MarkdownPreview({
   fileName: string;
   /** The rendered Markdown panel, built on the server. */
   rendered: React.ReactNode;
+  /**
+   * The Raw pane's highlighted source, also built on the server. Same reason
+   * as `rendered`: a toggle should cost no parser in the browser.
+   */
+  highlighted?: React.ComponentProps<typeof TextPreview>["highlighted"];
 }) {
   const t = useT();
   const [mode, setMode] = useState<Mode>("rendered");
@@ -59,7 +65,7 @@ export function MarkdownPreview({
           content={source}
           truncated={truncated}
           downloadUrl={downloadUrl}
-          fileName={fileName}
+          highlighted={highlighted}
         />
       ) : (
         rendered

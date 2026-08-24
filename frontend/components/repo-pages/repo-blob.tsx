@@ -1,4 +1,4 @@
-import { Download, FileCode2, Pencil } from "lucide-react";
+import { Download, Pencil } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { CommitBar } from "@/components/repo/commit-bar";
@@ -107,23 +107,21 @@ export async function RepoBlob({
             {/* Always present, whatever the file type and whoever is looking:
                 the text and Markdown previews used to offer no way out at all,
                 so "open config.json, take the contents" dead-ended on screen.
-                Both point at the canonical resolve URL — the one a `curl` would
+                It points at the canonical resolve URL — the one a `curl` would
                 use — and the group keeps its place in the row so the Edit and
-                Delete controls beside it never shift (DESIGN.md §8). */}
+                Delete controls beside it never shift (DESIGN.md §8).
+
+                Only one link, deliberately. A "Raw" link next to it would be
+                the same URL doing the same thing: the API serves every blob as
+                Content-Disposition: attachment, which is what stops a pushed
+                .html or .svg from executing on the API origin
+                (backend/internal/api/resolve.go), so there is no version of
+                this that renders in the tab. Offering it twice would also
+                double-count: resolve is the one path that increments the
+                download counter, so a click meaning "let me read this" would
+                register as a download. Reading happens in the preview below,
+                which is highlighted, numbered and free. */}
             <div className="ml-auto flex items-center gap-3">
-              <a
-                href={downloadUrl}
-                // The API serves every blob as Content-Disposition: attachment
-                // (backend/internal/api/resolve.go), so this saves the file
-                // rather than rendering it; the new tab keeps the reader on the
-                // page either way.
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1.5 text-accent hover:underline"
-              >
-                <FileCode2 size={14} />
-                {t("repo.blob.raw")}
-              </a>
               <a
                 href={downloadUrl}
                 download={entry.name}

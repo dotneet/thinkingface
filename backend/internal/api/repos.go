@@ -125,11 +125,15 @@ func (s *Server) cloneURL(r *store.Repo) string {
 // docs/users/guides/git.md ("ssh://git@host:port/{kind}s/{ns}/{name}.git"),
 // or "" when the SSH listener is off.
 //
-// The host comes from TF_PUBLIC_URL, never from TF_SSH_ADDR: the latter is a
-// *listen* address (":2222", "0.0.0.0:2222") and its host half says nothing
-// about where clients should connect. Only its port is deployment-specific
-// enough to be worth publishing, and port 22 is left implicit so the URL stays
-// the short form people expect.
+// Neither half comes from TF_SSH_ADDR by preference: that is a *listen*
+// address (":2222", "0.0.0.0:2222"), and a listen address describes where the
+// process binds, not where anyone can reach it. The host is TF_PUBLIC_URL's,
+// and the port is TF_SSH_PUBLIC_PORT when set -- compose, Kubernetes and a
+// load balancer all routinely publish the listener on a different port, and
+// advertising the internal one would hand every user a URL that does not
+// connect. TF_SSH_ADDR's port is the fallback because it is right whenever
+// nothing remaps it, which covers running the binary directly. Port 22 stays
+// implicit so the URL keeps the short form people expect.
 func (s *Server) sshCloneURL(r *store.Repo) string {
 	if !s.cfg.SSHEnabled {
 		return ""
@@ -138,7 +142,11 @@ func (s *Server) sshCloneURL(r *store.Repo) string {
 	if host == "" {
 		return ""
 	}
-	if port := sshPort(s.cfg.SSHAddr); port != "" && port != "22" {
+	port := s.cfg.SSHPublicPort
+	if port == "" {
+		port = sshPort(s.cfg.SSHAddr)
+	}
+	if port != "" && port != "22" {
 		host = net.JoinHostPort(host, port)
 	} else if strings.Contains(host, ":") {
 		// A bare IPv6 literal needs its brackets back, which Hostname() removed.

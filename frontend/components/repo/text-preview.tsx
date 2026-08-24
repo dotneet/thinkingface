@@ -6,11 +6,11 @@ import { useEffect, useMemo, useState } from "react";
 import { EmptyState } from "@/components/ui/empty-state";
 import { cn } from "@/lib/cn";
 import {
-  buildCodeLines,
+  type CodeHighlightResult,
   type CodeLine,
-  detectCodeLanguage,
   MAX_HIGHLIGHT_LINES,
-} from "@/lib/code-highlight";
+  plainCodeLines,
+} from "@/lib/code-lines";
 import { formatNumber } from "@/lib/format";
 import { useT } from "@/lib/i18n/client";
 
@@ -109,33 +109,36 @@ function CodeLines({ lines }: { lines: CodeLine[] }) {
  * parse as a table, and the Markdown preview needs it for its Raw mode. Client
  * component so `useT` works from every one of those call sites.
  *
- * When `fileName` identifies a language the bundled highlighter knows, the
- * contents get `hljs-*` token colours and a line-number gutter whose numbers
- * are `#L12` deep links. Files past the caps in `lib/code-highlight.ts` fall
- * back to a flat `<pre>` and say why.
+ * Every file gets a line-number gutter whose numbers are `#L12` deep links.
+ * Token colours come from `highlighted`, which the Server Component that owns
+ * the file builds with `lib/code-highlight.ts`; when it is absent (a client
+ * caller whose text only exists in the browser) the same gutter is rendered
+ * over plain text. Files past the caps in `lib/code-lines.ts` fall back to a
+ * flat `<pre>` and say why.
  */
 export function TextPreview({
   content,
   truncated,
   downloadUrl,
-  fileName,
+  highlighted: precomputed,
 }: {
   content: string;
   /** True when the *server* clipped the preview at its 512KB limit. */
   truncated?: boolean;
   downloadUrl: string;
   /**
-   * The file's name, used only to pick a highlighting language. Omitted by
-   * callers whose text is not a source file (the tabular preview's Raw mode),
-   * which renders it unhighlighted but still numbered.
+   * The highlighted lines, already built. Passing this in is what keeps
+   * `rehype-highlight` and lowlight's 37 grammars out of the client bundle:
+   * the Server Component that owns the file calls `highlightSource` and hands
+   * the result down, so the browser downloads and re-runs none of it. Callers
+   * that are themselves client components (the tabular preview's Raw mode)
+   * omit it and fall back to building here, where the cost is real but the
+   * input is a CSV the user already chose to view as text.
    */
-  fileName?: string;
+  highlighted?: CodeHighlightResult;
 }) {
   const t = useT();
-  const highlighted = useMemo(
-    () => buildCodeLines(content, fileName ? detectCodeLanguage(fileName) : null),
-    [content, fileName],
-  );
+  const built = useMemo(() => precomputed ?? plainCodeLines(content), [precomputed, content]);
 
   // A zero-byte file otherwise renders as an empty bordered box, which reads
   // as a failed load rather than as "there is nothing in here". The tabular
@@ -150,16 +153,16 @@ export function TextPreview({
 
   return (
     <div className="rounded-lg border border-border bg-bg-raised">
-      {highlighted.ok ? (
-        <CodeLines lines={highlighted.lines} />
+      {built.ok ? (
+        <CodeLines lines={built.lines} />
       ) : (
         <>
           {/* Above the text on purpose: it explains what the reader is about
               to look at, and it is a static condition, so nothing moves. */}
           <div className="border-b border-border px-4 py-2 text-xs font-medium text-fg-subtle">
-            {highlighted.reason === "tooManyLines"
+            {built.reason === "tooManyLines"
               ? t("repo.codePreview.tooManyLines", {
-                  lines: formatNumber(highlighted.lines),
+                  lines: formatNumber(built.lines),
                   limit: formatNumber(MAX_HIGHLIGHT_LINES),
                 })
               : t("repo.codePreview.tooLarge")}

@@ -10,6 +10,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { Markdown, type MarkdownLinkContext } from "@/components/ui/markdown";
 import { errorMessage, type FailedApiResult } from "@/lib/api-error-message";
+import { buildCodeLines, detectCodeLanguage } from "@/lib/code-highlight";
 import { formatBytes } from "@/lib/format";
 import { getT } from "@/lib/i18n/server";
 import { decodeRawContent } from "@/lib/raw-content";
@@ -179,6 +180,7 @@ export async function FilePreview({
         truncated={raw.truncated}
         downloadUrl={downloadUrl}
         fileName={entry.name}
+        highlighted={buildCodeLines(content, detectCodeLanguage(entry.name))}
         // Rendered here rather than inside the client wrapper so react-markdown
         // and its plugin chain stay on the server; the toggle only chooses
         // which of the two already-built panels is on screen.
@@ -223,9 +225,12 @@ export async function FilePreview({
       content={content}
       truncated={raw.truncated}
       downloadUrl={downloadUrl}
-      // Drives the syntax highlighting: the extension (or a well-known
-      // extensionless name) is the only signal used, never the contents.
-      fileName={entry.name}
+      // Highlighted here, on the server. Doing it inside TextPreview would put
+      // rehype-highlight and lowlight's grammars into the client bundle and run
+      // the whole parse a second time during hydration, for output that cannot
+      // differ -- the input is immutable file content. The language comes from
+      // the extension (or a well-known extensionless name), never the contents.
+      highlighted={buildCodeLines(content, detectCodeLanguage(entry.name))}
     />
   );
 }

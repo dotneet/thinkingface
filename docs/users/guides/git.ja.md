@@ -147,6 +147,8 @@ api.delete_branch("admin/my-model", branch="experiment")
 api.delete_tag("admin/my-model", tag="v1.0")
 ```
 
+Web UI からも同じ 4 つの操作ができます。ブランチの作成はリビジョンセレクタにあり、リポジトリの **Settings** タブには両方の ref が一覧され、タグ付けと削除の操作が付いています（[Web インターフェース](web-ui.md#manage-branches-and-tags) を参照）。シェルも Python セッションも不要です。
+
 `create_branch(..., revision=...)` は任意のリビジョンからブランチを開始し、
 `create_tag(..., revision=...)` は任意のリビジョンにタグを打ちます。`exist_ok=True` を渡すと、繰り返
 し呼んでも no-op になります。**リポジトリのデフォルトブランチは削除できません** — HEAD、リポジトリ

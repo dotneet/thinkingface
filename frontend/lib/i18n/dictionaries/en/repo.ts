@@ -242,7 +242,6 @@ export const repo = {
   blob: {
     fileNotFound: "File not found in tree listing.",
     edit: "Edit",
-    raw: "Raw",
     download: "Download",
   },
   // Source-file preview: the line gutter and the reasons a file is shown flat.

@@ -229,7 +229,6 @@ export const repo = {
   blob: {
     fileNotFound: "ツリー一覧にファイルが見つかりません。",
     edit: "編集",
-    raw: "Raw",
     download: "ダウンロード",
   },
   // ソースファイルのプレビュー。行番号の欄と、強調表示を諦めた理由。

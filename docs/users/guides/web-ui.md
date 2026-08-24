@@ -51,8 +51,10 @@ shown only when they apply:
 - **Settings** — present only if you can administer the repository.
 
 The Card tab renders the README, a table of contents for longer pages, and a sidebar with
-download counts, total size, file count, license, last-updated date, tags, a `git clone`
-command, and the list of branches:
+file download counts, total size, file count, license, last-updated date, topics, git tags,
+the clone URL (over HTTPS, or SSH where the server offers it), and the list of branches. A
+**Use this model** / **Use this dataset** button there gives you the `huggingface_hub` and
+`datasets` snippets for this instance, `HF_ENDPOINT` included:
 
 ![A dataset repository page: the rendered card next to the file list and sidebar](../images/dataset-overview.png)
 
@@ -63,7 +65,8 @@ stays readable and downloadable.
 ### The revision selector
 
 Every files/blob/commits view starts with a row showing the current revision — a branch,
-tag, or commit — as a dropdown, followed by the path as clickable breadcrumb segments. Click
+tag, or commit — as a dropdown, which also offers **New branch** if you can write to the
+repository. The row continues with the path as clickable breadcrumb segments. Click
 the revision chip to switch between branches and tags (a filter box appears once a
 repository has more than a handful of either); selecting one keeps you on the same kind of
 page — the tree, a specific file, or history — for the new revision. A path segment's trailing
@@ -85,9 +88,13 @@ way the top-level card is.
 ## View a file
 
 Opening a file (`/blob/{revision}/{path}`) shows its size, an LFS badge when it's an LFS
-object, and its last commit, followed by a preview appropriate to the file:
+object, its last commit, and a **Download** link that works for every file type, followed by a
+preview appropriate to the file:
 
-- Text and Markdown files render inline (Markdown as rendered HTML, with a raw-source toggle).
+- Source and text files render inline with syntax highlighting and a line-number gutter. Each
+  number is a link, so `#L42` in a URL scrolls to that line and highlights it — which is how
+  you point a colleague at one line of a config.
+- Markdown renders as HTML, with a Rendered / Raw toggle.
 - Parquet files show a summary card with an "Open in viewer" link instead of raw content.
 - Checkpoint files (safetensors, `.bin`, `.pt`, `.pth`, `.ckpt`) open the model inspector —
   see [Inspecting Models](model-checkpoints.md).
@@ -140,6 +147,20 @@ from the history.
 Unlike editing, this works for LFS-tracked files as well: deleting one removes the pointer
 from the tree, while the stored object stays in the bucket until nothing references it any
 more and garbage collection reclaims it.
+
+## Manage branches and tags
+
+The repository's **Settings** tab lists every branch and tag with the commit it points at, and
+lets you create a tag or delete a ref. Creating a branch is on the revision selector instead,
+where you are already standing on the revision to branch from. The default branch has no
+delete control: the server refuses to remove it, so the reason is shown where the button would
+be.
+
+Tagging takes a name, the revision to tag, and an optional message — a message makes it an
+annotated tag, exactly as `git tag -m` would.
+
+None of this needs a shell. The equivalent `huggingface_hub` calls are in
+[Working with Git](git.md#branches-tags-and-revisions).
 
 ## Commit history
 
