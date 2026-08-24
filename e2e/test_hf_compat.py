@@ -20,7 +20,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from huggingface_hub import HfApi
-from huggingface_hub.utils import HfHubHTTPError
+from huggingface_hub.utils import HfHubHTTPError, RevisionNotFoundError
 
 
 def test_whoami(hf_api: HfApi, namespace: str) -> None:
@@ -284,5 +284,97 @@ def test_list_repo_commits(hf_api: HfApi, namespace: str, unique_name: str) -> N
             hf_api.list_repo_commits(
                 repo_id=repo_id, repo_type="dataset", revision="no-such-revision"
             )
+    finally:
+        hf_api.delete_repo(repo_id=repo_id, repo_type="dataset")
+
+
+def test_revision_not_found_for_repo_with_commits(
+    hf_api: HfApi, namespace: str, unique_name: str, tmp_path
+) -> None:
+    """An unknown `revision` on a repo that has commits must look not-found.
+
+    repo-info / tree / paths-info used to treat any unrecognized `{rev}` as if
+    it resolved to the default branch (or answered empty), so
+    `huggingface_hub` never raised `RevisionNotFoundError` -- `revision_exists`
+    incorrectly returned `True`, `list_repo_files` silently returned `[]`
+    instead of raising, and `snapshot_download` would quietly materialize an
+    empty (or wrong) snapshot instead of failing. The `X-Error-Code:
+    RevisionNotFound` response header is what makes `huggingface_hub` raise
+    the specific error instead of treating the call as a success.
+    """
+    repo_id = f"{namespace}/{unique_name}-revs"
+    hf_api.create_repo(repo_id=repo_id, repo_type="model", private=False)
+    try:
+        hf_api.upload_file(
+            path_or_fileobj=b"hello\n",
+            path_in_repo="notes.txt",
+            repo_id=repo_id,
+            repo_type="model",
+            commit_message="Add notes",
+        )
+        commit_sha = hf_api.list_repo_commits(repo_id=repo_id, repo_type="model")[0].commit_id
+        hf_api.create_branch(repo_id=repo_id, repo_type="model", branch="feature")
+        hf_api.create_tag(repo_id=repo_id, repo_type="model", tag="v1.0")
+
+        # --- the bug: an unrecognized revision must not look like success -
+        assert (
+            hf_api.revision_exists(repo_id=repo_id, revision="no-such-rev", repo_type="model")
+            is False
+        )
+
+        with pytest.raises(RevisionNotFoundError):
+            hf_api.list_repo_files(repo_id=repo_id, repo_type="model", revision="no-such-rev")
+
+        with pytest.raises(RevisionNotFoundError):
+            list(hf_api.list_repo_tree(repo_id=repo_id, repo_type="model", revision="no-such-rev"))
+
+        with pytest.raises(RevisionNotFoundError):
+            hf_api.get_paths_info(
+                repo_id=repo_id, repo_type="model", revision="no-such-rev", paths=["notes.txt"]
+            )
+
+        with pytest.raises(RevisionNotFoundError):
+            hf_api.snapshot_download(
+                repo_id=repo_id,
+                repo_type="model",
+                revision="no-such-rev",
+                local_dir=tmp_path / "snapshot",
+            )
+
+        # --- regression: real branches / tags / commit SHAs keep working --
+        for revision in ("main", "feature", "v1.0", commit_sha):
+            assert (
+                hf_api.revision_exists(repo_id=repo_id, revision=revision, repo_type="model")
+                is True
+            )
+            files = hf_api.list_repo_files(repo_id=repo_id, repo_type="model", revision=revision)
+            assert "notes.txt" in files
+    finally:
+        hf_api.delete_repo(repo_id=repo_id, repo_type="model")
+
+
+def test_repo_info_succeeds_right_after_create_repo(
+    hf_api: HfApi, namespace: str, unique_name: str
+) -> None:
+    """`create_repo()` immediately followed by `repo_info()` must stay a 200.
+
+    `create_repo` always writes an initial commit synchronously before
+    returning (see `createRepo` in backend/internal/api/repos.go), so a
+    genuinely 0-commit repository is never observable through this suite --
+    but the invariant that matters to a client is exactly this boundary: the
+    revision-not-found check added for the bug above must not turn the
+    ordinary create -> read flow into a 404, whatever revision string
+    `repo_info()` happens to be called with by default.
+    """
+    repo_id = f"{namespace}/{unique_name}-fresh"
+    hf_api.create_repo(repo_id=repo_id, repo_type="dataset", private=False)
+    try:
+        info = hf_api.repo_info(repo_id=repo_id, repo_type="dataset")
+        assert info.id == repo_id
+
+        info_main = hf_api.repo_info(repo_id=repo_id, repo_type="dataset", revision="main")
+        assert info_main.sha == info.sha
+
+        assert list(hf_api.list_repo_tree(repo_id=repo_id, repo_type="dataset"))
     finally:
         hf_api.delete_repo(repo_id=repo_id, repo_type="dataset")
