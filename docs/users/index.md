@@ -40,6 +40,7 @@ vendored fork, no separate SDK.
 | Explore datasets and checkpoints in the browser | [Browsing the Web UI](guides/web-ui.md) |
 | Log training runs and compare them | [Tracking Experiments](guides/experiments.md) |
 | Set up a shared team namespace | [Organizations](guides/organizations.md) |
+| Trigger something of your own when a push or a run lands | [Webhooks](guides/webhooks.md) |
 | Know exactly what is and is not compatible with the Hub | [Compatibility](reference/compatibility.md) |
 | Deploy this for real | [Deployment](self-hosting/deployment.md) |
 

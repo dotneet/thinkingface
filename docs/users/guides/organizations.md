@@ -176,7 +176,7 @@ existence is public information.
 | **Profile** | Display name, description, website and avatar URL (a link to an image hosted elsewhere; there are no uploads). The namespace name is fixed. |
 | **Policy** | `members_visibility`, described above. |
 | **Members** | Add, promote, demote and remove, as described above. |
-| **Webhooks** | HTTP endpoints notified about events in the organization's repositories. Subscribable events are `repo.push`, `repo.created`, `repo.deleted`, `run.finished` and `run.failed`. |
+| **Webhooks** | HTTP endpoints notified about events in the organization's repositories — pushes, repository lifecycle, transfers and experiment run status. All nine events, the payloads, signature verification and the retry policy are in [Webhooks](webhooks.md). |
 | **Storage** | The LFS bytes the organization's repositories hold in object storage, broken down by repository. |
 | **Audit log** | Administrative changes and repository lifecycle events, newest first. |
 | **Delete organization** | The danger zone, described below. |

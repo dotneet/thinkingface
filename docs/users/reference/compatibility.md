@@ -32,10 +32,18 @@ export HF_HUB_DISABLE_XET=1
 | `create_branch()` / `delete_branch()` | Yes, including `exist_ok=True` and branch names containing `/`. The default branch cannot be deleted |
 | `create_tag()` / `delete_tag()` | Yes, including `exist_ok=True`. A `tag_message` creates a real annotated tag |
 | `list_repo_commits()` | Yes, newest first, with `revision=` and pagination |
+| `upload_folder()` | Yes, for a folder mixing a plain file and a Git LFS-tracked one. Re-uploading byte-identical content creates **no** new commit, and changing one file uploads only that file — verified in both directions, for the regular path and the LFS path |
+| `snapshot_download()` | Partly: an unknown `revision=` is verified to raise `RevisionNotFoundError` rather than silently materializing an empty snapshot. A successful whole-repository snapshot is **not** asserted by the suite |
 
-`upload_folder()` and `snapshot_download()` are not exercised by the test suite, so they are
-left out of this table rather than assumed. If you rely on either, verify against your own
-instance before depending on it.
+Two notes on the last two rows, since "verified" means something narrower there:
+
+- `upload_folder()`'s LFS coverage comes from `weights.bin` matching the `*.bin` pattern in the
+  default `.gitattributes`, so it is LFS-routed regardless of its size. Very large folders, and
+  the `allow_patterns` / `ignore_patterns` / `delete_patterns` arguments, are not exercised.
+- `snapshot_download()` is only exercised in the failing direction. Downloading a whole
+  repository goes through the same `list_repo_tree` and `hf_hub_download` paths that *are*
+  verified above, so it is expected to work — but if you depend on it, check it against your own
+  instance rather than treating this page as evidence.
 
 One thing to know about branches and tags created through the API: **creating a branch schedules
 the same background indexing a push does, and creating a tag does not** — exactly like
