@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ExperimentDashboard } from "@/components/experiments/experiment-dashboard";
 import { ErrorState } from "@/components/ui/error-state";
+import { errorMessage } from "@/lib/api-error-message";
 import { listRuns } from "@/lib/experiments";
 import { getT } from "@/lib/i18n/server";
 import { getExperimentLineage, type RunModels, toRunModels } from "@/lib/lineage";
@@ -59,7 +60,7 @@ export default async function ExperimentProjectPage({
       {!result.ok ? (
         <ErrorState
           title={t("experiments.errorTitle")}
-          message={result.message}
+          message={errorMessage(t, result)}
           hint={t("experiments.project.errorHint")}
         />
       ) : (

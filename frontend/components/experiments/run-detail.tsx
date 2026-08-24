@@ -22,6 +22,7 @@ import { Checkbox, Select, Slider } from "@/components/ui/field";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SpinnerSlot } from "@/components/ui/spinner";
 import { TimeText } from "@/components/ui/time-text";
+import { ApiResultError, queryErrorMessage } from "@/lib/api-error-message";
 import { colorForRun } from "@/lib/chart-utils";
 import {
   deleteRun,
@@ -99,7 +100,7 @@ export function RunDetail({
     queryKey: runsKey,
     queryFn: async () => {
       const result = await listRuns(ns, repo, project);
-      if (!result.ok) throw new Error(result.message);
+      if (!result.ok) throw new ApiResultError(result);
       return result.data;
     },
     initialData: { runs: initialRuns },
@@ -119,7 +120,7 @@ export function RunDetail({
   const annotate = useMutation({
     mutationFn: async (body: ExpRunAnnotationRequest) => {
       const result = await updateRunAnnotations(ns, repo, project, runName, body);
-      if (!result.ok) throw new Error(result.message);
+      if (!result.ok) throw new ApiResultError(result);
       return result.data;
     },
     onSuccess: () => {
@@ -133,7 +134,7 @@ export function RunDetail({
   const remove = useMutation({
     mutationFn: async () => {
       const result = await deleteRun(ns, repo, project, runName);
-      if (!result.ok) throw new Error(result.message);
+      if (!result.ok) throw new ApiResultError(result);
     },
     onSuccess: () => {
       // Nothing on this route can render any more, so leave for the project
@@ -154,7 +155,7 @@ export function RunDetail({
         x: xMode,
         max_points: 1000,
       });
-      if (!result.ok) throw new Error(result.message);
+      if (!result.ok) throw new ApiResultError(result);
       return result.data;
     },
   });
@@ -183,14 +184,10 @@ export function RunDetail({
         ? t("experiments.table.statusFailed")
         : t("experiments.table.statusRunning");
   const annotateError = annotate.isError
-    ? annotate.error instanceof Error
-      ? annotate.error.message
-      : t("experiments.dashboard.updateFailed")
+    ? queryErrorMessage(t, annotate.error, t("experiments.dashboard.updateFailed"))
     : undefined;
   const deleteError = remove.isError
-    ? remove.error instanceof Error
-      ? remove.error.message
-      : t("experiments.deleteRun.failed")
+    ? queryErrorMessage(t, remove.error, t("experiments.deleteRun.failed"))
     : undefined;
 
   return (
@@ -367,11 +364,11 @@ export function RunDetail({
         {metrics.isError ? (
           <ErrorState
             title={t("experiments.errorTitle")}
-            message={
-              metrics.error instanceof Error
-                ? metrics.error.message
-                : t("experiments.dashboard.metricsLoadFailed")
-            }
+            message={queryErrorMessage(
+              t,
+              metrics.error,
+              t("experiments.dashboard.metricsLoadFailed"),
+            )}
           />
         ) : metrics.isPending ? (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">

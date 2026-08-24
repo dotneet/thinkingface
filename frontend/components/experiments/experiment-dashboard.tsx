@@ -18,6 +18,7 @@ import { Checkbox, Input, Select, Slider } from "@/components/ui/field";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SpinnerSlot } from "@/components/ui/spinner";
+import { ApiResultError, queryErrorMessage } from "@/lib/api-error-message";
 import { deleteRun, getMetrics, listRuns, updateRunAnnotations } from "@/lib/experiments";
 import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
@@ -71,7 +72,7 @@ export function ExperimentDashboard({
     queryKey: runsKey,
     queryFn: async () => {
       const result = await listRuns(ns, repo, project);
-      if (!result.ok) throw new Error(result.message);
+      if (!result.ok) throw new ApiResultError(result);
       return result.data;
     },
     initialData: { runs: initialRuns },
@@ -132,7 +133,7 @@ export function ExperimentDashboard({
   const annotate = useMutation({
     mutationFn: async ({ run, body }: { run: string; body: ExpRunAnnotationRequest }) => {
       const result = await updateRunAnnotations(ns, repo, project, run, body);
-      if (!result.ok) throw new Error(result.message);
+      if (!result.ok) throw new ApiResultError(result);
       return result.data;
     },
     onSuccess: () => {
@@ -146,7 +147,7 @@ export function ExperimentDashboard({
   const remove = useMutation({
     mutationFn: async (run: string) => {
       const result = await deleteRun(ns, repo, project, run);
-      if (!result.ok) throw new Error(result.message);
+      if (!result.ok) throw new ApiResultError(result);
       return run;
     },
     onSuccess: (run) => {
@@ -213,7 +214,7 @@ export function ExperimentDashboard({
         x: xMode,
         max_points: 1000,
       });
-      if (!result.ok) throw new Error(result.message);
+      if (!result.ok) throw new ApiResultError(result);
       return result.data;
     },
     enabled: selectedNames.length > 0,
@@ -235,9 +236,7 @@ export function ExperimentDashboard({
     <div className="flex flex-col gap-6">
       {annotate.isError && (
         <Alert tone="negative" title={t("experiments.dashboard.annotateErrorTitle")}>
-          {annotate.error instanceof Error
-            ? annotate.error.message
-            : t("experiments.dashboard.updateFailed")}{" "}
+          {queryErrorMessage(t, annotate.error, t("experiments.dashboard.updateFailed"))}{" "}
           {t("experiments.dashboard.writeAccessRequired", { repo: `${ns}/${repo}` })}
         </Alert>
       )}
@@ -388,11 +387,7 @@ export function ExperimentDashboard({
           ) : isError ? (
             <ErrorState
               title={t("experiments.errorTitle")}
-              message={
-                error instanceof Error
-                  ? error.message
-                  : t("experiments.dashboard.metricsLoadFailed")
-              }
+              message={queryErrorMessage(t, error, t("experiments.dashboard.metricsLoadFailed"))}
             />
           ) : isPending ? (
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -491,9 +486,7 @@ export function ExperimentDashboard({
         deleting={remove.isPending}
         error={
           remove.isError
-            ? remove.error instanceof Error
-              ? remove.error.message
-              : t("experiments.deleteRun.failed")
+            ? queryErrorMessage(t, remove.error, t("experiments.deleteRun.failed"))
             : undefined
         }
         onClose={() => setDeleteFor(null)}
