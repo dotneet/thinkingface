@@ -795,6 +795,15 @@ res 200:
 ```
 (models uses `modelId`; datasets don't need it, but returning it does no harm)
 
+- A `{rev}` that does not resolve is **404 + `X-Error-Code: RevisionNotFound`**, matching the
+  branch/tag and commits endpoints below — the header is what makes `huggingface_hub` raise
+  `RevisionNotFoundError` instead of a bare `HfHubHTTPError` (or, without it, silently returning
+  as if the revision existed). **Exception:** a repository whose git directory holds zero commits
+  — the brief state between `gitexec.InitBare` and the seeded "Initial commit" during
+  `createRepo` (`backend/internal/api/repos.go`) — returns 200 for any `{rev}`, including the
+  default, rather than 404: `create_repo` → `repo_info` is an ordinary `huggingface_hub` flow and
+  must not break on a repository that has nothing in it yet.
+
 ### `GET /api/{datasets|models}/{ns}/{name}/tree/{rev}/{path...}`  (HF-compatible)
 query: `recursive=true|false`, `expand=true|false`, `limit`, `cursor`
 res 200 (an array):
@@ -806,6 +815,10 @@ res 200 (an array):
 ```
 `size` is the actual file size for LFS entries (not the pointer's size).
 
+- Same `{rev}` handling as `repo-info` above: 404 + `X-Error-Code: RevisionNotFound` when the
+  repository has commits but `{rev}` doesn't resolve; 200 (empty array) for a repository with
+  zero commits.
+
 ### `POST /api/{datasets|models}/{ns}/{name}/paths-info/{rev}`  (HF-compatible)
 req: `{"paths": ["a.txt", "data/"], "expand": false}` → res 200: `hfTreeEntry[]` (same shape as `tree`)
 
@@ -816,6 +829,8 @@ req: `{"paths": ["a.txt", "data/"], "expand": false}` → res 200: `hfTreeEntry[
 - A body that can't be read as JSON is treated as "`paths` is empty" and returns 200.
   `huggingface_hub`'s `get_paths_info` sends this form-encoded (via `requests`'s `data=`), so
   returning 400 here would break the client.
+- Same `{rev}` handling as `repo-info` / `tree` above: 404 + `X-Error-Code: RevisionNotFound` when
+  the repository has commits but `{rev}` doesn't resolve; 200 for a repository with zero commits.
 
 ### `GET /api/{datasets|models}/{ns}/{name}/refs`  (HF-compatible)
 res: `{"branches":[{"name":"main","ref":"refs/heads/main","targetCommit":"<sha>"}],"tags":[],"converts":[]}`

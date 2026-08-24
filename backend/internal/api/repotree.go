@@ -54,10 +54,21 @@ func (s *Server) handleHFRepoInfo(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "open git repository", err)
 		return
 	}
-	entries, commit, err := gitRepo.Tree(rev, "", true)
-	if err != nil {
-		handleStoreError(w, "read tree", err)
+	// Resolved before the tree read so an unknown revision is a 404 rather
+	// than a repository that looks empty: HfApi.revision_exists is nothing
+	// but this endpoint's status code.
+	commit, empty, ok := s.revisionOrEmpty(w, gitRepo, repo, rev)
+	if !ok {
 		return
+	}
+	var entries []gitrepo.Entry
+	if !empty {
+		// The resolved hash, not rev: one resolution per request.
+		entries, _, err = gitRepo.Tree(commit.String(), "", true)
+		if err != nil {
+			handleStoreError(w, "read tree", err)
+			return
+		}
 	}
 
 	siblings := make([]hfSibling, 0, len(entries))
@@ -158,18 +169,28 @@ func (s *Server) handleHFTree(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	recursive := r.URL.Query().Get("recursive") == "true" || r.URL.Query().Get("recursive") == "1"
-	entries, _, err := gitRepo.Tree(chi.URLParam(r, "rev"), wildcardPath(r), recursive)
-	if err != nil {
-		if errors.Is(err, gitrepo.ErrPathNotFound) {
-			// huggingface_hub only treats a 404 as "this path does not
-			// exist" (EntryNotFoundError) when this header is present;
-			// without it HfFileSystem.glob -- and therefore
-			// datasets.Dataset.push_to_hub, which globs data/* before
-			// uploading -- fails on a repo that has no such directory yet.
-			w.Header().Set("X-Error-Code", "EntryNotFound")
-		}
-		handleStoreError(w, "read tree", err)
+	// An unknown revision is a RevisionNotFound 404, not an empty listing --
+	// otherwise list_repo_files(revision="typo") answers [] and the typo is
+	// never seen. A repository with no commits at all still answers 200 [].
+	commit, empty, ok := s.revisionOrEmpty(w, gitRepo, repo, chi.URLParam(r, "rev"))
+	if !ok {
 		return
+	}
+	var entries []gitrepo.Entry
+	if !empty {
+		entries, _, err = gitRepo.Tree(commit.String(), wildcardPath(r), recursive)
+		if err != nil {
+			if errors.Is(err, gitrepo.ErrPathNotFound) {
+				// huggingface_hub only treats a 404 as "this path does not
+				// exist" (EntryNotFoundError) when this header is present;
+				// without it HfFileSystem.glob -- and therefore
+				// datasets.Dataset.push_to_hub, which globs data/* before
+				// uploading -- fails on a repo that has no such directory yet.
+				w.Header().Set("X-Error-Code", "EntryNotFound")
+			}
+			handleStoreError(w, "read tree", err)
+			return
+		}
 	}
 
 	out := make([]hfTreeEntry, 0, len(entries))
@@ -242,10 +263,27 @@ func (s *Server) handleHFPathsInfo(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "open git repository", err)
 		return
 	}
-	rev := chi.URLParam(r, "rev")
+	// Resolved once, ahead of the loop: a path that is simply absent is
+	// skipped below, so without this an unknown revision would be
+	// indistinguishable from "none of these paths exist" and
+	// snapshot_download(revision="typo") would happily write an empty
+	// snapshot. A repository with no commits keeps its 200 [].
+	commit, empty, ok := s.revisionOrEmpty(w, gitRepo, repo, chi.URLParam(r, "rev"))
+	if !ok {
+		return
+	}
+	// An empty repository has nothing to stat, so the loop is skipped
+	// entirely rather than asked about the zero hash once per path.
+	paths := req.Paths
+	if empty {
+		paths = nil
+	}
+	// The resolved hash, not rev: one resolution per request, so a push
+	// landing mid-batch cannot split one response across two commits.
+	rev := commit.String()
 
 	out := []hfTreeEntry{}
-	for _, p := range req.Paths {
+	for _, p := range paths {
 		e, _, err := gitRepo.Stat(rev, p)
 		if err != nil {
 			continue

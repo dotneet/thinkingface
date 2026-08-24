@@ -142,6 +142,38 @@ func (s *Server) resolveRev(w http.ResponseWriter, repo *store.Repo, rev string)
 	return nil, plumbing.ZeroHash, false
 }
 
+// revisionOrEmpty is resolveRev's read-only sibling, for the HF endpoints that
+// answer with a listing rather than performing a write.
+//
+// empty=true means the repository has no commits at all. That is a legitimate
+// 200 with nothing in it -- `create_repo` followed by `repo_info` is an
+// ordinary huggingface_hub flow and must not 404 -- so the caller answers with
+// an empty listing rather than an error. When the repository *does* have
+// commits but rev is not one of them, this writes 404 +
+// `X-Error-Code: RevisionNotFound` itself and reports ok=false. Without the
+// distinction every unknown revision read as "empty", which is how
+// `revision_exists(repo_id, "typo")` came back True and
+// `snapshot_download(revision="typo")` quietly produced a zero-file snapshot.
+//
+// The tie-breaker is the same as resolveRev's, and for the same reason:
+// gitrepo.Resolve reports an unborn HEAD and an unknown name alike as
+// ErrEmptyRepo, because go-git answers plumbing.ErrReferenceNotFound for both.
+//
+// The returned hash is meant to be handed straight to gitRepo.Tree / Stat, so
+// the revision is resolved exactly once per request and a concurrent push
+// cannot make two lookups in one response disagree.
+func (s *Server) revisionOrEmpty(w http.ResponseWriter, gitRepo *gitrepo.Repo, repo *store.Repo, rev string) (plumbing.Hash, bool, bool) {
+	target, err := gitRepo.Resolve(rev)
+	if err == nil {
+		return target, false, true
+	}
+	if errors.Is(err, gitrepo.ErrEmptyRepo) && gitRepo.IsEmpty() {
+		return plumbing.ZeroHash, true, true
+	}
+	revisionNotFound(w, "revision "+rev+" not found in "+repo.FullName())
+	return plumbing.ZeroHash, false, false
+}
+
 // ------------------------------------------------------------------ branches
 
 // handleHFCreateBranch answers POST /api/{type}s/{ns}/{name}/branch/{branch}
