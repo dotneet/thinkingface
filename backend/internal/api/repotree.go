@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net/http"
 	"sort"
 	"strconv"
@@ -222,6 +223,73 @@ const (
 	maxPathBytes = 4096
 )
 
+// payloadTooLarge answers MaxBytesReader's error with a 413, and reports
+// whether err was that error at all. Shared by the two decoders below so one
+// endpoint cannot grow two different answers to an oversized body.
+func payloadTooLarge(w http.ResponseWriter, err error, maxBytes int64) bool {
+	var tooLarge *http.MaxBytesError
+	if !errors.As(err, &tooLarge) {
+		return false
+	}
+	writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+		fmt.Sprintf("request body must be at most %d bytes", maxBytes))
+	return true
+}
+
+// decodePathsInfoPaths reads the requested paths out of a paths-info body, in
+// either of the two encodings this endpoint has to accept.
+//
+// huggingface_hub's get_paths_info posts a *form-encoded* body (requests'
+// `data=`, not `json=`). A JSON-only decoder therefore never saw a single real
+// client's paths: the decode failed, the tolerated failure left the list nil,
+// and the endpoint answered 200 [] to everything. That is not a lenient
+// fallback but a dead endpoint -- HfFileSystem.info / .exists fall through to
+// _raise_file_not_found on an empty answer, which is what broke `datasets` and
+// `pandas.read_parquet("hf://...")`, and CommitOperationCopy could not resolve
+// its source either. The Web UI and this repository's own contract examples
+// post JSON, so the content type picks the decoder and both keep working.
+//
+// `expand`, which huggingface_hub always sends next to the paths, is read by
+// neither branch: the extra fields it selects (lastCommit,
+// securityFileStatus) are not produced here, and huggingface_hub's RepoFile /
+// RepoFolder read both with a default, so leaving them out is safe.
+//
+// ok=false means the response has already been written.
+func decodePathsInfoPaths(w http.ResponseWriter, r *http.Request) (paths []string, ok bool) {
+	// The ceiling is installed before anything touches the body, because
+	// ParseForm buffers the whole of it: net/http only skips its own 10MiB
+	// fallback cap when the body already is a MaxBytesReader, and that cap is
+	// larger than maxBatchBody, so it would never bind first.
+	r.Body = http.MaxBytesReader(w, r.Body, maxBatchBody)
+
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if mediaType == "application/x-www-form-urlencoded" {
+		if err := r.ParseForm(); err != nil {
+			if payloadTooLarge(w, err, maxBatchBody) {
+				return nil, false
+			}
+			// Tolerated for the same reason as the JSON branch below: a body
+			// this server cannot read is "no paths", not a 400.
+			return nil, true
+		}
+		// PostForm, not Form: Form folds the query string in, and a path
+		// smuggled through the URL is not part of the posted batch.
+		return r.PostForm["paths"], true
+	}
+
+	var req struct {
+		Paths []string `json:"paths"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if payloadTooLarge(w, err, maxBatchBody) {
+			return nil, false
+		}
+		// Only the size ceiling is an error; a body that will not parse is
+		// still treated as an empty batch.
+	}
+	return req.Paths, true
+}
+
 // handleHFPathsInfo answers the batch metadata lookup snapshot_download uses to
 // plan a download without walking the whole tree.
 func (s *Server) handleHFPathsInfo(w http.ResponseWriter, r *http.Request) {
@@ -230,32 +298,19 @@ func (s *Server) handleHFPathsInfo(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req struct {
-		Paths  []string `json:"paths"`
-		Expand bool     `json:"expand"`
-	}
-	// Tolerant on purpose: huggingface_hub's get_paths_info posts a
-	// form-encoded body (requests' `data=`, not `json=`), which will not
-	// decode here and has always been treated as "no paths". Turning that
-	// into a 400 would break the client, so only the size ceiling is
-	// enforced as an error.
-	body := http.MaxBytesReader(w, r.Body, maxBatchBody)
-	if err := json.NewDecoder(body).Decode(&req); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
-				fmt.Sprintf("request body must be at most %d bytes", maxBatchBody))
-			return
-		}
+	reqPaths, ok := decodePathsInfoPaths(w, r)
+	if !ok {
+		return
 	}
 	// Each path costs a commit resolution plus a tree walk, and on a public
 	// repository this endpoint is reachable without authentication -- so the
-	// element count, not just the byte count, has to be bounded.
-	if len(req.Paths) > maxPathsInfoPaths {
+	// element count, not just the byte count, has to be bounded. Both limits
+	// apply whichever encoding the batch arrived in.
+	if len(reqPaths) > maxPathsInfoPaths {
 		badRequest(w, fmt.Sprintf("paths may contain at most %d entries", maxPathsInfoPaths))
 		return
 	}
-	for _, p := range req.Paths {
+	for _, p := range reqPaths {
 		if len(p) > maxPathBytes || strings.ContainsRune(p, 0) {
 			badRequest(w, fmt.Sprintf("each path must be at most %d bytes and must not contain NUL", maxPathBytes))
 			return
@@ -282,7 +337,7 @@ func (s *Server) handleHFPathsInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	// An empty repository has nothing to stat, so the loop is skipped
 	// entirely rather than asked about the zero hash once per path.
-	paths := req.Paths
+	paths := reqPaths
 	if empty {
 		paths = nil
 	}
@@ -375,27 +430,53 @@ func (s *Server) handleUITree(w http.ResponseWriter, r *http.Request) {
 	}
 	dir := wildcardPath(r)
 
-	entries, _, err := gitRepo.Tree(rev, dir, false)
-	if err != nil {
-		handleStoreError(w, "read tree", err)
+	// Resolved before the tree read, the same way the HF-compatible handlers
+	// do it. gitrepo.Tree answers an unknown revision with an empty listing
+	// (Resolve folds "unborn HEAD" and "no such name" into one error), so a
+	// typo'd or deleted branch used to render as a repository with no files in
+	// it -- exactly the empty/zero/failure conflation frontend/DESIGN.md §9
+	// forbids. A repository with no commits at all still answers 200 with an
+	// empty listing: the file browser's empty state is built on that.
+	commit, empty, ok := s.revisionOrEmpty(w, gitRepo, repo, rev)
+	if !ok {
 		return
 	}
 
-	// A plain file only has a copy command to offer once the sync worker has
-	// indexed its blob for rev -- the worker publishes to blobs/ before it
-	// writes the row, so the index is the record of what is in the bucket,
-	// the same one /gcs/{rev} reads. Loaded once per listing, not once per
-	// entry; a failure degrades to no commands rather than a broken listing.
-	indexedBlobs, err := s.store.ListIndexedBlobSHAs(r.Context(), repo.ID, rev)
-	if err != nil {
-		slog.Warn("list indexed blobs", "repo", repo.FullName(), "rev", rev, "error", err)
-	}
+	// The resolved hash, not rev: one resolution per request, so a push landing
+	// mid-request cannot split one listing across two commits.
+	treeRev := commit.String()
+	var (
+		entries      []gitrepo.Entry
+		indexedBlobs map[string]bool
+		lastCommits  map[string]gitrepo.CommitMeta
+		latest       *gitrepo.CommitMeta
+	)
+	if !empty {
+		entries, _, err = gitRepo.Tree(treeRev, dir, false)
+		if err != nil {
+			handleStoreError(w, "read tree", err)
+			return
+		}
 
-	// Attribution is best-effort decoration: a failure here degrades to a
-	// listing without commit info rather than a broken file browser.
-	lastCommits, latest, lcErr := gitRepo.LastCommits(rev, dir)
-	if lcErr != nil {
-		slog.Warn("resolve last commits", "repo", repo.FullName(), "rev", rev, "dir", dir, "error", lcErr)
+		// A plain file only has a copy command to offer once the sync worker
+		// has indexed its blob for rev -- the worker publishes to blobs/
+		// before it writes the row, so the index is the record of what is in
+		// the bucket, the same one /gcs/{rev} reads. Keyed by the ref name the
+		// caller asked for, not by the commit: that is the column the sync
+		// worker writes. Loaded once per listing, not once per entry; a
+		// failure degrades to no commands rather than a broken listing.
+		indexedBlobs, err = s.store.ListIndexedBlobSHAs(r.Context(), repo.ID, rev)
+		if err != nil {
+			slog.Warn("list indexed blobs", "repo", repo.FullName(), "rev", rev, "error", err)
+		}
+
+		// Attribution is best-effort decoration: a failure here degrades to a
+		// listing without commit info rather than a broken file browser.
+		var lcErr error
+		lastCommits, latest, lcErr = gitRepo.LastCommits(treeRev, dir)
+		if lcErr != nil {
+			slog.Warn("resolve last commits", "repo", repo.FullName(), "rev", rev, "dir", dir, "error", lcErr)
+		}
 	}
 
 	out := make([]apitypes.TreeEntryUI, 0, len(entries))
@@ -438,11 +519,13 @@ func (s *Server) handleUITree(w http.ResponseWriter, r *http.Request) {
 	if dir != "" {
 		readmePath = dir + "/README.md"
 	}
-	if content, err := gitRepo.ReadFile(rev, readmePath, maxReadmeBytes); err == nil {
-		body := repocard.Parse(content).Body
-		readme = &body
-	} else if errors.Is(err, gitrepo.ErrBlobTooLarge) {
-		readmeTooLarge = true
+	if !empty {
+		if content, err := gitRepo.ReadFile(treeRev, readmePath, maxReadmeBytes); err == nil {
+			body := repocard.Parse(content).Body
+			readme = &body
+		} else if errors.Is(err, gitrepo.ErrBlobTooLarge) {
+			readmeTooLarge = true
+		}
 	}
 
 	resp := apitypes.TreeResponseUI{Path: dir, Entries: out, Readme: readme, ReadmeTooLarge: readmeTooLarge}
@@ -535,10 +618,29 @@ func (s *Server) handleUICommits(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	metas, next, err := gitRepo.ListCommits(rev, r.URL.Query().Get("path"), after, limit)
-	if err != nil {
-		handleStoreError(w, "list commits", err)
+	// Resolved first for the same reason as handleUITree: gitrepo.ListCommits
+	// answers an unknown revision with an empty page, so a typo'd branch used
+	// to look like a repository with no history rather than a 404. A
+	// repository with no commits at all keeps its 200 + empty list.
+	commit, empty, ok := s.revisionOrEmpty(w, gitRepo, repo, rev)
+	if !ok {
 		return
+	}
+	var (
+		metas []gitrepo.CommitMeta
+		next  plumbing.Hash
+	)
+	if !empty {
+		// The resolved hash, not rev. A non-zero after names a commit outright
+		// and ListCommits ignores the revision entirely then; resolving it all
+		// the same keeps every page of one walk answering the way its first
+		// page did, instead of a branch deleted mid-paging turning into a
+		// silent 200.
+		metas, next, err = gitRepo.ListCommits(commit.String(), r.URL.Query().Get("path"), after, limit)
+		if err != nil {
+			handleStoreError(w, "list commits", err)
+			return
+		}
 	}
 	resp := apitypes.CommitListResponse{Commits: make([]apitypes.CommitInfoUI, 0, len(metas))}
 	for _, m := range metas {

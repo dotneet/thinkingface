@@ -21,7 +21,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import requests
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, HfFileSystem, RepoFile, RepoFolder
 from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError, RevisionNotFoundError
 
 
@@ -496,6 +496,80 @@ def test_revision_not_found_for_repo_with_commits(
             )
             files = hf_api.list_repo_files(repo_id=repo_id, repo_type="model", revision=revision)
             assert "notes.txt" in files
+    finally:
+        hf_api.delete_repo(repo_id=repo_id, repo_type="model")
+
+
+def test_get_paths_info_returns_entries_for_real_paths(
+    hf_api: HfApi, hf_endpoint: str, hf_token: str, namespace: str, unique_name: str
+) -> None:
+    """`get_paths_info` must answer with the paths that really are there.
+
+    `HfApi.get_paths_info` posts its batch as `data={"paths": [...],
+    "expand": ...}` -- *form-encoded*, not JSON. The server parsed only JSON
+    and swallowed the failure, so every real request decoded to zero paths and
+    came back `200 []`: an endpoint that could only ever answer "none of these
+    exist". This suite never noticed, because the only thing it asserted about
+    paths-info was that a bad revision raises -- which it did, for the wrong
+    reason.
+
+    `HfFileSystem.info()` / `.exists()` are the fallout that matters: they turn
+    an empty answer into a `FileNotFoundError`, which is what breaks `datasets`
+    and `pandas.read_parquet("hf://...")`. `CommitOperationCopy` cannot resolve
+    its source either.
+    """
+    repo_id = f"{namespace}/{unique_name}-paths-info"
+    hf_api.create_repo(repo_id=repo_id, repo_type="model", private=False)
+    try:
+        hf_api.upload_file(
+            path_or_fileobj=b"hello\n",
+            path_in_repo="notes.txt",
+            repo_id=repo_id,
+            repo_type="model",
+            commit_message="Add notes",
+        )
+        hf_api.upload_file(
+            path_or_fileobj=b"a,b\n1,2\n",
+            path_in_repo="data/train.csv",
+            repo_id=repo_id,
+            repo_type="model",
+            commit_message="Add data",
+        )
+
+        # --- the bug: a batch of paths that exist must come back non-empty -
+        infos = hf_api.get_paths_info(
+            repo_id=repo_id, repo_type="model", paths=["notes.txt", "data"]
+        )
+        by_path = {item.path: item for item in infos}
+        assert set(by_path) == {"notes.txt", "data"}, f"paths-info returned {by_path!r}"
+        assert isinstance(by_path["notes.txt"], RepoFile)
+        assert by_path["notes.txt"].size == len(b"hello\n")
+        assert by_path["notes.txt"].blob_id
+        assert isinstance(by_path["data"], RepoFolder)
+
+        # A bare string is wrapped in a list by the client, so it travels as a
+        # one-element form field rather than a JSON array.
+        only = hf_api.get_paths_info(repo_id=repo_id, repo_type="model", paths="notes.txt")
+        assert [item.path for item in only] == ["notes.txt"]
+
+        # Absent paths are left out of the answer rather than reported: what
+        # must not happen is the whole batch coming back empty because of one.
+        mixed = hf_api.get_paths_info(
+            repo_id=repo_id, repo_type="model", paths=["notes.txt", "no-such-file.txt"]
+        )
+        assert [item.path for item in mixed] == ["notes.txt"]
+
+        # Naming a revision explicitly takes the same path through the client.
+        on_main = hf_api.get_paths_info(
+            repo_id=repo_id, repo_type="model", revision="main", paths=["data/train.csv"]
+        )
+        assert [item.path for item in on_main] == ["data/train.csv"]
+
+        # --- the caller that depends on it: HfFileSystem.exists / .info ----
+        fs = HfFileSystem(endpoint=hf_endpoint, token=hf_token)
+        assert fs.exists(f"{repo_id}/notes.txt")
+        assert not fs.exists(f"{repo_id}/no-such-file.txt")
+        assert fs.info(f"{repo_id}/notes.txt")["size"] == len(b"hello\n")
     finally:
         hf_api.delete_repo(repo_id=repo_id, repo_type="model")
 
