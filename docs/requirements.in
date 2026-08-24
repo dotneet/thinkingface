@@ -1,0 +1,9 @@
+# Direct dependencies of the documentation site build (make docs / docs.yml).
+#
+# The pinned, hash-verified requirements.txt next to this file is generated
+# from it -- edit this file, then run `make lock-python`.
+mkdocs-material==9.7.7
+mkdocs-static-i18n==1.3.1
+
+# Pulled in by mkdocs-material; floor raised past PYSEC-2026-3609 / PYSEC-2026-3654.
+pymdown-extensions>=11.0.1

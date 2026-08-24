@@ -1,0 +1,19 @@
+# bun install policy. See docs/dev/supply-chain.md for the reasoning.
+
+[install]
+# Minimum release age (seconds): only versions that have been public on the
+# registry for at least 7 days are candidates for resolution.
+#
+# This is the cheap defence against the npm attack pattern where a maintainer
+# account is taken over, a malicious patch release is published, and everyone
+# who runs `bun update` in the next few hours ships it. A week is long enough
+# that such a release is usually yanked before it can be resolved here.
+#
+# It only affects *resolution* (`bun add` / `bun update` / a cold install with
+# no lockfile). `bun install --frozen-lockfile`, which is what CI and the
+# Docker build run, installs exactly what bun.lock already pins and is not
+# influenced by this setting.
+#
+# To take a fresh release on purpose (a security fix, say), override it for
+# that one command: `bun update <pkg> --minimum-release-age=0`.
+minimumReleaseAge = 604800

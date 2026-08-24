@@ -2,7 +2,10 @@ name: thinkingface
 
 services:
   postgres:
-    image: postgres:17-alpine
+    # Images are pinned by digest as well as by tag (a tag is mutable, so the
+    # tag alone means "whatever was pushed most recently"). Renovate
+    # (renovate.json) bumps the two together -- see docs/dev/supply-chain.md.
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-tf}
@@ -26,7 +29,7 @@ services:
     # Requires 1.55.0 or later: below that, the resumable upload path ignores
     # the generation precondition (fsouza/fake-gcs-server#2260). The WAL
     # index's CAS (docs/dev/continuity-design.md §11) depends on this precondition.
-    image: fsouza/fake-gcs-server:1.55.1
+    image: fsouza/fake-gcs-server:1.55.1@sha256:91afded49de804aa61b5f3eb6c7cd65205acf9e5c5e047cf0ba7d9507af806c8
     restart: unless-stopped
     command:
       - "-scheme=http"

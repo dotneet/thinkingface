@@ -2,6 +2,14 @@ module github.com/dotneet/thinkingface/backend
 
 go 1.25.0
 
+// The Go toolchain the project is built with, pinned to a patch release
+// rather than left at whatever `go 1.25.0` resolves to. CI installs the
+// toolchain from this file, so without the line it built with 1.25.0 and
+// carried 27 known standard-library vulnerabilities that later 1.25.x
+// releases had already fixed (`make audit` reports them). Bump it together
+// with the golang image in backend/Dockerfile; see docs/dev/supply-chain.md.
+toolchain go1.25.14
+
 require (
 	cloud.google.com/go/storage v1.65.0
 	github.com/gliderlabs/ssh v0.3.8

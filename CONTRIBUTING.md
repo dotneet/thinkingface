@@ -34,12 +34,18 @@ make check       # every quality gate — run this after any change
    ["Things that must stay in sync"](docs/dev/development.md#things-that-must-stay-in-sync).
 4. If the change is user-visible, update the relevant page under `docs/users/` (new pages must
    be added to the `nav:` in `mkdocs.yml`).
-5. Use [Conventional Commits](https://www.conventionalcommits.org/) in English for commit
+5. Adding or bumping a dependency? Keep the lockfile in the same commit
+   (`bun.lock`, `go.mod`/`go.sum`, `make lock-python` for the Python sets) and run
+   `make audit`. Every install here resolves from a lockfile, a digest, or a commit SHA —
+   see [the supply chain policy](docs/dev/supply-chain.md) before introducing a new one.
+6. Use [Conventional Commits](https://www.conventionalcommits.org/) in English for commit
    messages and the PR title: `feat:` / `fix:` / `docs:` / `refactor:` / `chore:`.
-6. Open the PR against `main` and describe what changed, why, and how you verified it.
+7. Open the PR against `main` and describe what changed, why, and how you verified it.
 
 CI runs the backend, frontend, Python, type-contract, and Terraform checks on every PR, and the
-docs workflow builds `docs/users/` with `mkdocs --strict` when it changes. The Terraform job is
+docs workflow builds `docs/users/` with `mkdocs --strict` when it changes. A separate security
+workflow runs `make audit` (govulncheck / `bun audit` / `pip-audit`) weekly and on any PR that
+touches a dependency manifest. The Terraform job is
 static only (`fmt -check`, `init -backend=false`, `validate`) — it has no GCP credentials, so a
 green run does not mean `infra/` will apply cleanly.
 

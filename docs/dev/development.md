@@ -159,6 +159,11 @@ Two things about the Terraform gate specifically:
   deliberately kept out of CI; run them yourself against a real project before relying on a
   change to `infra/`.
 
+`make audit` is a separate gate, not part of `make check`: it asks advisory databases about
+the pinned dependency tree, so its answer changes without the code changing.
+`.github/workflows/security.yml` runs it weekly and on any PR that touches a dependency
+manifest — see [`supply-chain.md`](supply-chain.md).
+
 Optionally install [lefthook](https://github.com/evilmartians/lefthook) for pre-commit
 feedback (`lefthook install`; `lefthook.yml` is at the root). It is not required — `make check`
 and CI are authoritative — and `git commit --no-verify` skips it for one commit.
@@ -172,8 +177,10 @@ and CI are authoritative — and `git commit --no-verify` skips it for one commi
 | `make test-e2e` | `e2e/` — `huggingface_hub` / `datasets` / git / GCS compatibility against a running server | `make up` |
 
 The E2E suite talks to an already-running server: it logs in as the admin user from `.env`,
-issues a write token, and revokes it at the end of the session (`e2e/conftest.py`). It runs in
-a disposable `uv` environment so its dependencies never touch your Python setup. **Run it
+issues a write token, and revokes it at the end of the session (`e2e/conftest.py`). It resolves
+its dependencies from `e2e/uv.lock` into `e2e/.venv` (`uv run --locked`), so they never touch
+your ambient Python setup and never float to a newer version behind your back — `uv` is
+required for it. **Run it
 whenever you change an HF-compatible endpoint** (whoami / create_repo / preupload / commit /
 resolve / tree / LFS batch) — compatibility with the upstream client libraries is the project's
 top priority. What the suite covers is listed in [`e2e/README.md`](../../e2e/README.md).
@@ -193,6 +200,12 @@ top priority. What the suite covers is listed in [`e2e/README.md`](../../e2e/REA
 - **Frontend conventions.** `frontend/DESIGN.md` describes the primitives, semantic color
   tokens, the loading / empty / error state rule, and the i18n dictionaries; `bun run check:ui`
   enforces the mechanical parts.
+- **Dependency pins.** After editing `docs/requirements.in`, `requirements-lint.in` or
+  `e2e/pyproject.toml`, run `make lock-python` and commit the regenerated files (CI checks
+  `e2e/uv.lock` with `uv lock --check`). A Docker base image's tag and its `@sha256:` digest
+  move together, as do a GitHub Action's SHA and its `# vX.Y.Z` comment, and
+  `backend/go.mod`'s `toolchain` line and the `golang:` image in `backend/Dockerfile`. The
+  reasoning behind all of it is in [`supply-chain.md`](supply-chain.md).
 
 ## Documentation
 

@@ -45,6 +45,8 @@ POSTGRES_PORT ?= 5432
 # environment (the same approach as docs/requirements.txt). Using whatever
 # `ruff` happens to be on PATH is what let a stale local version pass while
 # CI's newer one failed -- and the old fallback could skip the check entirely.
+# requirements-lint.txt is generated from requirements-lint.in and pins every
+# transitive package with a hash; regenerate it with `make lock-python`.
 define RUFF
 	@uv run --isolated --with-requirements requirements-lint.txt ruff $(1)
 endef
@@ -57,7 +59,7 @@ TERRAFORM ?= terraform
 
 .PHONY: build-web help up down up-sqlite down-sqlite logs rebuild psql check check-backend check-frontend check-python \
         check-types check-terraform gen-types test test-backend test-frontend test-store-pg test-e2e fmt lint clean tf \
-        dev-web dev-api gcs-proxy dev-stop docs docs-build frontend-deps
+        dev-web dev-api gcs-proxy dev-stop docs docs-build frontend-deps lock-python audit
 
 # The full SQLite override set. See the comment at the top of
 # docker-compose.sqlite.yml.
@@ -150,6 +152,69 @@ docs: ## Serve docs/users/ locally with live reload (DOCS_PORT, default 8123)
 
 docs-build: ## Build the docs site into site/ the same way CI does
 	$(MKDOCS) build --strict
+
+# ---- dependency locks ------------------------------------------------------
+
+# Every Python entry point installs from a fully pinned, hash-verified file:
+# docs/requirements.txt and requirements-lint.txt are compiled from the .in
+# files next to them, and e2e resolves from e2e/uv.lock. Edit the .in files or
+# e2e/pyproject.toml, run this, and commit the result -- CI's python job
+# re-checks that e2e/uv.lock is in sync. See docs/dev/supply-chain.md.
+#
+# --python-version 3.12 matches CI; --universal keeps the markers valid on
+# other interpreters too, so a developer on 3.13/3.14 resolves the same set.
+PIP_COMPILE := uv pip compile --universal --python-version 3.12 --generate-hashes
+
+lock-python: ## Regenerate the pinned Python requirement files and e2e/uv.lock
+	@uv --version >/dev/null 2>&1 || { echo "uv is required: https://docs.astral.sh/uv/getting-started/installation/" >&2; exit 1; }
+	@echo "==> uv pip compile (docs)"
+	$(PIP_COMPILE) docs/requirements.in -o docs/requirements.txt
+	@echo "==> uv pip compile (lint)"
+	$(PIP_COMPILE) requirements-lint.in -o requirements-lint.txt
+	@echo "==> uv lock (e2e)"
+	cd e2e && uv lock
+
+# ---- vulnerability audits --------------------------------------------------
+
+# `make audit` is exactly what .github/workflows/security.yml runs (weekly and
+# on any change to a dependency manifest). Every scanner is version-pinned so
+# a scanner release cannot change the verdict on its own.
+GOVULNCHECK_VERSION := v1.7.0
+PIP_AUDIT_VERSION := 2.10.1
+PIP_AUDIT := uvx -p 3.12 --from pip-audit==$(PIP_AUDIT_VERSION) pip-audit --no-deps --disable-pip
+
+# Advisories that are known, transitive, and not reachable from this codebase.
+# Each one needs a reason and a way out; re-check the list whenever next is
+# upgraded (`bun audit` with no --ignore prints the full picture).
+#
+#   GHSA-6g55-p6wh-862q / GHSA-r28c-9q8g-f849  postcss <= 8.5.17, arbitrary
+#     file read via a sourceMappingURL comment. next@15 pins postcss 8.4.31
+#     exactly, so it cannot be upgraded from here. Only reachable through CSS
+#     the build processes, and all of that is first-party.
+#   GHSA-f88m-g3jw-g9cj  sharp < 0.35.0, inherited libvips CVEs. Pulled in by
+#     next, whose range excludes 0.35. sharp only runs behind next/image's
+#     optimiser, and this app uses plain <img> everywhere (see
+#     components/namespace/namespace-avatar.tsx) -- no user-supplied bytes
+#     ever reach libvips.
+BUN_AUDIT_IGNORES := --ignore GHSA-6g55-p6wh-862q --ignore GHSA-r28c-9q8g-f849 --ignore GHSA-f88m-g3jw-g9cj
+
+audit: ## Scan Go / frontend / Python dependencies for known vulnerabilities
+	@echo "==> govulncheck (backend)"
+	cd backend && go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+	@echo "==> bun audit (frontend)"
+	cd frontend && $(BUN) audit --audit-level=high $(BUN_AUDIT_IGNORES)
+	@echo "==> pip-audit (docs, lint)"
+	$(PIP_AUDIT) -r docs/requirements.txt -r requirements-lint.txt
+	@echo "==> pip-audit (e2e, from uv.lock)"
+# Via a temp file, not a pipe: make's shell is /bin/sh without pipefail, so
+# `uv export | pip-audit` would report the *audit's* status. A failed or empty
+# export would then be audited as an empty requirement set, print "No known
+# vulnerabilities found", and pass -- a clean bill of health for a tree nothing
+# looked at. -s rejects an empty export for the same reason.
+	@cd e2e && tmp="$$(mktemp)" && trap 'rm -f "$$tmp"' EXIT && \
+		uv export --frozen --no-emit-project --quiet > "$$tmp" && \
+		[ -s "$$tmp" ] && \
+		$(PIP_AUDIT) -r "$$tmp"
 
 # ---- quality gates ---------------------------------------------------------
 
@@ -253,16 +318,17 @@ test-store-pg: ## Run backend/internal/store integration tests against the `make
 	cd backend && TF_TEST_DATABASE_URL="postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(POSTGRES_PORT)/$(POSTGRES_DB)_test?sslmode=disable" \
 		go test ./internal/store/ -count=1
 
-# `uv run --isolated` builds a throwaway environment from requirements.txt, so
-# the suite never installs huggingface_hub / datasets / pyarrow into whatever
-# interpreter happens to be active. Falls back to plain pip when uv is absent.
+# `uv run --locked` builds the environment in e2e/.venv from e2e/uv.lock, so
+# huggingface_hub / datasets / pyarrow never land in whatever interpreter
+# happens to be active, and every transitive package comes in at the exact
+# version and hash the lockfile records. `--locked` fails instead of
+# re-resolving when pyproject.toml and uv.lock have drifted apart -- run
+# `make lock-python` to update them. There is no plain-pip fallback on
+# purpose: it would install an unpinned dependency tree
+# (docs/dev/supply-chain.md).
 test-e2e: ## Run the huggingface_hub compatibility E2E suite (requires `make up` first)
-	@if uv --version >/dev/null 2>&1; then \
-		cd e2e && uv run --isolated --with-requirements requirements.txt pytest -v; \
-	else \
-		echo "  uv not found; installing dependencies into the current python environment" >&2; \
-		cd e2e && pip install -q -r requirements.txt && pytest -v; \
-	fi
+	@uv --version >/dev/null 2>&1 || { echo "uv is required: https://docs.astral.sh/uv/getting-started/installation/" >&2; exit 1; }
+	cd e2e && uv run --locked pytest -v
 
 # ---- formatting / linting --------------------------------------------------
 

@@ -62,6 +62,8 @@ make test-store-pg # also run backend/internal/store integration tests against P
 make test-e2e      # huggingface_hub-compatible E2E (requires make up first)
 make fmt / lint    # format / static analysis
 make gen-types     # regenerate frontend/types/api.gen.ts from Go wire types
+make audit         # scan Go / frontend / Python dependencies for known vulnerabilities
+make lock-python   # regenerate the pinned Python requirement files and e2e/uv.lock
 make dev-web       # next dev on the host (:3100). ★use this to see UI changes live
 make dev-api       # API on the host (:8081, SQLite). try backend changes without rebuilding docker
 make dev-stop      # stop the host-side dev servers above (does not touch docker)
@@ -75,8 +77,8 @@ To run things individually:
 cd backend  && go build ./... && go vet ./... && go test ./...
 cd frontend && bun run typecheck && bun run lint && bun run format:check && bun run check:ui && bun run test
 make build-web  # production build. Running `bun run build` directly hits the plain PATH's Node 18 and fails
-# E2E runs in a disposable uv environment so its deps don't pollute the current python environment (same for make test-e2e)
-cd e2e      && uv run --isolated --with-requirements requirements.txt pytest -v
+# E2E resolves from e2e/uv.lock into e2e/.venv, so its deps don't pollute the current python environment (same for make test-e2e)
+cd e2e      && uv run --locked pytest -v
 ```
 
 **Always run `make check` after code changes.**
@@ -90,6 +92,11 @@ the backend / frontend / python / contract / terraform jobs in CI (`.github/work
 Note that `terraform validate` only checks the config against the provider schemas — it never
 contacts GCP, so server-side limits (e.g. Cloud Run's 4 GiB of memory per vCPU) still only
 surface at apply time. `terraform plan` / `apply` need credentials and are not run in CI.
+
+`make audit` is separate and deliberately not part of `make check`: it queries advisory
+databases over the network, so its verdict changes without the code changing.
+`.github/workflows/security.yml` runs exactly that command weekly and on any PR touching a
+dependency manifest. See `docs/dev/supply-chain.md`.
 
 You can optionally install lefthook (`lefthook.yml`) for early feedback before committing:
 `lefthook install` (to remove it, `lefthook uninstall`; to skip it just this once,
@@ -135,8 +142,10 @@ the root and Japanese under `/ja/`, with a language switcher in the header.
   same English files.
 
 `.github/workflows/docs.yml` builds with `mkdocs build --strict` on PRs (broken internal
-links fail the build) and deploys from `main`. MkDocs and `mkdocs-static-i18n` are pinned in
-`docs/requirements.txt` and always run through a disposable `uv` environment.
+links fail the build) and deploys from `main`. MkDocs and `mkdocs-static-i18n` are declared in
+`docs/requirements.in`; `docs/requirements.txt` is generated from it by `make lock-python` and
+pins every transitive package with a hash (CI installs it with `pip install --require-hashes`,
+`make docs` runs it in a disposable `uv` environment). Edit the `.in` file, never the `.txt`.
 
 The screenshots in `docs/users/images/` are captured mechanically from a throwaway instance
 seeded with demo content, never by hand — `scripts/docs-demo/` plus the procedure in
@@ -168,6 +177,12 @@ own compose stack: it is full of E2E leftovers, and the UI must be in English.
    priority.** When changing the behavior of an HF-compatible endpoint (whoami / create_repo
    / preupload / commit / resolve / tree / LFS batch), always run `make test-e2e` to confirm
    there is no regression.
+6. **Every dependency install resolves from a lockfile, a digest, or a commit SHA.**
+   `bun install --frozen-lockfile`, `uv run --locked`, `pip install --require-hashes`,
+   `image:tag@sha256:...`, `uses: owner/action@<sha>`. Never add an install step that lets a
+   registry decide the version (`pip install -r` on a `>=` file, a bare `:latest`, a `@v4`
+   tag, a `|| bun install` fallback) — the policy, the regeneration commands and the
+   accepted-advisory list are in `docs/dev/supply-chain.md`.
 
 ## UI conventions (frontend)
 

@@ -98,17 +98,21 @@ docker compose up -d
 Then, from this directory:
 
 ```bash
-uv run --isolated --with-requirements requirements.txt pytest -v
+uv run --locked pytest -v
 ```
 
-`--isolated` builds a throwaway environment, so `huggingface_hub` / `datasets`
-/ `pyarrow` never land in whatever interpreter happens to be active. Without
-uv, the equivalent is `pip install -r requirements.txt && pytest -v` — prefer a
-virtualenv for that. `make test-e2e` from the repo root picks whichever is
-available.
+[uv](https://docs.astral.sh/uv/) is required (the same as for `make lint` and
+`make docs`). It builds the environment in `.venv/` here, so `huggingface_hub`
+/ `datasets` / `pyarrow` never land in whatever interpreter happens to be
+active. `make test-e2e` from the repo root runs exactly this.
 
-`pyproject.toml` + `uv.lock` pin the same dependency set for `uv sync`;
-`requirements.txt` is kept in step for the pip path and for CI.
+`--locked` is the point of the command: the dependency set comes from
+`uv.lock`, which pins every transitive package to an exact version and hash,
+and the flag makes uv fail rather than silently re-resolve if `pyproject.toml`
+and the lockfile have drifted apart. CI runs the same lockfile, and the `python`
+job re-checks it with `uv lock --check`. After editing `pyproject.toml`, run
+`uv lock` here (or `make lock-python` from the repo root) and commit the result.
+See [docs/dev/supply-chain.md](../docs/dev/supply-chain.md).
 
 ## Configuration
 
