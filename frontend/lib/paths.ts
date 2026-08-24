@@ -110,3 +110,21 @@ export function decodeRouteParams<T extends Record<string, string | string[] | u
   }
   return decoded as T;
 }
+
+/**
+ * Resolves what "Create a new file" will actually create: the typed path is
+ * relative to the directory being browsed, the way GitHub's own "Add file" is.
+ * Creating `README.md` from inside `docs/` therefore makes `docs/README.md` —
+ * being sent to the repository root from a directory you are looking at would
+ * be the more surprising of the two behaviours.
+ *
+ * A leading slash is stripped rather than treated as "from the root": it is a
+ * typo, not an escape hatch, and silently rooting the path is exactly the
+ * ambiguity this function exists to remove. The dialog shows the resolved
+ * path back to the user as they type.
+ */
+export function resolveNewFilePath(dir: string[], typed: string): string {
+  const relative = typed.trim().replace(/^\/+/, "").replace(/\/+/g, "/").replace(/\/+$/, "");
+  if (!relative) return "";
+  return [...dir, relative].join("/");
+}

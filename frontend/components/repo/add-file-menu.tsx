@@ -9,7 +9,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Field, Input } from "@/components/ui/field";
 import { useT } from "@/lib/i18n/client";
-import { repoEditHref } from "@/lib/paths";
+import { repoEditHref, resolveNewFilePath } from "@/lib/paths";
 import type { RepoKind } from "@/types/api";
 
 /**
@@ -38,15 +38,18 @@ export function AddFileMenu({
   const [uploadOpen, setUploadOpen] = useState(false);
   const [newPath, setNewPath] = useState("");
 
-  const trimmed = newPath.trim().replace(/^\/+/, "");
+  // What will actually be created: the typed path is relative to the
+  // directory being browsed (see resolveNewFilePath), and the dialog says so
+  // and shows the result rather than leaving the user to work it out.
+  const resolved = resolveNewFilePath(path, newPath);
 
   function createFile() {
-    if (!trimmed) return;
+    if (!resolved) return;
     setNewFileOpen(false);
     setNewPath("");
     // ?new=1 tells the editor that a path with nothing at it is the point,
     // rather than a 404 — see components/repo-pages/repo-edit.tsx.
-    router.push(`${repoEditHref(kind, ns, name, rev, [...path, trimmed].join("/"))}?new=1`);
+    router.push(`${repoEditHref(kind, ns, name, rev, resolved)}?new=1`);
   }
 
   return (
@@ -92,17 +95,23 @@ export function AddFileMenu({
         footer={
           <>
             <Button onClick={() => setNewFileOpen(false)}>{t("repo.editor.cancel")}</Button>
-            <Button variant="primary" onClick={createFile} disabled={!trimmed}>
+            <Button variant="primary" onClick={createFile} disabled={!resolved}>
               {t("repo.upload.newFileConfirm")}
             </Button>
           </>
         }
       >
         <div className="flex flex-col gap-4 px-4 py-4">
-          <p className="text-sm text-fg-muted">{t("repo.upload.newFileBody")}</p>
+          <p className="text-sm text-fg-muted">
+            {path.length > 0
+              ? t("repo.upload.newFileBodyIn", { dir: path.join("/") })
+              : t("repo.upload.newFileBody")}
+          </p>
           <Field
             label={t("repo.upload.newFilePathLabel")}
-            hint={[...path, t("repo.upload.newFilePathPlaceholder")].join("/")}
+            hint={t("repo.upload.newFileResolved", {
+              path: resolved || resolveNewFilePath(path, t("repo.upload.newFilePathPlaceholder")),
+            })}
           >
             <Input
               autoFocus

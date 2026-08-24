@@ -229,10 +229,20 @@ export const repo = {
     menuNewFile: "Create a new file",
     menuUpload: "Upload files",
     newFileTitle: "Create a new file",
-    newFileBody: "The path is relative to the repository root. Use / to place it in a directory.",
+    // Two bodies rather than one with a "/" in it: at the repository root
+    // there is no directory worth naming, and printing one there would be
+    // noise on the most common case.
+    newFileBody: "The file is created at the repository root. Use / to put it in a subdirectory.",
+    newFileBodyIn: "The file is created in {dir}. Use / to put it in a subdirectory of that.",
+    // Shown under the input as the user types, so the path that will actually
+    // be created is never something they have to work out themselves.
+    newFileResolved: "Creates {path}",
     newFilePathLabel: "File path",
     newFilePathPlaceholder: "notes.md",
     newFileConfirm: "Create file",
+    newFileIsLFS:
+      "{file} is tracked by Git LFS in this repository, so its contents can't be written in the browser editor. Add it with Add file → Upload files instead — uploads handle LFS for you.",
+    newFileIsLFSAction: "Upload it instead",
     title: "Upload files",
     dropLabel: "Drop files here, or click to choose",
     dropHint: "They will be committed to {dir} on {rev}.",

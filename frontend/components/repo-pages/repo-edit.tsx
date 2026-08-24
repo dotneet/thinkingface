@@ -1,13 +1,16 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { FileEditor } from "@/components/repo/file-editor";
 import { RepoBreadcrumb } from "@/components/repo/repo-breadcrumb";
 import { RepoNotFoundOrLogin } from "@/components/repo/repo-not-found";
 import { RepoTabs } from "@/components/repo/repo-tabs";
+import { buttonClass } from "@/components/ui/button";
 import { ErrorState } from "@/components/ui/error-state";
 import { isNotFound } from "@/lib/api";
 import { errorMessage } from "@/lib/api-error-message";
 import { getT } from "@/lib/i18n/server";
 import { publicApiBase, repoBlobHref, repoEditHref, repoTreeHref } from "@/lib/paths";
+import { routeForPath } from "@/lib/preupload";
 import { redirectIfRepoMoved } from "@/lib/repo-redirect";
 import { getRawFile, getRepo, getTree, resolveFileUrl } from "@/lib/repos";
 import { authHeaders } from "@/lib/server-auth";
@@ -89,13 +92,18 @@ export async function RepoEdit({
 
   const blobHref = repoBlobHref(kind, ns, name, rev, filePath);
 
-  function editError(message: string, hint?: string) {
+  function editError(message: string, hint?: string, action?: React.ReactNode) {
     return (
       <div className="flex flex-col gap-4">
         <RepoBreadcrumb kind={kind} ns={ns} name={name} trail={trail} />
         <h1 className="text-2xl font-semibold tracking-tight">{repo.full_name}</h1>
         <RepoTabs kind={kind} ns={ns} name={name} repo={repo} active="files" />
-        <ErrorState title={t("repo.edit.cantEditTitle")} message={message} hint={hint} />
+        <ErrorState
+          title={t("repo.edit.cantEditTitle")}
+          message={message}
+          hint={hint}
+          action={action}
+        />
       </div>
     );
   }
@@ -118,6 +126,32 @@ export async function RepoEdit({
 
   if (!repo.branches.includes(rev)) {
     return editError(t("repo.edit.notBranch", { rev }), t("repo.edit.notBranchHint"));
+  }
+
+  // A file that already exists carries its own verdict in the tree entry
+  // (`entry.lfs`, checked above). One being created has no entry, so the
+  // question -- would this path be LFS-managed? -- has to be asked of the
+  // server: the answer comes from the repository's .gitattributes at this
+  // revision, and a copy of that rule here would go stale the moment someone
+  // edits the file. Without this the editor opens happily and the commit is
+  // refused afterwards (handleEditFile's lfsEditRejection), which is a dead
+  // end reached only after the user has typed a whole file.
+  //
+  // "unknown" (the check itself failed) opens the editor: a flaky preupload
+  // must not block a legitimate create, and the server still refuses an LFS
+  // path on save, so the worst case is today's behaviour rather than a new
+  // way to be locked out.
+  if (!entry && (await routeForPath(kind, ns, name, rev, filePath, { headers })) === "lfs") {
+    return editError(
+      t("repo.edit.badType"),
+      t("repo.upload.newFileIsLFS", { file: filePath }),
+      <Link
+        href={repoTreeHref(kind, ns, name, rev, dirPath.join("/"))}
+        className={buttonClass({ variant: "primary" })}
+      >
+        {t("repo.upload.newFileIsLFSAction")}
+      </Link>,
+    );
   }
 
   // A file being created has nothing to read and nothing to lock against:

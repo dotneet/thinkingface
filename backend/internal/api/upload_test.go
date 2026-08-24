@@ -798,3 +798,109 @@ func TestLimitedReader_CapIsInclusive(t *testing.T) {
 		})
 	}
 }
+
+// ------------------------------------------------------- preupload at size 0
+
+// preuploadModes asks the HF-compatible preupload endpoint how each path would
+// be stored, at size 0.
+func preuploadModes(t *testing.T, f *archiveFixture, path, token string, files []string) map[string]string {
+	t.Helper()
+	body := struct {
+		Files []map[string]any `json:"files"`
+	}{}
+	for _, p := range files {
+		body.Files = append(body.Files, map[string]any{"path": p, "sample": "", "size": 0})
+	}
+	resp := f.do("POST", path, token, body)
+	if resp.status() != 200 {
+		t.Fatalf("preupload status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+	var parsed struct {
+		Files []struct {
+			Path       string `json:"path"`
+			UploadMode string `json:"uploadMode"`
+		} `json:"files"`
+	}
+	resp.json(t, &parsed)
+	modes := map[string]string{}
+	for _, entry := range parsed.Files {
+		modes[entry.Path] = entry.UploadMode
+	}
+	return modes
+}
+
+// The web UI's "Create a new file" flow asks this endpoint, at size 0, whether
+// a path it is about to open an editor for is LFS-managed -- rather than
+// keeping a copy of the pattern list in the browser, which would go stale the
+// moment someone edits .gitattributes. Two things have to hold for that to
+// work: size 0 must still report a pattern match as "lfs", and the answer must
+// come from the repository's own .gitattributes.
+func TestPreupload_AtSizeZeroReportsGitattributesPatterns(t *testing.T) {
+	f := newArchiveFixture(t)
+	f.repo("alice", "up", "model")
+	tok := f.token(f.alice, "write")
+
+	modes := preuploadModes(t, f, "/api/models/alice/up/preupload/main", tok,
+		[]string{"model.safetensors", "data/train.parquet", "weights.bin", "docs/notes.md", "README.md"})
+
+	for _, path := range []string{"model.safetensors", "data/train.parquet", "weights.bin"} {
+		if modes[path] != "lfs" {
+			t.Errorf("uploadMode for %s = %q, want lfs -- the editor would open on a path the "+
+				"commit then refuses", path, modes[path])
+		}
+	}
+	for _, path := range []string{"docs/notes.md", "README.md"} {
+		if modes[path] != "regular" {
+			t.Errorf("uploadMode for %s = %q, want regular -- the editor must still open for "+
+				"ordinary text files", path, modes[path])
+		}
+	}
+}
+
+func TestPreupload_AtSizeZeroFollowsTheRepositorysOwnGitattributes(t *testing.T) {
+	f := newArchiveFixture(t)
+	r := f.repo("alice", "custom", "model")
+	// A repository may both add patterns and negate the seeded ones. Neither
+	// is knowable from the path alone, which is the whole reason the browser
+	// asks the server instead of deciding for itself.
+	seedFile(t, f, r, ".gitattributes", []byte(
+		gitrepo.DefaultGitAttributes("model")+"*.parquet -filter=lfs\n*.notes filter=lfs diff=lfs merge=lfs -text\n"))
+	tok := f.token(f.alice, "write")
+
+	modes := preuploadModes(t, f, "/api/models/alice/custom/preupload/main", tok,
+		[]string{"data/train.parquet", "docs/a.notes", "model.safetensors"})
+
+	if modes["data/train.parquet"] != "regular" {
+		t.Errorf("uploadMode for a negated pattern = %q, want regular", modes["data/train.parquet"])
+	}
+	if modes["docs/a.notes"] != "lfs" {
+		t.Errorf("uploadMode for a repository-added pattern = %q, want lfs", modes["docs/a.notes"])
+	}
+	if modes["model.safetensors"] != "lfs" {
+		t.Errorf("uploadMode for a seeded pattern = %q, want lfs", modes["model.safetensors"])
+	}
+}
+
+// The guard the UI relies on is only worth having because the commit really
+// does refuse: an LFS-managed path cannot be created through the edit endpoint
+// however empty its content is.
+func TestEditFile_RefusesToCreateAnLFSManagedPath(t *testing.T) {
+	f := newArchiveFixture(t)
+	r := f.repo("alice", "new", "model")
+	seedFile(t, f, r, "README.md", []byte("# hi\n"))
+	tok := f.token(f.alice, "write")
+
+	for _, path := range []string{"data/train.parquet", "model.safetensors"} {
+		resp := f.do("PUT", "/api/v1/edit/model/alice/new/main/"+path, tok,
+			apitypes.EditFileRequest{Content: ""})
+		if resp.status() != 400 {
+			t.Errorf("creating %s: status = %d, want 400", path, resp.status())
+		}
+		if !strings.Contains(resp.rec.Body.String(), "LFS") {
+			t.Errorf("creating %s: body = %s, want it to name LFS", path, resp.rec.Body.String())
+		}
+		if !fileMissing(t, f, r, "main", path) {
+			t.Errorf("%s was created despite being LFS-managed", path)
+		}
+	}
+}

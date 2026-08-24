@@ -221,10 +221,16 @@ export const repo = {
     menuUpload: "ファイルをアップロード",
     newFileTitle: "新しいファイルを作成",
     newFileBody:
-      "パスはリポジトリのルートからの相対パスです。ディレクトリに置くには / を使います。",
+      "ファイルはリポジトリのルート直下に作成されます。サブディレクトリに置くには / を使います。",
+    newFileBodyIn:
+      "ファイルは {dir} の下に作成されます。さらにサブディレクトリに置くには / を使います。",
+    newFileResolved: "{path} を作成します",
     newFilePathLabel: "ファイルパス",
     newFilePathPlaceholder: "notes.md",
     newFileConfirm: "ファイルを作成",
+    newFileIsLFS:
+      "{file} はこのリポジトリで Git LFS の管理対象です。そのため中身をブラウザのエディタから書くことはできません。代わりに「ファイルを追加 → ファイルをアップロード」から追加してください — アップロードなら LFS も自動で処理されます。",
+    newFileIsLFSAction: "代わりにアップロードする",
     title: "ファイルをアップロード",
     dropLabel: "ここにファイルをドロップ、またはクリックして選択",
     dropHint: "{rev} の {dir} にコミットされます。",
