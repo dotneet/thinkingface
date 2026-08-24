@@ -116,6 +116,16 @@ declared but left out of that group on purpose: the tests assert that the
 autolog integrations import with neither installed, so pulling them in would
 quietly void the contract and drag two very large trees into every PR.
 
+That project also sets `[tool.uv] package = false`, which is what keeps its
+*build* dependencies out of the picture. `uv run` would otherwise build the
+package before running anything, and a build resolves `[build-system] requires`
+from PyPI at that moment -- a lockfile records runtime dependencies, not build
+ones, so every `make check` and every CI run would fetch an unpinned hatchling.
+The tests import the package from the source tree beside them
+(`[tool.pytest.ini_options] pythonpath`), so nothing needs building to run
+them; `[build-system]` still describes how a wheel is produced for
+distribution.
+
 ## Auditing
 
 ```bash
