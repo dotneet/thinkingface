@@ -117,7 +117,15 @@ func NewServer(d Deps) *Server {
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 
+	// stripClientRequestID runs before middleware.RequestID so the ID it
+	// generates is always server-chosen, never a client-supplied header
+	// value (see stripClientRequestID's doc comment in requestid.go).
+	r.Use(stripClientRequestID)
 	r.Use(middleware.RequestID)
+	// setRequestIDHeader must sit after middleware.RequestID (the ID has to
+	// exist in the context first) and before every handler, since a header
+	// set after the response body starts writing is silently dropped.
+	r.Use(setRequestIDHeader)
 	// No middleware.RealIP here: it rewrites RemoteAddr from headers any client
 	// can set (GHSA-3fxj-6jh8-hvhx), and nothing in this server reads RemoteAddr
 	// anyway. Anything that starts to should resolve the peer against a known
@@ -486,8 +494,13 @@ func requestLogger(next http.Handler) http.Handler {
 		if ww.Status() >= 500 {
 			level = slog.LevelError
 		}
+		// middleware.RequestID always runs upstream of requestLogger (see
+		// Handler()), so the ID is present on every request this logs; the
+		// field is emitted unconditionally to match method/path/status/
+		// bytes/duration above, which are never omitted either.
 		slog.Log(r.Context(), level, "http",
 			"method", r.Method, "path", r.URL.Path, "status", ww.Status(),
-			"bytes", ww.BytesWritten(), "duration", time.Since(start).String())
+			"bytes", ww.BytesWritten(), "duration", time.Since(start).String(),
+			"request_id", middleware.GetReqID(r.Context()))
 	})
 }
