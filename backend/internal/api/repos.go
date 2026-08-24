@@ -213,7 +213,12 @@ func (s *Server) createRepo(ctx context.Context, user *store.User, kind, ns, nam
 	// other server-side commit: skipping it here would leave a repository
 	// whose main predates its index, and the very next authoritative commit
 	// would be rejected as stale (§7).
-	readme := fmt.Sprintf("---\nlicense: unknown\ntags: []\n---\n\n# %s\n\n%s\n", name, description)
+	//
+	// No `license:` key: the creator hasn't chosen one yet, and asserting
+	// "unknown" made every fresh repository a first-class (bogus) value in
+	// the license facet. License() (internal/store/repos.go) and the license
+	// facet both already treat an absent key as "" / excluded.
+	readme := fmt.Sprintf("---\ntags: []\n---\n\n# %s\n\n%s\n", name, description)
 	newHash, _, err := s.commitThroughWAL(ctx, repo, gitrepo.CommitRequest{
 		Branch:  "main",
 		Message: "Initial commit",
