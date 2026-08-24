@@ -58,8 +58,16 @@ Rules:
 - **Never** use a raw Tailwind palette colour (`bg-slate-800`, `text-red-500`, …). They are fixed
   values that do not swap with the theme.
 - Opacity works normally: `bg-positive/15`, `border-warning/40`.
-- Raw `var(--tf-*)` in a **JS value** (not a `className`) is fine and sometimes required — uPlot
-  takes stroke colours as strings, for example. The check only looks inside `className`.
+- Raw `var(--tf-*)` in a **JS value** (not a `className`) is only allowed where the value ends up
+  somewhere CSS resolves it — an inline `style`, or an SVG presentation attribute
+  (`<line stroke="var(--tf-border)">`, as in `parallel-coordinates.tsx`). The `check:ui` rule only
+  looks inside `className`, so this one is on you.
+- **A canvas never resolves `var()`.** `ctx.fillStyle = "var(--tf-fg-subtle)"` is an invalid value
+  that the setter *silently ignores* — no exception, the previous colour (black, on a fresh
+  context) stays — so a uPlot axis or grid handed a custom property draws black on the dark
+  theme's black canvas. Resolve to a real colour first with `readChartThemeColors()`
+  (`lib/theme-colors.ts`), and follow theme switches with `subscribeThemeChange()`;
+  `uplot-chart.tsx` is the worked example.
 
 ## 2. Spacing, radius, typography
 
