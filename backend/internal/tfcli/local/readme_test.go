@@ -3,6 +3,8 @@ package local
 import (
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestBuildReadme(t *testing.T) {
@@ -167,6 +169,89 @@ func TestMergeReadmeEmptyFrontMatterWithBlankLine(t *testing.T) {
 	}
 	got := string(out)
 	want := "---\nlicense: mit\ntags:\n  - nlp\n---\n\nBody\n"
+	if got != want {
+		t.Errorf("MergeReadme() =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// A tag that looks like a YAML integer (e.g. from `tf up --tag 2024`) must
+// come back as the string "2024" on reparse, not the integer 2024 -- an
+// unquoted "2024" round-trips through repocard.Card.Tags() as an int and
+// gets silently dropped there (item.(string) fails and the tag is skipped).
+func TestMergeReadmeQuotesNumericLikeTag(t *testing.T) {
+	existing := "---\nlicense: mit\ntags:\n  - nlp\n---\n\nBody\n"
+	out, err := MergeReadme([]byte(existing), CardOptions{Tags: []string{"2024"}})
+	if err != nil {
+		t.Fatalf("MergeReadme: %v", err)
+	}
+	got := string(out)
+	want := "---\nlicense: mit\ntags:\n  - nlp\n  - \"2024\"\n---\n\nBody\n"
+	if got != want {
+		t.Errorf("MergeReadme() =\n%q\nwant\n%q", got, want)
+	}
+
+	// Reparse the produced front matter and confirm the tag survives as a
+	// string, the same guarantee BuildReadme already provides.
+	var doc struct {
+		Tags []string `yaml:"tags"`
+	}
+	front := strings.TrimPrefix(got, "---\n")
+	front = front[:strings.Index(front, "\n---")]
+	if err := yaml.Unmarshal([]byte(front), &doc); err != nil {
+		t.Fatalf("reparse front matter: %v", err)
+	}
+	if len(doc.Tags) != 2 || doc.Tags[1] != "2024" {
+		t.Errorf("reparsed tags = %#v, want [nlp 2024] with 2024 as a string", doc.Tags)
+	}
+}
+
+// A license value that looks like a YAML boolean must round-trip as that
+// literal string, not as a bool. Note that yaml.v3 (used by both this
+// package and repocard.Parse) follows the YAML 1.2 core schema, where only
+// true/false (and case variants) resolve as booleans -- unlike YAML 1.1,
+// it does *not* treat yes/no/on/off as booleans, so only true/false are
+// exercised here; the "no"/"yes"/"on" quoting the original bug report
+// worried about was already a non-issue with this library's parser
+// (verified with yaml.Unmarshal before writing this test).
+func TestMergeReadmeQuotesBooleanLikeLicense(t *testing.T) {
+	for _, value := range []string{"true", "false"} {
+		t.Run(value, func(t *testing.T) {
+			existing := "---\ntitle: Existing\n---\n\nBody\n"
+			out, err := MergeReadme([]byte(existing), CardOptions{License: value})
+			if err != nil {
+				t.Fatalf("MergeReadme: %v", err)
+			}
+			got := string(out)
+			wantLine := "license: \"" + value + "\"\n"
+			if !strings.Contains(got, wantLine) {
+				t.Errorf("MergeReadme() = %q, want it to contain %q", got, wantLine)
+			}
+
+			var doc struct {
+				License string `yaml:"license"`
+			}
+			front := strings.TrimPrefix(got, "---\n")
+			front = front[:strings.Index(front, "\n---")]
+			if err := yaml.Unmarshal([]byte(front), &doc); err != nil {
+				t.Fatalf("reparse front matter: %v", err)
+			}
+			if doc.License != value {
+				t.Errorf("reparsed license = %q, want %q", doc.License, value)
+			}
+		})
+	}
+}
+
+// Safe values (no quoting needed) must keep rendering unquoted through the
+// yaml.Node merge path too, matching yamlScalar's behavior in BuildReadme.
+func TestMergeReadmeLeavesSafeValuesUnquoted(t *testing.T) {
+	existing := "---\ntitle: Existing\n---\n\nBody\n"
+	out, err := MergeReadme([]byte(existing), CardOptions{License: "mit", Tags: []string{"nlp", "ja"}, Description: "A model."})
+	if err != nil {
+		t.Fatalf("MergeReadme: %v", err)
+	}
+	got := string(out)
+	want := "---\ntitle: Existing\nlicense: mit\ntags:\n  - nlp\n  - ja\ndescription: A model.\n---\n\nBody\n"
 	if got != want {
 		t.Errorf("MergeReadme() =\n%q\nwant\n%q", got, want)
 	}
