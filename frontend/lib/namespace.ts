@@ -95,6 +95,18 @@ export function canEditNamespace(profile: NamespaceProfile): boolean {
 }
 
 /**
+ * True for the two roles that grant write access to a namespace ("admin" and
+ * "write"; "read" and "" do not). This is the single predicate behind
+ * `canCreateInNamespace` and `writableNamespaces` below -- both check the
+ * same bar the backend applies wherever the destination only needs write,
+ * e.g. `startTransfer`'s `destRole >= RoleWrite`
+ * (backend/internal/api/transfers.go).
+ */
+function hasWriteRole(role: string): boolean {
+  return role === "admin" || role === "write";
+}
+
+/**
  * True when the viewer may create repositories here *through the UI*: the
  * namespace appears in their own `/api/v1/me` list with write or admin
  * (their user namespace, or an organisation they belong to at that level).
@@ -109,5 +121,22 @@ export function canCreateInNamespace(profile: NamespaceProfile, me: User | null)
   if (!me) return false;
   const target = profile.name.toLowerCase();
   const mine = me.namespaces.find((n) => n.name.toLowerCase() === target);
-  return mine !== undefined && (mine.role === "admin" || mine.role === "write");
+  return mine !== undefined && hasWriteRole(mine.role);
+}
+
+/**
+ * The subset of the viewer's own `/api/v1/me` namespaces they can actually
+ * create in / write to (role "admin" or "write") -- `canCreateInNamespace`'s
+ * predicate applied across the whole list instead of one profile.
+ *
+ * `/api/v1/me`'s `user.namespaces` is *not* pre-filtered by role: the
+ * backend's `NamespacesForUser` (backend/internal/store/namespaces.go) lists
+ * every namespace the user owns or is a member of, "read" memberships
+ * included. A picker that offers repository creation or a transfer
+ * destination must filter through this (or `hasWriteRole` directly) rather
+ * than using `user.namespaces` as-is, or a read-only member gets an option
+ * that 400s/403s only once they submit.
+ */
+export function writableNamespaces(user: User): User["namespaces"] {
+  return user.namespaces.filter((n) => hasWriteRole(n.role));
 }

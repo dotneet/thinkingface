@@ -33,7 +33,12 @@ export function CreateRepoForm({
   loggedIn,
   initialNamespace,
 }: {
-  /** Where the user may create: their own name plus every org they can write to. */
+  /**
+   * Where the user may create: their own name plus every org they can write
+   * to. The caller must pre-filter with `writableNamespaces` (lib/namespace.ts)
+   * -- `/api/v1/me`'s full namespace list also includes read-only
+   * memberships, which the backend rejects a repository creation into.
+   */
   namespaces: Namespace[];
   loggedIn: boolean;
   /**

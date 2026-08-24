@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { CreateRepoForm } from "@/components/repo/create-repo-form";
 import { getT } from "@/lib/i18n/server";
+import { writableNamespaces } from "@/lib/namespace";
 import { getCurrentUser } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -14,8 +15,10 @@ export default async function NewRepoPage({
 }) {
   const [user, t, sp] = await Promise.all([getCurrentUser(), getT(), searchParams]);
   // The whole Namespace (name + kind + role), not just the name: the form
-  // badges organisations and reads their creation policy.
-  const namespaces = user.ok ? user.data.user.namespaces : [];
+  // badges organisations and reads their creation policy. Filtered to write
+  // or admin -- `/api/v1/me` also lists namespaces the user can only read,
+  // which the backend rejects a repository creation into (lib/namespace.ts).
+  const namespaces = user.ok ? writableNamespaces(user.data.user) : [];
 
   return (
     <div className="flex flex-col gap-6">

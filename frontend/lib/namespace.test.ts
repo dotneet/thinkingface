@@ -8,6 +8,7 @@ import {
   namespaceTabHref,
   parseNamespaceTab,
   updateMyProfile,
+  writableNamespaces,
 } from "@/lib/namespace";
 import type { MembersVisibility, NamespaceProfile, OrgRole, User } from "@/types/api";
 
@@ -170,6 +171,43 @@ describe("canCreateInNamespace", () => {
     expect(canCreateInNamespace(p, me([{ name: "alice", kind: "user", role: "admin" }]))).toBe(
       false,
     );
+  });
+});
+
+describe("writableNamespaces", () => {
+  const me = (namespaces: User["namespaces"]): User => ({
+    id: 1,
+    username: "alice",
+    email: "",
+    is_admin: false,
+    display_name: "",
+    avatar_url: "",
+    namespaces,
+  });
+
+  it("keeps admin and write roles, for both personal and org namespaces", () => {
+    const user = me([
+      { name: "alice", kind: "user", role: "admin" }, // owner of their own namespace
+      { name: "acme", kind: "org", role: "write" },
+    ]);
+    expect(writableNamespaces(user).map((n) => n.name)).toEqual(["alice", "acme"]);
+  });
+
+  it("drops a read membership", () => {
+    const user = me([
+      { name: "acme", kind: "org", role: "read" },
+      { name: "other-org", kind: "org", role: "write" },
+    ]);
+    expect(writableNamespaces(user).map((n) => n.name)).toEqual(["other-org"]);
+  });
+
+  it("returns an empty list when every membership is read-only", () => {
+    const user = me([{ name: "acme", kind: "org", role: "read" }]);
+    expect(writableNamespaces(user)).toEqual([]);
+  });
+
+  it("returns an empty list for a user with no namespaces at all", () => {
+    expect(writableNamespaces(me([]))).toEqual([]);
   });
 });
 
