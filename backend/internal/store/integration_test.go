@@ -634,6 +634,43 @@ func TestIntegrationFilesLFSParquet(t *testing.T) {
 			t.Fatalf("DeleteOrphanedLFSObject empty = %v, %v", deleted, err)
 		}
 
+		// GC, untracked: bytes in the bucket that no lfs_objects row names.
+		// The pass claims the oid by inserting a row, so the two things worth
+		// pinning down are that it refuses an oid that already has one (the
+		// dedup race) and that its own claim never outlives the call.
+		if deleted, err := s.DeleteUntrackedLFSObject(ctx, "oid-2", func() error {
+			return errors.New("must not be called")
+		}); err != nil || deleted {
+			t.Fatalf("DeleteUntrackedLFSObject tracked = %v, %v", deleted, err)
+		}
+		if size, ok, err := s.HasLFSObject(ctx, "oid-2"); err != nil || !ok || size != 5 {
+			t.Fatalf("HasLFSObject oid-2 after refused delete = %d %v %v", size, ok, err)
+		}
+		if deleted, err := s.DeleteUntrackedLFSObject(ctx, "oid-leaked", func() error {
+			return storageErr
+		}); !errors.Is(err, storageErr) || deleted {
+			t.Fatalf("DeleteUntrackedLFSObject storage failure = %v, %v", deleted, err)
+		}
+		if _, ok, _ := s.HasLFSObject(ctx, "oid-leaked"); ok {
+			t.Fatal("rolled back DeleteUntrackedLFSObject left its claim row behind")
+		}
+		removed = false
+		if deleted, err := s.DeleteUntrackedLFSObject(ctx, "oid-leaked", func() error {
+			removed = true
+			return nil
+		}); err != nil || !deleted || !removed {
+			t.Fatalf("DeleteUntrackedLFSObject = %v, %v (removed %v)", deleted, err, removed)
+		}
+		if _, ok, _ := s.HasLFSObject(ctx, "oid-leaked"); ok {
+			t.Fatal("DeleteUntrackedLFSObject left its claim row behind")
+		}
+		if deleted, err := s.DeleteUntrackedLFSObject(ctx, "", func() error { return nil }); err != nil || deleted {
+			t.Fatalf("DeleteUntrackedLFSObject empty = %v, %v", deleted, err)
+		}
+		if _, err := s.DeleteUntrackedLFSObject(ctx, "oid-leaked", nil); err == nil {
+			t.Fatal("DeleteUntrackedLFSObject without removeStorage must fail")
+		}
+
 		// Parquet metadata.
 		r = f.repo(t, "bob", "pq", "dataset", nil)
 		if err := s.ReplaceRepoFiles(ctx, r.ID, "main", []RepoFile{{Path: "a.parquet", Size: 7, BlobSHA: "x", LFSOID: ptr("oid-a")}}); err != nil {
@@ -670,6 +707,75 @@ func TestIntegrationFilesLFSParquet(t *testing.T) {
 		}
 		if pfs, _ := s.ListParquetFiles(ctx, r.ID, "main"); len(pfs) != 1 || pfs[0].Path != "b.parquet" {
 			t.Fatalf("after DeleteParquetFiles = %+v", pfs)
+		}
+	})
+}
+
+// The reason DeleteUntrackedLFSObject claims the oid instead of trusting the
+// collector's snapshot: an upload that deduplicates against bytes already in
+// the bucket writes the row without rewriting the object, so it can appear at
+// any moment, however old the object is. Here the collector gets there first
+// and the upload has to be told the bytes are gone -- ErrLFSObjectGone, which
+// the batch path turns back into an upload action -- rather than committing a
+// link to an object the collector is deleting.
+func TestIntegrationDeleteUntrackedLFSObjectBlocksAConcurrentRecord(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+		r := f.repo(t, "alice", "leaky", "dataset", nil)
+
+		const oid = "oid-untracked"
+		// Stands in for the bucket: removeStorage is what empties it, and
+		// RecordLFSObject's confirmPresent is what reads it back.
+		var mu sync.Mutex
+		present := true
+		claimed := make(chan struct{})
+		started := make(chan struct{})
+
+		recordErr := make(chan error, 1)
+		go func() {
+			// Only after the collector holds the claim, so the ordering
+			// under test is the interesting one and not a coin flip.
+			<-claimed
+			close(started)
+			recordErr <- s.RecordLFSObject(ctx, r.ID, oid, 42, func(string) (bool, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				return present, nil
+			})
+		}()
+
+		deleted, err := s.DeleteUntrackedLFSObject(ctx, oid, func() error {
+			close(claimed)
+			<-started
+			// Long enough for the upload to reach the database and block
+			// there. If the claim did not hold it, this is the window in
+			// which it would read the bucket, find the bytes still present,
+			// and commit a link to them -- which is why they only go away
+			// below, after the pause, rather than up front.
+			time.Sleep(100 * time.Millisecond)
+			mu.Lock()
+			present = false
+			mu.Unlock()
+			return nil
+		})
+		if err != nil || !deleted {
+			t.Fatalf("DeleteUntrackedLFSObject = %v, %v", deleted, err)
+		}
+
+		select {
+		case err := <-recordErr:
+			if !errors.Is(err, ErrLFSObjectGone) {
+				t.Fatalf("concurrent RecordLFSObject = %v, want ErrLFSObjectGone", err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("concurrent RecordLFSObject never returned")
+		}
+		if _, ok, _ := s.HasLFSObject(ctx, oid); ok {
+			t.Fatal("a row survived: the upload linked bytes the collector deleted")
+		}
+		if referenced, _ := s.ListReferencedLFSOIDs(ctx); referenced[oid] {
+			t.Fatal("the upload linked the oid to the repository after the delete")
 		}
 	})
 }

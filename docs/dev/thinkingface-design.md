@@ -110,7 +110,10 @@ gs://{bucket}/
   neither the repository name nor the branch. Identical content is automatically deduplicated across repositories
 - Transfers, renames, and deletions never move a single byte of GCS objects. Orphaned objects are
   reclaimed by `thinkingface gc` (using `repo_lfs_objects` as the reference count for `lfs/` and
-  `repo_files.blob_sha` for `blobs/`)
+  `repo_files.blob_sha` for `blobs/`). Both prefixes are also scanned from the bucket, so an
+  object whose bytes were written and whose index row never was — every write path stores before
+  it records — is reclaimed too, rather than being charged for forever
+  (`docs/dev/content-addressed-storage-design.md` §5)
 - A signed PUT URL for an LFS upload targets `tmp/uploads/lfs/{repoID}/{oid}`, never `lfs/` directly.
   An upload lands in `lfs/` only once verify checks the transferred byte count and promotes it there
   with a server-side copy, so a half-finished or corrupt transfer never becomes visible as a valid

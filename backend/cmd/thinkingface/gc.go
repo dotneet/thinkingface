@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"path"
 	"time"
 
 	"github.com/dotneet/thinkingface/backend/internal/lfs"
@@ -19,6 +20,25 @@ import (
 // committed yet. A day is far longer than either takes and costs only the
 // storage of a handful of objects until the next run.
 const blobGrace = 24 * time.Hour
+
+// untrackedLFSGrace is how long an lfs/ object may exist with no lfs_objects
+// row before gc reads it as leaked rather than mid-upload. Every write path
+// puts the bytes at their content-addressed key before recording the row (the
+// reverse order would advertise an object whose bytes are not there yet), so
+// there is always a window in which a perfectly healthy upload is
+// indistinguishable from a crash that never got to the row.
+//
+// Unlike blobGrace this is not what makes the pass safe -- the interesting
+// race is against dedup, which links an existing object without rewriting it,
+// so no age threshold can ever see it coming; store.DeleteUntrackedLFSObject
+// takes the row lock that does. What the grace buys is that an upload in
+// flight is not *failed*: gc deleting bytes a verify is a moment away from
+// linking is answered with ErrLFSObjectGone and a re-upload, which is correct
+// but is a push the user watches fail for no reason. A day is orders of
+// magnitude more than the gap it covers -- a single database transaction --
+// and costs only the storage of whatever a crash stranded since the previous
+// run.
+const untrackedLFSGrace = 24 * time.Hour
 
 // minStagingGrace floors the window below, so that an operator who shortens
 // TF_SIGNED_URL_MAX_TTL cannot shorten it to something a slow transfer can
@@ -55,6 +75,7 @@ type gcDB interface {
 	ListLFSObjects(ctx context.Context) ([]store.LFSObjectRef, error)
 	ListReferencedLFSOIDs(ctx context.Context) (map[string]bool, error)
 	DeleteOrphanedLFSObject(ctx context.Context, oid string, removeStorage func() error) (deleted bool, err error)
+	DeleteUntrackedLFSObject(ctx context.Context, oid string, removeStorage func() error) (deleted bool, err error)
 	ListReferencedBlobSHAs(ctx context.Context) (map[string]bool, error)
 }
 
@@ -74,7 +95,12 @@ type gcStorage interface {
 // remove one. Staging objects are different: nothing shares them, so an
 // interrupted upload just sits there until gc removes it.
 //
-// All three passes report first and only delete with --yes (or --dry-run=false).
+// Both content-addressed layers are also scanned from the bucket, not only
+// from the database: an object whose bytes were written and whose row never
+// was is invisible to any query, and gcLFS covers that shape for lfs/ the way
+// gcBlobs has always had to for blobs/.
+//
+// Every pass reports first and only deletes with --yes (or --dry-run=false).
 func runGC(ctx context.Context, db gcDB, obj gcStorage, signedURLMaxTTL time.Duration, args []string) error {
 	fs := flag.NewFlagSet("gc", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", true, "report orphaned objects without deleting anything (default)")
@@ -96,7 +122,48 @@ func runGC(ctx context.Context, db gcDB, obj gcStorage, signedURLMaxTTL time.Dur
 	return gcStaging(ctx, obj, signedURLMaxTTL, execute)
 }
 
-// gcLFS collects lfs/ objects that no repository links to any more.
+// gcLFS reclaims the lfs/ layer, which leaks in two different shapes and
+// needs a pass for each.
+//
+//   - Objects lfs_objects knows about that no repository links to any more:
+//     the ordinary outcome of deleting a repository or dropping a file. The
+//     rows are the starting point, and repo_lfs_objects is the reference count
+//     (gcLFSUnreferenced).
+//   - Objects lfs_objects knows nothing about, because the bytes were written
+//     and the row never was. Starting from the rows cannot find these by
+//     construction, so this pass starts from the bucket the way gcBlobs does
+//     (gcLFSUntracked).
+//
+// The reads are shared and ordered deliberately. The listing goes first
+// because it is the slow one, and both database reads come after it, so a row
+// that commits while the listing runs is seen rather than mistaken for a leak
+// -- the same ordering, for the same reason, that gcBlobs uses. The
+// unreferenced pass then runs before the untracked one: it deletes rows, and
+// the untracked set was computed against the rows as they were before it ran,
+// so the objects it removes are already excluded and no key is deleted twice.
+func gcLFS(ctx context.Context, db gcDB, obj gcStorage, execute bool) error {
+	objects, err := obj.List(ctx, storage.LFSPrefix)
+	if err != nil {
+		return fmt.Errorf("list lfs objects in storage: %w", err)
+	}
+	all, err := db.ListLFSObjects(ctx)
+	if err != nil {
+		return fmt.Errorf("list lfs objects: %w", err)
+	}
+	referenced, err := db.ListReferencedLFSOIDs(ctx)
+	if err != nil {
+		return fmt.Errorf("list referenced lfs oids: %w", err)
+	}
+
+	untracked := store.UntrackedLFSObjects(objects, all, time.Now().Add(-untrackedLFSGrace))
+
+	if err := gcLFSUnreferenced(ctx, db, obj, all, referenced, execute); err != nil {
+		return err
+	}
+	return gcLFSUntracked(ctx, db, obj, untracked, len(objects), execute)
+}
+
+// gcLFSUnreferenced collects lfs/ objects that no repository links to any more.
 //
 // The initial scan is a snapshot: between that listing and each delete, a
 // push or LFS verify can attach a previously orphaned oid to a repository.
@@ -106,15 +173,7 @@ func runGC(ctx context.Context, db gcDB, obj gcStorage, signedURLMaxTTL time.Dur
 // run can retry. A concurrent upload batch that Stat'ed a hit before
 // waiting on that lock is told to re-upload via RecordLFSObject's
 // confirmPresent check (ErrLFSObjectGone).
-func gcLFS(ctx context.Context, db gcDB, obj gcStorage, execute bool) error {
-	all, err := db.ListLFSObjects(ctx)
-	if err != nil {
-		return fmt.Errorf("list lfs objects: %w", err)
-	}
-	referenced, err := db.ListReferencedLFSOIDs(ctx)
-	if err != nil {
-		return fmt.Errorf("list referenced lfs oids: %w", err)
-	}
+func gcLFSUnreferenced(ctx context.Context, db gcDB, obj gcStorage, all []store.LFSObjectRef, referenced map[string]bool, execute bool) error {
 	orphaned := store.OrphanedLFSObjects(all, referenced)
 
 	var totalBytes int64
@@ -157,6 +216,67 @@ func gcLFS(ctx context.Context, db gcDB, obj gcStorage, execute bool) error {
 	}
 	if storageFailures > 0 {
 		return fmt.Errorf("%d lfs objects failed to delete from storage; see the logged errors above", storageFailures)
+	}
+	return nil
+}
+
+// gcLFSUntracked collects lfs/ objects that have no lfs_objects row at all.
+//
+// Every upload path writes the bytes to the content-addressed key before it
+// records the row, so a crash or a failed request in between strands an object
+// that no query names -- and the unreferenced pass above, which enumerates
+// rows, can never see it. Without this pass such an object is charged for
+// until somebody happens to upload byte-identical content, which is to say
+// indefinitely.
+//
+// Deletion goes through DeleteUntrackedLFSObject rather than straight to
+// storage. The candidate list is as stale as any snapshot, and staleness is
+// especially dangerous for this class: an upload batch that finds these bytes
+// already present deduplicates against them and links the oid *without
+// rewriting anything*, so the object gains a row while its storage timestamp
+// stays as old as it ever was. That method claims the oid under the same lock
+// RecordLFSObject takes, which is what makes the delete safe; untrackedLFSGrace
+// only keeps gc away from uploads that are still in flight.
+func gcLFSUntracked(ctx context.Context, db gcDB, obj gcStorage, untracked []storage.ObjectInfo, listed int, execute bool) error {
+	var totalBytes int64
+	for _, o := range untracked {
+		totalBytes += o.Size
+		fmt.Printf("untracked lfs   %s  %d bytes\n", o.Key, o.Size)
+	}
+	fmt.Printf("%d of %d stored lfs objects have no lfs_objects row (%d bytes total)\n", len(untracked), listed, totalBytes)
+
+	if !execute {
+		fmt.Println("dry run: nothing deleted. Re-run with --yes to delete these objects.")
+		return nil
+	}
+
+	var deleted int
+	var deletedBytes int64
+	var skipped int
+	var storageFailures int
+	for _, o := range untracked {
+		ok, err := db.DeleteUntrackedLFSObject(ctx, path.Base(o.Key), func() error {
+			return obj.Delete(ctx, o.Key)
+		})
+		if err != nil {
+			slog.Error("gc: delete failed, leaving the untracked lfs object for a later retry",
+				"key", o.Key, "error", err)
+			storageFailures++
+			continue
+		}
+		if !ok {
+			skipped++
+			continue
+		}
+		deleted++
+		deletedBytes += o.Size
+	}
+	fmt.Printf("deleted %d of %d untracked lfs objects (%d bytes)\n", deleted, len(untracked), deletedBytes)
+	if skipped > 0 {
+		fmt.Printf("skipped %d objects that gained an lfs_objects row since the scan\n", skipped)
+	}
+	if storageFailures > 0 {
+		return fmt.Errorf("%d untracked lfs objects failed to delete from storage; see the logged errors above", storageFailures)
 	}
 	return nil
 }

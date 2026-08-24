@@ -1,6 +1,11 @@
 package store
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/dotneet/thinkingface/backend/internal/storage"
+)
 
 func TestOrphanedLFSObjects_ExcludesReferenced(t *testing.T) {
 	all := []LFSObjectRef{
@@ -142,4 +147,52 @@ func TestListReferencedBlobSHAs(t *testing.T) {
 			t.Error("sha-readme lost its reference; the other repository still carries it")
 		}
 	})
+}
+
+func lfsStored(oid string, age time.Duration) storage.ObjectInfo {
+	return storage.ObjectInfo{
+		Key:     storage.LFSKey(oid),
+		Size:    int64(len(oid)),
+		Updated: time.Now().Add(-age),
+	}
+}
+
+func TestUntrackedLFSObjects_KeepsTrackedAndYoungObjects(t *testing.T) {
+	tracked := lfsStored("aaaa1111", 90*24*time.Hour)
+	leaked := lfsStored("bbbb2222", 90*24*time.Hour)
+	// Bytes written moments ago, whose row is probably being committed right
+	// now: every write path stores before it records.
+	inFlight := lfsStored("cccc3333", time.Minute)
+
+	got := UntrackedLFSObjects(
+		[]storage.ObjectInfo{tracked, leaked, inFlight},
+		[]LFSObjectRef{{OID: "aaaa1111", Size: 8}},
+		time.Now().Add(-24*time.Hour),
+	)
+
+	if len(got) != 1 || got[0].Key != leaked.Key {
+		t.Fatalf("UntrackedLFSObjects = %v, want only %s", got, leaked.Key)
+	}
+}
+
+// Only keys that are the canonical home of the oid in their basename are
+// touched. Nothing this system writes produces any other shape under lfs/, so
+// one that turns up is not something to guess the meaning of and delete.
+func TestUntrackedLFSObjects_SkipsKeysThatAreNotACanonicalLFSKey(t *testing.T) {
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	objects := []storage.ObjectInfo{
+		{Key: "lfs/aaaa1111", Updated: old},          // missing the fanout directories
+		{Key: "lfs/zz/zz/aaaa1111", Updated: old},    // fanout that does not match the oid
+		{Key: "lfs/aa/aa/1111/nested", Updated: old}, // a directory where the object should be
+	}
+
+	if got := UntrackedLFSObjects(objects, nil, time.Now()); len(got) != 0 {
+		t.Fatalf("UntrackedLFSObjects = %v, want none", got)
+	}
+}
+
+func TestUntrackedLFSObjects_EmptyInputsDoNotPanic(t *testing.T) {
+	if got := UntrackedLFSObjects(nil, nil, time.Now()); len(got) != 0 {
+		t.Errorf("UntrackedLFSObjects(nil, nil) = %v, want empty", got)
+	}
 }
