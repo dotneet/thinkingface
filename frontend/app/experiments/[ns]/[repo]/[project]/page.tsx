@@ -1,4 +1,6 @@
+import type { Metadata } from "next";
 import Link from "next/link";
+import { titleMetadata } from "@/app/page-metadata";
 import { ExperimentDashboard } from "@/components/experiments/experiment-dashboard";
 import { ErrorState } from "@/components/ui/error-state";
 import { errorMessage } from "@/lib/api-error-message";
@@ -10,6 +12,15 @@ import { redirectIfRepoMoved } from "@/lib/repo-redirect";
 import { authHeaders } from "@/lib/server-auth";
 
 export const dynamic = "force-dynamic";
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ ns: string; repo: string; project: string }>;
+}): Promise<Metadata> {
+  const [{ ns, repo, project }, t] = await Promise.all([params.then(decodeRouteParams), getT()]);
+  return titleMetadata(t("meta.experiments"), `${ns}/${repo}`, project);
+}
 
 export default async function ExperimentProjectPage({
   params,

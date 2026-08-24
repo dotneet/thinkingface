@@ -1,7 +1,14 @@
+import type { Metadata } from "next";
+import { titleMetadata } from "@/app/page-metadata";
 import { WebhooksManager } from "@/components/settings/webhooks-manager";
 import { getT } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
+
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getT();
+  return titleMetadata(t("meta.settings"), t("meta.webhooks"));
+}
 
 export default async function WebhooksPage() {
   const t = await getT();

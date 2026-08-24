@@ -39,14 +39,22 @@ export const repo = {
   sidebar: {
     organization: "Organization",
     userNamespace: "User",
-    downloads: "Downloads",
-    downloads30d: "Downloads (30d)",
+    // "File downloads", not "Downloads": the counter only sees the resolve
+    // endpoint, so naming it after the whole repository would overstate what
+    // it measures. `downloadsHint` says the rest out loud.
+    downloads: "File downloads",
+    downloads30d: "File downloads (30d)",
+    downloadsHint:
+      "Counts single-file downloads served by this server (resolve URLs, hf_hub_download, snapshot_download). git clone, git lfs pull and transfers straight out of the bucket are not counted.",
     size: "Size",
     files: "Files",
     license: "License",
     updated: "Updated",
-    tags: "Tags",
+    // Card topics, not git tags — the two used to share the word "Tags" in
+    // this sidebar and only one of them was ever shown.
+    tags: "Topics",
     branches: "Branches",
+    gitTags: "Git tags",
     gcsAccess: {
       label: "GCS access",
       emptyTitle: "No indexed files",
@@ -60,6 +68,80 @@ export const repo = {
       duckdbLabel: "DuckDB",
       copyDuckdb: "Copy query",
     },
+  },
+  // The clone URL block. Two protocols rather than one, because a user who
+  // registered an SSH key at /settings/ssh-keys had no way to find out which
+  // URL that key works against — the port is deployment-specific.
+  clone: {
+    title: "Clone",
+    protocolLabel: "Clone protocol",
+    http: "HTTP",
+    ssh: "SSH",
+    sshHint: "SSH authenticates by key only. Register your public key in Settings → SSH keys.",
+    // Git LFS always speaks HTTP, even when the remote is SSH.
+    sshLfsHint: "Git LFS transfers over HTTP; clone over HTTP for repositories with LFS files.",
+  },
+  // "Use this model / dataset": the snippets that point huggingface_hub,
+  // datasets and transformers at this server. This is the whole point of the
+  // product and it used to appear nowhere in the UI.
+  usage: {
+    labelModel: "Use this model",
+    labelDataset: "Use this dataset",
+    intro:
+      "huggingface_hub, datasets and transformers work against thinkingface unchanged — point them at this server with HF_ENDPOINT.",
+    envLabel: "Environment",
+    envHint:
+      "Export these before Python starts: huggingface_hub reads its endpoint once, at import time.",
+    copyEnv: "Copy environment",
+    tokenHint: "Add HF_TOKEN=… as well for a token-authenticated client.",
+    datasetsLabel: "datasets",
+    downloadLabel: "huggingface_hub",
+    transformersLabel: "transformers",
+    transformersHint:
+      "AutoModel / AutoTokenizer stand in for whichever task-specific class this model needs.",
+    copySnippet: "Copy snippet",
+    revisionHint: "Pass revision=… to pin a branch, tag or commit. Showing {rev}.",
+  },
+  // Creating and deleting branches and tags from the web UI. The HF-compatible
+  // API has had all four operations from the start; only the UI was missing.
+  refs: {
+    newBranch: "New branch",
+    newBranchTitle: "Create a branch",
+    newBranchBody: "The new branch starts at {rev}.",
+    branchNameLabel: "Branch name",
+    branchNamePlaceholder: "feature/my-change",
+    createBranch: "Create branch",
+    creating: "Creating…",
+    cancel: "Cancel",
+    manageTitle: "Branches and tags",
+    manageDescription:
+      "Tags mark a revision so it can be downloaded by name. Deleting a ref removes the name, not the commits it pointed at.",
+    branchesTitle: "Branches",
+    tagsTitle: "Tags",
+    noBranches: "This repository has no branches yet.",
+    noTags: "This repository has no tags yet.",
+    defaultBadge: "default",
+    // Why the default branch has no delete control (the server refuses it too).
+    defaultUndeletable: "The default branch can't be deleted.",
+    newTagTitle: "Create a tag",
+    tagNameLabel: "Tag name",
+    tagNamePlaceholder: "v1.0",
+    tagRevLabel: "Revision to tag",
+    tagMessageLabel: "Message (optional)",
+    tagMessageHint: "A message makes it an annotated tag, the way git tag -m does.",
+    createTag: "Create tag",
+    deleteBranchAction: "Delete branch {name}",
+    deleteTagAction: "Delete tag {name}",
+    deleteBranchTitle: "Delete this branch?",
+    deleteBranchBody:
+      "The branch {name} will be removed from {repo}. Its commits stay in the repository until git garbage-collects the ones nothing else references.",
+    deleteTagTitle: "Delete this tag?",
+    deleteTagBody:
+      "The tag {name} will be removed from {repo}. Anything pinned to it by name stops resolving.",
+    confirmDelete: "Delete",
+    deleting: "Deleting…",
+    blockedByArchive: "Unarchive this repository before changing its branches or tags.",
+    noPermission: "You need write access to this repository to change its branches and tags.",
   },
   readme: {
     emptyTitle: "No README",
@@ -138,6 +220,10 @@ export const repo = {
     tags: "Tags",
     filterLabel: "Filter branches and tags",
     noMatches: "No matching branches or tags",
+    // The commit each ref points at, which the API has always returned
+    // (`RefUI.target_oid`) and this menu never showed. Two branches with the
+    // same tip are otherwise indistinguishable here.
+    targetTitle: "Points at commit {oid}",
   },
   commitBar: {
     history: "History",
@@ -156,6 +242,20 @@ export const repo = {
   blob: {
     fileNotFound: "File not found in tree listing.",
     edit: "Edit",
+    download: "Download",
+  },
+  // Source-file preview: the line gutter and the reasons a file is shown flat.
+  codePreview: {
+    lineLink: "Line {line}",
+    tooManyLines:
+      "This file has {lines} lines — more than the {limit} this preview highlights, so it is shown as plain text without line numbers.",
+    tooLarge:
+      "This file is too large to highlight in the browser, so it is shown as plain text without line numbers.",
+  },
+  markdownPreview: {
+    previewMode: "Preview mode",
+    modeRendered: "Rendered",
+    modeRaw: "Raw",
   },
   preview: {
     emptyFile: "This file is empty",

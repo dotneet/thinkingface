@@ -129,6 +129,15 @@ type Config struct {
 	SSHEnabled bool
 	// SSHAddr is the listen address for that listener.
 	SSHAddr string
+	// SSHPublicPort is the port clients should dial, when it differs from the
+	// one SSHAddr listens on. Empty means "the same".
+	//
+	// The two are routinely different and only the deployment knows: compose
+	// and Kubernetes remap ports, and a load balancer in front terminates on
+	// its own. Publishing the listen port in ssh_clone_url would then hand
+	// every user a URL that does not connect, which is worse than showing
+	// none -- so this exists to be set wherever the mapping happens.
+	SSHPublicPort string
 	// SSHHostKeyPath is where the server's SSH host key lives. It is
 	// generated on first start if absent, and MUST point at persistent
 	// storage: on an ephemeral filesystem every cold start mints a new
@@ -176,6 +185,7 @@ func Load() (*Config, error) {
 
 		SSHEnabled:     e.bool("TF_SSH_ENABLED", false),
 		SSHAddr:        env("TF_SSH_ADDR", ":2222"),
+		SSHPublicPort:  env("TF_SSH_PUBLIC_PORT", ""),
 		SSHHostKeyPath: env("TF_SSH_HOST_KEY_PATH", "/data/ssh/host_ed25519"),
 		SSHIdleTimeout: e.duration("TF_SSH_IDLE_TIMEOUT", 10*time.Minute),
 

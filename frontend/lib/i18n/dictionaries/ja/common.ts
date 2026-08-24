@@ -1,8 +1,5 @@
 // Shell (header / nav / user menu) and the language settings page.
 export const common = {
-  meta: {
-    description: "データセット・モデル・実験トラッキング。",
-  },
   nav: {
     datasets: "データセット",
     models: "モデル",

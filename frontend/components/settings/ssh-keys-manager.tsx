@@ -1,10 +1,11 @@
 "use client";
 
-import { KeyRound, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, KeyRound, Trash2 } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Button, buttonClass } from "@/components/ui/button";
+import { CodeBlock } from "@/components/ui/code-block";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
@@ -33,6 +34,11 @@ export function SSHKeysManager() {
   // Id of the row pending confirmation in the ConfirmDialog; null closes it.
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Id of the row whose stored public key is expanded. A public key is not a
+  // secret, but it is one very long line, so it stays collapsed until asked
+  // for. One at a time: the point is to read *this* key, and keeping the list
+  // short keeps the toggles near where the pointer already is.
+  const [expandedKeyId, setExpandedKeyId] = useState<number | null>(null);
 
   async function refresh() {
     const result = await listSSHKeys();
@@ -174,7 +180,7 @@ export function SSHKeysManager() {
         />
       ) : (
         <div className="scroll-x rounded-lg border border-border">
-          <table className="w-full min-w-[720px] border-collapse text-sm">
+          <table className="w-full min-w-[820px] border-collapse text-sm">
             <thead>
               <tr className="border-b border-border text-left text-xs font-medium text-fg-subtle">
                 <th className="px-3 py-2 font-medium">{t("settings.sshKeys.colTitle")}</th>
@@ -186,39 +192,83 @@ export function SSHKeysManager() {
               </tr>
             </thead>
             <tbody>
-              {keys.map((key) => (
-                <tr key={key.id} className="border-b border-border last:border-0">
-                  <td className="px-3 py-2 font-medium">{key.title}</td>
-                  <td className="px-3 py-2 font-mono text-xs text-fg-muted">{key.key_type}</td>
-                  <td className="px-3 py-2 font-mono text-xs text-fg-muted">{key.fingerprint}</td>
-                  <td className="px-3 py-2 text-fg-subtle">
-                    <TimeText iso={key.created_at} style="dateTime" />
-                  </td>
-                  <td className="px-3 py-2 text-fg-subtle">
-                    {key.last_used_at ? (
-                      <TimeText iso={key.last_used_at} style="dateTime" />
-                    ) : (
-                      t("settings.sshKeys.neverUsed")
+              {keys.map((key) => {
+                const expanded = expandedKeyId === key.id;
+                const panelId = `ssh-key-${key.id}-public-key`;
+                return (
+                  <Fragment key={key.id}>
+                    <tr className={expanded ? undefined : "border-b border-border last:border-0"}>
+                      <td className="px-3 py-2 font-medium">{key.title}</td>
+                      <td className="px-3 py-2 font-mono text-xs text-fg-muted">{key.key_type}</td>
+                      <td className="px-3 py-2 font-mono text-xs text-fg-muted">
+                        {key.fingerprint}
+                      </td>
+                      <td className="px-3 py-2 text-fg-subtle">
+                        <TimeText iso={key.created_at} style="dateTime" />
+                      </td>
+                      <td className="px-3 py-2 text-fg-subtle">
+                        {key.last_used_at ? (
+                          <TimeText iso={key.last_used_at} style="dateTime" />
+                        ) : (
+                          t("settings.sshKeys.neverUsed")
+                        )}
+                      </td>
+                      <td className="px-3 py-2">
+                        <div className="flex items-center justify-end gap-2">
+                          {/* The label never changes and the two chevrons are
+                              the same size, so toggling cannot resize this
+                              button and nudge the destructive Delete next to
+                              it out from under the pointer (DESIGN.md §8).
+                              The panel opens *below* this row, so the toggle
+                              itself also stays put. */}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            aria-expanded={expanded}
+                            aria-controls={panelId}
+                            aria-label={t("settingsDetail.sshKeys.publicKeyToggleAria", {
+                              title: key.title,
+                            })}
+                            onClick={() => setExpandedKeyId(expanded ? null : key.id)}
+                          >
+                            {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                            {t("settingsDetail.sshKeys.publicKeyToggle")}
+                          </Button>
+                          <Button
+                            variant="danger"
+                            size="sm"
+                            disabled={deletingId !== null}
+                            onClick={() => {
+                              setDeleteError(null);
+                              setConfirmDeleteId(key.id);
+                            }}
+                          >
+                            <Trash2 size={12} />
+                            {deletingId === key.id
+                              ? t("settings.sshKeys.deleting")
+                              : t("settings.sshKeys.delete")}
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                    {expanded && (
+                      <tr className="border-b border-border last:border-0">
+                        <td id={panelId} colSpan={6} className="px-3 pb-3">
+                          {/* CodeBlock's unlabelled layout: the key line is a
+                              flex item with `overflow-x: auto`, so its
+                              automatic minimum size collapses to 0 and the
+                              line scrolls inside this cell instead of
+                              stretching the table (and the page) sideways. */}
+                          <CodeBlock
+                            value={key.public_key}
+                            copyLabel={t("settingsDetail.sshKeys.copyPublicKey")}
+                          />
+                        </td>
+                      </tr>
                     )}
-                  </td>
-                  <td className="px-3 py-2 text-right">
-                    <Button
-                      variant="danger"
-                      size="sm"
-                      disabled={deletingId !== null}
-                      onClick={() => {
-                        setDeleteError(null);
-                        setConfirmDeleteId(key.id);
-                      }}
-                    >
-                      <Trash2 size={12} />
-                      {deletingId === key.id
-                        ? t("settings.sshKeys.deleting")
-                        : t("settings.sshKeys.delete")}
-                    </Button>
-                  </td>
-                </tr>
-              ))}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>

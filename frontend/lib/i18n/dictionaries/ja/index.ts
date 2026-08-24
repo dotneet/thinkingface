@@ -6,6 +6,7 @@ import { common } from "@/lib/i18n/dictionaries/ja/common";
 import { errors } from "@/lib/i18n/dictionaries/ja/errors";
 import { experiments } from "@/lib/i18n/dictionaries/ja/experiments";
 import { home } from "@/lib/i18n/dictionaries/ja/home";
+import { meta } from "@/lib/i18n/dictionaries/ja/meta";
 import { model } from "@/lib/i18n/dictionaries/ja/model";
 import { namespace } from "@/lib/i18n/dictionaries/ja/namespace";
 import { newRepo } from "@/lib/i18n/dictionaries/ja/newRepo";
@@ -14,6 +15,7 @@ import { parquet } from "@/lib/i18n/dictionaries/ja/parquet";
 import { repo } from "@/lib/i18n/dictionaries/ja/repo";
 import { repoList } from "@/lib/i18n/dictionaries/ja/repoList";
 import { settings } from "@/lib/i18n/dictionaries/ja/settings";
+import { settingsDetail } from "@/lib/i18n/dictionaries/ja/settingsDetail";
 import { ui } from "@/lib/i18n/dictionaries/ja/ui";
 
 export const ja: Dict = {
@@ -22,6 +24,7 @@ export const ja: Dict = {
   errors,
   experiments,
   home,
+  meta,
   model,
   namespace,
   newRepo,
@@ -30,5 +33,6 @@ export const ja: Dict = {
   repo,
   repoList,
   settings,
+  settingsDetail,
   ui,
 };

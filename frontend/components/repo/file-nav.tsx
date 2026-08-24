@@ -38,6 +38,7 @@ export async function FileNav({
   path,
   refs,
   target = "tree",
+  canCreateBranch = false,
 }: {
   kind: RepoKind;
   ns: string;
@@ -47,6 +48,12 @@ export async function FileNav({
   refs?: RefsResponseUI;
   /** Where selecting a ref in the switcher navigates to. Defaults to the file tree. */
   target?: "tree" | "commits" | "blob";
+  /**
+   * Adds "New branch" to the ref switcher. Off unless the caller has checked
+   * that the viewer may write and the repository isn't archived — the server
+   * refuses both, so offering it would be a dead end.
+   */
+  canCreateBranch?: boolean;
 }) {
   const t = await getT();
   return (
@@ -60,6 +67,7 @@ export async function FileNav({
           path={path}
           refs={refs}
           target={target}
+          canCreateBranch={canCreateBranch}
         />
       ) : (
         <StaticRevChip rev={rev} />

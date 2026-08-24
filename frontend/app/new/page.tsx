@@ -1,10 +1,17 @@
+import type { Metadata } from "next";
 import Link from "next/link";
+import { titleMetadata } from "@/app/page-metadata";
 import { CreateRepoForm } from "@/components/repo/create-repo-form";
 import { getT } from "@/lib/i18n/server";
 import { writableNamespaces } from "@/lib/namespace";
 import { getCurrentUser } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
+
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getT();
+  return titleMetadata(t("meta.newRepository"));
+}
 
 export default async function NewRepoPage({
   searchParams,

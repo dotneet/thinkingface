@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -119,6 +121,61 @@ func (s *Server) cloneURL(r *store.Repo) string {
 	return fmt.Sprintf("%s/%s/%s/%s.git", s.cfg.PublicURL, kindPlural(r.Kind), r.Namespace, r.Name)
 }
 
+// sshCloneURL builds the git-over-SSH remote documented in
+// docs/users/guides/git.md ("ssh://git@host:port/{kind}s/{ns}/{name}.git"),
+// or "" when the SSH listener is off.
+//
+// Neither half comes from TF_SSH_ADDR by preference: that is a *listen*
+// address (":2222", "0.0.0.0:2222"), and a listen address describes where the
+// process binds, not where anyone can reach it. The host is TF_PUBLIC_URL's,
+// and the port is TF_SSH_PUBLIC_PORT when set -- compose, Kubernetes and a
+// load balancer all routinely publish the listener on a different port, and
+// advertising the internal one would hand every user a URL that does not
+// connect. TF_SSH_ADDR's port is the fallback because it is right whenever
+// nothing remaps it, which covers running the binary directly. Port 22 stays
+// implicit so the URL keeps the short form people expect.
+func (s *Server) sshCloneURL(r *store.Repo) string {
+	if !s.cfg.SSHEnabled {
+		return ""
+	}
+	host := publicHost(s.cfg.PublicURL)
+	if host == "" {
+		return ""
+	}
+	port := s.cfg.SSHPublicPort
+	if port == "" {
+		port = sshPort(s.cfg.SSHAddr)
+	}
+	if port != "" && port != "22" {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		// A bare IPv6 literal needs its brackets back, which Hostname() removed.
+		host = "[" + host + "]"
+	}
+	return fmt.Sprintf("ssh://git@%s/%s/%s/%s.git", host, kindPlural(r.Kind), r.Namespace, r.Name)
+}
+
+// publicHost is TF_PUBLIC_URL's hostname, with any HTTP port dropped: the SSH
+// listener has its own. An IPv6 literal keeps its brackets so the result can be
+// re-joined with a port.
+func publicHost(publicURL string) string {
+	u, err := url.Parse(publicURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// sshPort is the port half of a listen address such as ":2222" or
+// "0.0.0.0:2222". An address with no port at all yields "".
+func sshPort(addr string) string {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	return port
+}
+
 func (s *Server) buildDetail(ctx context.Context, r *store.Repo) apitypes.RepoDetail {
 	d := apitypes.RepoDetail{
 		RepoSummary: toSummary(r), Card: r.Card,
@@ -128,6 +185,7 @@ func (s *Server) buildDetail(ctx context.Context, r *store.Repo) apitypes.RepoDe
 		d.Card = map[string]any{}
 	}
 	d.CloneURL = s.cloneURL(r)
+	d.SSHCloneURL = s.sshCloneURL(r)
 	d.Branches = []string{}
 	d.TagsRefs = []string{}
 	d.ParquetFiles = []apitypes.ParquetSummary{}

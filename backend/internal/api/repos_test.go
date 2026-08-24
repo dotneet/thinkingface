@@ -1,6 +1,11 @@
 package api
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/dotneet/thinkingface/backend/internal/config"
+	"github.com/dotneet/thinkingface/backend/internal/store"
+)
 
 // TestHFDeleteRepoDefaultsNamespaceToCaller covers the same namespace
 // fallback handleHFCreateRepo already has: huggingface_hub's
@@ -44,5 +49,83 @@ func TestHFDeleteRepoRejectsOtherNamespace(t *testing.T) {
 	// The repository must still be there.
 	if r := f.do("GET", "/api/v1/repos/model/bob/other", "", nil); r.status() != 200 {
 		t.Fatalf("repo missing after rejected delete: status = %d, body = %s", r.status(), r.rec.Body.String())
+	}
+}
+
+// TestSSHCloneURL pins the URL shape documented in docs/users/guides/git.md.
+// The host comes from TF_PUBLIC_URL, the port from TF_SSH_PUBLIC_PORT when a
+// deployment remaps the listener and from TF_SSH_ADDR otherwise, and the whole
+// thing is empty when the listener is off, so the UI can tell "no SSH here"
+// from "SSH on the default port".
+func TestSSHCloneURL(t *testing.T) {
+	repo := &store.Repo{Kind: "dataset", Namespace: "admin", Name: "imdb-reviews"}
+	model := &store.Repo{Kind: "model", Namespace: "acme", Name: "sentiment-base"}
+
+	cases := []struct {
+		name       string
+		enabled    bool
+		publicURL  string
+		sshAddr    string
+		publicPort string
+		repo       *store.Repo
+		want       string
+	}{
+		{
+			name: "disabled", enabled: false,
+			publicURL: "http://localhost:8080", sshAddr: ":2222", repo: repo, want: "",
+		},
+		{
+			name:      "listen address contributes only its port",
+			enabled:   true,
+			publicURL: "http://localhost:8080", sshAddr: "0.0.0.0:2222", repo: repo,
+			want: "ssh://git@localhost:2222/datasets/admin/imdb-reviews.git",
+		},
+		{
+			name: "models sit at the root", enabled: true,
+			publicURL: "https://hub.example.com", sshAddr: ":2222", repo: model,
+			want: "ssh://git@hub.example.com:2222/models/acme/sentiment-base.git",
+		},
+		{
+			name: "port 22 stays implicit", enabled: true,
+			publicURL: "https://hub.example.com", sshAddr: ":22", repo: repo,
+			want: "ssh://git@hub.example.com/datasets/admin/imdb-reviews.git",
+		},
+		{
+			name: "http port is dropped, not reused", enabled: true,
+			publicURL: "http://192.168.1.10:8080", sshAddr: ":2222", repo: repo,
+			want: "ssh://git@192.168.1.10:2222/datasets/admin/imdb-reviews.git",
+		},
+		{
+			name: "address with no port falls back to the implicit 22", enabled: true,
+			publicURL: "http://localhost:8080", sshAddr: "", repo: repo,
+			want: "ssh://git@localhost/datasets/admin/imdb-reviews.git",
+		},
+		// A remapped listener: the container binds 2222, the world dials
+		// 22022. Advertising the listen port here would hand out a URL that
+		// does not connect.
+		{
+			name: "the advertised port wins over the listen port", enabled: true,
+			publicURL: "https://hub.example.com", sshAddr: ":2222", publicPort: "22022",
+			repo: repo,
+			want: "ssh://git@hub.example.com:22022/datasets/admin/imdb-reviews.git",
+		},
+		{
+			name: "an advertised port of 22 is still implicit", enabled: true,
+			publicURL: "https://hub.example.com", sshAddr: ":2222", publicPort: "22",
+			repo: repo,
+			want: "ssh://git@hub.example.com/datasets/admin/imdb-reviews.git",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Server{cfg: &config.Config{
+				PublicURL: tc.publicURL, SSHEnabled: tc.enabled, SSHAddr: tc.sshAddr,
+				SSHPublicPort: tc.publicPort,
+			}}
+			if got := s.sshCloneURL(tc.repo); got != tc.want {
+				t.Fatalf("sshCloneURL = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

@@ -1,7 +1,14 @@
+import type { Metadata } from "next";
+import { titleMetadata } from "@/app/page-metadata";
 import { StorageUsage } from "@/components/settings/storage-usage";
 import { getT } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
+
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getT();
+  return titleMetadata(t("meta.settings"), t("meta.storage"));
+}
 
 export default async function StorageUsagePage() {
   const t = await getT();

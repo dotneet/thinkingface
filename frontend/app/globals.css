@@ -334,63 +334,69 @@ body {
 }
 
 /* highlight.js token colours, tuned from the existing semantic tokens so
-   both themes stay readable on --tf-bg-sunken. */
-.tf-markdown .hljs-comment,
-.tf-markdown .hljs-quote {
+   both themes stay readable on --tf-bg-sunken.
+
+   Scoped to `.tf-hljs` rather than `.tf-markdown` because the same
+   rehype-highlight output appears in two places: fenced blocks inside rendered
+   Markdown (the wrapper in ui/markdown.tsx carries both classes) and the
+   source-file preview in components/repo/text-preview.tsx, which is not
+   Markdown at all. One stylesheet, one set of token colours. */
+.tf-hljs .hljs-comment,
+.tf-hljs .hljs-quote {
   color: var(--tf-fg-subtle);
   font-style: italic;
 }
-.tf-markdown .hljs-keyword,
-.tf-markdown .hljs-selector-tag,
-.tf-markdown .hljs-literal,
-.tf-markdown .hljs-subst,
-.tf-markdown .hljs-tag {
+.tf-hljs .hljs-keyword,
+.tf-hljs .hljs-selector-tag,
+.tf-hljs .hljs-literal,
+.tf-hljs .hljs-subst,
+.tf-hljs .hljs-tag {
   color: var(--tf-accent);
 }
-.tf-markdown .hljs-type,
-.tf-markdown .hljs-built_in {
+.tf-hljs .hljs-type,
+.tf-hljs .hljs-built_in {
   color: var(--tf-accent);
   font-weight: 600;
 }
-.tf-markdown .hljs-string,
-.tf-markdown .hljs-regexp,
-.tf-markdown .hljs-addition,
-.tf-markdown .hljs-doctag {
+.tf-hljs .hljs-string,
+.tf-hljs .hljs-regexp,
+.tf-hljs .hljs-addition,
+.tf-hljs .hljs-doctag {
   color: var(--tf-positive);
 }
-.tf-markdown .hljs-number,
-.tf-markdown .hljs-symbol,
-.tf-markdown .hljs-bullet,
-.tf-markdown .hljs-link,
-.tf-markdown .hljs-meta,
-.tf-markdown .hljs-attribute {
+.tf-hljs .hljs-number,
+.tf-hljs .hljs-symbol,
+.tf-hljs .hljs-bullet,
+.tf-hljs .hljs-link,
+.tf-hljs .hljs-meta,
+.tf-hljs .hljs-attribute {
   color: var(--tf-warning);
 }
-.tf-markdown .hljs-deletion {
+.tf-hljs .hljs-deletion {
   color: var(--tf-negative);
 }
-.tf-markdown .hljs-title,
-.tf-markdown .hljs-section,
-.tf-markdown .hljs-name,
-.tf-markdown .hljs-selector-id,
-.tf-markdown .hljs-selector-class,
-.tf-markdown .hljs-attr {
+.tf-hljs .hljs-title,
+.tf-hljs .hljs-section,
+.tf-hljs .hljs-name,
+.tf-hljs .hljs-selector-id,
+.tf-hljs .hljs-selector-class,
+.tf-hljs .hljs-attr {
   color: var(--tf-fg);
   font-weight: 600;
 }
-.tf-markdown .hljs-variable,
-.tf-markdown .hljs-template-variable,
-.tf-markdown .hljs-params {
+.tf-hljs .hljs-variable,
+.tf-hljs .hljs-template-variable,
+.tf-hljs .hljs-params {
   color: var(--tf-fg);
 }
-.tf-markdown .hljs-punctuation,
-.tf-markdown .hljs-operator {
+.tf-hljs .hljs-punctuation,
+.tf-hljs .hljs-operator {
   color: var(--tf-fg-muted);
 }
-.tf-markdown .hljs-emphasis {
+.tf-hljs .hljs-emphasis {
   font-style: italic;
 }
-.tf-markdown .hljs-strong {
+.tf-hljs .hljs-strong {
   font-weight: 700;
 }
 
