@@ -395,7 +395,7 @@ func (s *Store) ListModelProducers(ctx context.Context, ns, name string) ([]ExpR
 		 JOIN repositories r ON r.id = p.repo_id
 		 JOIN namespaces n ON n.id = r.namespace_id
 		 WHERE LOWER(m.repo_namespace) = LOWER($1) AND m.repo_name = $2
-		 ORDER BY r.updated_at DESC, p.name, rn.name
+		 ORDER BY r.updated_at DESC, p.name, rn.name, rn.id, m.raw
 		 LIMIT `+strconv.Itoa(maxRunProducers), args...)
 	if err != nil {
 		return nil, fmt.Errorf("list model producers: %w", err)
@@ -637,7 +637,18 @@ func (s *Store) DeleteExpRun(ctx context.Context, projectID int64, name string) 
 
 // DeleteProjectRunsNotIn prunes runs that vanished from the parquet export, so
 // a rewritten history does not leave ghosts in the run list.
+//
+// A nil keep set is a no-op. Both dialects bind nil as SQL NULL, and the two
+// engines then disagree by exactly the worst amount: `NOT (name = ANY(NULL))`
+// is NULL on Postgres and deletes nothing, while
+// `NOT (name IN (SELECT value FROM json_each(NULL)))` is true for every row
+// on SQLite and would delete the project's whole run list. An *empty* slice
+// is a different statement -- "the export really does list no runs" -- and
+// still prunes on both engines, since it binds as an empty array.
 func (s *Store) DeleteProjectRunsNotIn(ctx context.Context, projectID int64, keep []string) error {
+	if keep == nil {
+		return nil
+	}
 	_, err := s.db.Exec(ctx,
 		`DELETE FROM exp_runs WHERE project_id = $1 AND NOT (name `+s.d.inArray("$2")+`)
 		   AND NOT EXISTS (SELECT 1 FROM exp_points p WHERE p.run_id = exp_runs.id)`,

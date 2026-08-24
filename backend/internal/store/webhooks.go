@@ -213,6 +213,13 @@ func scanDelivery(row rowScanner) (*WebhookDelivery, error) {
 	return d, nil
 }
 
+// The delivery history page size, as docs/dev/api-contract.md documents it
+// ("limit (default 30, max 100)").
+const (
+	defaultDeliveryPageSize = 30
+	maxDeliveryPageSize     = 100
+)
+
 const deliveryColumns = `id, webhook_id, event, payload, status, attempts,
 	last_attempt_at, response_status, response_body, created_at`
 
@@ -223,12 +230,7 @@ func (s *Store) GetWebhookDelivery(ctx context.Context, id int64) (*WebhookDeliv
 
 // ListWebhookDeliveries returns one page of delivery history, newest first.
 func (s *Store) ListWebhookDeliveries(ctx context.Context, webhookID int64, limit, offset int) ([]WebhookDelivery, int64, error) {
-	if limit <= 0 || limit > 100 {
-		limit = 30
-	}
-	if offset < 0 {
-		offset = 0
-	}
+	limit, offset = pageWindow(limit, offset, defaultDeliveryPageSize, maxDeliveryPageSize)
 	var total int64
 	if err := s.db.QueryRow(ctx,
 		`SELECT count(*) FROM webhook_deliveries WHERE webhook_id = $1`, webhookID).Scan(&total); err != nil {

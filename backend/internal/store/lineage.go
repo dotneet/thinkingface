@@ -335,7 +335,7 @@ func (s *Store) queryDependents(ctx context.Context, where string, args []any) (
 		 JOIN repositories r ON r.id = l.repo_id
 		 JOIN namespaces n ON n.id = r.namespace_id
 		 WHERE `+where+`
-		 ORDER BY r.updated_at DESC, r.name
+		 ORDER BY r.updated_at DESC, r.name, r.id, l.edge_kind, l.raw
 		 LIMIT `+strconv.Itoa(maxLineageDependents), args...)
 	if err != nil {
 		return nil, fmt.Errorf("list lineage dependents: %w", err)

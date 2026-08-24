@@ -168,7 +168,7 @@ func (s *Store) transferMove(ctx context.Context, ex executor, spec TransferSpec
 	// The new name is now a real repository again, so any redirect that used
 	// to live there must go (docs/dev/repo-transfer-design.md §5 "conflicts").
 	if _, err = ex.Exec(ctx,
-		`DELETE FROM repo_redirects WHERE kind = $1 AND from_namespace = $2 AND from_name = $3`,
+		`DELETE FROM repo_redirects WHERE kind = $1 AND LOWER(from_namespace) = LOWER($2) AND from_name = $3`,
 		repoKind, toNS.Name, toName); err != nil {
 		return nil, 0, "", err
 	}
@@ -176,10 +176,22 @@ func (s *Store) transferMove(ctx context.Context, ex executor, spec TransferSpec
 	// Only edges that point at a repository of this kind follow the move: a
 	// model and a dataset may share a name, and `base_model` edges name
 	// models while `dataset` / `run` edges name datasets (see lineage.go).
+	// The namespace half of the target is card-authored text, so it is
+	// matched folded, exactly as ListLineageDependents finds these edges: an
+	// edge written `Alice/foo` describes the repository being moved just as
+	// much as `alice/foo` does, and leaving it behind would dangle it.
+	// `new_version` is the exception -- it targets whatever kind declared it
+	// (LineageEdge.TargetKind) -- so its kind is read from the source row,
+	// the same expression ListRepoLineage resolves the edge with. Lumping it
+	// in with the datasets both stranded a moved model's successors and let a
+	// moved dataset rewrite the edges between two same-named models.
 	if _, err = ex.Exec(ctx,
 		`UPDATE repo_lineage SET target_namespace = $3, target_name = $4, updated_at = $5
-		 WHERE target_namespace = $1 AND target_name = $2
-		   AND (CASE edge_kind WHEN 'base_model' THEN 'model' ELSE 'dataset' END) = $6`,
+		 WHERE LOWER(target_namespace) = LOWER($1) AND target_name = $2
+		   AND (CASE edge_kind
+		          WHEN 'base_model' THEN 'model'
+		          WHEN 'new_version' THEN (SELECT src.kind FROM repositories src WHERE src.id = repo_lineage.repo_id)
+		          ELSE 'dataset' END) = $6`,
 		fromNS.Name, repoName, toNS.Name, toName, now, repoKind); err != nil {
 		return nil, 0, "", err
 	}

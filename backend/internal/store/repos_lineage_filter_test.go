@@ -247,3 +247,57 @@ func TestIntegrationRepoLineageFilters(t *testing.T) {
 		})
 	})
 }
+
+// A facet count is a promise about what clicking it returns. The relation
+// facet is computed over a join rather than over the row itself, so with a
+// base model selected it has to count the edges pointing at *that* base
+// model -- the same edge baseModelClause constrains -- and not every
+// base_model edge the repository happens to declare.
+func TestIntegrationRelationFacetMatchesTheFilterItOffers(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newLineageFixture(t, s)
+		ctx := f.ctx
+
+		// A quantisation of base-model that is also, separately, a fine-tune
+		// of base-2. Under ?base_model=alice/base-model it belongs in the
+		// quantized bucket alone: its base-2 edge describes another lineage.
+		hybrid := f.repo(t, "alice", "hybrid", "model", nil)
+		if err := s.ReplaceRepoLineage(ctx, hybrid.ID, []LineageEdge{
+			{Kind: LineageKindBaseModel, Raw: "alice/base-model", Namespace: "alice",
+				Name: "base-model", Relation: "quantized"},
+			{Kind: LineageKindBaseModel, Raw: "alice/base-2", Namespace: "alice",
+				Name: "base-2", Relation: "finetune", Ordinal: 1},
+		}); err != nil {
+			t.Fatalf("ReplaceRepoLineage: %v", err)
+		}
+
+		_, _, facets, err := s.ListRepos(ctx, RepoFilter{BaseModel: "alice/base-model", WithFacets: true})
+		if err != nil {
+			t.Fatalf("ListRepos: %v", err)
+		}
+		got := map[string]int64{}
+		for _, it := range facets.Relations {
+			got[it.Value] = it.Count
+		}
+		// finetune = ft + legacy + secret-ft; quantized = gguf + hybrid.
+		want := map[string]int64{"finetune": 3, "quantized": 2, "merge": 1}
+		for k, v := range want {
+			if got[k] != v {
+				t.Errorf("relation facet[%q] = %d, want %d (got %v)", k, got[k], v, got)
+			}
+		}
+		if len(got) != len(want) {
+			t.Errorf("relation facet = %v, want exactly %v", got, want)
+		}
+		// The number shown is the number the filter behind it returns.
+		for _, it := range facets.Relations {
+			_, total, _, err := s.ListRepos(ctx, RepoFilter{BaseModel: "alice/base-model", Relation: it.Value})
+			if err != nil {
+				t.Fatalf("ListRepos(relation %q): %v", it.Value, err)
+			}
+			if total != it.Count {
+				t.Errorf("facet says %s (%d) but the filter returns %d", it.Value, it.Count, total)
+			}
+		}
+	})
+}

@@ -34,9 +34,11 @@ func TestTranslateSQLite(t *testing.T) {
 	if got := translateSQLite(in); got != want {
 		t.Fatalf("translateSQLite =\n%s\nwant\n%s", got, want)
 	}
-	// Cached path returns the same result.
+	// Repeated calls are stable -- and are recomputed, not memoised: a cache
+	// keyed by the query text would grow with the number of tag clauses a
+	// filtered listing renders, and never shrink again.
 	if got := translateSQLite(in); got != want {
-		t.Fatalf("cached translateSQLite = %s", got)
+		t.Fatalf("repeated translateSQLite = %s", got)
 	}
 	// Placeholders are left alone: modernc binds $N by number.
 	if got := translateSQLite(`SELECT $2, $1, $2`); got != `SELECT $2, $1, $2` {
@@ -138,6 +140,23 @@ func TestBuildRepoWhereSQLiteDialect(t *testing.T) {
 		clause, args := buildRepoWhere(d, RepoFilter{Search: "!!!"}, repoFilterScopeAll)
 		if clause != "" || len(args) != 0 {
 			t.Errorf("%s: empty search clause = %q args %v", d.name(), clause, args)
+		}
+	}
+}
+
+// translateSQLite runs on every statement, so it has to be cheap enough not
+// to want a cache. Measured against the cost of parsing and executing the
+// statement it precedes, one Replacer pass over the text is noise.
+func BenchmarkTranslateSQLite(b *testing.B) {
+	// A listing query with a handful of tag clauses: the shape whose length
+	// varies per request, and the reason a query-keyed cache is unbounded.
+	q := `SELECT r.id FROM repositories r JOIN namespaces n ON n.id = r.namespace_id
+		WHERE r.name ILIKE $1 AND r.updated_at <= now() AND (` +
+		strings.Repeat(`EXISTS (SELECT 1 FROM json_each(r.card, '$.tags') WHERE value = $2) AND `, 8) +
+		`1 = 1) ORDER BY r.updated_at DESC, r.id DESC LIMIT $3 OFFSET $4`
+	for b.Loop() {
+		if translateSQLite(q) == "" {
+			b.Fatal("empty translation")
 		}
 	}
 }

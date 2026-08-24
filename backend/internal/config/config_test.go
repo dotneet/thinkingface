@@ -270,3 +270,52 @@ func TestLoad_CookieSecureIsTriState(t *testing.T) {
 		}
 	}
 }
+
+// A number/boolean/duration that does not parse is a startup error, not a
+// silent fall back to the default: an operator who typed TF_SYNC_WORKERS=two
+// would otherwise run on 2 workers believing they had set something else.
+func TestLoad_RejectsUnparseableTypedValues(t *testing.T) {
+	cases := []struct{ key, value string }{
+		{"TF_SYNC_WORKERS", "two"},
+		{"TF_WEBHOOK_WORKERS", "1.5"},
+		{"TF_AUTH_RATE_LIMIT_PER_MIN", "-"},
+		{"TF_GIT_CACHE_BYTES", "2GB"},
+		{"TF_VIEWER_METADATA_CACHE_BYTES", "256MiB"},
+		{"TF_SESSION_TTL", "7dd"},
+		{"TF_SIGNED_URL_TTL", "1 hour"},
+		{"TF_EXP_FLUSH_INTERVAL", "60"},
+		{"TF_ALLOW_SIGNUP", "yes"},
+		{"TF_SSH_ENABLED", "on"},
+		{"TF_COOKIE_SECURE", "maybe"},
+	}
+	for _, c := range cases {
+		t.Run(c.key, func(t *testing.T) {
+			setBase(t)
+			t.Setenv(c.key, c.value)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), c.key) {
+				t.Fatalf("Load() with %s=%q err = %v, want an error naming %s", c.key, c.value, err, c.key)
+			}
+		})
+	}
+}
+
+// The other half of the rule: an unset variable is not an invalid one, and
+// still yields the documented default.
+func TestLoad_UnsetTypedValuesKeepTheirDefaults(t *testing.T) {
+	setBase(t)
+	for _, key := range []string{
+		"TF_SYNC_WORKERS", "TF_GIT_CACHE_BYTES", "TF_SESSION_TTL",
+		"TF_ALLOW_SIGNUP", "TF_SSH_ENABLED", "TF_COOKIE_SECURE",
+	} {
+		t.Setenv(key, "")
+	}
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.SyncWorkers != 2 || c.GitCacheBytes != 2<<30 || c.SessionTTL != 7*24*time.Hour ||
+		!c.AllowSignup || c.SSHEnabled || c.CookieSecure != nil {
+		t.Fatalf("defaults not applied: %+v", c)
+	}
+}
