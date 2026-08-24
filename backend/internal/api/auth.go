@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -587,6 +588,14 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, apitypes.TokenListResponse{Items: items})
 }
 
+// maxTokenExpiryDays bounds how far out a token's expiry can be set. The cap
+// exists so "no expiry" stays a deliberate choice rather than the only
+// practical one, and so a client can't request something absurd like a
+// 100-year token. It is not part of the HF-compatible surface: nothing in
+// huggingface_hub mints tokens, so this endpoint and its cap are ours alone
+// to define.
+const maxTokenExpiryDays = 365
+
 func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	// Write scope, not merely authentication: minting is how a read-only
 	// token would otherwise escalate itself into a write-scoped one.
@@ -597,6 +606,11 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name  string `json:"name"`
 		Scope string `json:"scope"`
+		// ExpiresInDays is omitted, null, or 0 for a token that never
+		// expires -- encoding/json leaves a plain (non-pointer) int
+		// untouched for both a missing key and an explicit `null`, so all
+		// three spellings collapse to the same zero value here.
+		ExpiresInDays int `json:"expires_in_days"`
 	}
 	if !decodeJSON(w, r, maxAuthBody, &req, "request body must be JSON with name and scope") {
 		return
@@ -607,12 +621,30 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	if req.Scope != "read" && req.Scope != "write" {
 		req.Scope = "read"
 	}
+	if req.ExpiresInDays < 0 {
+		badRequest(w, "expires_in_days must not be negative")
+		return
+	}
+	if req.ExpiresInDays > maxTokenExpiryDays {
+		badRequest(w, fmt.Sprintf("expires_in_days must be at most %d", maxTokenExpiryDays))
+		return
+	}
+	var expiresAt *time.Time
+	if req.ExpiresInDays > 0 {
+		// Computed here in Go (UTC) rather than left to the database's own
+		// "now + N days": PostgreSQL and SQLite spell that arithmetic
+		// differently (see dialect.nowPlusSeconds), and resolving it to a
+		// single absolute instant before it ever reaches SQL keeps the two
+		// backends from being able to disagree about it.
+		t := time.Now().UTC().AddDate(0, 0, req.ExpiresInDays)
+		expiresAt = &t
+	}
 	token, hash, err := auth.NewToken()
 	if err != nil {
 		internalError(w, "generate token", err)
 		return
 	}
-	rec, err := s.store.CreateToken(r.Context(), user.ID, req.Name, req.Scope, hash)
+	rec, err := s.store.CreateToken(r.Context(), user.ID, req.Name, req.Scope, hash, expiresAt)
 	if err != nil {
 		internalError(w, "create token", err)
 		return
@@ -625,7 +657,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 func toTokenItem(t *store.AccessToken) apitypes.TokenItem {
 	return apitypes.TokenItem{
 		ID: t.ID, Name: t.Name, Scope: apitypes.TokenScope(t.Scope),
-		CreatedAt: t.CreatedAt, LastUsedAt: t.LastUsedAt,
+		CreatedAt: t.CreatedAt, LastUsedAt: t.LastUsedAt, ExpiresAt: t.ExpiresAt,
 	}
 }
 

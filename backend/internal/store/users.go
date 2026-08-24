@@ -25,7 +25,9 @@ type AccessToken struct {
 	Name       string     `json:"name"`
 	Scope      string     `json:"scope"`
 	LastUsedAt *time.Time `json:"last_used_at"`
-	CreatedAt  time.Time  `json:"created_at"`
+	// ExpiresAt is nil for a token that never expires.
+	ExpiresAt *time.Time `json:"expires_at"`
+	CreatedAt time.Time  `json:"created_at"`
 }
 
 // CreateUser inserts the user and their personal namespace in one transaction,
@@ -221,13 +223,18 @@ func (s *Store) SetUserAdmin(ctx context.Context, userID int64, isAdmin bool) er
 	return tx.Commit(ctx)
 }
 
-func (s *Store) CreateToken(ctx context.Context, userID int64, name, scope, tokenHash string) (*AccessToken, error) {
+// CreateToken inserts a new access token. expiresAt is nil for a token that
+// never expires; otherwise it is the caller-computed instant the token stops
+// working, already resolved to an absolute time so this method (and the
+// PostgreSQL/SQLite dialects it runs against) never has to do date
+// arithmetic itself.
+func (s *Store) CreateToken(ctx context.Context, userID int64, name, scope, tokenHash string, expiresAt *time.Time) (*AccessToken, error) {
 	t := &AccessToken{}
 	err := s.db.QueryRow(ctx,
-		`INSERT INTO access_tokens (user_id, name, token_hash, scope) VALUES ($1, $2, $3, $4)
-		 RETURNING id, user_id, name, scope, last_used_at, created_at`,
-		userID, name, tokenHash, scope,
-	).Scan(&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.CreatedAt)
+		`INSERT INTO access_tokens (user_id, name, token_hash, scope, expires_at) VALUES ($1, $2, $3, $4, $5)
+		 RETURNING id, user_id, name, scope, last_used_at, expires_at, created_at`,
+		userID, name, tokenHash, scope, expiresAt,
+	).Scan(&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.ExpiresAt, &t.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("insert token: %w", err)
 	}
@@ -259,9 +266,12 @@ func (s *Store) TouchToken(ctx context.Context, id int64) error {
 	return err
 }
 
+// ListTokens returns every token the user holds, including expired ones --
+// the owner needs to see why a token stopped working and still be able to
+// delete it, so expiry is not a filter here (only LookupToken enforces it).
 func (s *Store) ListTokens(ctx context.Context, userID int64) ([]AccessToken, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT id, user_id, name, scope, last_used_at, created_at
+		`SELECT id, user_id, name, scope, last_used_at, expires_at, created_at
 		 FROM access_tokens WHERE user_id = $1 ORDER BY created_at DESC`, userID)
 	if err != nil {
 		return nil, err
@@ -271,7 +281,7 @@ func (s *Store) ListTokens(ctx context.Context, userID int64) ([]AccessToken, er
 	out := []AccessToken{}
 	for rows.Next() {
 		var t AccessToken
-		if err := rows.Scan(&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.ExpiresAt, &t.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -279,6 +289,8 @@ func (s *Store) ListTokens(ctx context.Context, userID int64) ([]AccessToken, er
 	return out, rows.Err()
 }
 
+// DeleteToken revokes a token regardless of whether it has already expired --
+// an expired row is still the owner's to clean up.
 func (s *Store) DeleteToken(ctx context.Context, userID, id int64) error {
 	n, err := s.db.Exec(ctx, `DELETE FROM access_tokens WHERE id = $1 AND user_id = $2`, id, userID)
 	if err != nil {

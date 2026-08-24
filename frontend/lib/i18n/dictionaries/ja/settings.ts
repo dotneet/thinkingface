@@ -71,6 +71,18 @@ export const settings = {
     neverUsed: "未使用",
     delete: "削除",
     deleting: "削除中…",
+    expiry: {
+      label: "有効期限",
+      never: "無期限",
+      days7: "7 日",
+      days30: "30 日",
+      days60: "60 日",
+      days90: "90 日",
+      days365: "365 日",
+      column: "有効期限",
+      noExpiration: "無期限",
+      expiredBadge: "期限切れ",
+    },
   },
   sshKeys: {
     title: "SSH キー",

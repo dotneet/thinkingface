@@ -18,7 +18,7 @@ For *what* the system does and *why* it is built this way, read
 | [bun](https://bun.sh) and Node.js 20+ | Frontend (the Makefile resolves both to absolute paths via [mise](https://mise.jdx.dev); see "Toolchain notes" below) |
 | [uv](https://docs.astral.sh/uv/) | Python checks, E2E tests, and the docs site — all run in disposable environments |
 | `git` and `git-lfs` | Exercising the git transport locally |
-| Terraform (optional) | `infra/` |
+| Terraform (optional) | `infra/`. `make check` skips its Terraform gate when the binary is absent; CI always runs it |
 
 ## Repository layout
 
@@ -135,9 +135,29 @@ make check
 | `make check-frontend` | `bun run typecheck`, `lint` (ESLint), `format:check` (Biome), `check:ui` (`frontend/scripts/check-ui.mjs`, the UI conventions from `frontend/DESIGN.md`), `test` (vitest) |
 | `make check-python` | `ruff check` + `ruff format --check` for `e2e/`, `clients/python/`, `scripts/` |
 | `make check-types` | Regenerates `frontend/types/api.gen.ts` from `backend/internal/apitypes` with tygo and fails on any diff |
+| `make check-terraform` | `terraform fmt -check -recursive`, then `terraform init -backend=false` + `terraform validate` in `infra/` |
 
 Formatting and linting on their own: `make fmt` (Go / TypeScript / Python / Terraform) and
 `make lint`.
+
+Two things about the Terraform gate specifically:
+
+- **It skips itself when `terraform` is not installed**, since Terraform is only needed for
+  `infra/` and most changes never touch it. The CI `terraform` job always runs, so nothing
+  reaches `main` unchecked — but if you edit `infra/`, install Terraform (at or above
+  `required_version` in `infra/versions.tf`) so you find out before pushing. The first run
+  downloads the providers into `infra/.terraform/`; later runs are near-instant.
+  `infra/.terraform.lock.hcl` is committed and records checksums for `linux_amd64` (CI) and
+  `darwin_arm64` (dev machines) — after adding or bumping a provider, refresh both with
+  `terraform providers lock -platform=linux_amd64 -platform=darwin_arm64`, otherwise `init`
+  rewrites the lock on whichever platform runs it next.
+- **`terraform validate` is not a dry run.** It checks the configuration against the provider
+  *schemas* — syntax, argument names, types, references — and never contacts GCP, so
+  server-side constraints are invisible to it. Cloud Run permits at most 4 GiB of memory per
+  vCPU, for instance, so a service requesting 8 GiB on 1 vCPU passes both this gate and CI and
+  is rejected at apply time. `terraform plan` and `apply` need GCP credentials and are
+  deliberately kept out of CI; run them yourself against a real project before relying on a
+  change to `infra/`.
 
 Optionally install [lefthook](https://github.com/evilmartians/lefthook) for pre-commit
 feedback (`lefthook install`; `lefthook.yml` is at the root). It is not required — `make check`

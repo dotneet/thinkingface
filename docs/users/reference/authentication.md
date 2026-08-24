@@ -89,20 +89,25 @@ An access token (`tf_xxxxxxxxxxxx`) is what every non-browser client uses: `hugg
 
 ![The access token page, showing the create-token form and a list of existing tokens](../images/settings-tokens.png)
 
-Give the token a name and a scope, then create it:
+Give the token a name, a scope, and an expiration, then create it:
 
 | Scope | Meaning |
 |---|---|
 | `read` | Can read repositories you have access to; cannot push, create, delete, or manage tokens/SSH keys |
 | `write` | Everything `read` can do, plus pushing commits, creating and deleting repositories, and managing your own tokens and SSH keys |
 
+Expiration is one of **No expiration**, 7, 30, 60, 90, or 365 days (365 is the maximum). Once a
+token's expiration date passes it stops authenticating requests — the same as if it had been
+deleted — though it still appears in the token list, badged as expired, so you can tell why it
+stopped working and remove it.
+
 The token's value is displayed exactly once, immediately after creation — copy it before
 navigating away, since the server only ever stores its hash and cannot show it to you again.
 If you lose it, delete the token and create a new one.
 
-The token list shows each token's name, scope, creation date, and last-used date, and lets
-you delete a token (with a confirmation step) at any time — deleting it takes effect
-immediately.
+The token list shows each token's name, scope, creation date, last-used date, and expiration
+(or **Never** for one with no expiration), and lets you delete a token (with a confirmation
+step) at any time — deleting it takes effect immediately, the same as letting it expire.
 
 !!! note "Minting tokens needs a write-scoped credential"
     Creating or deleting a token or an SSH key always requires write scope, even though

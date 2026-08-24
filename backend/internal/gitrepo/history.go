@@ -20,18 +20,22 @@ type CommitMeta struct {
 	Hash plumbing.Hash
 	// Message is the subject line only.
 	Message string
-	Author  string
-	When    time.Time
+	// Body is everything after the subject line, trimmed; empty for a
+	// single-line commit message. The UI never shows it, but
+	// huggingface_hub's GitCommitInfo splits a commit into `title` and
+	// `message` exactly this way, so the HF-compatible commits endpoint needs
+	// both halves.
+	Body   string
+	Author string
+	When   time.Time
 }
 
 func metaOf(c *object.Commit) CommitMeta {
-	subject := c.Message
-	if i := strings.IndexByte(subject, '\n'); i >= 0 {
-		subject = subject[:i]
-	}
+	subject, body, _ := strings.Cut(c.Message, "\n")
 	return CommitMeta{
 		Hash:    c.Hash,
 		Message: strings.TrimSpace(subject),
+		Body:    strings.TrimSpace(body),
 		Author:  c.Author.Name,
 		When:    c.Author.When,
 	}

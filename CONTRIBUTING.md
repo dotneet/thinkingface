@@ -38,8 +38,10 @@ make check       # every quality gate — run this after any change
    messages and the PR title: `feat:` / `fix:` / `docs:` / `refactor:` / `chore:`.
 6. Open the PR against `main` and describe what changed, why, and how you verified it.
 
-CI runs the backend, frontend, Python, and type-contract checks on every PR, and the docs
-workflow builds `docs/users/` with `mkdocs --strict` when it changes.
+CI runs the backend, frontend, Python, type-contract, and Terraform checks on every PR, and the
+docs workflow builds `docs/users/` with `mkdocs --strict` when it changes. The Terraform job is
+static only (`fmt -check`, `init -backend=false`, `validate`) — it has no GCP credentials, so a
+green run does not mean `infra/` will apply cleanly.
 
 ## Code style
 
