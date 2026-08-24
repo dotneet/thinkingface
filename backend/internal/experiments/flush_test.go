@@ -545,3 +545,116 @@ func TestFlush_AppendsToARouteAExport(t *testing.T) {
 		}
 	}
 }
+
+// TestMergePoints_MetricsCannotOverwriteStructuralColumns is the unit-level
+// half of the reserved-name fix. The ingest API refuses these names now, but
+// exp_points still holds whatever earlier builds accepted, and one such point
+// is enough to rename a run in the committed parquet.
+func TestMergePoints_MetricsCannotOverwriteStructuralColumns(t *testing.T) {
+	existing := &existingTable{ingestIDs: map[int64]bool{}}
+	ts := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	points := []store.PendingPoint{{
+		ID: 7, RunName: "run-1", Step: 3, TS: ts,
+		Metrics: map[string]float64{
+			"loss":         0.25,
+			"run_name":     0.5,
+			"step":         99,
+			"timestamp":    1,
+			IngestIDColumn: 42,
+		},
+	}}
+
+	columns, rows, appended := mergePoints(existing, points)
+	if appended != 1 || len(rows) != 1 {
+		t.Fatalf("appended = %d, rows = %d, want 1 and 1", appended, len(rows))
+	}
+	row := rows[0]
+	if row["run_name"] != "run-1" {
+		t.Errorf("run_name = %#v, want the point's own run name", row["run_name"])
+	}
+	if row["step"] != int64(3) {
+		t.Errorf("step = %#v, want the point's own step", row["step"])
+	}
+	if row["timestamp"] != ts {
+		t.Errorf("timestamp = %#v, want the point's own timestamp", row["timestamp"])
+	}
+	if row[IngestIDColumn] != int64(7) {
+		t.Errorf("%s = %#v, want the point id (the idempotency key)", IngestIDColumn, row[IngestIDColumn])
+	}
+	if row["loss"] != 0.25 {
+		t.Errorf("loss = %#v, want the metric to still be written", row["loss"])
+	}
+	// The structural columns keep the shape this package gives them; a
+	// doubleColumn("run_name") would have made the file unreadable as well.
+	for _, c := range columns {
+		if c.name == "run_name" && (c.kind != colString || c.optional) {
+			t.Errorf("run_name column = %+v, want a required string", c)
+		}
+		if c.name == "step" && c.kind != colInt64 {
+			t.Errorf("step column = %+v, want an int64", c)
+		}
+	}
+}
+
+// TestFlush_AbandonsAProjectThatCanNeverBeCommitted covers the rows an older
+// build accepted before the ingest API rejected the name: `.git/metrics.parquet`
+// is a path Commit always refuses, so without this the project would sit in
+// the flush queue forever, warning every ten seconds and holding one of the
+// hundred slots the poller has.
+func TestFlush_AbandonsAProjectThatCanNeverBeCommitted(t *testing.T) {
+	h := newExpHarness(t)
+	projectID := h.ingest(".git", "run-1", "running", []int64{1, 2, 3}, "loss")
+
+	result, err := h.flusher.Flush(h.ctx, h.repo, projectID, ".git")
+	if err != nil {
+		t.Fatalf("flush: %v, want the buffer abandoned rather than an error retried forever", err)
+	}
+	if result != nil {
+		t.Fatalf("flush committed %+v, want nothing (the path is not committable)", result)
+	}
+	if n := h.pointCount(projectID); n != 0 {
+		t.Errorf("buffered points after an abandoned flush = %d, want 0", n)
+	}
+}
+
+// TestFlush_AbandonsAFileTooLargeToRebuild pins the memory bound: a flush
+// rebuilds the whole file, so a metrics parquet past maxExistingFlushRows is
+// refused from its footer -- before a single row is decoded -- instead of
+// loading every row into a map and taking the API process down with it.
+func TestFlush_AbandonsAFileTooLargeToRebuild(t *testing.T) {
+	h := newExpHarness(t)
+
+	// A first, ordinary flush is what puts rows in the file at all.
+	projectID := h.ingest("demo", "run-1", "running", []int64{1, 2, 3}, "loss")
+	first := h.flush(projectID, "demo")
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, first.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	// Rather than build a million-row fixture, shrink the bound to below what
+	// the file already holds; the code path is identical.
+	restore := maxExistingFlushRows
+	maxExistingFlushRows = 2
+	t.Cleanup(func() { maxExistingFlushRows = restore })
+
+	h.ingest("demo", "run-1", "running", []int64{4, 5}, "loss")
+	result, err := h.flusher.Flush(h.ctx, h.repo, projectID, "demo")
+	if err != nil {
+		t.Fatalf("flush: %v, want the buffer abandoned rather than an error retried forever", err)
+	}
+	if result != nil {
+		t.Fatalf("flush committed %+v, want nothing (the file is too large to rebuild)", result)
+	}
+	if n := h.pointCount(projectID); n != 0 {
+		t.Errorf("buffered points after an abandoned flush = %d, want 0", n)
+	}
+
+	// What was already committed must be untouched: abandoning a flush drops
+	// the buffer, it does not rewrite the file.
+	h.reindex()
+	got := h.series("demo")
+	if len(got) != 1 || len(got[0].Points) != 3 {
+		t.Fatalf("series = %#v, want the 3 points of the first flush", got)
+	}
+}

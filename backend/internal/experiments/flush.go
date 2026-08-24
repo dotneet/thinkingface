@@ -31,6 +31,40 @@ import (
 // the next tick.
 const MaxFlushPoints = 50000
 
+// maxExistingFlushRows bounds the *other* half of that allocation, which
+// MaxFlushPoints never covered: the rows already in the file. readExisting
+// materialises one map[string]any per row, so a repository carrying a
+// multi-million-row trackio export (or any large parquet pushed by hand)
+// turned a single live point into gigabytes of heap -- in the API process,
+// since the syncer runs there (cmd/thinkingface/main.go) -- and the next tick
+// did it again. A row costs roughly half a kilobyte once the map header,
+// its buckets and the boxed values are counted, so a million rows is a
+// several-hundred-megabyte flush: high enough that no realistic training run
+// reaches it, low enough to survive.
+//
+// It is a var only so the tests can lower it; nothing changes it at runtime.
+//
+// TODO: the permanent fix is to append a row group to the existing file
+// instead of rebuilding it, which would need neither cap. That is a rewrite of
+// the writer (parquetwrite.go) and of the LFS blob handling around it, so it
+// is deliberately not attempted here.
+var maxExistingFlushRows int64 = 1_000_000
+
+// tooManyExistingRowsError reports a metrics parquet this package cannot
+// rebuild within its memory budget. Like unsupportedColumnError it describes a
+// file, not a transient failure -- see abandonPoints for what happens to the
+// buffered points.
+type tooManyExistingRowsError struct {
+	Path    string
+	NumRows int64
+	Max     int64
+}
+
+func (e *tooManyExistingRowsError) Error() string {
+	return fmt.Sprintf("metrics parquet %s has %d rows, more than the %d a flush can rebuild in memory",
+		e.Path, e.NumRows, e.Max)
+}
+
 // flushAuthor signs the machine-generated commits, so `git log` makes it
 // obvious that nobody typed them.
 var flushAuthor = gitrepo.Signature{Name: "thinkingface", Email: "noreply@thinkingface.local"}
@@ -97,9 +131,21 @@ func (f *Flusher) Flush(ctx context.Context, repo *store.Repo, projectID int64, 
 	if err != nil {
 		return nil, err
 	}
+	// A project whose name cannot be a path segment (".git", ".", "..") makes
+	// a file Commit will always refuse, so the buffer is abandoned here rather
+	// than failing at the end of every tick from now on. Ingest rejects such a
+	// name today (api.validateIngestProject); this is for the rows an older
+	// build already accepted.
+	if perr := gitrepo.ValidatePath(path); perr != nil {
+		return nil, f.abandonPoints(ctx, project, points, perr)
+	}
 
 	existing, baseOID, err := f.readExisting(ctx, repo, gitRepo, ref, path)
 	if err != nil {
+		var tooMany *tooManyExistingRowsError
+		if errors.As(err, &tooMany) {
+			return nil, f.abandonPoints(ctx, project, points, err)
+		}
 		return nil, err
 	}
 
@@ -137,6 +183,39 @@ func (f *Flusher) Flush(ctx context.Context, repo *store.Repo, projectID int64, 
 		OldSHA: oldHash.String(), NewSHA: newHash.String(),
 		PointIDs: ids, NumAppended: appended,
 	}, nil
+}
+
+// abandonPoints drops buffered points that can never reach the parquet, after
+// saying so as loudly as this layer can. It returns the error from the delete
+// (or nil), so its caller reports "there was nothing to flush" rather than a
+// failure that would be retried.
+//
+// Deleting them is a deliberate departure from what every *transient* failure
+// here does, which is to leave the buffer alone and try again next tick. The
+// two conditions routed here -- a project name no path can hold, and a file
+// too large to rebuild in memory -- are properties of the repository, not of
+// this attempt: nothing about the next tick is different. Retrying forever
+// would be tolerable if the damage stayed inside the one project, but it does
+// not. exp_points grows without bound for it (and Series loads all of it to
+// draw the live chart), and the poller takes its candidates from
+// ListPendingFlushProjects, which is `ORDER BY p.id LIMIT 100` -- a hundred
+// wedged projects and *no* project on the instance is flushed again. A buffer
+// that can never drain is not a harmless buffer.
+//
+// The cost is real, which is why this is an error and carries the counts: the
+// points were accepted with a 200 and are now gone from the chart as well.
+// Only the batch this flush read is dropped, so the log says exactly how much
+// was lost each time, and the operator's fix -- shrink or move the metrics
+// file, or use a project name that can be committed -- takes effect on the
+// next points ingested rather than on the ones already thrown away.
+func (f *Flusher) abandonPoints(ctx context.Context, project string, points []store.PendingPoint, reason error) error {
+	ids := make([]int64, 0, len(points))
+	for _, p := range points {
+		ids = append(ids, p.ID)
+	}
+	slog.Error("dropping buffered experiment points that can never be flushed",
+		"project", project, "points", len(ids), "reason", reason)
+	return f.store.DeletePoints(ctx, ids)
 }
 
 // metricsPath picks the file this project's points belong in: the metrics
@@ -190,6 +269,13 @@ func (f *Flusher) readExisting(ctx context.Context, repo *store.Repo, gitRepo *g
 	schema, err := f.viewer.Schema(ctx, key)
 	if err != nil {
 		return nil, "", fmt.Errorf("read %s schema: %w", path, err)
+	}
+	// The row count comes out of the footer, so this costs one ranged read and
+	// no decoding: the file is refused *before* the scan below turns every one
+	// of its rows into a map. Checking it afterwards would be no check at all,
+	// since the scan is the allocation being guarded against.
+	if schema.NumRows > maxExistingFlushRows {
+		return nil, "", &tooManyExistingRowsError{Path: path, NumRows: schema.NumRows, Max: maxExistingFlushRows}
 	}
 	for _, c := range schema.Columns {
 		col, err := columnFromSchema(c)
@@ -253,6 +339,18 @@ func mergePoints(existing *existingTable, points []store.PendingPoint) ([]flushC
 			IngestIDColumn: p.ID,
 		}
 		for key, value := range p.Metrics {
+			// A metric may not be named after one of the row's structural
+			// columns: the two share this row, so "run_name" would replace the
+			// run's name with a number -- and after the next re-index its
+			// points would belong to a run called "0.5" that never ran. The
+			// ingest API rejects such a name with a 400
+			// (api.validateIngestMetricName), but points accepted before that
+			// check existed are still in exp_points, and nothing else between
+			// there and here would notice. Dropping the value loses nothing
+			// chartable: the indexer skips structural columns anyway.
+			if IsStructuralColumn(key) {
+				continue
+			}
 			add(doubleColumn(key))
 			row[key] = value
 		}
