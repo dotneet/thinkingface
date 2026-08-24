@@ -253,8 +253,15 @@ func (s *Store) SetUserAdmin(ctx context.Context, userID int64, isAdmin bool) er
 		return norm(err)
 	}
 	if current && !isAdmin {
+		// Suspended administrators do not count. They cannot authenticate on
+		// any path, so leaving one as the only "remaining" administrator
+		// locks the instance out just as thoroughly as leaving none -- and
+		// SetUserDisabled applies the same predicate, so the two guards have
+		// to agree or one of them can be walked around by going through the
+		// other.
 		var admins int64
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM users WHERE is_admin`).Scan(&admins); err != nil {
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM users WHERE is_admin AND disabled_at IS NULL`).Scan(&admins); err != nil {
 			return err
 		}
 		if admins <= 1 {

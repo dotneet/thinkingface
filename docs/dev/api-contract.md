@@ -702,6 +702,11 @@ type RepoDetail = RepoSummary & {
   readme: string                  // README body (front matter stripped), 256KB max
   readme_too_large: boolean       // README.md exists but exceeds 256KB, so readme stays empty (card is unaffected since it's sourced from the index)
   clone_url: string               // "http://localhost:8080/datasets/ns/name.git"
+  ssh_clone_url: string           // "ssh://git@localhost:2222/datasets/ns/name.git",
+                                  // "" when TF_SSH_ENABLED is off. Served because the
+                                  // host and port are deployment-specific and cannot be
+                                  // derived from clone_url; the UI must not offer an SSH
+                                  // option when this is empty.
   branches: string[]
   tags_refs: string[]
   parquet_files: ParquetSummary[] // This repository's parquet listing (default branch)

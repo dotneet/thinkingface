@@ -130,7 +130,13 @@ func TestLoad_SignedURLMaxTTLParsesFromEnv(t *testing.T) {
 // clearest available signal that an instance is not a laptop, so it is the
 // line where a warning becomes a refusal. Plain http keeps booting on the
 // defaults -- `docker compose up` and the e2e suite depend on that.
-func TestLoad_RefusesDevelopmentSecretsOverHTTPS(t *testing.T) {
+// The development defaults are public knowledge (.env.example ships the admin
+// password, and the default session secret lets anyone forge a tf_session for
+// any user id), so the only deployment allowed to boot on them is one nobody
+// else can reach. The test is the *host*, not the scheme: an internal
+// instance served over plain http on a LAN address is exactly the case the
+// old https-only guard let through, and it is the intended deployment shape.
+func TestLoad_RefusesDevelopmentSecretsOffLoopback(t *testing.T) {
 	const longSecret = "0123456789abcdef0123456789abcdef"
 	tests := []struct {
 		name    string
@@ -162,9 +168,57 @@ func TestLoad_RefusesDevelopmentSecretsOverHTTPS(t *testing.T) {
 				"TF_SESSION_SECRET": longSecret,
 			},
 		},
+		// Loopback keeps booting on the defaults: this is what `docker compose
+		// up` and the e2e suite use, and nothing else can reach it.
 		{
-			name: "http on the defaults still boots",
+			name: "http on localhost still boots",
 			env:  map[string]string{"TF_PUBLIC_URL": "http://localhost:8080"},
+		},
+		{
+			name: "http on a literal loopback address still boots",
+			env:  map[string]string{"TF_PUBLIC_URL": "http://127.0.0.1:8080"},
+		},
+		{
+			name: "http on an IPv6 loopback address still boots",
+			env:  map[string]string{"TF_PUBLIC_URL": "http://[::1]:8080"},
+		},
+		{
+			name: "a .localhost subdomain still boots",
+			env:  map[string]string{"TF_PUBLIC_URL": "http://api.localhost:8080"},
+		},
+		// The case the https-only guard missed. An internal deployment on a
+		// LAN name is reachable by everyone on that network, so the published
+		// defaults are no more acceptable there than on the public internet.
+		{
+			name:    "http on an internal hostname refuses the default admin password",
+			env:     map[string]string{"TF_PUBLIC_URL": "http://hub.internal", "TF_SESSION_SECRET": longSecret},
+			wantErr: "TF_ADMIN_PASSWORD",
+		},
+		{
+			name:    "http on an internal hostname refuses the default session secret",
+			env:     map[string]string{"TF_PUBLIC_URL": "http://hub.internal", "TF_ADMIN_PASSWORD": "hunter2hunter2"},
+			wantErr: "TF_SESSION_SECRET",
+		},
+		{
+			name: "http on a LAN address refuses a too-short session secret",
+			env: map[string]string{
+				"TF_PUBLIC_URL": "http://10.0.0.5:8080", "TF_ADMIN_PASSWORD": "hunter2hunter2",
+				"TF_SESSION_SECRET": "short",
+			},
+			wantErr: "at least 32 bytes",
+		},
+		{
+			name: "http on an internal hostname boots once configured",
+			env: map[string]string{
+				"TF_PUBLIC_URL": "http://hub.internal", "TF_ADMIN_PASSWORD": "hunter2hunter2",
+				"TF_SESSION_SECRET": longSecret,
+			},
+		},
+		// A URL that cannot be parsed is not loopback, so it fails closed.
+		{
+			name:    "an unparseable public URL is not treated as loopback",
+			env:     map[string]string{"TF_PUBLIC_URL": "://nonsense", "TF_SESSION_SECRET": longSecret},
+			wantErr: "TF_ADMIN_PASSWORD",
 		},
 	}
 	for _, tt := range tests {
