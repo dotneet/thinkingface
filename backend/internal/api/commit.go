@@ -87,6 +87,54 @@ func looksLikeSHA(rev string) bool {
 	return true
 }
 
+// ensureBranchRev refuses a write whose {rev} names something in this
+// repository that is not a branch. Every write path commits to
+// refs/heads/{rev}, while every read resolves {rev} through go-git's
+// RefRevParseRules, which tries refs/tags/%s *before* refs/heads/%s. Writing
+// to a rev that is a tag would therefore read one ref and write another: the
+// branch would be created out of nothing, as a parentless root commit, and the
+// tag would keep winning every subsequent read -- so the caller would be told
+// the write succeeded and then never see it again. The same goes for anything
+// else that resolves without being a branch (an abbreviated SHA, "HEAD",
+// "main~1"): there is no branch there to extend.
+//
+// A rev that resolves to nothing at all is still allowed through. That is the
+// first commit on a new branch, which these endpoints are expected to create.
+//
+// 409 rather than 400, like every other collision with a ref that is already
+// there (writeRefError's ErrRefExists, StalePathError): the request is
+// well-formed and only this repository's current state refuses it, so deleting
+// the tag or picking another name makes the identical request succeed. A full
+// commit SHA stays a 400 in looksLikeSHA, since that one is refused by its
+// shape without the repository having any say.
+//
+// what names the operation in the message ("commits" / "uploads" / ...), as in
+// the looksLikeSHA messages it sits next to.
+func ensureBranchRev(w http.ResponseWriter, gitRepo *gitrepo.Repo, rev, what string) bool {
+	isBranch, err := gitRepo.HasBranch(rev)
+	if err != nil {
+		internalError(w, "read branch ref", err)
+		return false
+	}
+	if isBranch {
+		return true
+	}
+	if _, err := gitRepo.Resolve(rev); err != nil {
+		return true
+	}
+	isTag, err := gitRepo.HasTag(rev)
+	if err != nil {
+		internalError(w, "read tag ref", err)
+		return false
+	}
+	if isTag {
+		conflict(w, rev+" is a tag, not a branch; "+what+" must target a branch")
+		return false
+	}
+	conflict(w, rev+" is not a branch of this repository; "+what+" must target a branch")
+	return false
+}
+
 // commitLine is one NDJSON operation in the commit payload.
 type commitLine struct {
 	Key   string          `json:"key"`
@@ -110,9 +158,18 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// No Open here: commitThroughWAL (re-)opens the repository itself, since
+	// Opened only to check the revision, and the handle is dropped again
+	// straight away: commitThroughWAL (re-)opens the repository itself, since
 	// an authoritative-mode materialisation may rebuild the directory and
 	// invalidate any handle taken before it.
+	gitRepo, err := s.git.Open(repo.StoragePath)
+	if err != nil {
+		internalError(w, "open git repository", err)
+		return
+	}
+	if !ensureBranchRev(w, gitRepo, rev, "commits") {
+		return
+	}
 
 	summary := "Upload files"
 	var ops []gitrepo.Op
@@ -212,12 +269,25 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 				internalError(w, "stat lfs object", err)
 				return
 			}
-			size := v.Size
-			if size == 0 {
-				size = info.Size
+			// The pointer always carries the object's real size, and a
+			// declared size that disagrees with it is refused rather than
+			// quietly corrected. The pointer's size is what resolve declares
+			// as Content-Length before streaming the object, so a client-chosen
+			// one is a client-chosen truncation: net/http cuts the body off at
+			// the declared length, and a lie of "1" hands every downloader a
+			// one-byte file that looks completely downloaded. Too large hangs
+			// the connection instead, and either way repo_files.size and the
+			// repository's total size are indexed from the pointer. Omitting
+			// the field stays legal -- the object itself is the source of
+			// truth -- and a caller that sends a size is simply told when it
+			// does not match, rather than being ignored.
+			if v.Size != 0 && v.Size != info.Size {
+				badRequest(w, fmt.Sprintf("lfsFile %s: size %d does not match the uploaded object's %d bytes",
+					v.Path, v.Size, info.Size))
+				return
 			}
 			ops = append(ops, gitrepo.Op{
-				Kind: gitrepo.OpAdd, Path: v.Path, Data: gitrepo.FormatLFSPointer(v.OID, size),
+				Kind: gitrepo.OpAdd, Path: v.Path, Data: gitrepo.FormatLFSPointer(v.OID, info.Size),
 			})
 			lfsOIDs = append(lfsOIDs, v.OID)
 

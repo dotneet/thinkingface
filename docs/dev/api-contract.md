@@ -1092,6 +1092,24 @@ disappeared from the bucket return the same
 (preupload → LFS batch upload → verify, or a git-lfs push) always creates the link first, so this
 doesn't affect it.
 
+The `size` of an `lfsFile` is optional, and the pointer always carries the **stored object's** size
+rather than the declared one. A `size` that's present and disagrees returns
+`400 bad_request: lfsFile {path}: size {n} does not match the uploaded object's {m} bytes`.
+It can't be taken on trust: the pointer's size is what `resolve` declares as `Content-Length`
+before streaming the object, so a declared `1` would hand every downloader a one-byte file that
+looks completely downloaded (`net/http` truncates the body at the declared length), an over-large
+one would hang the connection, and `repo_files.size` and the repository's total size are indexed
+from the same number.
+
+`{rev}` is a **branch name**. A full commit SHA returns 400, and a `{rev}` that resolves to
+something in this repository that is *not* a branch — a tag, an abbreviated SHA, `HEAD` — returns
+**409 `conflict`** (`{rev} is a tag, not a branch; commits must target a branch`). Without this,
+the write would create `refs/heads/{rev}` as a parentless root commit while every read of `{rev}`
+kept resolving `refs/tags/{rev}` first (go-git's `RefRevParseRules`), so the commit would be
+reported as successful and then never be visible again. A `{rev}` that resolves to nothing is
+still accepted and creates the branch — that's the first commit on a new branch. The same rule and
+status apply to `PUT`/`DELETE /api/v1/edit/...` and to `POST /api/v1/upload/...`.
+
 An NDJSON line that can't be parsed returns 400 `bad_request`. The message is one of the fixed
 strings `commit body must be newline-delimited JSON` / `invalid file entry` /
 `invalid lfsFile entry`; the decoder's internal error text is never returned (the same policy as
@@ -1130,7 +1148,7 @@ Constraints and status codes:
 | JSON parse failure | 400 `bad_request` (`request body must be JSON with a content field`). The decoder's internal message is never returned |
 | Character encoding | `content` must be valid UTF-8. Invalid input returns 400 |
 | LFS-managed path | 400 for a path that is (or would become) LFS-managed per `.gitattributes`. Also 400 for an existing file that's already committed as LFS |
-| `rev` | Branch name only. Passing a commit SHA returns 400 (defaults to the repository's default branch when omitted) |
+| `rev` | Branch name only. Passing a commit SHA returns 400; a `rev` that resolves to something other than a branch (a tag, an abbreviated SHA, `HEAD`) returns **409 `conflict`**, as on the commit API and for the same reason — reads resolve a tag before a branch of the same name, so the write would land on a branch nobody reads. A `rev` that resolves to nothing still creates the branch. Defaults to the repository's default branch when omitted |
 | Optimistic locking | When `base_oid` is given and it doesn't match the current blob SHA (or the file no longer exists), returns **409 `conflict`** |
 | No change | If the saved content is identical to the current content, no new commit is created and the current HEAD and file state are returned as-is |
 | Sync | When a commit is created, a sync job to GCS is enqueued just like any other path (`Enqueue`) |
@@ -1162,7 +1180,7 @@ Constraints and status codes:
 | Missing path | **404 `not_found`** — a delete of something that is not there is not an empty commit |
 | Directory | 400. Delete a directory's files individually, or use `deletedFolder` on the commit API |
 | **LFS-managed path** | **Allowed**, unlike the `PUT`. Editing an LFS file would mean the browser writing pointer bytes it cannot produce; deleting one only drops the pointer from the tree. **The object itself is not deleted from the bucket** — it is content-addressed, immutable and shared instance-wide, so the deletion merely removes a reference and the bytes stay until `thinkingface gc` finds nothing refers to them any more (`docs/dev/content-addressed-storage-design.md` §5) |
-| `rev` | Branch name only. Passing a commit SHA returns 400 (defaults to the repository's default branch when omitted) |
+| `rev` | Branch name only. Passing a commit SHA returns 400; a `rev` that resolves to something other than a branch (a tag, an abbreviated SHA, `HEAD`) returns **409 `conflict`**, as on the commit API and for the same reason — reads resolve a tag before a branch of the same name, so the write would land on a branch nobody reads. A `rev` that resolves to nothing still creates the branch. Defaults to the repository's default branch when omitted |
 | Optimistic locking | When `base_oid` is given and it doesn't match the current blob SHA, returns **409 `conflict`**. For an LFS file this is the SHA of the *pointer* blob, which is what the tree listing reports |
 | Sync | A sync job is enqueued exactly as for any other commit (`Enqueue`), so the index is updated and the `repo.push` webhook fires |
 | Auth | 401 when unauthenticated; 403 without write permission (a read-scope token also gets 403); 403 `repository_archived` for an archived repository |
@@ -1239,7 +1257,7 @@ Constraints and status codes:
 | Missing directories | Created by the commit itself, here and on `PUT /api/v1/edit/...` alike — a path may name directories that do not exist yet |
 | Over a size limit | **413 `payload_too_large`**, naming the file |
 | Too many files | 400, naming the limit |
-| `rev` | Branch name only. Passing a commit SHA returns 400 (defaults to the repository's default branch when omitted) |
+| `rev` | Branch name only. Passing a commit SHA returns 400; a `rev` that resolves to something other than a branch (a tag, an abbreviated SHA, `HEAD`) returns **409 `conflict`**, as on the commit API and for the same reason — reads resolve a tag before a branch of the same name, so the write would land on a branch nobody reads. A `rev` that resolves to nothing still creates the branch. Defaults to the repository's default branch when omitted |
 | Concurrent push | The commit is rebuilt on the moved head (`retryOnStale`), as for the HF commit API; only exhausted retries surface as 409 `conflict` |
 | Concurrent GC | A garbage collection that removed the object between the copy and the link answers **409 `conflict`** (`store.ErrLFSObjectGone` / `lfs.ErrNotStaged`), not 500: re-uploading the same bytes succeeds. The emulator's LFS proxy upload answers the identical condition the same way |
 | Sync | One sync job for the commit (`Enqueue`), so the index is updated and the `repo.push` webhook fires |
