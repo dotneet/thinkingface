@@ -49,8 +49,14 @@ define RUFF
 	@uv run --isolated --with-requirements requirements-lint.txt ruff $(1)
 endef
 
+# Whatever terraform is on PATH; override to point at another binary
+# (`make check-terraform TERRAFORM=tofu`). Every target that uses it first
+# checks the binary exists, because terraform is an optional prerequisite --
+# see check-terraform below.
+TERRAFORM ?= terraform
+
 .PHONY: build-web help up down up-sqlite down-sqlite logs rebuild psql check check-backend check-frontend check-python \
-        check-types gen-types test test-backend test-frontend test-store-pg test-e2e fmt lint clean tf \
+        check-types check-terraform gen-types test test-backend test-frontend test-store-pg test-e2e fmt lint clean tf \
         dev-web dev-api gcs-proxy dev-stop docs docs-build
 
 # The full SQLite override set. See the comment at the top of
@@ -140,7 +146,7 @@ docs-build: ## Build the docs site into site/ the same way CI does
 
 # ---- quality gates ---------------------------------------------------------
 
-check: check-backend check-frontend check-python check-types ## Run every quality gate (run this after any code change)
+check: check-backend check-frontend check-python check-types check-terraform ## Run every quality gate (run this after any code change)
 	@echo "==> all checks passed"
 
 gen-types: ## Regenerate frontend/types/api.gen.ts from backend/internal/apitypes (tygo)
@@ -187,6 +193,29 @@ check-python: ## ruff check + ruff format --check for e2e/, clients/python/ and 
 	$(call RUFF,check e2e clients/python scripts)
 	@echo "==> python: ruff format --check"
 	$(call RUFF,format --check e2e clients/python scripts)
+
+# Mirrors the CI `terraform` job. Two things to know about it:
+#
+#  - Terraform is an *optional* prerequisite (only infra/ needs it), so this
+#    gate skips itself when the binary is absent rather than failing a
+#    frontend-only `make check`. CI always has terraform, so infra/ is still
+#    covered before anything merges.
+#  - `terraform validate` only checks the configuration against the provider
+#    *schemas*. It never contacts GCP, so it cannot see server-side limits --
+#    Cloud Run allows at most 4 GiB per vCPU, and a service asking for 8 GiB on
+#    1 vCPU passes here and fails at apply. `plan` / `apply` need credentials
+#    and are deliberately not part of any gate.
+check-terraform: ## terraform fmt -check + validate for infra/ (skipped when terraform is not installed)
+	@if ! $(TERRAFORM) version >/dev/null 2>&1; then \
+		echo "==> terraform: skip ($(TERRAFORM) not found)"; \
+	else \
+		echo "==> terraform: fmt -check"; \
+		cd infra && $(TERRAFORM) fmt -check -recursive && \
+		echo "==> terraform: init -backend=false (downloads providers on first run)" && \
+		$(TERRAFORM) init -backend=false -input=false >/dev/null && \
+		echo "==> terraform: validate" && \
+		$(TERRAFORM) validate; \
+	fi
 
 test: test-backend test-frontend ## Run backend and frontend unit tests
 
@@ -238,7 +267,11 @@ fmt: ## Format Go, TypeScript, Python and Terraform sources
 	@echo "==> ruff format"
 	$(call RUFF,format e2e clients/python scripts)
 	@echo "==> terraform fmt"
-	cd infra && terraform fmt -recursive
+	@if $(TERRAFORM) version >/dev/null 2>&1; then \
+		cd infra && $(TERRAFORM) fmt -recursive; \
+	else \
+		echo "  skip: $(TERRAFORM) not found"; \
+	fi
 
 lint: ## Lint Go, Python and Terraform sources
 	@echo "==> go vet"
@@ -252,7 +285,11 @@ lint: ## Lint Go, Python and Terraform sources
 	@echo "==> ruff check"
 	$(call RUFF,check e2e clients/python)
 	@echo "==> terraform validate"
-	cd infra && terraform validate
+	@if $(TERRAFORM) version >/dev/null 2>&1; then \
+		cd infra && $(TERRAFORM) init -backend=false -input=false >/dev/null && $(TERRAFORM) validate; \
+	else \
+		echo "  skip: $(TERRAFORM) not found"; \
+	fi
 
 clean: ## Stop services and remove containers, networks and named volumes
 	$(COMPOSE) down -v
