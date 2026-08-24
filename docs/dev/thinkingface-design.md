@@ -102,7 +102,10 @@ gs://{bucket}/
 │   ├── index.json                            #   CAS target. Refs and pack ordering
 │   ├── base/{ulid}.pack                      #   Compaction snapshot
 │   └── entries/{seq}-{ulid}.pack             #   One push = one entry
-└── tmp/uploads/lfs/{repoID}/{oid}            # Staging area every LFS upload lands in before verify
+└── tmp/uploads/lfs/{repoID}/…                # Staging area every LFS upload lands in before it is promoted:
+                                              # {oid} where the client declares the digest up front (a signed
+                                              # PUT), incoming-{random} where the server hashes the bytes
+                                              # itself and so cannot name the key until it has (LFSIncomingKey)
 ```
 
 - **LFS payloads live only in `lfs/`, and non-LFS blob payloads live only in `blobs/` — exactly one copy of each.**
@@ -115,6 +118,9 @@ gs://{bucket}/
   it records — is reclaimed too, rather than being charged for forever
   (`docs/dev/content-addressed-storage-design.md` §5)
 - A signed PUT URL for an LFS upload targets `tmp/uploads/lfs/{repoID}/{oid}`, never `lfs/` directly.
+  Where the bytes stream through the server instead (the browser upload endpoint, and the
+  emulator's transfer proxy) the staging key is random rather than named after the oid, so two
+  uploads of the same object can never share one staged object and overwrite each other's bytes.
   An upload lands in `lfs/` only once verify checks the transferred byte count and promotes it there
   with a server-side copy, so a half-finished or corrupt transfer never becomes visible as a valid
   object. Nothing indexes `tmp/uploads/`, so `thinkingface gc` reclaims whatever an interrupted

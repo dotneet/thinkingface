@@ -184,16 +184,37 @@ func (s *Server) handleLFSProxyUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write to the staging key first, exactly as the signed-URL path does:
-	// the digest is only known once the whole body has been read, and a
+	// Write to a staging key first, exactly as the signed-URL path does: the
+	// digest is only known once the whole body has been read, and a
 	// mismatched object must never land on the shared content-addressed key.
 	// This path can hash the bytes as they pass through the server, so the
 	// digest is settled by the time promotion runs; the signed-URL path never
 	// sees them and pays for the same guarantee later instead, by reading the
 	// staged object back and hashing it inside lfs.Verify.
-	stagingKey := storage.LFSStagingKey(repoID, oid)
+	//
+	// The key is random rather than storage.LFSStagingKey(repoID, oid), for
+	// the same reason the browser upload endpoint uses one: that name is
+	// derived from nothing but the caller's own request, so two requests
+	// naming the same repository and oid share one staging object and each
+	// hashes a body the other may already have replaced -- and the digest
+	// computed here is then a statement about bytes that are no longer at the
+	// key. lfs.PromoteStagedFrom catches that (it requires the staged object's
+	// generation to be the one it checked), but catching a collision only
+	// turns it into a failed push; a key nothing else can name removes it. It
+	// matters beyond this handler because this route is registered in both
+	// storage modes, so a proxy upload writing to the shared name could also
+	// overwrite a signed-URL upload's staged bytes while its verify runs.
+	stagingKey, err := incomingUploadKey(repoID)
+	if err != nil {
+		internalError(w, "buffer upload", err)
+		return
+	}
 	hashReader := newHashingReader(r.Body)
 	if err := s.storage.Put(r.Context(), stagingKey, hashReader, "application/octet-stream"); err != nil {
+		// Nothing else will ever name this key, so a partial write here is
+		// garbage the moment this request ends. Best effort: `thinkingface gc`
+		// sweeps the staging prefix by age if the delete does not land.
+		_ = s.storage.Delete(r.Context(), stagingKey)
 		internalError(w, "buffer upload", err)
 		return
 	}
@@ -206,7 +227,7 @@ func (s *Server) handleLFSProxyUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	// Promotion (copy to lfs/{oid}, link, drop the staged object) is shared
 	// with Verify so both upload paths publish objects the same way.
-	if err := s.lfs.PromoteStaged(r.Context(), repoID, oid, size); err != nil {
+	if err := s.lfs.PromoteStagedFrom(r.Context(), repoID, oid, size, stagingKey); err != nil {
 		if errors.Is(err, store.ErrLFSObjectGone) || errors.Is(err, lfs.ErrNotStaged) {
 			writeLFSError(w, http.StatusConflict, "object was removed; retry the upload")
 			return
