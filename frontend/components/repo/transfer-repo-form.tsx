@@ -15,6 +15,7 @@ import { errorMessage, type FailedApiResult } from "@/lib/api-error-message";
 import { getMe } from "@/lib/auth";
 import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
+import { writableNamespaces } from "@/lib/namespace";
 import { repoBase } from "@/lib/paths";
 import { cancelTransfer, getPendingTransfer, transferRepo } from "@/lib/transfers";
 import { type NameError, validateName } from "@/lib/validation";
@@ -68,7 +69,11 @@ export function TransferRepoForm({ kind, ns, name }: { kind: RepoKind; ns: strin
         setNamespaces([]);
         return;
       }
-      const names = result.data.user.namespaces.map((n) => n.name);
+      // "One of mine" can only offer namespaces the viewer can actually
+      // write to -- `/api/v1/me` also lists read-only memberships, and the
+      // backend requires write on the destination to complete a transfer
+      // (startTransfer's destRole >= RoleWrite, backend/internal/api/transfers.go).
+      const names = writableNamespaces(result.data.user).map((n) => n.name);
       setNamespaces(names);
       setSelectedNamespace(names[0] ?? "");
       setMode(names.length > 0 ? "mine" : "other");
