@@ -6,7 +6,9 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // fetcherFor serves ranged reads out of an in-memory file.
@@ -325,6 +327,35 @@ func TestInspectPyTorchReadsOnlyTheHeader(t *testing.T) {
 	}
 	if fetched > size {
 		t.Errorf("fetched %d bytes for a %d byte file: the reader is over-reading", fetched, size)
+	}
+}
+
+func TestCollectorAddMetadata_TruncatesASCIIAtRuneLimit(t *testing.T) {
+	// Regression: plain ASCII text must still be cut at exactly 512
+	// characters, same as before rune-aware truncation.
+	c := &collector{meta: map[string]string{}}
+	c.addMetadata("note", strings.Repeat("x", 600), 0)
+	want := strings.Repeat("x", 512) + "…"
+	if got := c.meta["note"]; got != want {
+		t.Errorf("meta[note] = %q, want 512 x's plus an ellipsis", got)
+	}
+}
+
+func TestCollectorAddMetadata_TruncatesOnRuneBoundaryForMultibyteText(t *testing.T) {
+	// The 512-character cut lands inside a run of 3-byte Japanese characters;
+	// truncation must land on a rune boundary rather than slicing mid-character
+	// and producing invalid UTF-8 (which json.Marshal would silently replace
+	// with U+FFFD in the API response).
+	c := &collector{meta: map[string]string{}}
+	long := strings.Repeat("a", 511) + "あいうえお"
+	c.addMetadata("note", long, 0)
+	got := c.meta["note"]
+	if !utf8.ValidString(got) {
+		t.Fatalf("meta[note] = %q is not valid UTF-8", got)
+	}
+	want := strings.Repeat("a", 511) + "あ" + "…"
+	if got != want {
+		t.Errorf("meta[note] = %q, want %q", got, want)
 	}
 }
 

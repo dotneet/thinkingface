@@ -416,10 +416,26 @@ func (c *collector) addMetadata(name string, v any, depth int) {
 	default:
 		return
 	}
-	if len(text) > 512 {
-		text = text[:512] + "…"
+	if cut := truncateRunes(text, 512); cut != text {
+		text = cut + "…"
 	}
 	c.meta[name] = text
+}
+
+// truncateRunes returns the first n runes of s, or s unchanged when it
+// already has n or fewer. Cutting by rune count rather than slicing by byte
+// index never splits a multi-byte character in two, which would otherwise
+// leave an invalid UTF-8 tail that json.Marshal silently replaces with
+// U+FFFD on the way out. 512 is a character count, not a byte count: nothing
+// downstream requires a byte ceiling on a metadata value, and a byte-based
+// cap would give a checkpoint's Japanese metadata roughly a third as many
+// characters as English for the same limit.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 func joinKey(prefix, key string) string {
