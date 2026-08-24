@@ -24,7 +24,7 @@ drives CPython's own `pickle.Pickler` directly (including a
 The resulting opcode stream has the same shape a real `torch.save` would
 produce, so the backend's checkpoint reader (which only ever parses the
 pickle -- it never imports or executes anything from it) can't tell the
-difference. This keeps `e2e/requirements.txt` free of a torch dependency.
+difference. This keeps `e2e/pyproject.toml` free of a torch dependency.
 """
 
 from __future__ import annotations
