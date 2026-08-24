@@ -1,5 +1,9 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Release quarantine is 7 days -- the same window frontend/bunfig.toml enforces for bun (minimumReleaseAge = 604800). Change one and change the other; docs/dev/supply-chain.md explains why.",
+    "vulnerabilityAlerts drops that wait for known CVEs. It only relaxes Renovate's own version choice: bun still refuses a version younger than 7 days when it refreshes bun.lock, so a frontend security PR for a fresh fix needs `cd frontend && bun install --minimum-release-age=0` by hand on the PR branch."
+  ],
   "extends": [
     "config:recommended",
     ":dependencyDashboard",
