@@ -578,6 +578,44 @@ func validateIngestName(name string) error {
 	return nil
 }
 
+// validateIngestMetricName is validateIngestName plus the one rule only a
+// metric has to obey: it must not be named after a column the metrics parquet
+// uses to describe the row rather than to hold a measurement.
+//
+// A point's structural columns and its metrics are written into the same row
+// at flush time (experiments.mergePoints), so a metric called "run_name" would
+// land in the file's own required-string run_name column: the run would come
+// back from the next re-index named "0.5", losing every point it logged in
+// that window to a run that never existed. "step" would do the same to a
+// chart's x axis, and "_ingest_id" would break the key that keeps a flush
+// retried after a crash from writing the same points twice.
+func validateIngestMetricName(name string) error {
+	if err := validateIngestName(name); err != nil {
+		return err
+	}
+	if experiments.IsStructuralColumn(name) {
+		return errors.New("is reserved: it names a structural column of the metrics parquet")
+	}
+	return nil
+}
+
+// validateIngestProject is validateIngestName plus the check that the project
+// can actually become a directory in the repository. The flush writes
+// "{project}/metrics.parquet" (experiments.Flusher.metricsPath), and Commit
+// refuses a ".", ".." or ".git" segment -- so a project named ".git" would be
+// accepted here, buffered in exp_points, and then fail every flush forever.
+// This is the same guard safeRunArtifactDir applies to an artifact path, moved
+// to the point where the name first enters the system.
+func validateIngestProject(project string) error {
+	if err := validateIngestName(project); err != nil {
+		return err
+	}
+	if err := gitrepo.ValidatePath(project + "/metrics.parquet"); err != nil {
+		return errors.New("must be usable as a directory name in the repository")
+	}
+	return nil
+}
+
 // optionalIngestName validates a name the client may omit and reports it as
 // "set this" (non-nil) or "leave it alone" (nil).
 //
@@ -647,7 +685,7 @@ func (s *Server) handleExperimentLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	project := chi.URLParam(r, "project")
-	if err := validateIngestName(project); err != nil {
+	if err := validateIngestProject(project); err != nil {
 		badRequest(w, "project "+err.Error())
 		return
 	}
@@ -669,7 +707,7 @@ func (s *Server) handleExperimentLog(w http.ResponseWriter, r *http.Request) {
 			lastStep = p.Step
 		}
 		for k, v := range p.Metrics {
-			if err := validateIngestName(k); err != nil {
+			if err := validateIngestMetricName(k); err != nil {
 				badRequest(w, "metric name "+strconv.Quote(k)+" "+err.Error())
 				return
 			}
@@ -814,7 +852,7 @@ func (s *Server) handleExperimentFinish(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	project := chi.URLParam(r, "project")
-	if err := validateIngestName(project); err != nil {
+	if err := validateIngestProject(project); err != nil {
 		badRequest(w, "project "+err.Error())
 		return
 	}

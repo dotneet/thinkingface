@@ -190,3 +190,62 @@ func TestListExperiments_Search(t *testing.T) {
 		t.Fatalf("search=nonexistentterm = %+v", none)
 	}
 }
+
+// TestExperimentLog_RejectsMetricNamedAfterAStructuralColumn pins the reserved
+// names. A point's metrics and its structural fields share one row of the
+// metrics parquet (experiments.mergePoints), so a metric called "run_name"
+// would be written into the file's own run column: after the next re-index the
+// run would be called "0.5" and would have lost every point it logged in that
+// window. "_ingest_id" is worse still -- it is the key that keeps a flush
+// retried after a crash from writing the same points twice.
+func TestExperimentLog_RejectsMetricNamedAfterAStructuralColumn(t *testing.T) {
+	f := newExpFixture(t)
+	f.repo("alice", "exp", "dataset")
+	tok := f.token(f.alice, "write")
+
+	for _, name := range []string{"run_name", "step", "timestamp", "_ingest_id"} {
+		resp := f.do("POST", "/api/v1/experiments/alice/exp/proj/log", tok, map[string]any{
+			"run":    "run-1",
+			"points": []map[string]any{point(1, map[string]any{name: 0.5})},
+		})
+		if resp.status() != 400 {
+			t.Errorf("metric %q status = %d, want 400 (body %s)", name, resp.status(), resp.rec.Body.String())
+		}
+	}
+
+	// An ordinary metric is unaffected.
+	f.logBatch(tok, map[string]any{
+		"run":    "run-1",
+		"points": []map[string]any{point(1, map[string]any{"loss": 0.5})},
+	})
+}
+
+// TestExperimentIngest_RejectsAProjectNameThatCannotBeCommitted stops a name
+// that would buffer fine and then fail every flush forever: the flush writes
+// "{project}/metrics.parquet", and Commit refuses ".", ".." and ".git"
+// segments, so such a project would sit in the flush queue warning every ten
+// seconds and holding one of the poller's hundred slots.
+func TestExperimentIngest_RejectsAProjectNameThatCannotBeCommitted(t *testing.T) {
+	f := newExpFixture(t)
+	f.repo("alice", "exp", "dataset")
+	tok := f.token(f.alice, "write")
+
+	for _, project := range []string{".git", ".GIT", "..", "."} {
+		body := map[string]any{
+			"run":    "run-1",
+			"points": []map[string]any{point(1, map[string]any{"loss": 0.5})},
+		}
+		resp := f.do("POST", "/api/v1/experiments/alice/exp/"+project+"/log", tok, body)
+		if resp.status() != 400 {
+			t.Errorf("log into project %q status = %d, want 400 (body %s)",
+				project, resp.status(), resp.rec.Body.String())
+		}
+		// finish creates the project too, so it needs the same guard.
+		resp = f.do("POST", "/api/v1/experiments/alice/exp/"+project+"/finish", tok,
+			map[string]any{"run": "run-1"})
+		if resp.status() != 400 {
+			t.Errorf("finish in project %q status = %d, want 400 (body %s)",
+				project, resp.status(), resp.rec.Body.String())
+		}
+	}
+}

@@ -138,7 +138,7 @@ func convertLeafValue(typ parquet.Type, v parquet.Value) any {
 	if lt := typ.LogicalType(); lt != nil && lt.Value != nil {
 		switch lv := lt.Value.(type) {
 		case *format.DecimalType:
-			return decimalToFloat64(typ, v, lv.Scale)
+			return decimalToFloat64(typ, v, lv.Precision, lv.Scale)
 		case *format.DateType:
 			return dateToString(v)
 		case *format.TimestampType:
@@ -184,10 +184,59 @@ func byteArrayToStringOrBase64(b []byte) any {
 	return base64.StdEncoding.EncodeToString(b)
 }
 
+// maxDecimalScale is the largest DECIMAL scale this package will honour.
+//
+// A file's precision and scale come straight out of its footer and nothing --
+// not the spec's readers, not parquet-go -- checks them, so they are attacker
+// input: a few hundred bytes of parquet can declare DECIMAL(9, 1000000000)
+// and every single cell then asks for 10^1000000000 as a big.Int. Measured on
+// this code, 10^1e7 costs 0.67 s and 16 MB and 10^1e8 costs 26 s and 159 MB,
+// multiplied by rows x columns -- one `GET .../parquet/rows` is enough to stop
+// the server, and viewer.Scan drags the experiments indexer in with it.
+//
+// 76 is not arbitrary: it is the widest decimal a 256-bit unscaled value can
+// express (Arrow's Decimal256 ceiling), so it still admits every decimal a
+// real writer emits -- Spark, Hive and pandas stop at 38 -- while capping the
+// exponentiation at ~256 bits, which is free. Anything past it is not a
+// decimal anyone wrote, so it is reported as null rather than computed.
+const maxDecimalScale = 76
+
+// decimalPrec is the working precision of the big.Float division below: wide
+// enough that a full-width unscaled value survives it, since the result is
+// truncated to a float64 anyway.
+const decimalPrec = 256
+
+// decimalScaleFactors holds 10^scale for every scale in range, built once at
+// init instead of per cell (the whole point of the bound above). big.Float
+// operations never mutate their operands, so sharing these across the
+// goroutines serving different requests is safe.
+var decimalScaleFactors = func() [maxDecimalScale + 1]*big.Float {
+	var out [maxDecimalScale + 1]*big.Float
+	for i := range out {
+		pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(i)), nil)
+		out[i] = new(big.Float).SetPrec(decimalPrec).SetInt(pow)
+	}
+	return out
+}()
+
+// validDecimalAnnotation reports whether a DECIMAL annotation is one the
+// parquet spec allows (LogicalTypes.md: a positive precision, and a scale that
+// is neither negative nor larger than the precision) and small enough to
+// evaluate. A negative scale is deliberately rejected rather than clamped: it
+// is not legal parquet, and no writer produces one -- Spark's and Arrow's
+// decimal types both refuse it -- so a file carrying one is malformed, not a
+// dialect to support.
+func validDecimalAnnotation(precision, scale int32) bool {
+	return precision > 0 && scale >= 0 && scale <= precision && scale <= maxDecimalScale
+}
+
 // decimalToFloat64 applies a DECIMAL logical type's scale to the physical
-// value, returning a float64 (or nil for NaN/Inf, and for unsupported
-// physical representations).
-func decimalToFloat64(typ parquet.Type, v parquet.Value, scale int32) any {
+// value, returning a float64 (or nil for NaN/Inf, for an annotation outside
+// the bounds above, and for unsupported physical representations).
+func decimalToFloat64(typ parquet.Type, v parquet.Value, precision, scale int32) any {
+	if !validDecimalAnnotation(precision, scale) {
+		return nil
+	}
 	switch typ.Kind() {
 	case parquet.Int32:
 		return safeFloat(float64(v.Int32()) / math.Pow10(int(scale)))
@@ -202,7 +251,7 @@ func decimalToFloat64(typ parquet.Type, v parquet.Value, scale int32) any {
 
 // decimalBytesToFloat64 decodes a big-endian two's-complement integer (the
 // on-disk representation of BYTE_ARRAY/FIXED_LEN_BYTE_ARRAY decimals) and
-// applies the given scale.
+// applies the given scale, which the caller has already bounded.
 func decimalBytesToFloat64(data []byte, scale int32) float64 {
 	if len(data) == 0 {
 		return 0
@@ -220,10 +269,8 @@ func decimalBytesToFloat64(data []byte, scale int32) float64 {
 		val.SetBytes(data)
 	}
 
-	prec := uint(256)
-	f := new(big.Float).SetPrec(prec).SetInt(val)
-	scaleFactor := new(big.Float).SetPrec(prec).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale)), nil))
-	f.Quo(f, scaleFactor)
+	f := new(big.Float).SetPrec(decimalPrec).SetInt(val)
+	f.Quo(f, decimalScaleFactors[scale])
 	out, _ := f.Float64()
 	return out
 }

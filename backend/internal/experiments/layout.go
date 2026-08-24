@@ -141,6 +141,13 @@ var structuralColumns = map[string]bool{
 	IngestIDColumn: true,
 }
 
+// IsStructuralColumn reports whether name describes the row rather than a
+// measurement. The ingest API refuses it as a metric name (api/experiments.go)
+// and mergePoints refuses to write one, because a point's metrics and its
+// structural fields end up in the same parquet row: a metric named "run_name"
+// would otherwise overwrite the run's own name with a number.
+func IsStructuralColumn(name string) bool { return structuralColumns[name] }
+
 func runColumn(columns map[string]bool) string {
 	for _, c := range []string{"run_name", "run", "run_id"} {
 		if columns[c] {

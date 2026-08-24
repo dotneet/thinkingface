@@ -1679,11 +1679,21 @@ to it directly. While archived, both ingest (`log` / `finish`) and PATCH/DELETE 
   - **`summary` and `metric_keys` are merged across batches.** A batch that sends only `loss`
     doesn't wipe out an existing `accuracy`, and a batch with `points: []` (a status notification)
     doesn't empty out the summary. The same key is overwritten with the new value.
+  - Metric names follow the same constraint as run names (1-256 bytes, no control characters) and
+    additionally must not be one of the **structural columns** of the metrics parquet — `id`,
+    `log_id`, `space_id`, `run_id`, `run_name`, `run`, `step`, `_step`, `global_step`, `timestamp`,
+    `_timestamp`, `created_at`, `project`, `_ingest_id`. Those describe the row rather than a
+    measurement, so a metric named after one would overwrite it when the buffer is flushed into
+    the parquet (a run renamed to `"0.5"`, a broken x axis). 400.
+  - `{project}` must also be usable as a directory inside the repository, since the flush writes
+    `{project}/metrics.parquet`: `.`, `..` and `.git` (matched case-insensitively) return 400
+    rather than being buffered into points that could never be committed.
 - `POST /api/v1/experiments/{ns}/{repo}/{project}/finish`
   req `{"run":"run-1","status":"finished","group":"lr-sweep","job_type":"eval"}` → 200
   - `group` / `job_type` are handled the same as in `log` (optional, empty means keep). A run that
     never sent a single point gets created by this call, so these are accepted here too, so that
     such a run can also be placed into a group.
+  - `{project}` is validated exactly as in `log`, since this call creates the project too.
 
 ### Run artifacts
 
