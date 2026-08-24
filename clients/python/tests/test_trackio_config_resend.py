@@ -20,6 +20,7 @@ No server is involved: ``requests.get`` / ``requests.post`` are stubbed.
 from __future__ import annotations
 
 import sys
+import threading
 import types
 from typing import Any
 
@@ -182,13 +183,16 @@ def real_lightning_integration(monkeypatch):
 
     import importlib
 
-    mod = importlib.reload(sys.modules["thinkingface.trackio.integrations"])
+    # import_module rather than reload(sys.modules[...]): this file is a valid
+    # target on its own, and then nothing has imported integrations yet.
+    name = "thinkingface.trackio.integrations"
+    mod = importlib.reload(importlib.import_module(name))
     assert mod._HAS_LIGHTNING is True
     yield mod
 
-    for name in fake_modules:
-        del sys.modules[name]
-    importlib.reload(sys.modules["thinkingface.trackio.integrations"])
+    for fake in fake_modules:
+        del sys.modules[fake]
+    importlib.reload(sys.modules[name])
 
 
 class TestLightningLoggerResendsConfigThroughARealRun:
@@ -211,3 +215,26 @@ class TestLightningLoggerResendsConfigThroughARealRun:
         batches = _payloads(server, "/log")
         assert len(batches) == 2
         assert batches[1]["config"] == {"batch_size": 32}
+
+
+class TestConfigThatCannotBePrepared:
+    """A config value deepcopy refuses must not cost the run its points.
+
+    The points are the part that cannot be reconstructed, and an exception out
+    of flush() on the timer thread would also stop _schedule_flush from ever
+    running again -- so the copy failure is reported and the config skipped.
+    """
+
+    def test_uncopyable_config_still_sends_the_metrics(self, server):
+        run = trackio.init("proj", name="r1", config={"lr": 0.1})
+        run.config["handle"] = threading.Lock()  # deepcopy refuses this
+
+        run.log({"loss": 1.0})
+        with pytest.warns(UserWarning, match="could not prepare the config"):
+            run.flush()
+
+        batches = _payloads(server, "/log")
+        assert len(batches) == 1
+        assert "config" not in batches[0]
+        assert [p["metrics"]["loss"] for p in batches[0]["points"]] == [1.0]
+        assert run._buffer == []
