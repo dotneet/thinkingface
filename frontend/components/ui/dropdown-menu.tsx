@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useOnClickOutside } from "@/hooks/use-on-click-outside";
 import { cn } from "@/lib/cn";
 
@@ -29,7 +29,11 @@ export function DropdownMenu({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  const close = () => setOpen(false);
+  // Stable identity: useOnClickOutside re-subscribes its document listeners
+  // whenever `handler` changes, so a new `close` on every render (the
+  // previous `() => setOpen(false)`) meant the listeners were torn down and
+  // re-added on every render this menu caused, not just on open/close.
+  const close = useCallback(() => setOpen(false), []);
   useOnClickOutside(ref, close);
 
   return (

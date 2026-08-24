@@ -43,8 +43,9 @@ export function WebhookDeliveriesPanel({ webhookId }: { webhookId: number }) {
   const [error, setError] = useState<string | null>(null);
   const [redeliveringId, setRedeliveringId] = useState<number | null>(null);
 
-  async function refresh(atOffset: number) {
+  async function refresh(atOffset: number, isStale: () => boolean = () => false) {
     const result = await listWebhookDeliveries(webhookId, { limit: PAGE_SIZE, offset: atOffset });
+    if (isStale()) return;
     if (!result.ok) {
       setError(errorMessage(t, result));
       return;
@@ -56,7 +57,11 @@ export function WebhookDeliveriesPanel({ webhookId }: { webhookId: number }) {
   }
 
   useEffect(() => {
-    refresh(0);
+    let cancelled = false;
+    refresh(0, () => cancelled);
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [webhookId]);
 

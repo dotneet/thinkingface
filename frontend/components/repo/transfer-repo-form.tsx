@@ -81,8 +81,10 @@ export function TransferRepoForm({ kind, ns, name }: { kind: RepoKind; ns: strin
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       const result = await getPendingTransfer(kind, ns, name);
+      if (cancelled) return;
       if (!result.ok) {
         // No pending transfer is the common case, not an error to surface.
         if (result.status === 404) {
@@ -95,6 +97,9 @@ export function TransferRepoForm({ kind, ns, name }: { kind: RepoKind; ns: strin
       }
       setTransfer(result.data.transfer);
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [kind, ns, name]);
 
   async function handleCancel() {

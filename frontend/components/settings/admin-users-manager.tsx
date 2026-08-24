@@ -78,23 +78,35 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
     [t],
   );
 
-  const refresh = useCallback(async () => {
-    const result = await listAdminUsers({ search, limit: PAGE_SIZE, offset });
-    if (!result.ok) {
-      setLoadError(describe(result));
-      setUsers(null);
-      // Never carry a count over from a failed read: an empty list next to a
-      // stale total states something the page does not know (DESIGN.md §9).
-      setTotal(null);
-      return;
-    }
-    setLoadError(null);
-    setUsers(result.data.items);
-    setTotal(result.data.total);
-  }, [search, offset, describe]);
+  const refresh = useCallback(
+    async (isStale: () => boolean = () => false) => {
+      const result = await listAdminUsers({ search, limit: PAGE_SIZE, offset });
+      if (isStale()) return;
+      if (!result.ok) {
+        setLoadError(describe(result));
+        setUsers(null);
+        // Never carry a count over from a failed read: an empty list next to a
+        // stale total states something the page does not know (DESIGN.md §9).
+        setTotal(null);
+        return;
+      }
+      setLoadError(null);
+      setUsers(result.data.items);
+      setTotal(result.data.total);
+    },
+    [search, offset, describe],
+  );
 
+  // Guards against a fast search/page change letting an older, slower
+  // response land after the newer one and overwrite it (e.g. typing "alice"
+  // then quickly clearing the box could show alice's single result after the
+  // full list already rendered).
   useEffect(() => {
-    refresh();
+    let cancelled = false;
+    refresh(() => cancelled);
+    return () => {
+      cancelled = true;
+    };
   }, [refresh]);
 
   function runSearch(query: string) {
