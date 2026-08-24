@@ -704,6 +704,18 @@ resource "google_cloud_scheduler_job" "compact" {
 # without bound: nothing else in this configuration ever deletes an lfs/ or
 # blobs/ object.
 #
+# postgres mode only. In sqlite mode the Job is not created at all, and
+# backend/entrypoint.sh refuses `gc` even if one is invoked by hand. The
+# reason is not that gc writes to SQLite -- though it does, and entrypoint.sh
+# never replicates a non-`serve` subcommand's writes back to the Litestream
+# replica. It is that gc would be reading a *restored snapshot*: the live
+# `serve` instance owns the only current copy of the database, so an LFS
+# object uploaded since that snapshot has no row in the Job's copy, gc
+# concludes the object is unreferenced, and deletes bytes a repository is
+# still using. DeleteOrphanedLFSObject's row lock cannot help across two
+# different database files. Reclaiming storage in sqlite mode has to happen
+# inside the serving process, which is a separate piece of work.
+#
 # Same image/SA/VPC egress/secrets/resources as compact above, but a far
 # longer timeout: gc's own scan is a full, unpaginated listing of the
 # entire blobs/ prefix (backend/internal/storage.GCS.List has no page cap)
@@ -713,6 +725,9 @@ resource "google_cloud_scheduler_job" "compact" {
 # ---------------------------------------------------------------------------
 
 resource "google_cloud_run_v2_job" "gc" {
+  # postgres only -- see the block comment above.
+  count = var.database_backend == "postgres" ? 1 : 0
+
   project  = var.project_id
   name     = var.gc_job_name
   location = var.region
@@ -832,17 +847,21 @@ resource "google_cloud_run_v2_job" "gc" {
 # just this one job (not the broader api SA) -- same rationale as
 # compact_scheduler above.
 resource "google_service_account" "gc_scheduler" {
+  count = var.database_backend == "postgres" ? 1 : 0
+
   project      = var.project_id
   account_id   = "thinkingface-gc-${var.environment}"
   display_name = "thinkingface gc scheduler (${var.environment})"
 }
 
 resource "google_cloud_run_v2_job_iam_member" "gc_scheduler_invoker" {
+  count = var.database_backend == "postgres" ? 1 : 0
+
   project  = var.project_id
-  location = google_cloud_run_v2_job.gc.location
-  name     = google_cloud_run_v2_job.gc.name
+  location = google_cloud_run_v2_job.gc[0].location
+  name     = google_cloud_run_v2_job.gc[0].name
   role     = "roles/run.invoker"
-  member   = "serviceAccount:${google_service_account.gc_scheduler.email}"
+  member   = "serviceAccount:${google_service_account.gc_scheduler[0].email}"
 }
 
 # Triggers the gc Job via the Cloud Run Admin API's `jobs.run` method,
@@ -851,6 +870,8 @@ resource "google_cloud_run_v2_job_iam_member" "gc_scheduler_invoker" {
 # gc_schedule's description in variables.tf) so the two never put load on
 # Postgres and GCS at the same time.
 resource "google_cloud_scheduler_job" "gc" {
+  count = var.database_backend == "postgres" ? 1 : 0
+
   project   = var.project_id
   region    = var.region
   name      = "thinkingface-gc-${var.environment}"
@@ -859,16 +880,16 @@ resource "google_cloud_scheduler_job" "gc" {
 
   http_target {
     http_method = "POST"
-    uri         = "https://${var.region}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${var.project_id}/jobs/${google_cloud_run_v2_job.gc.name}:run"
+    uri         = "https://${var.region}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${var.project_id}/jobs/${google_cloud_run_v2_job.gc[0].name}:run"
 
     oauth_token {
-      service_account_email = google_service_account.gc_scheduler.email
+      service_account_email = google_service_account.gc_scheduler[0].email
     }
   }
 
   depends_on = [
     google_project_service.required,
-    google_cloud_run_v2_job_iam_member.gc_scheduler_invoker,
+    google_cloud_run_v2_job_iam_member.gc_scheduler_invoker[0],
   ]
 }
 
