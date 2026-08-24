@@ -8,16 +8,25 @@ a variable is unset.
 !!! warning "Change these before exposing an instance to anyone else"
     `TF_ADMIN_PASSWORD` and `TF_SESSION_SECRET` both ship with public, well-known defaults
     (`admin` and a fixed development string, respectively). Leaving either one unset is fine
-    on a laptop only you can reach. The server refuses to start on either default once
-    `TF_PUBLIC_URL` is an `https://` URL, and logs a warning on every boot while they remain
-    unset even over plain HTTP.
+    on a laptop only you can reach. **The server refuses to start on either default unless
+    `TF_PUBLIC_URL` points at loopback** — `localhost`, a `.localhost` subdomain, or a literal
+    loopback address. A LAN hostname or IP counts as reachable by someone else, whether or not
+    TLS is in front of it, because knowing the default session secret is enough to forge a
+    session cookie for any account.
+
+!!! danger "Upgrading an existing plain-HTTP instance"
+    This check used to apply only to `https://` URLs. An instance already running on something
+    like `http://hub.internal` with the shipped defaults **will refuse to boot after upgrading**.
+    Set `TF_ADMIN_PASSWORD` and a `TF_SESSION_SECRET` of at least 32 bytes before you upgrade.
+    Changing `TF_SESSION_SECRET` signs everyone out — existing `tf_session` cookies no longer
+    verify — but access tokens and SSH keys are unaffected.
 
 ## Server
 
 | Variable | What it does | Default | Notes |
 |---|---|---|---|
 | `TF_ADDR` | Listen address for the HTTP API (git smart HTTP, LFS, REST, the viewer). | `:8080` | |
-| `TF_PUBLIC_URL` | The externally reachable base URL of the API. Used to infer the CORS default origin and cookie security, and embedded in generated LFS/HF-compatible URLs. | `http://localhost:8080` | Starting this with `https://` switches the server into "production" validation: it then refuses to boot on the default admin password or session secret. |
+| `TF_PUBLIC_URL` | The externally reachable base URL of the API. Used to infer the CORS default origin and cookie security, and embedded in generated LFS/HF-compatible URLs. | `http://localhost:8080` | Pointing this anywhere other than loopback switches the server into "production" validation: it then refuses to boot on the default admin password or session secret. |
 | `GIT_ROOT` | Directory holding bare git repositories on disk. | `/data/git` | Must be persistent storage unless the Continuity/WAL migration is `authoritative` (see the git/caching table below), in which case it is only a rebuildable cache. |
 
 ## Storage
@@ -47,9 +56,9 @@ a variable is unset.
 | Variable | What it does | Default | Notes |
 |---|---|---|---|
 | `TF_ADMIN_USERNAME` | Username seeded for the first account, only when the users table is empty. | `admin` | |
-| `TF_ADMIN_PASSWORD` | Password for that seeded account. | `admin` | **Change this.** Well-known default; startup is refused under `https://` `TF_PUBLIC_URL` while it is unset. **First boot only** — see the note below. |
+| `TF_ADMIN_PASSWORD` | Password for that seeded account. | `admin` | **Change this.** Well-known default; startup is refused whenever `TF_PUBLIC_URL` points anywhere other than loopback while it is unset. **First boot only** — see the note below. |
 | `TF_ADMIN_EMAIL` | Email address for the seeded account. | `admin@example.com` | |
-| `TF_SESSION_SECRET` | HMAC-SHA256 key signing session cookies (`tf_session`) and LFS transfer URLs. | `dev-insecure-session-secret` | **Change this.** Must be at least 32 bytes once `TF_PUBLIC_URL` is `https://`, and cannot be left at the default in that case either. |
+| `TF_SESSION_SECRET` | HMAC-SHA256 key signing session cookies (`tf_session`) and LFS transfer URLs. | `dev-insecure-session-secret` | **Change this.** Must be at least 32 bytes, and must not be the default, whenever `TF_PUBLIC_URL` points anywhere other than loopback. Anyone who knows the default can forge a session cookie for any account, so an instance on a LAN name needs a real one just as much as a public one does. |
 | `TF_SESSION_TTL` | How long an issued session cookie stays valid. | `168h` (7 days) | Also invalidated early on logout or password change. |
 | `TF_COOKIE_SECURE` | Force the `Secure` attribute on the session cookie. | *(inferred from `TF_PUBLIC_URL`)* | Set explicitly to `true` when TLS terminates in front of the server (e.g. a load balancer) and traffic to the container itself is plain HTTP — the automatic inference gets this wrong in that setup. |
 | `TF_ALLOWED_ORIGINS` | Comma-separated browser origins allowed for credentialed CORS. | *(inferred: `TF_PUBLIC_URL`'s origin, plus `http://localhost:3000` / `http://127.0.0.1:3000` when not `https`)* | Set this explicitly in production if the web UI is served from a different host than the API — an origin outside the allowlist gets no CORS headers and its state-changing cookie-authenticated requests are rejected with 403. `huggingface_hub`, `git`, and `curl` send no `Origin` header and are unaffected either way. |

@@ -166,7 +166,17 @@ func normalizeHFSort(v string) string {
 // mode that reads as data: `gated=True` would come back full of repositories
 // that are not gated, `expand=[...]` would come back missing exactly the
 // fields the caller asked to be given. Each is a 400 naming itself.
-var hfListUnsupported = []string{"expand", "gated", "inference", "emissions_thresholds"}
+var hfListUnsupported = []string{"expand", "inference", "emissions_thresholds"}
+
+// hfListFalsey are the spellings huggingface_hub sends for a false-valued
+// query parameter. Go's strconv.ParseBool does not know Python's "False".
+func hfListFalsey(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "false", "0", "no":
+		return true
+	}
+	return false
+}
 
 // hfListFilter maps the HuggingFace listing query string onto a store filter,
 // returning a non-empty message when the request cannot be honoured as asked.
@@ -185,6 +195,14 @@ func hfListFilter(kind string, q url.Values) (store.RepoFilter, string) {
 		if q.Get(name) != "" {
 			return filter, name + " is not supported by this instance; drop it and filter the results yourself"
 		}
+	}
+	// `gated` is the one narrowing parameter with a harmless value. Nothing
+	// here is gated, so gated=False asks for exactly what this server would
+	// return anyway and is honoured by doing nothing; only gated=True would
+	// answer with a superset of what was asked for.
+	if v := q.Get("gated"); v != "" && !hfListFalsey(v) {
+		return filter, "gated is not supported by this instance; no repository here is gated, " +
+			"so gated=True can only be answered with repositories that are not"
 	}
 
 	if v := q.Get("limit"); v != "" {
@@ -223,13 +241,19 @@ func hfListFilter(kind string, q url.Values) (store.RepoFilter, string) {
 			}
 			return filter, "sort=" + v + " is not supported; use downloads, lastModified, createdAt or id"
 		}
-		// The Hub reads any direction other than -1 as ascending, so an
-		// absent direction asks for ascending too.
-		if wantDescending := q.Get("direction") == "-1"; wantDescending != order.descending {
-			if order.descending {
-				return filter, "sort=" + v + " is only available in descending order here; add direction=-1"
+		// Only an *explicit* direction is checked. Treating an absent one as
+		// ascending would reject `sort=downloads` on its own -- the single
+		// most common way anybody calls this -- and "most downloaded first"
+		// is what the Hub answers there too. The point of refusing a
+		// direction is not to insist callers name one, it is to never hand
+		// back the opposite order to a caller who did.
+		if dir := q.Get("direction"); dir != "" {
+			if wantDescending := dir == "-1"; wantDescending != order.descending {
+				if order.descending {
+					return filter, "sort=" + v + " is only available in descending order here; use direction=-1 or omit it"
+				}
+				return filter, "sort=" + v + " is only available in ascending order here; drop direction=-1"
 			}
-			return filter, "sort=" + v + " is only available in ascending order here; drop direction=-1"
 		}
 		filter.Sort = order.sort
 	}
