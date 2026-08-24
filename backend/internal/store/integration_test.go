@@ -307,12 +307,22 @@ func TestIntegrationUsersNamespacesTokens(t *testing.T) {
 		}
 
 		// Tokens.
-		tok, err := s.CreateToken(ctx, f.alice.ID, "laptop", "write", "hash-1")
-		if err != nil || tok.LastUsedAt != nil || tok.Scope != "write" {
+		tok, err := s.CreateToken(ctx, f.alice.ID, "laptop", "write", "hash-1", nil)
+		if err != nil || tok.LastUsedAt != nil || tok.Scope != "write" || tok.ExpiresAt != nil {
 			t.Fatalf("CreateToken = %+v, %v", tok, err)
 		}
-		if _, err := s.CreateToken(ctx, f.bob.ID, "other", "read", "hash-2"); err != nil {
+		if _, err := s.CreateToken(ctx, f.bob.ID, "other", "read", "hash-2", nil); err != nil {
 			t.Fatal(err)
+		}
+		// A token created with an expiry round-trips it through CreateToken's
+		// RETURNING and through ListTokens.
+		future := time.Now().Add(24 * time.Hour)
+		tok3, err := s.CreateToken(ctx, f.alice.ID, "expiring", "read", "hash-3", &future)
+		if err != nil || tok3.ExpiresAt == nil {
+			t.Fatalf("CreateToken with expiry = %+v, %v", tok3, err)
+		}
+		if d := tok3.ExpiresAt.Sub(future); d < -time.Second || d > time.Second {
+			t.Fatalf("CreateToken expires_at = %v, want close to %v", tok3.ExpiresAt, future)
 		}
 		u, at, err := s.LookupToken(ctx, "hash-1")
 		if err != nil || u.ID != f.alice.ID || at.ID != tok.ID {
@@ -321,14 +331,26 @@ func TestIntegrationUsersNamespacesTokens(t *testing.T) {
 		if _, _, err := s.LookupToken(ctx, "nope"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("LookupToken missing err = %v", err)
 		}
+		// A token whose expiry is in the future still authenticates.
+		if _, at3, err := s.LookupToken(ctx, "hash-3"); err != nil || at3.ID != tok3.ID {
+			t.Fatalf("LookupToken (not yet expired) = %+v, %v", at3, err)
+		}
 		if err := s.TouchToken(ctx, tok.ID); err != nil {
 			t.Fatal(err)
 		}
 		list, err := s.ListTokens(ctx, f.alice.ID)
-		if err != nil || len(list) != 1 || list[0].LastUsedAt == nil {
+		if err != nil || len(list) != 2 {
 			t.Fatalf("ListTokens = %+v, %v", list, err)
 		}
-		// Expired tokens are rejected by LookupToken.
+		for _, item := range list {
+			if item.ID == tok.ID && item.LastUsedAt == nil {
+				t.Fatalf("ListTokens laptop token = %+v, want last_used_at set", item)
+			}
+			if item.ID == tok3.ID && item.ExpiresAt == nil {
+				t.Fatalf("ListTokens expiring token = %+v, want expires_at set", item)
+			}
+		}
+		// Expired tokens are rejected by LookupToken...
 		if _, err := s.db.Exec(ctx, `UPDATE access_tokens SET expires_at = $1 WHERE id = $2`,
 			time.Now().Add(-time.Hour), tok.ID); err != nil {
 			t.Fatal(err)
@@ -336,10 +358,32 @@ func TestIntegrationUsersNamespacesTokens(t *testing.T) {
 		if _, _, err := s.LookupToken(ctx, "hash-1"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expired LookupToken err = %v", err)
 		}
+		// ...but ListTokens keeps showing it, so the owner can see why it
+		// stopped working and still delete it.
+		list, err = s.ListTokens(ctx, f.alice.ID)
+		if err != nil || len(list) != 2 {
+			t.Fatalf("ListTokens (with expired) = %+v, %v", list, err)
+		}
+		found := false
+		for _, item := range list {
+			if item.ID == tok.ID {
+				found = true
+				if item.ExpiresAt == nil || !item.ExpiresAt.Before(time.Now()) {
+					t.Fatalf("ListTokens expired token = %+v, want a past expires_at", item)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("ListTokens dropped the expired token: %+v", list)
+		}
 		if err := s.DeleteToken(ctx, f.bob.ID, tok.ID); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("DeleteToken by other user err = %v", err)
 		}
+		// DeleteToken works on an already-expired token too.
 		if err := s.DeleteToken(ctx, f.alice.ID, tok.ID); err != nil {
+			t.Fatalf("DeleteToken: %v", err)
+		}
+		if err := s.DeleteToken(ctx, f.alice.ID, tok3.ID); err != nil {
 			t.Fatalf("DeleteToken: %v", err)
 		}
 		if list, _ := s.ListTokens(ctx, f.alice.ID); len(list) != 0 {

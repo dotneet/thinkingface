@@ -25,7 +25,9 @@ type AccessToken struct {
 	Name       string     `json:"name"`
 	Scope      string     `json:"scope"`
 	LastUsedAt *time.Time `json:"last_used_at"`
-	CreatedAt  time.Time  `json:"created_at"`
+	// ExpiresAt is nil for a token that never expires.
+	ExpiresAt *time.Time `json:"expires_at"`
+	CreatedAt time.Time  `json:"created_at"`
 }
 
 // CreateUser inserts the user and their personal namespace in one transaction,
@@ -91,13 +93,148 @@ func (s *Store) CountUsers(ctx context.Context) (int64, error) {
 	return n, err
 }
 
-func (s *Store) CreateToken(ctx context.Context, userID int64, name, scope, tokenHash string) (*AccessToken, error) {
+// ListUsers is the site administrator's account directory: every user,
+// optionally narrowed by a case-insensitive substring of the username or the
+// email address, plus the total ignoring the page window.
+//
+// The password hash is deliberately not selected. Nothing above this layer
+// needs it for a listing, and a column that is never read cannot leak.
+func (s *Store) ListUsers(ctx context.Context, search string, limit, offset int) ([]User, int64, error) {
+	limit, offset = pageWindow(limit, offset)
+
+	// ILIKE is rewritten to LIKE for SQLite (dialect.go), whose LIKE is
+	// already case-insensitive for ASCII -- the same compromise the
+	// repository and organisation listings make.
+	where := ""
+	var countArgs []any
+	countBind := binder(&countArgs)
+	if search != "" {
+		p := countBind("%" + search + "%")
+		where = ` WHERE (username ILIKE ` + p + ` OR email ILIKE ` + p + `)`
+	}
+
+	var total int64
+	if err := s.db.QueryRow(ctx, `SELECT count(*) FROM users`+where, countArgs...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	var args []any
+	bind := binder(&args)
+	listWhere := ""
+	if search != "" {
+		p := bind("%" + search + "%")
+		listWhere = ` WHERE (username ILIKE ` + p + ` OR email ILIKE ` + p + `)`
+	}
+	limitP, offsetP := bind(limit), bind(offset)
+
+	rows, err := s.db.Query(ctx,
+		`SELECT id, username, email, is_admin, created_at FROM users`+listWhere+
+			` ORDER BY username LIMIT `+limitP+` OFFSET `+offsetP, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	out := []User{}
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.IsAdmin, &u.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, u)
+	}
+	return out, total, rows.Err()
+}
+
+// pageWindow clamps an offset-based page request. A limit outside the range
+// falls back to the default rather than erroring, matching ListOrgs.
+func pageWindow(limit, offset int) (int, int) {
+	if limit <= 0 || limit > maxUserPageSize {
+		limit = defaultUserPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
+const (
+	defaultUserPageSize = 50
+	maxUserPageSize     = 200
+)
+
+// UpdateUserPassword replaces the stored bcrypt hash **and** revokes every
+// outstanding session, in one statement, returning the new session_epoch.
+//
+// The two used to be separate calls, which left a window where the password
+// had changed but the old cookies still worked -- a failure between them
+// meant the caller saw an error while a stale session stayed valid. There is
+// no caller that wants one without the other, so the pair is not a choice to
+// offer: a single UPDATE makes "changing a password revokes its sessions" an
+// invariant of the write rather than a rule every call site has to remember.
+// (RETURNING works on both engines; see dialect_sqlite.go's
+// updateExpRunAnnotation for the other use.)
+//
+// Access tokens are untouched. They are an independent credential and a
+// password change is not evidence about any of them
+// (docs/dev/api-contract.md §1.3).
+func (s *Store) UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) (int64, error) {
+	var epoch int64
+	err := s.db.QueryRow(ctx,
+		`UPDATE users SET password_hash = $2, session_epoch = session_epoch + 1
+		 WHERE id = $1 RETURNING session_epoch`, userID, passwordHash).Scan(&epoch)
+	return epoch, norm(err)
+}
+
+// SetUserAdmin grants or revokes instance-wide administrator rights.
+// Revoking it from the last remaining administrator is ErrLastSiteAdmin: the
+// flag is the only thing that can hand it back, so an instance that loses its
+// last administrator can only be repaired from the database.
+//
+// The read-modify-write runs under an advisory lock rather than a row lock:
+// the rule is about the *count* of administrators, so two concurrent
+// demotions of two different accounts must not both observe two.
+func (s *Store) SetUserAdmin(ctx context.Context, userID int64, isAdmin bool) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+
+	if err := s.d.advisoryXactLock(ctx, tx, "site-admins", 0); err != nil {
+		return err
+	}
+	var current bool
+	if err := tx.QueryRow(ctx, `SELECT is_admin FROM users WHERE id = $1`, userID).Scan(&current); err != nil {
+		return norm(err)
+	}
+	if current && !isAdmin {
+		var admins int64
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM users WHERE is_admin`).Scan(&admins); err != nil {
+			return err
+		}
+		if admins <= 1 {
+			return ErrLastSiteAdmin
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE users SET is_admin = $2 WHERE id = $1`, userID, isAdmin); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// CreateToken inserts a new access token. expiresAt is nil for a token that
+// never expires; otherwise it is the caller-computed instant the token stops
+// working, already resolved to an absolute time so this method (and the
+// PostgreSQL/SQLite dialects it runs against) never has to do date
+// arithmetic itself.
+func (s *Store) CreateToken(ctx context.Context, userID int64, name, scope, tokenHash string, expiresAt *time.Time) (*AccessToken, error) {
 	t := &AccessToken{}
 	err := s.db.QueryRow(ctx,
-		`INSERT INTO access_tokens (user_id, name, token_hash, scope) VALUES ($1, $2, $3, $4)
-		 RETURNING id, user_id, name, scope, last_used_at, created_at`,
-		userID, name, tokenHash, scope,
-	).Scan(&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.CreatedAt)
+		`INSERT INTO access_tokens (user_id, name, token_hash, scope, expires_at) VALUES ($1, $2, $3, $4, $5)
+		 RETURNING id, user_id, name, scope, last_used_at, expires_at, created_at`,
+		userID, name, tokenHash, scope, expiresAt,
+	).Scan(&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.ExpiresAt, &t.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("insert token: %w", err)
 	}
@@ -129,9 +266,12 @@ func (s *Store) TouchToken(ctx context.Context, id int64) error {
 	return err
 }
 
+// ListTokens returns every token the user holds, including expired ones --
+// the owner needs to see why a token stopped working and still be able to
+// delete it, so expiry is not a filter here (only LookupToken enforces it).
 func (s *Store) ListTokens(ctx context.Context, userID int64) ([]AccessToken, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT id, user_id, name, scope, last_used_at, created_at
+		`SELECT id, user_id, name, scope, last_used_at, expires_at, created_at
 		 FROM access_tokens WHERE user_id = $1 ORDER BY created_at DESC`, userID)
 	if err != nil {
 		return nil, err
@@ -141,7 +281,7 @@ func (s *Store) ListTokens(ctx context.Context, userID int64) ([]AccessToken, er
 	out := []AccessToken{}
 	for rows.Next() {
 		var t AccessToken
-		if err := rows.Scan(&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.ExpiresAt, &t.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -149,6 +289,8 @@ func (s *Store) ListTokens(ctx context.Context, userID int64) ([]AccessToken, er
 	return out, rows.Err()
 }
 
+// DeleteToken revokes a token regardless of whether it has already expired --
+// an expired row is still the owner's to clean up.
 func (s *Store) DeleteToken(ctx context.Context, userID, id int64) error {
 	n, err := s.db.Exec(ctx, `DELETE FROM access_tokens WHERE id = $1 AND user_id = $2`, id, userID)
 	if err != nil {

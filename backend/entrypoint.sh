@@ -29,6 +29,30 @@ if [ -z "${TF_LITESTREAM_REPLICA_URL:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 1b. Refuse `gc` outright in this mode.
+#
+#    Everything below restores a *snapshot* of the database from the replica.
+#    That is fine for a reader, and fine for `serve`, which then owns the only
+#    current copy and streams its own writes back. It is not fine for `gc`:
+#    reference-counted collection decides an object is garbage by not finding
+#    a row for it, so a snapshot taken before the latest uploads makes gc
+#    conclude that live LFS payloads are unreferenced and delete them from the
+#    bucket. DeleteOrphanedLFSObject re-checks under a row lock, but that lock
+#    is in a different database file from the one the live server is using, so
+#    it coordinates nothing. Its own row deletions would then be dropped on
+#    exit as well, since this script never replicates a non-serve subcommand.
+#
+#    infra/main.tf does not create the gc Job in sqlite mode; this is the
+#    backstop for a hand-run `gcloud run jobs execute`. Reclaiming storage
+#    under sqlite has to happen inside the serving process instead.
+# ---------------------------------------------------------------------------
+if [ "${1:-serve}" = "gc" ]; then
+  echo "entrypoint: refusing to run gc against a Litestream-restored SQLite snapshot." >&2
+  echo "entrypoint: it would delete LFS objects uploaded after the snapshot was taken." >&2
+  exit 64
+fi
+
+# ---------------------------------------------------------------------------
 # 2. Derive the local SQLite file path from DATABASE_URL.
 #    sqlite:///data/db/thinkingface.db -> /data/db/thinkingface.db
 #    (strip the "sqlite://" scheme prefix, then drop a trailing "?query"
@@ -69,11 +93,14 @@ litestream restore -if-db-not-exists -if-replica-exists -o "$DB_PATH" "$TF_LITES
 #    process for `replicate` to attach to, so it's run directly instead.
 #
 #    NOTE: writes made by non-serve subcommands are NOT replicated back to
-#    the GCS replica by this script. Today `compact` (the only one the
-#    Cloud Run Job invokes, see infra/main.tf) only reads the DB, so this
-#    is safe. If a future subcommand needs to persist SQLite writes, it
-#    must either run through `litestream replicate` too or explicitly
-#    push a new snapshot before exiting.
+#    the GCS replica by this script, and non-serve subcommands read a
+#    restored snapshot rather than the live database. `compact` (the only
+#    one the Cloud Run Job invokes in this mode, see infra/main.tf) only
+#    reads, so it is safe on both counts. `gc` is unsafe on both and is
+#    refused in step 1b. A future subcommand that needs to persist SQLite
+#    writes must either run through `litestream replicate` too or push a
+#    new snapshot before exiting -- and one whose *correctness* depends on
+#    seeing the live database, as gc's does, cannot run here at all.
 # ---------------------------------------------------------------------------
 cmd=${1:-serve}
 if [ "$cmd" = "serve" ]; then

@@ -116,6 +116,21 @@ domain strategy for your environment.
 
 ### Reference-counted GC (`thinkingface gc`)
 
+!!! warning
+    **The gc Job exists in `postgres` mode only.** Under
+    `database_backend = "sqlite"` it is not created, and `backend/entrypoint.sh`
+    refuses `gc` even if a Job is invoked by hand, so a stray
+    `gcloud run jobs execute ... --args=gc,--yes` exits 64 without touching the
+    bucket. The reason is not just that a non-`serve` subcommand's SQLite writes
+    are never replicated back: gc would be reading a Litestream-**restored
+    snapshot** while the live `serve` instance owns the only current copy of the
+    database. Any LFS object uploaded since that snapshot has no row in the
+    Job's copy, so gc would conclude it is unreferenced and delete bytes a
+    repository is still serving. `DeleteOrphanedLFSObject`'s row lock cannot
+    coordinate across two different database files. Reclaiming storage under
+    sqlite has to happen inside the serving process, which is separate work.
+
+
 `thinkingface gc`'s own default is `--dry-run`: it reports orphaned `lfs/`
 and `blobs/` objects without deleting anything. The `gc` Job mirrors that —
 `var.gc_delete_enabled` (default `false`) controls whether the Job's `args`

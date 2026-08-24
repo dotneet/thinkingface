@@ -62,8 +62,8 @@ output "compact_job_name" {
 }
 
 output "gc_job_name" {
-  description = "Cloud Run Job name for reference-counted GC (`thinkingface gc`). See var.gc_delete_enabled for whether scheduled runs actually delete anything."
-  value       = google_cloud_run_v2_job.gc.name
+  description = "Cloud Run Job name for reference-counted GC (`thinkingface gc`), or null in sqlite mode where the Job is not created. See var.gc_delete_enabled for whether scheduled runs actually delete anything."
+  value       = one(google_cloud_run_v2_job.gc[*].name)
 }
 
 output "web_url" {

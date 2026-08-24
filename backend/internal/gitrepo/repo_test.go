@@ -2,6 +2,7 @@ package gitrepo
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os/exec"
 	"sort"
@@ -471,6 +472,51 @@ func TestCommit_FirstCommitNoParentAndHeadPointsAtBranch(t *testing.T) {
 	}
 
 	assertRepoHealthy(t, repo.Dir())
+}
+
+// SetHead is the on-disk half of PATCH /api/v1/repos/{kind}/{ns}/{name}
+// (default_branch): it must repoint the bare repository's HEAD symref, the
+// same thing --initial-branch= sets at Init time, so a fresh `git clone`
+// checks out the new branch.
+func TestRepo_SetHead_RepointsSymbolicRef(t *testing.T) {
+	_, repo := newTestRepo(t)
+	mustCommit(t, repo, "main", "on main", addOp("README.md", "hello"))
+	otherHash := mustCommit(t, repo, "release", "on release", addOp("VERSION", "1.0"))
+
+	if err := repo.SetHead(context.Background(), "release"); err != nil {
+		t.Fatalf("SetHead: %v", err)
+	}
+
+	out := runGit(t, repo.Dir(), "symbolic-ref", "HEAD")
+	if strings.TrimSpace(out) != "refs/heads/release" {
+		t.Fatalf("HEAD symbolic-ref = %q, want refs/heads/release", strings.TrimSpace(out))
+	}
+	// HeadSHA (an empty-rev Resolve) follows HEAD, so this is the read path a
+	// client's `git clone` and this codebase's own HeadSHA() exercise, not
+	// just symbolic-ref's own bookkeeping.
+	if got := repo.HeadSHA(); got != otherHash.String() {
+		t.Fatalf("HeadSHA() after SetHead(release) = %s, want %s", got, otherHash)
+	}
+
+	assertRepoHealthy(t, repo.Dir())
+}
+
+// A branch name that is not a valid git ref component (rather than one that
+// simply does not exist -- callers are expected to have checked existence
+// via RefTarget first) must not reach gitexec as a bare string concatenated
+// into an argument.
+func TestRepo_SetHead_RejectsInvalidBranchName(t *testing.T) {
+	_, repo := newTestRepo(t)
+	mustCommit(t, repo, "main", "on main", addOp("README.md", "hello"))
+
+	if err := repo.SetHead(context.Background(), "../../etc/passwd"); err == nil {
+		t.Fatalf("SetHead(%q) succeeded, want a validation error", "../../etc/passwd")
+	}
+
+	out := runGit(t, repo.Dir(), "symbolic-ref", "HEAD")
+	if strings.TrimSpace(out) != "refs/heads/main" {
+		t.Fatalf("HEAD symbolic-ref = %q after a rejected SetHead, want unchanged refs/heads/main", strings.TrimSpace(out))
+	}
 }
 
 // ------------------------------------------------------------- validatePath

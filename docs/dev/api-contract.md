@@ -17,6 +17,11 @@ The confirmed specification between the backend (Go) and frontend (Next.js), and
   back. A non-matching `Origin` gets no CORS headers at all (the request itself still goes through).
   When unset, the default is the origin of `TF_PUBLIC_URL`, plus, if `TF_PUBLIC_URL` is not https,
   `http://localhost:3000` / `http://127.0.0.1:3000`. `Vary: Origin` is always attached.
+  `Access-Control-Expose-Headers` names what browser JS is allowed to read back: `ETag`,
+  `X-Repo-Commit`, `X-Linked-Etag`, `X-Linked-Size`, `Content-Length`, `Content-Range`,
+  `Accept-Ranges`, `Location`. `Content-Range` / `Accept-Ranges` are on the list so a
+  cross-origin range read of `resolve` can tell which bytes it was given — a header left off
+  it is invisible to the caller, not merely unadvertised.
 - **CSRF**: For requests other than GET/HEAD/OPTIONS authenticated via cookie session,
   if the `Origin` (or the `Referer`'s origin if absent) doesn't match the allowlist, the response
   is **403 `forbidden`**. Requests with neither `Origin` nor `Referer` are allowed through
@@ -151,9 +156,22 @@ experiment repository is a dataset, and it also appears in `GET /api/datasets`. 
 `GET /api/v1/namespaces/{ns}`, conversely, splits `num_datasets` and `num_experiments` (§1.2).
 
 ### Token management
-- `GET /api/v1/tokens` → `{"items": [{id, name, scope, created_at, last_used_at}]}`
-- `POST /api/v1/tokens` req `{"name","scope":"read"|"write"}` → `{id, name, scope, token}` (`token` is returned only at creation time, with a `tf_` prefix)
-- `DELETE /api/v1/tokens/{id}` → 204
+- `GET /api/v1/tokens` → `{"items": [{id, name, scope, created_at, last_used_at, expires_at}]}`.
+  Includes expired tokens (`expires_at` in the past) -- the list never filters on expiry, so the
+  owner can see why a token stopped working and still delete it.
+- `POST /api/v1/tokens` req `{"name","scope":"read"|"write","expires_in_days"?: number | null}` →
+  `{id, name, scope, expires_at, token}` (`token` is returned only at creation time, with a `tf_`
+  prefix)
+- `DELETE /api/v1/tokens/{id}` → 204. Works on an expired token the same as a live one.
+
+`expires_in_days` omitted, `null`, or `0` means the token never expires (`expires_at` is `null`).
+Otherwise it must be a positive integer up to **365**; anything negative or over that cap is 400
+`bad_request`. The expiry is resolved to an absolute UTC instant in Go at request time
+(`time.Now().UTC().AddDate(0, 0, days)`) rather than left to the database's own date arithmetic,
+so PostgreSQL and SQLite cannot disagree about it. `LookupToken` (used by every authenticated
+request) rejects a token once `expires_at` has passed, indistinguishably from a token that never
+existed -- an unauthenticated caller learns nothing about whether a given token string used to be
+valid.
 
 ### 1.1 Organizations
 
@@ -325,6 +343,136 @@ type SSHKeyItem = {
   revealing which account holds it). Because public-key authentication resolves the user from the
   key alone, the same key can't be shared across two accounts.
 - `last_used_at` is the time the key was used to authenticate an SSH session.
+
+### 1.3 Passwords and site administration
+
+`TF_ADMIN_PASSWORD` only ever applies to the *first* boot of an empty instance (`seedAdmin`
+returns immediately once `CountUsers() > 0`), so these endpoints are the only way to change a
+password after that — and the only way to appoint a second site administrator.
+
+```ts
+type AdminUser = {
+  id: number
+  username: string
+  email: string
+  is_admin: boolean        // the instance-wide flag, not an organization role
+  created_at: string
+}
+```
+
+`AdminUser` deliberately has no password field of any kind. The stored bcrypt hash lives on
+`store.User` and is never copied onto a wire type.
+
+All three endpoints below run bcrypt, so all three answer the two throttling responses §1's login
+endpoint documents, and they mean the same things here: **429 `rate_limited`** when the caller's own
+per-address failure budget is spent, and **503 `overloaded`** when no bcrypt slot came free. The
+second is the server's capacity, not the caller's conduct, and must not be reported as the first.
+
+Writing a password is atomic with revoking that account's sessions — one `UPDATE` sets the hash and
+increments `session_epoch` together, so no failure can leave old cookies valid against a new
+password. `PATCH /api/v1/me/password` re-signs the caller's own cookie from the epoch that write
+returns.
+
+#### `PATCH /api/v1/me/password`
+
+Write scope required. req `{"current_password": string, "new_password": string}` → **204**.
+
+- `current_password` is always verified, even though the caller is already authenticated:
+  holding a session is not on its own permission to replace the credential it was minted from.
+  A wrong one is **401** (`unauthorized`), and the failure counts against the same per-address
+  and per-username buckets as the login form.
+- `new_password` is validated by exactly the rule sign-up uses — at least 8 bytes, at most
+  `auth.MaxPasswordBytes` (72). Both call the same `validatePassword` helper, so a password
+  that could not be registered cannot be reached by changing to it either. **400** otherwise.
+- On success every session is revoked (`BumpSessionEpoch`) **and the calling browser's
+  `tf_session` cookie is re-issued at the new epoch**, so changing your password does not sign
+  you out of the tab you changed it in. A token-authenticated caller holds no cookie and is
+  issued none.
+- **Access tokens are deliberately *not* revoked.** A token is an independent credential with
+  its own lifecycle and its own revocation UI (§1 "Token management"); a password change is
+  evidence about the password, not about any token minted from the account. Revoking every
+  token on a routine rotation would break unattended clients (CI, `git`, the `tf` CLI) for a
+  threat the change does not address — someone who wants a token gone deletes that token.
+
+#### `GET /api/v1/admin/users`
+
+Site administrators only (`users.is_admin`); **403** for anyone else, said out loud rather than
+hidden behind a 404. Reading is enough — a read-scoped token works.
+
+Query: `search` (case-insensitive substring of the username *or* the email), `limit` (default
+50, capped at 200), `offset`. res 200:
+
+```json
+{ "items": [ /* AdminUser */ ], "total": 12 }
+```
+
+`total` counts every account matching `search`, ignoring the page window.
+
+#### `POST /api/v1/admin/users`
+
+Site administrators only, write scope. req:
+
+```json
+{ "username": "dana", "email": "dana@example.com", "password": "…", "is_admin": false }
+```
+
+res **201** `{"user": AdminUser}`.
+
+- **`TF_ALLOW_SIGNUP` is deliberately not consulted.** That flag closes the public
+  `/api/v1/auth/signup` form; an instance run that way still has to be able to gain accounts,
+  and this is the route that does it. Gating it on the same flag would make
+  `TF_ALLOW_SIGNUP=false` a one-way door with no way to add a colleague short of editing the
+  database.
+- Validation is shared with `handleSignup` down to the helper: `validateNamespaceName` (an
+  account is also a namespace, so the reserved list of `docs/dev/organization-design.md` §6.3
+  applies — a reserved name answers 400 `reserved_name`), `validatePassword`, `validateEmail`.
+  All of it runs before `CreateUser`, so a rejected request creates neither an account nor a
+  namespace.
+- `is_admin` is optional and defaults to false. Setting it is how an instance gets its second
+  site administrator without a two-step create-then-promote.
+- A username already held by an account **or an organization** is 409 `conflict` —
+  `CreateUser` inserts the user and its namespace in one transaction.
+- **No session cookie is issued.** `handleSignup` mints one because the caller *is* the new
+  account; here the caller is somebody else, and replacing the administrator's own session with
+  the new user's would sign them out of their own browser.
+- There is no email round trip and no invitation flow: the administrator hands the password
+  over out of band, and the new user changes it at `PATCH /api/v1/me/password`.
+
+#### `PATCH /api/v1/admin/users/{username}`
+
+Site administrators only, write scope. req — both fields optional, an absent one is left
+unchanged:
+
+```json
+{ "password": "…", "is_admin": true }
+```
+
+res 200 `{"user": AdminUser}`. Errors:
+
+| Status | Type | When |
+|---|---|---|
+| 400 | `bad_request` | Neither field set (a body that changes nothing is refused rather than answered 200), or an invalid `password` |
+| 400 | `self_demote` | An attempt to clear **your own** `is_admin`. Its own type so the UI can translate it; the web UI leaves the control off your own row, so it answers a race or a hand-made request |
+| 403 | `forbidden` | The caller is not a site administrator, or holds a read-only token |
+| 404 | `not_found` | No account with that username |
+| 409 | `last_admin` | Clearing `is_admin` would leave the instance with no site administrator |
+
+Everything that can fail on its own terms — validation, the target lookup, the self-demotion rule,
+and the bcrypt hash — completes before the first durable write, so a refused request cannot have
+granted administrator rights on its way out. The two writes are not wrapped in a single
+transaction: `SetUserAdmin` goes first because it is the one that can still refuse (409), the
+password write carries its own revocation, and what remains between them is an infrastructure
+failure that an identical retry converges from.
+
+Setting `password` revokes the *target's* sessions (their tokens, again, survive). The
+self-demotion 400 makes the 409 unreachable through this endpoint in practice — any other
+account the caller could demote implies a second administrator exists — so `store.ErrLastSiteAdmin`
+is a guard against a concurrent demotion rather than an everyday answer.
+
+**Audit**: there is no site-wide audit table. `org_audit_log` is keyed by namespace and these
+actions have none, and three verbs do not justify a migration, so every account created, every
+password reset and every `is_admin` change is recorded as a structured `slog.Info` line naming
+the actor, the target, and what changed — never the password itself, in either direction.
 
 ---
 
@@ -519,6 +667,74 @@ jump to the top of "recently updated").
 - `RepoDetail.can_write` becomes false while archived (all edit affordances disappear at once).
   `can_admin` stays true — the owner can unarchive.
 - Webhook: delivers `repo.archived` / `repo.unarchived`.
+
+### Changing the default branch
+```
+PATCH /api/v1/repos/{kind}/{ns}/{name}   req RepoUpdateRequest {default_branch?: string}
+      → 200 {"repo": RepoDetail}
+```
+A partial update over repository configuration; `default_branch` is the only field today, and the
+request must set it (400 `bad_request` otherwise). Fixes the common "pushed to `master`, meant
+`main`" mistake without a re-push; before this the column was only ever set by `CreateRepo`, so
+there was no way to correct it short of editing the database. `RepoUpdateRequest` is shaped for
+future fields: every field is a pointer and absent ones are left alone.
+
+- Permission: namespace admin (the owner of a personal namespace, or an org admin) and site admin
+  only — the same line drawn for archive/transfer/delete, not a plain write member. Unlike
+  archive/unarchive, this is **not** allowed while the repository is archived (403
+  `repository_archived`) — switching branches changes what clone/tree/card/lineage read, which is
+  a content-adjacent change, not the unarchive escape hatch.
+- 404 `not_found` if `default_branch` names a branch that does not exist in the repository
+  (checked against `refs/heads/{branch}`, not merely "some ref with this name" — a tag of the same
+  name does not count). Idempotent: setting it to its current value returns 200 and does nothing
+  else described below.
+- Effect:
+  - The bare repository's `HEAD` symref is repointed at `refs/heads/{branch}` (`gitrepo.Repo.SetHead`,
+    the same mechanism `--initial-branch=` sets at creation time) — this is what a plain `git clone`
+    of the repository checks out afterwards.
+  - `repositories.default_branch` is updated (`store.SetRepoDefaultBranch`), bumping `updated_at`
+    like an ordinary push does (unlike archiving, which leaves it alone).
+  - A sync job is enqueued for the new default branch with `old_sha == new_sha` (its current tip):
+    `head_sha` / the parsed README card / lineage / `is_experiment` are only refreshed by the sync
+    worker for `job.Ref == repositories.default_branch` (`internal/syncer/syncer.go`), so a branch
+    pushed to before it became the default — the case this endpoint exists for — still carries the
+    *previous* default branch's metadata until this runs; `repo_files` and the parquet index are
+    refreshed unconditionally by the same job, so re-running them when the branch was already
+    indexed is harmless. Because `old_sha == new_sha`, the resulting `repo.push` webhook (below)
+    reports `changed_files: 0` — a subscriber can tell this apart from an actual push to the same
+    ref. This also means the response's `head_sha` / `card` / `parquet_files` can be momentarily
+    stale until that job finishes (`RepoDetail.indexing` reports it, same as right after repository
+    creation).
+  - The reindex is queued **even when the branch is already the default**, where nothing else is
+    written. That is what makes retrying the request a repair: if an earlier attempt updated
+    `HEAD` and the row and then failed to queue the job (500), repeating it queues the job and
+    the metadata catches up.
+  - A failed enqueue is **not** rolled back. `HEAD` and the row already agree on the new branch
+    by that point, so the repository is consistent and only its index is stale. Undoing the
+    switch would mean writing to the store that just refused a write, and the outage that failed
+    the enqueue fails the undo too — leaving `HEAD` and the row naming different branches, which
+    is worse than a stale index. If the **row** write fails, `HEAD` is put back, since that is the
+    one pair that must never disagree: a clone follows `HEAD` while every listing reads the row.
+  - **Not atomic across the two stores.** `HEAD` (a file) and `default_branch` (a row) are
+    separate writes with no lock spanning them, so two concurrent `PATCH`es naming *different*
+    branches can interleave and leave the two disagreeing. It is bounded and self-healing — any
+    later `PATCH` (including a same-value one) puts them back in step — and it is not worth a
+    cross-store lock: under `TF_WAL_MODE=authoritative` the bare repository is per-instance local
+    state materialised from the WAL, so "the" `HEAD` is not a single shared object to begin with,
+    which is the same reason `alignHEAD` below cannot resolve it either.
+  - Webhook: no dedicated event was added for this. `repo.push` fires once the reindex above
+    completes (payload as documented in §9), which is enough signal for a mirroring consumer that
+    the default branch's effective content may have changed; a purpose-built event would carry
+    marginal value over that plus the response's own `default_branch`.
+  - Not touched: `wal.materialize.alignHEAD`'s cache-rebuild heuristic (`internal/wal/materialize.go`)
+    still does not know about `repositories.default_branch` — it keeps `HEAD` if its current target
+    still exists in the index, else prefers `refs/heads/main`, else the alphabetically first branch.
+    That is a pre-existing limitation (its own `TODO(continuity-design)`), not something this
+    endpoint changes, but it is more likely to be visibly wrong now that a repository's default
+    branch can deliberately be something other than `main`: a WAL cache rebuild of such a
+    repository can reset its bare-repo `HEAD` to the heuristic's answer rather than the configured
+    default until the next push realigns it. Fixing this needs the symref recorded in the WAL index
+    itself (a format change), which is out of scope here.
 
 ### `POST /api/repos/move`  (HF-compatible: `HfApi.move_repo`)
 req: `{"fromRepo":"alice/foo","toRepo":"team/foo","type":"model"|"dataset"}`
@@ -935,15 +1151,22 @@ Constraints and status codes:
   - `X-Repo-Commit: <commit sha>`
   - `X-Linked-Etag` / `X-Linked-Size` (for LFS)
   - `Content-Length`, `Content-Type`, `Accept-Ranges: bytes`
-- Range requests are supported (regular files from memory, LFS via a storage range read).
+- Range requests are supported on both paths: a regular file streams the requested slice straight
+  out of the git blob (never buffered — these run to gigabytes), LFS uses a storage range read. One
+  range per request (`bytes=a-b` / `bytes=a-` / `bytes=-n`); a satisfiable one answers 206 with
+  `Content-Range`, while an unparseable, multi-range or unsatisfiable one falls back to 200 with the
+  whole body rather than 416. A HEAD ignores `Range` and always reports the full `Content-Length`,
+  which is what `hf_hub_download` reads the size from.
 - Download stats: once a request is known not to be for a directory, it counts as 1 request = 1
-  count, UPSERTed into `repo_download_stats(repo_id, date, count)`. Both HEAD and an LFS 302 count
-  as one (range splitting, or a client's actual fetch from the GCS location a 302 pointed to, isn't
+  count, and **the same single count advances both counters** — the running total
+  `repositories.downloads` and today's row in `repo_download_stats(repo_id, date, count)`
+  (UPSERTed). One rule governs both, so the last-30-days figure is always a window over the same
+  total the UI shows it beside, and can never exceed it. Both HEAD and an LFS 302 count as one
+  (range splitting, or a client's actual fetch from the GCS location a 302 pointed to, isn't
   counted — that traffic doesn't pass through this server, so there's no way to observe it).
-  Recording happens in a goroutine decoupled from the request's response path; a failure there is
-  only logged and doesn't affect the response (`Server.recordDownload` → `store.RecordDownload`).
-  The running total is the existing `repositories.downloads` (unchanged — that one doesn't count
-  HEAD).
+  Recording happens in a goroutine decoupled from the request's response path; a failure on either
+  write is only logged and doesn't affect the response (`Server.recordDownload` →
+  `store.IncrementDownloads` + `store.RecordDownload`).
 
 ### `GET /api/v1/raw/{kind}/{ns}/{name}/{rev}/{path...}`  (for the UI preview)
 res: `{"path","size","truncated":bool,"content":"...","encoding":"utf-8"|"base64"}`

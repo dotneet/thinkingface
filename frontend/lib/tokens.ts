@@ -8,10 +8,11 @@ export function listTokens(): Promise<ApiResult<{ items: TokenItem[] }>> {
 export function createToken(
   name: string,
   scope: "read" | "write",
+  expiresInDays?: number | null,
 ): Promise<ApiResult<CreateTokenResponse>> {
   return apiFetch<CreateTokenResponse>("/api/v1/tokens", {
     method: "POST",
-    body: { name, scope },
+    body: { name, scope, expires_in_days: expiresInDays ?? null },
   });
 }
 
