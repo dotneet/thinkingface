@@ -147,7 +147,15 @@ func (s *Server) handleHFRefs(w http.ResponseWriter, r *http.Request) {
 			tags = append(tags, ref{Name: n, Ref: "refs/tags/" + n, TargetCommit: h.String()})
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"branches": branches, "tags": tags, "converts": []any{}})
+	// `converts` and `pullRequests` are always empty and always present.
+	// huggingface_hub's list_repo_refs subscripts them rather than using
+	// .get(): `include_pull_requests=True` raised KeyError on this response
+	// until pullRequests was here, which is a crash for asking a question
+	// whose honest answer is "none". Neither feature exists on this server,
+	// so the empty list *is* the answer.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"branches": branches, "tags": tags, "converts": []any{}, "pullRequests": []any{},
+	})
 }
 
 type hfTreeEntry struct {

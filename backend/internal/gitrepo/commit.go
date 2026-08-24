@@ -23,6 +23,12 @@ const (
 	OpAdd OpKind = iota
 	OpDelete
 	OpDeleteDir
+	// OpCopy puts an existing blob at a second path. It is what
+	// huggingface_hub's CommitOperationCopy asks for, and it is a hash copy
+	// rather than a byte copy on purpose: the source is already an object in
+	// this repository, so nothing has to be read, buffered or re-hashed, and
+	// the cost is the same for a 2KB README and a 40GB LFS pointer's target.
+	OpCopy
 )
 
 type Op struct {
@@ -30,7 +36,11 @@ type Op struct {
 	Path string
 	// Data is the literal file content for OpAdd. For an LFS file the caller
 	// passes the pointer bytes (see FormatLFSPointer).
-	Data       []byte
+	Data []byte
+	// SrcHash is the blob OpCopy points the new path at. It must already be
+	// an object in this repository -- Commit refuses a hash it cannot find
+	// rather than writing a tree entry with nothing behind it.
+	SrcHash    plumbing.Hash
 	Executable bool
 }
 
@@ -46,6 +56,20 @@ type CommitRequest struct {
 	Author    Signature
 	Ops       []Op
 	AllowNoop bool
+	// ParentCommit is an optimistic lock on the branch as a whole: when it is
+	// set, the commit only applies if the branch's head is that commit. It is
+	// huggingface_hub's `create_commit(parent_commit=...)`, whose whole point
+	// is that a repository someone else moved must not be written to.
+	//
+	// The value is a lowercase hex prefix of at least 7 characters -- the
+	// shorthand form huggingface_hub documents -- matched against the head
+	// this commit would build on. An unborn branch matches nothing at all,
+	// including a prefix of zeroes.
+	//
+	// Checked here rather than by the caller for the same reason
+	// Preconditions are: the parent is selected under this mutex, so a check
+	// made before the call is already stale by the time the tree is built.
+	ParentCommit string
 	// Preconditions are optimistic locks checked against the parent commit
 	// under the same mutex that selects it. Validating a path's state before
 	// calling Commit is not enough: between that check and the commit,
@@ -60,6 +84,25 @@ type CommitRequest struct {
 type PathPrecondition struct {
 	Path string
 	OID  string
+}
+
+// StaleParentError reports a ParentCommit that is not the branch's head. It is
+// deliberately its own type rather than a flavour of StalePathError: the
+// caller's answer for it is "your view of the branch is out of date, fetch and
+// decide again", which is not the same thing as the retryable contention every
+// other write conflict here reports.
+type StaleParentError struct {
+	Branch   string
+	Expected string
+	Actual   string // "" when the branch has no commits yet
+}
+
+func (e *StaleParentError) Error() string {
+	actual := e.Actual
+	if actual == "" {
+		actual = "<no commits>"
+	}
+	return fmt.Sprintf("commit: %s is at %s, not at the expected parent %s", e.Branch, actual, e.Expected)
 }
 
 // StalePathError reports a precondition that no longer holds; callers map it
@@ -113,6 +156,24 @@ func (r *Repo) Commit(req CommitRequest) (newHash, oldHash plumbing.Hash, err er
 		root = &dirNode{hash: parent.TreeHash}
 	}
 
+	// The branch-level lock is checked before the per-path ones, and against
+	// the same parent: a caller that named a parent commit is asserting the
+	// branch has not moved at all, so nothing else about the request matters
+	// once that is false.
+	if req.ParentCommit != "" {
+		// An unborn branch never matches: oldHash.String() is forty zeroes
+		// there, which a prefix of zeroes would otherwise satisfy.
+		if oldHash.IsZero() || !strings.HasPrefix(oldHash.String(), strings.ToLower(req.ParentCommit)) {
+			actual := ""
+			if !oldHash.IsZero() {
+				actual = oldHash.String()
+			}
+			return plumbing.ZeroHash, oldHash, &StaleParentError{
+				Branch: req.Branch, Expected: req.ParentCommit, Actual: actual,
+			}
+		}
+	}
+
 	// Preconditions are evaluated against the parent this very commit will
 	// build on — the only reading that makes the optimistic lock sound.
 	for _, pc := range req.Preconditions {
@@ -136,8 +197,8 @@ func (r *Repo) Commit(req CommitRequest) (newHash, oldHash plumbing.Hash, err er
 			return plumbing.ZeroHash, oldHash, err
 		}
 		switch op.Kind {
-		case OpAdd:
-			blobHash, bErr := r.writeBlob(op.Data)
+		case OpAdd, OpCopy:
+			blobHash, bErr := r.blobFor(op)
 			if bErr != nil {
 				return plumbing.ZeroHash, oldHash, bErr
 			}
@@ -262,6 +323,27 @@ func (r *Repo) writeEmptyTree() (plumbing.Hash, error) {
 		return plumbing.ZeroHash, fmt.Errorf("encode empty tree: %w", err)
 	}
 	return r.repo.Storer.SetEncodedObject(obj)
+}
+
+// blobFor resolves the blob an add-shaped op puts at its path: freshly written
+// from the request's bytes for OpAdd, an object already here for OpCopy.
+//
+// The existence check on the copy source is not a formality. A tree entry
+// naming an object the repository does not hold is a *corrupt* commit rather
+// than a failed one -- every later read of that path, and every clone, breaks
+// on it -- and the caller resolved that hash before this ran, with the WAL's
+// stale-ref retry free to rebuild the directory in between.
+func (r *Repo) blobFor(op Op) (plumbing.Hash, error) {
+	if op.Kind != OpCopy {
+		return r.writeBlob(op.Data)
+	}
+	if op.SrcHash.IsZero() {
+		return plumbing.ZeroHash, fmt.Errorf("commit: copy to %q names no source blob", op.Path)
+	}
+	if _, err := r.storer().EncodedObject(plumbing.BlobObject, op.SrcHash); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("commit: copy to %q from blob %s: %w", op.Path, op.SrcHash, err)
+	}
+	return op.SrcHash, nil
 }
 
 func (r *Repo) writeBlob(data []byte) (plumbing.Hash, error) {
