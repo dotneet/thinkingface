@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
+	"github.com/dotneet/thinkingface/backend/internal/lfs"
 	"github.com/dotneet/thinkingface/backend/internal/storage"
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
@@ -356,6 +358,33 @@ func TestUpload_OverThresholdGoesToLFSBySize(t *testing.T) {
 		t.Errorf("pointer size = %d, want %d", pointer.Size, len(big))
 	}
 
+	// Exactly the threshold is the boundary that matters: ShouldUseLFS (and
+	// therefore preupload, the HF commit path and git's own routing) treats
+	// `size >= LFSInlineThreshold` as LFS, so a 10MiB file uploaded from the
+	// browser has to land in LFS too. Routing it inline here would put a
+	// large blob in the object database that no other client would ever put
+	// there.
+	exact := bytes.Repeat([]byte("x"), gitrepo.LFSInlineThreshold)
+	resp = upload(t, f, "/api/v1/upload/model/alice/up/main", tok, "", []uploadPart{
+		{path: "exact.unknown", name: "exact.unknown", content: exact},
+	})
+	if resp.status() != 200 {
+		t.Fatalf("status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+	pointer, ok = gitrepo.ParseLFSPointer(readFile(t, f, r, "main", "exact.unknown"))
+	if !ok {
+		t.Fatalf("a file of exactly LFSInlineThreshold (%d) bytes was committed inline; "+
+			"ShouldUseLFS routes it to LFS, so this path must too", gitrepo.LFSInlineThreshold)
+	}
+	if pointer.Size != int64(len(exact)) {
+		t.Errorf("pointer size = %d, want %d", pointer.Size, len(exact))
+	}
+	// The routing decision must agree with the shared rule, not merely with
+	// this test's expectation of it.
+	if want := gitrepo.ParseGitAttributes(nil).ShouldUseLFS("exact.unknown", int64(len(exact))); !want {
+		t.Fatal("ShouldUseLFS no longer routes an exactly-threshold file to LFS; this test is asserting the wrong contract")
+	}
+
 	// Just under the threshold stays a plain blob.
 	small := bytes.Repeat([]byte("x"), gitrepo.LFSInlineThreshold-1)
 	resp = upload(t, f, "/api/v1/upload/model/alice/up/main", tok, "", []uploadPart{
@@ -633,5 +662,103 @@ func TestReadUploadPart_RefusesAnInlineFileOverTheRemainingBudget(t *testing.T) 
 	}
 	if len(op.Data) != 100 {
 		t.Errorf("committed %d bytes, want 100", len(op.Data))
+	}
+}
+
+// ------------------------------------------------------------ staging + errors
+
+// The staging object an in-flight upload streams into must live under the
+// prefix `thinkingface gc` sweeps by age. Nothing else records it, so a key
+// outside that prefix is an abandoned multi-gigabyte upload nothing ever
+// reclaims (see storage.LFSStagingPrefix's own comment).
+func TestIncomingUploadKey_IsSweptByGC(t *testing.T) {
+	key, err := incomingUploadKey(42)
+	if err != nil {
+		t.Fatalf("incomingUploadKey: %v", err)
+	}
+	if !strings.HasPrefix(key, storage.LFSStagingPrefix) {
+		t.Errorf("key = %q, want it under the swept staging prefix %q", key, storage.LFSStagingPrefix)
+	}
+	// Distinct per call: two concurrent uploads sharing a key would overwrite
+	// each other's bytes mid-digest.
+	other, err := incomingUploadKey(42)
+	if err != nil {
+		t.Fatalf("incomingUploadKey: %v", err)
+	}
+	if key == other {
+		t.Errorf("two calls produced the same key %q", key)
+	}
+	// Never collides with a real staging key, whose name is a 64-char digest.
+	if key == storage.LFSStagingKey(42, strings.Repeat("a", 64)) {
+		t.Errorf("key %q collides with the oid-named staging key space", key)
+	}
+}
+
+// A GC that removed the object between the copy and the link is contention,
+// not a fault: the emulator proxy upload answers it with a conflict and this
+// path must agree, or the browser is told to give up on something a retry
+// would fix.
+func TestWriteUploadPartError_StatusCodes(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"over the size ceiling", errUploadTooLarge, http.StatusRequestEntityTooLarge},
+		{"wrapped size ceiling", fmt.Errorf("write big.bin: %w", errUploadTooLarge), http.StatusRequestEntityTooLarge},
+		{"object collected mid-upload", fmt.Errorf("publish lfs object: %w", store.ErrLFSObjectGone), http.StatusConflict},
+		{"staged bytes vanished", fmt.Errorf("publish lfs object: %w", lfs.ErrNotStaged), http.StatusConflict},
+		{"anything else", errors.New("bucket unreachable"), http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			(&Server{}).writeUploadPartError(rec, "data/a.bin", tt.err)
+			if rec.Code != tt.want {
+				t.Errorf("status = %d, want %d (body %s)", rec.Code, tt.want, rec.Body.String())
+			}
+			// Storage and database text names buckets and connections; it
+			// must never be echoed to a client.
+			if strings.Contains(rec.Body.String(), "bucket unreachable") {
+				t.Errorf("response leaked the underlying error: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+// The web UI's "Create a new file" flow lets someone type a path whose
+// directories do not exist yet, and opens an empty editor for it (the page
+// tolerates a 404 from the parent listing for exactly this case). That only
+// works if the commit itself creates the missing levels, so pin it here.
+func TestEditFile_CreatesAFileInADirectoryThatDoesNotExistYet(t *testing.T) {
+	f := newArchiveFixture(t)
+	r := f.repo("alice", "new", "model")
+	seedFile(t, f, r, "README.md", []byte("# hi\n"))
+	tok := f.token(f.alice, "write")
+
+	// No base_oid: nothing is there to be stale against.
+	resp := f.do("PUT", "/api/v1/edit/model/alice/new/main/docs/notes/new.md", tok,
+		apitypes.EditFileRequest{Content: "# notes\n", Message: "Add notes"})
+	if resp.status() != 200 {
+		t.Fatalf("status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+	if got := string(readFile(t, f, r, "main", "docs/notes/new.md")); got != "# notes\n" {
+		t.Errorf("docs/notes/new.md = %q", got)
+	}
+
+	// An intentionally empty file is a real thing to create (a placeholder),
+	// so the editor enables Commit for it -- the API must accept one.
+	resp = f.do("PUT", "/api/v1/edit/model/alice/new/main/docs/notes/.gitkeep", tok,
+		apitypes.EditFileRequest{Content: ""})
+	if resp.status() != 200 {
+		t.Fatalf("empty file: status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+	var body apitypes.EditFileResponse
+	resp.json(t, &body)
+	if body.Size != 0 {
+		t.Errorf("size = %d, want 0", body.Size)
+	}
+	if got := string(readFile(t, f, r, "main", "docs/notes/.gitkeep")); got != "" {
+		t.Errorf("docs/notes/.gitkeep = %q, want empty", got)
 	}
 }

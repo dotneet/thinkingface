@@ -25,6 +25,7 @@ import (
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
+	"github.com/dotneet/thinkingface/backend/internal/lfs"
 	"github.com/dotneet/thinkingface/backend/internal/storage"
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
@@ -318,18 +319,40 @@ func (s *Server) readUploadPart(r *http.Request, repo *store.Repo, rules *gitrep
 		return gitrepo.Op{Kind: gitrepo.OpAdd, Path: target, Data: gitrepo.FormatLFSPointer(oid, size)}, nil
 	}
 
-	// Otherwise the size decides, and the only way to learn it is to read.
-	// Read one byte past the ceiling: that tells us the stream continued
-	// without having to trust a Content-Length the part does not carry.
-	limit := int64(maxUploadInlineBytes)
+	// Otherwise size decides, and the only way to learn it is to read.
 	if bySize {
-		limit = gitrepo.LFSInlineThreshold
+		// Read exactly the threshold. Filling the buffer means the file is
+		// at least LFSInlineThreshold bytes, which is precisely
+		// ShouldUseLFS's `size >= LFSInlineThreshold` -- the comparison has
+		// to match it exactly, or a file of exactly 10MiB takes a different
+		// route here than it does through preupload and lands in the object
+		// database as a large blob the contract says belongs in LFS.
+		// Reading *up to* the threshold (rather than one byte past it)
+		// leaves the two indistinguishable cases -- exactly the threshold,
+		// and more than it -- on the same side, which is where they belong.
+		head, err := io.ReadAll(io.LimitReader(part, gitrepo.LFSInlineThreshold))
+		if err != nil {
+			return gitrepo.Op{}, err
+		}
+		if int64(len(head)) >= gitrepo.LFSInlineThreshold {
+			oid, size, err := s.storeUploadedLFS(r, repo, io.MultiReader(bytes.NewReader(head), part))
+			if err != nil {
+				return gitrepo.Op{}, err
+			}
+			return gitrepo.Op{Kind: gitrepo.OpAdd, Path: target, Data: gitrepo.FormatLFSPointer(oid, size)}, nil
+		}
+		if int64(len(head)) > inlineBudget {
+			return gitrepo.Op{}, errUploadTooLarge
+		}
+		return gitrepo.Op{Kind: gitrepo.OpAdd, Path: target, Data: head}, nil
 	}
-	// Never read further than the request's remaining inline budget -- unless
-	// the part is one the size check may still hand to LFS, where reading up
-	// to the threshold is how that gets decided and the bytes are handed
-	// straight on to storage rather than kept.
-	if !bySize && limit > inlineBudget {
+
+	// .gitattributes negates LFS for this path, so there is nowhere for the
+	// bytes to go but a git blob however big the file turns out to be. The
+	// ceilings are caps rather than thresholds, so a file of exactly the cap
+	// is allowed and one byte more is refused -- hence reading one past it.
+	limit := int64(maxUploadInlineBytes)
+	if limit > inlineBudget {
 		limit = inlineBudget
 	}
 	head, err := io.ReadAll(io.LimitReader(part, limit+1))
@@ -337,19 +360,6 @@ func (s *Server) readUploadPart(r *http.Request, repo *store.Repo, rules *gitrep
 		return gitrepo.Op{}, err
 	}
 	if int64(len(head)) > limit {
-		if !bySize {
-			// .gitattributes negates LFS for this path, so there is nowhere
-			// for the bytes to go but a git blob -- and a blob this large is
-			// exactly what LFS exists to prevent.
-			return gitrepo.Op{}, errUploadTooLarge
-		}
-		oid, size, err := s.storeUploadedLFS(r, repo, io.MultiReader(bytes.NewReader(head), part))
-		if err != nil {
-			return gitrepo.Op{}, err
-		}
-		return gitrepo.Op{Kind: gitrepo.OpAdd, Path: target, Data: gitrepo.FormatLFSPointer(oid, size)}, nil
-	}
-	if int64(len(head)) > inlineBudget {
 		return gitrepo.Op{}, errUploadTooLarge
 	}
 	return gitrepo.Op{Kind: gitrepo.OpAdd, Path: target, Data: head}, nil
@@ -358,65 +368,50 @@ func (s *Server) readUploadPart(r *http.Request, repo *store.Repo, rules *gitrep
 // storeUploadedLFS streams one part into the object store and records it
 // against the repository, returning the pointer's oid and size.
 //
-// It is the same two-step the emulator's LFS proxy upload does, for the same
-// reason: the digest -- and therefore the object's only legitimate key -- is
-// not known until the last byte has been read, so the bytes land under a
-// scratch key first and are copied to storage.LFSKey(oid) once it is.
+// The bytes land under storage.LFSIncomingKey first because the digest --
+// and therefore the object's only legitimate key -- is not known until the
+// last byte has been read. That is the one thing this path does differently
+// from every other LFS upload, where the client declares the oid up front;
+// from there it hands over to lfs.PromoteStagedFrom, so the size check, the
+// server-side copy onto the content-addressed key, the link, the staging
+// cleanup and their ordering are the sequence the batch/verify and emulator
+// proxy paths run, not a second copy of it.
 //
-// Ordering is deliberate and matches every other LFS path here: bytes into
-// storage, *then* the index row (docs/dev/content-addressed-storage-design.md
-// §3-§5). A crash between the two leaves an object no row references, which
-// `thinkingface gc` reclaims; the reverse order would leave a row promising
-// bytes that are not there, which nothing repairs. A part that fails midway
-// leaves only the scratch key, which the bucket's own lifecycle rule on
-// tmp/uploads/ drops after a day.
+// Nothing streams through this process twice and nothing is buffered: Put
+// writes as the part arrives, and the promotion is a server-side copy.
 func (s *Server) storeUploadedLFS(r *http.Request, repo *store.Repo, src io.Reader) (string, int64, error) {
 	ctx := r.Context()
-	scratch, err := scratchUploadKey(repo.ID)
+	staging, err := incomingUploadKey(repo.ID)
 	if err != nil {
 		return "", 0, err
 	}
 	hashed := newHashingReader(&limitedReader{r: src, left: maxUploadFileBytes})
-	if err := s.storage.Put(ctx, scratch, hashed, "application/octet-stream"); err != nil {
-		_ = s.storage.Delete(ctx, scratch)
+	if err := s.storage.Put(ctx, staging, hashed, "application/octet-stream"); err != nil {
+		// Best effort: an object left here is swept by `thinkingface gc`'s
+		// staging pass once the grace period is up, which is exactly what
+		// that pass exists for.
+		_ = s.storage.Delete(ctx, staging)
 		return "", 0, err
 	}
 	oid, size := hashed.Result()
 
-	// Content-addressed, so this either creates the object or rewrites it
-	// with the identical bytes; a second uploader of the same file costs a
-	// copy and nothing else.
-	if err := s.storage.Copy(ctx, scratch, storage.LFSKey(oid)); err != nil {
-		_ = s.storage.Delete(ctx, scratch)
-		return "", 0, fmt.Errorf("store lfs object: %w", err)
-	}
-	_ = s.storage.Delete(ctx, scratch)
-
-	if err := s.store.RecordLFSObject(ctx, repo.ID, oid, size, func(key string) (bool, error) {
-		info, err := s.storage.Stat(ctx, key)
-		if errors.Is(err, storage.ErrNotFound) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		return size <= 0 || info.Size == size, nil
-	}); err != nil {
-		return "", 0, fmt.Errorf("record lfs object: %w", err)
+	if err := s.lfs.PromoteStagedFrom(ctx, repo.ID, oid, size, staging); err != nil {
+		_ = s.storage.Delete(ctx, staging)
+		return "", 0, fmt.Errorf("publish lfs object: %w", err)
 	}
 	return oid, size, nil
 }
 
-// scratchUploadKey names a per-request scratch object. The oid cannot be part
-// of it -- that is what the upload is computing -- so it is random: two
-// concurrent uploads of different files must never share a key, or one would
+// incomingUploadKey names the staging object one part is streamed into. The
+// oid cannot be part of it -- that is what the upload is computing -- so it is
+// random: two concurrent uploads must never share a key, or one would
 // overwrite the other's bytes halfway through the digest.
-func scratchUploadKey(repoID int64) (string, error) {
+func incomingUploadKey(repoID int64) (string, error) {
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", fmt.Errorf("generate upload key: %w", err)
 	}
-	return "tmp/uploads/web-" + strconv.FormatInt(repoID, 10) + "-" + hex.EncodeToString(nonce[:]), nil
+	return storage.LFSIncomingKey(repoID, hex.EncodeToString(nonce[:])), nil
 }
 
 // writeUploadPartError maps a failed part onto a response. Only the size
@@ -427,6 +422,16 @@ func (s *Server) writeUploadPartError(w http.ResponseWriter, target string, err 
 		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
 			fmt.Sprintf("%s is too large; a single file may be at most %d bytes, and files not stored in LFS at most %d bytes each and %d bytes per request",
 				target, int64(maxUploadFileBytes), int64(maxUploadInlineBytes), int64(maxUploadInlineTotalBytes)))
+		return
+	}
+	// A garbage collection that removed the object between the copy and the
+	// link is contention, not a fault: the same bytes uploaded again succeed.
+	// The emulator's LFS proxy upload answers the identical condition with a
+	// conflict, so this one does too rather than telling the browser the
+	// server broke.
+	if errors.Is(err, store.ErrLFSObjectGone) || errors.Is(err, lfs.ErrNotStaged) {
+		writeError(w, http.StatusConflict, "conflict",
+			target+" was removed from storage while it was being uploaded; retry the upload")
 		return
 	}
 	internalError(w, "store uploaded file", err)

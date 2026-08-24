@@ -28,6 +28,7 @@ export function FileEditor({
   baseOid,
   blobHref,
   cancelHref,
+  isNew = false,
   assetBaseUrl,
   repoRootUrl,
   linkContext,
@@ -47,6 +48,13 @@ export function FileEditor({
    * directory instead.
    */
   cancelHref?: string;
+  /**
+   * True when this editor is creating a file rather than changing one. It
+   * only affects whether Commit is enabled: creating an intentionally empty
+   * file (a `.gitkeep`-style placeholder) is a real thing to want, whereas
+   * committing an existing file back unchanged is not.
+   */
+  isNew?: boolean;
   assetBaseUrl: string;
   repoRootUrl: string;
   linkContext?: MarkdownLinkContext;
@@ -65,6 +73,11 @@ export function FileEditor({
   const [confirmDiscard, setConfirmDiscard] = useState(false);
 
   const dirty = content !== initialContent;
+  // A new file has nothing to differ from, so `dirty` would keep Commit
+  // disabled until the user typed something -- and typing then deleting it
+  // would disable it again. For an existing file the guard stays: it is what
+  // stops a no-op commit.
+  const canCommit = dirty || isNew;
 
   // Warn on tab close / hard navigation away from an unsaved edit. The
   // listener is only attached while dirty so it doesn't interfere with normal
@@ -117,7 +130,7 @@ export function FileEditor({
           value={content}
           onChange={setContent}
           onSubmit={() => {
-            if (dirty && !submitting) void handleSubmit();
+            if (canCommit && !submitting) void handleSubmit();
           }}
           markdown={isMarkdown}
           previewProps={{
@@ -151,7 +164,7 @@ export function FileEditor({
           <Button
             type="submit"
             variant="primary"
-            disabled={submitting || !dirty}
+            disabled={submitting || !canCommit}
             className="px-4 py-2"
           >
             {submitting && <LoaderCircle size={14} className="animate-spin" />}

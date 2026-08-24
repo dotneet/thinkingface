@@ -463,8 +463,14 @@ func (h *Handler) link(ctx context.Context, repoID int64, oid string, size int64
 // succeeds if the promoted object is present at the expected size, because
 // that is exactly what a completed promotion looks like.
 func (h *Handler) promote(ctx context.Context, repoID int64, oid string, size int64) error {
-	staging := storage.LFSStagingKey(repoID, oid)
+	return h.promoteFrom(ctx, repoID, oid, size, storage.LFSStagingKey(repoID, oid))
+}
 
+// promoteFrom is promote with the staging key spelled out, for the one caller
+// that cannot use storage.LFSStagingKey: the browser upload endpoint hashes
+// the bytes as it receives them, so they are already written somewhere by the
+// time their oid -- and therefore that key -- exists.
+func (h *Handler) promoteFrom(ctx context.Context, repoID int64, oid string, size int64, staging string) error {
 	info, err := h.storage.Stat(ctx, staging)
 	if errors.Is(err, storage.ErrNotFound) {
 		return h.promoteAlreadyDone(ctx, repoID, oid, size)
@@ -546,6 +552,23 @@ func (h *Handler) PromoteStaged(ctx context.Context, repoID int64, oid string, s
 		return errors.New("oid must be a sha256 hex digest")
 	}
 	return h.promote(ctx, repoID, oid, size)
+}
+
+// PromoteStagedFrom is PromoteStaged for bytes staged under a key the caller
+// chose, which only the browser upload endpoint needs: it computes the digest
+// from the stream rather than being told it, so it cannot name
+// storage.LFSStagingKey until the upload is already written (see
+// storage.LFSIncomingKey). Everything after that point -- the size check, the
+// copy onto the content-addressed key, the link, the staging cleanup, and
+// their ordering -- is the sequence every other upload path runs.
+func (h *Handler) PromoteStagedFrom(ctx context.Context, repoID int64, oid string, size int64, stagingKey string) error {
+	if !ValidOID(oid) {
+		return errors.New("oid must be a sha256 hex digest")
+	}
+	if stagingKey == "" {
+		return errors.New("lfs: staging key is required")
+	}
+	return h.promoteFrom(ctx, repoID, oid, size, stagingKey)
 }
 
 // Verify is the second half of a signed-URL upload: it promotes the staged

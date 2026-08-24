@@ -1,6 +1,9 @@
 package storage
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestLFSKey_ShapesAsTwoLevelFanOut(t *testing.T) {
 	oid := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
@@ -141,5 +144,29 @@ func TestWALKey_ResolvesIndexRelativeNames(t *testing.T) {
 		if got := WALKey(storagePath, tt.rel); got != tt.want {
 			t.Errorf("WALKey(%q) = %q, want %q", tt.rel, got, tt.want)
 		}
+	}
+}
+
+// Both staging keys have to sit under the prefix `thinkingface gc` sweeps, or
+// an interrupted upload is a multi-gigabyte object nothing ever reclaims --
+// nothing else records that one exists.
+func TestStagingKeys_LiveUnderTheSweptPrefix(t *testing.T) {
+	oid := "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+	for _, key := range []string{LFSStagingKey(7, oid), LFSIncomingKey(7, "deadbeef")} {
+		if !strings.HasPrefix(key, LFSStagingPrefix) {
+			t.Errorf("key %q is not under %q", key, LFSStagingPrefix)
+		}
+		if !strings.Contains(key, "/7/") {
+			t.Errorf("key %q does not carry the repository id", key)
+		}
+	}
+}
+
+// An incoming upload is named before its digest is known, so its name must not
+// be mistakable for an oid-named staging key.
+func TestLFSIncomingKey_DoesNotCollideWithOIDNamedStaging(t *testing.T) {
+	oid := "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+	if got := LFSIncomingKey(7, oid); got == LFSStagingKey(7, oid) {
+		t.Errorf("LFSIncomingKey(7, oid) = %q collides with the staging key for the same oid", got)
 	}
 }

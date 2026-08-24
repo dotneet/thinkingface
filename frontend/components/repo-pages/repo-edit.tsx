@@ -62,6 +62,16 @@ export async function RepoEdit({
     ? dirResult.data.entries.find((e) => e.path === filePath)
     : undefined;
 
+  // A file being created may name a directory that does not exist yet --
+  // "docs/notes/new.md" in a repository with no docs/ -- and the tree
+  // endpoint answers 404 for a path it cannot resolve. The commit creates
+  // every missing level (gitrepo's tree builder walks with create=true), so
+  // that 404 is the expected answer here rather than a failure. Every other
+  // way the listing can fail (backend down, no access) is still an error:
+  // narrowing on 404 alone keeps "the parent isn't there yet" from swallowing
+  // "we could not find out".
+  const parentNotCreatedYet = isNew && isNotFound(dirResult);
+
   if (dirResult.ok && !entry && !isNew) notFound();
 
   const trail = [
@@ -90,7 +100,7 @@ export async function RepoEdit({
     );
   }
 
-  if (!dirResult.ok) return editError(errorMessage(t, dirResult));
+  if (!dirResult.ok && !parentNotCreatedYet) return editError(errorMessage(t, dirResult));
   if (!entry && !isNew) return editError(t("repo.blob.fileNotFound"));
 
   if (!repo.can_write) {
@@ -151,6 +161,7 @@ export async function RepoEdit({
         baseOid={baseOid}
         blobHref={blobHref}
         cancelHref={entry ? blobHref : repoTreeHref(kind, ns, name, rev, dirPath.join("/"))}
+        isNew={!entry}
         assetBaseUrl={assetBaseUrl}
         repoRootUrl={repoRootUrl}
         linkContext={{ kind, ns, name, rev, dir: dirPath }}
