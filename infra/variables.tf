@@ -52,6 +52,26 @@ variable "tmp_uploads_retention_days" {
   default     = 1
 }
 
+variable "lfs_blobs_noncurrent_retention_days" {
+  description = <<-EOT
+    Days after an object under lfs/ or blobs/ becomes a noncurrent version
+    (i.e. days since `thinkingface gc` deleted it) before that noncurrent
+    version itself is deleted. This bucket has versioning enabled, so a gc
+    delete alone never frees storage -- it just makes the object noncurrent,
+    and the bytes keep being billed until something removes the noncurrent
+    version too. This is that removal step.
+
+    Deliberately does not apply to wal/: an old generation of
+    wal/{storage_path}/index.json is the only recovery path for a corrupted
+    or deleted WAL index (docs/dev/continuity-design.md §13, open issue 5;
+    procedure in docs/dev/wal-index-recovery.md) and must be kept
+    indefinitely, so the matching lifecycle_rule in main.tf is scoped to
+    lfs/ and blobs/ only.
+  EOT
+  type        = number
+  default     = 30
+}
+
 variable "bucket_reader_members" {
   description = <<-EOT
     IAM members granted read-only access to the bucket, for consumers that

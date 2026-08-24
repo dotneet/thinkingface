@@ -198,7 +198,7 @@ func newHarness(t *testing.T) *harness {
 // queue was empty or the job failed.
 func (h *harness) step() {
 	h.t.Helper()
-	job, err := h.st.ClaimSyncJob(h.ctx)
+	job, err := h.st.ClaimSyncJob(h.ctx, syncLease)
 	if err != nil {
 		h.t.Fatalf("claim sync job: %v", err)
 	}

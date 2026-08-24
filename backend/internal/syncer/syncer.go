@@ -34,6 +34,27 @@ import (
 
 const maxReadmeBytes = 256 << 10
 
+const (
+	// syncLease is how long a claimed job is held before the sweeper is
+	// entitled to assume the worker died. It is deliberately short relative
+	// to how long a large first push takes to publish, because the worker
+	// extends it (see heartbeat): a short lease bounds how long a genuinely
+	// dead claim blocks its ref, and the heartbeat is what keeps a slow but
+	// live job from being taken away underneath itself.
+	syncLease = 2 * time.Minute
+
+	// syncHeartbeat must stay comfortably below syncLease so an ordinary
+	// scheduling hiccup or a slow storage round-trip cannot let the lease
+	// lapse while the worker is still running.
+	syncHeartbeat = 30 * time.Second
+
+	// syncSweep is how often expired leases are returned to the queue. The
+	// same sweep runs once at startup (see cmd/thinkingface): a replica that
+	// crashed mid-sync is recovered without waiting for anyone to restart
+	// the survivors.
+	syncSweep = time.Minute
+)
+
 // WebhookFirer records webhook deliveries for an event. Implemented by
 // internal/webhooks.Dispatcher; kept as an interface here so the syncer never
 // needs to import the delivery machinery.
@@ -98,9 +119,15 @@ func (s *Syncer) Enqueue(ctx context.Context, repoID int64, ref, oldSHA, newSHA 
 	return nil
 }
 
-// Run starts the worker pool and blocks until ctx is cancelled.
+// Run starts the worker pool and the lease sweeper, and blocks until ctx is
+// cancelled.
 func (s *Syncer) Run(ctx context.Context) {
 	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.sweepLoop(ctx)
+	}()
 	for i := range s.workers {
 		wg.Add(1)
 		go func(id int) {
@@ -109,6 +136,42 @@ func (s *Syncer) Run(ctx context.Context) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// sweepLoop returns jobs whose lease lapsed to the queue. Without it a replica
+// that dies mid-sync leaves its ref blocked until somebody restarts a process,
+// because ClaimSyncJob refuses a ref that has any 'running' sibling.
+func (s *Syncer) sweepLoop(ctx context.Context) {
+	ticker := time.NewTicker(syncSweep)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		n, err := s.store.RequeueExpiredSyncJobs(ctx)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				slog.Error("requeue expired sync jobs", "error", err)
+			}
+			continue
+		}
+		if n > 0 {
+			// Worth a log line: every row here is a job whose worker
+			// vanished, which is the visible symptom of a crash elsewhere.
+			slog.Warn("requeued expired sync jobs", "count", n)
+			s.nudge()
+		}
+	}
+}
+
+// nudge wakes one idle worker without blocking if none is waiting.
+func (s *Syncer) nudge() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
 }
 
 func (s *Syncer) loop(ctx context.Context, id int) {
@@ -135,19 +198,70 @@ func (s *Syncer) loop(ctx context.Context, id int) {
 }
 
 func (s *Syncer) step(ctx context.Context) (bool, error) {
-	job, err := s.store.ClaimSyncJob(ctx)
+	job, err := s.store.ClaimSyncJob(ctx, syncLease)
 	if err != nil || job == nil {
 		return false, err
 	}
+
+	// Hold the lease for as long as the job actually runs. A first push of a
+	// large repository publishes for longer than one lease, and without this
+	// the sweeper would hand the ref to a second worker while this one is
+	// still walking the diff -- the exact double-publish ClaimSyncJob's
+	// NOT EXISTS clause exists to prevent.
+	stopHeartbeat := s.heartbeat(ctx, job.ID)
 	jobErr := s.process(ctx, job)
+	stopHeartbeat()
+
 	if jobErr != nil {
 		slog.Error("sync job failed", "job", job.ID, "repo", job.RepoID, "ref", job.Ref,
-			"attempt", job.Attempts, "error", jobErr)
+			"attempt", job.Attempts, "max_attempts", store.SyncMaxAttempts, "error", jobErr)
 	}
-	if err := s.store.FinishSyncJob(ctx, job.ID, jobErr); err != nil {
+	// FinishSyncJob decides retry-with-backoff vs park-as-failed from the
+	// attempt count on the row, so a cancelled context must not skip it --
+	// the lease would then have to lapse before anything happened. It runs
+	// on a background context for exactly that reason.
+	finishCtx := ctx
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		finishCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+	}
+	if err := s.store.FinishSyncJob(finishCtx, job.ID, jobErr); err != nil {
 		return true, fmt.Errorf("finish sync job %d: %w", job.ID, err)
 	}
 	return true, nil
+}
+
+// heartbeat keeps a claimed job's lease alive until the returned function is
+// called. The returned stop is idempotent and waits for the goroutine, so the
+// caller can be sure no heartbeat lands after FinishSyncJob.
+func (s *Syncer) heartbeat(ctx context.Context, jobID int64) func() {
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(syncHeartbeat)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if err := s.store.HeartbeatSyncJob(ctx, jobID, syncLease); err != nil {
+				if !errors.Is(err, context.Canceled) {
+					slog.Warn("heartbeat sync job", "job", jobID, "error", err)
+				}
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(done) })
+		<-stopped
+	}
 }
 
 // process dispatches a claimed job by kind. "push" -- and "" for rows that

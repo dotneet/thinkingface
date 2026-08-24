@@ -81,17 +81,26 @@ func (s *Store) DeleteSSHKey(ctx context.Context, userID, id int64) error {
 }
 
 // LookupSSHKey resolves a fingerprint offered during public key
-// authentication to its owner. ErrNotFound when the key is not registered.
+// authentication to its owner. ErrNotFound when the key is not registered --
+// or when its owner is suspended, which is the same answer on purpose.
+//
+// SSH is the one identity path that does not run through the HTTP middleware,
+// so the disabled_at predicate is what makes a suspended account unable to
+// `git push` over SSH. internal/sshserver treats ErrNotFound as "this key
+// authenticates nobody" and refuses the connection, which is exactly right:
+// there is nothing useful to tell a client at the public-key stage, and
+// answering differently would confirm that the key is registered.
 func (s *Store) LookupSSHKey(ctx context.Context, fingerprint string) (*User, *SSHKey, error) {
 	u := &User{}
 	k := &SSHKey{}
 	err := s.db.QueryRow(ctx,
 		`SELECT k.id, k.user_id, k.title, k.public_key, k.fingerprint, k.last_used_at, k.created_at,
-		        u.id, u.username, u.email, u.password_hash, u.is_admin, u.created_at, u.session_epoch
+		        `+userColumnsOn("u")+`
 		 FROM user_ssh_keys k JOIN users u ON u.id = k.user_id
-		 WHERE k.fingerprint = $1`, fingerprint,
+		 WHERE k.fingerprint = $1 AND u.disabled_at IS NULL`, fingerprint,
 	).Scan(&k.ID, &k.UserID, &k.Title, &k.PublicKey, &k.Fingerprint, &k.LastUsedAt, &k.CreatedAt,
-		&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt, &u.SessionEpoch)
+		&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt, &u.SessionEpoch,
+		&u.DisabledAt, &u.DisabledBy)
 	if err != nil {
 		return nil, nil, norm(err)
 	}

@@ -1,6 +1,6 @@
 "use client";
 
-import { ShieldCheck, ShieldOff, UserPlus, Users } from "lucide-react";
+import { KeyRound, ShieldCheck, ShieldOff, UserCheck, UserPlus, Users, UserX } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -13,7 +13,14 @@ import { Checkbox, Field, Input } from "@/components/ui/field";
 import { SearchInput } from "@/components/ui/search-input";
 import { SkeletonLines } from "@/components/ui/skeleton";
 import { TimeText } from "@/components/ui/time-text";
-import { adminUserErrorKey, createAdminUser, listAdminUsers, updateAdminUser } from "@/lib/admin";
+import {
+  adminUserErrorKey,
+  createAdminUser,
+  listAdminUsers,
+  revokeAdminUserCredentials,
+  setAdminUserDisabled,
+  updateAdminUser,
+} from "@/lib/admin";
 import type { FailedApiResult } from "@/lib/api-error-message";
 import { errorMessage } from "@/lib/api-error-message";
 import { formatNumber } from "@/lib/format";
@@ -29,13 +36,23 @@ const PAGE_SIZE = 50;
  * The site administrator's account directory
  * (docs/dev/api-contract.md §1.3).
  *
- * Everything here is one endpoint, `PATCH /api/v1/admin/users/{username}`:
- * resetting a password and flipping the administrator flag are the same
- * partial update with different fields set.
+ * Most of it is one endpoint, `PATCH /api/v1/admin/users/{username}`:
+ * resetting a password, flipping the administrator flag and suspending an
+ * account are the same partial update with different fields set. Revoking
+ * credentials is its own POST, because it is the one irreversible action here
+ * and must not ride along as a field on a partial update.
  *
- * The viewer's own row never offers "Revoke admin". The backend refuses
- * self-demotion with a 400, and an affordance whose only outcome is an error
- * is worse than no affordance at all.
+ * Suspension and revocation are offered as separate controls for the same
+ * reason they are separate endpoints: suspending is a switch (nothing is
+ * destroyed, restoring gives it all back), revoking permanently deletes the
+ * account's tokens and SSH keys. Presenting them as one "offboard" button
+ * would make the reversible one look irreversible and the irreversible one
+ * look undoable.
+ *
+ * The viewer's own row never offers "Revoke admin", "Suspend" or "Revoke
+ * credentials". The backend refuses all three on your own account with a 400,
+ * and an affordance whose only outcome is an error is worse than no
+ * affordance at all.
  */
 export function AdminUsersManager({ viewer }: { viewer: string }) {
   const t = useT();
@@ -56,6 +73,10 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
   const [resetConfirm, setResetConfirm] = useState("");
   const [resetError, setResetError] = useState<string | null>(null);
   const [adminTarget, setAdminTarget] = useState<AdminUser | null>(null);
+  // Suspension and credential revocation each get their own confirmation, and
+  // their own piece of state: the two are independent actions on the same row.
+  const [disableTarget, setDisableTarget] = useState<AdminUser | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<AdminUser | null>(null);
 
   // The "add user" dialog. Its own fields rather than a shared form object:
   // the create and reset dialogs can never be open at once, but sharing state
@@ -197,6 +218,44 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
     await refresh();
   }
 
+  async function handleDisableToggle(target: AdminUser) {
+    const disabled = !target.disabled;
+    setDisableTarget(null);
+    setBusy(target.username);
+    setActionError(null);
+    setNotice(null);
+    const result = await setAdminUserDisabled(target.username, disabled);
+    setBusy(null);
+    if (!result.ok) {
+      setActionError(describe(result));
+      return;
+    }
+    setNotice(
+      t(disabled ? "settings.adminUsers.suspendDone" : "settings.adminUsers.restoreDone", {
+        username: target.username,
+      }),
+    );
+    await refresh();
+  }
+
+  async function handleRevoke(target: AdminUser) {
+    setRevokeTarget(null);
+    setBusy(target.username);
+    setActionError(null);
+    setNotice(null);
+    const result = await revokeAdminUserCredentials(target.username);
+    setBusy(null);
+    if (!result.ok) {
+      setActionError(describe(result));
+      return;
+    }
+    // The listing does not change — nothing on the wire type counts tokens or
+    // keys — but it is reloaded anyway so the row cannot be acted on again
+    // from a copy taken before somebody else touched the account.
+    setNotice(t("settings.adminUsers.revokeDone", { username: target.username }));
+    await refresh();
+  }
+
   const hasPrev = offset > 0;
   const hasNext = total !== null && offset + PAGE_SIZE < total;
 
@@ -264,6 +323,12 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
                         {user.is_admin && (
                           <Badge tone="accent">{t("settings.adminUsers.adminBadge")}</Badge>
                         )}
+                        {/* A suspended account looks exactly like an active
+                            one everywhere else on this row, so the badge is
+                            the only thing that tells them apart. */}
+                        {user.disabled && (
+                          <Badge tone="negative">{t("settings.adminUsers.disabledBadge")}</Badge>
+                        )}
                         {isSelf && (
                           <span className="text-xs font-medium text-fg-subtle">
                             ({t("settings.adminUsers.you")})
@@ -289,6 +354,32 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
                         >
                           {t("settings.adminUsers.resetPassword")}
                         </Button>
+                        {/* Suspending or revoking your own account is a 400
+                            by design, so neither control appears on your own
+                            row (the same rule as the admin toggle below). */}
+                        {!isSelf && (
+                          <Button
+                            size="sm"
+                            variant={user.disabled ? "secondary" : "danger"}
+                            disabled={busy === user.username}
+                            onClick={() => setDisableTarget(user)}
+                          >
+                            {user.disabled ? <UserCheck size={13} /> : <UserX size={13} />}
+                            {user.disabled
+                              ? t("settings.adminUsers.restore")
+                              : t("settings.adminUsers.suspend")}
+                          </Button>
+                        )}
+                        {!isSelf && (
+                          <Button
+                            size="sm"
+                            disabled={busy === user.username}
+                            onClick={() => setRevokeTarget(user)}
+                          >
+                            <KeyRound size={13} />
+                            {t("settings.adminUsers.revokeCredentials")}
+                          </Button>
+                        )}
                         {/* Self-demotion is a 400 by design, so the control
                             is simply absent on your own row. */}
                         {!(isSelf && user.is_admin) && (
@@ -516,6 +607,61 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
         )}
         confirmingLabel={t("settings.adminUsers.working")}
         confirming={busy !== null && adminTarget !== null}
+      />
+
+      {/* Reversible, so a plain yes/no dialog: no typed confirmation. */}
+      <ConfirmDialog
+        open={disableTarget !== null}
+        onClose={() => setDisableTarget(null)}
+        onConfirm={() => {
+          if (disableTarget) void handleDisableToggle(disableTarget);
+        }}
+        tone={disableTarget?.disabled ? "primary" : "danger"}
+        title={t(
+          disableTarget?.disabled
+            ? "settings.adminUsers.restoreTitle"
+            : "settings.adminUsers.suspendTitle",
+          { username: disableTarget?.username ?? "" },
+        )}
+        description={
+          <p className="text-sm text-fg-muted">
+            {t(
+              disableTarget?.disabled
+                ? "settings.adminUsers.restoreDescription"
+                : "settings.adminUsers.suspendDescription",
+              { username: disableTarget?.username ?? "" },
+            )}
+          </p>
+        }
+        confirmLabel={t(
+          disableTarget?.disabled
+            ? "settings.adminUsers.restoreConfirm"
+            : "settings.adminUsers.suspendConfirm",
+        )}
+        confirmingLabel={t("settings.adminUsers.working")}
+        confirming={busy !== null && disableTarget !== null}
+      />
+
+      {/* Irreversible, so it asks for the username to be typed — the same
+          bar the repository and run deletions use. */}
+      <ConfirmDialog
+        open={revokeTarget !== null}
+        onClose={() => setRevokeTarget(null)}
+        onConfirm={() => {
+          if (revokeTarget) void handleRevoke(revokeTarget);
+        }}
+        requireText={revokeTarget?.username}
+        title={t("settings.adminUsers.revokeTitle", { username: revokeTarget?.username ?? "" })}
+        description={
+          <Alert tone="negative">
+            {t("settings.adminUsers.revokeDescription", {
+              username: revokeTarget?.username ?? "",
+            })}
+          </Alert>
+        }
+        confirmLabel={t("settings.adminUsers.revokeConfirm")}
+        confirmingLabel={t("settings.adminUsers.working")}
+        confirming={busy !== null && revokeTarget !== null}
       />
     </div>
   );

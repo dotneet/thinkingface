@@ -45,8 +45,16 @@ resource "google_project_service" "required" {
 # branch of the same one) may still reference them. Reclaiming orphans is
 # `thinkingface gc`'s job (reference-counted against repo_lfs_objects /
 # repo_files.blob_sha), not a bucket lifecycle rule keyed on age: an
-# untouched-for-90-days object is very often still exactly what a stable
-# dataset release should keep serving forever.
+# untouched-for-90-days *live* object is very often still exactly what a
+# stable dataset release should keep serving forever, so nothing here ever
+# deletes a current version by age.
+#
+# That does not extend to what gc deletes, though. This bucket has
+# versioning enabled, so gc deleting a live object only turns it noncurrent
+# -- the bytes are still there and still billed. A separate lifecycle rule
+# below (scoped to lfs/ and blobs/, never wal/) prunes those *noncurrent*
+# versions after 30 days so gc's deletes actually shrink the bill; see that
+# rule's comment for why the cutoff is on noncurrent age, not object age.
 # ---------------------------------------------------------------------------
 
 resource "google_storage_bucket" "main" {
@@ -78,6 +86,39 @@ resource "google_storage_bucket" "main" {
     condition {
       age            = var.tmp_uploads_retention_days
       matches_prefix = ["tmp/uploads/"]
+    }
+    action {
+      type = "Delete"
+    }
+  }
+
+  # lfs/ and blobs/ are reference-counted and reclaimed by `thinkingface gc`
+  # (see the object store comment above) -- but this bucket has versioning
+  # enabled, so a gc delete only turns the *current* version noncurrent; the
+  # bytes stay right where they were and keep being billed until the
+  # noncurrent version itself is deleted. Without this rule, every gc delete
+  # is invisible to the bill and the bucket grows without bound even though
+  # gc faithfully reports "deleted." 30 days gives an operator a window to
+  # notice and restore an accidental delete from a noncurrent version before
+  # it disappears for good (on top of soft_delete_policy above, which is a
+  # separate, bucket-wide, shorter-lived safety net that also covers
+  # deletes this rule cannot undo).
+  #
+  # Deliberately scoped to lfs/ and blobs/ only, via an inclusion list
+  # rather than an exclusion: GCS lifecycle conditions have no "everything
+  # except this prefix" form, so an inclusion list is the only way to
+  # *guarantee* wal/ is never touched here, however wal/ evolves. wal/ --
+  # in particular wal/{storage_path}/index.json -- must keep every
+  # noncurrent version forever: an old generation of index.json is the only
+  # recovery path for a corrupted or deleted WAL index
+  # (docs/dev/continuity-design.md §13, open issue 5; the recovery
+  # procedure itself is docs/dev/wal-index-recovery.md). Pruning it here
+  # would make that recovery path silently stop working after 30 days.
+  lifecycle_rule {
+    condition {
+      days_since_noncurrent_time = var.lfs_blobs_noncurrent_retention_days
+      with_state                 = "ARCHIVED"
+      matches_prefix             = ["lfs/", "blobs/"]
     }
     action {
       type = "Delete"

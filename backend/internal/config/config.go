@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -17,10 +18,10 @@ const (
 	DefaultSessionSecret = "dev-insecure-session-secret"
 )
 
-// MinSessionSecretLen is the shortest session secret accepted in a production
-// (https) deployment. The secret keys an HMAC-SHA256 that both session
-// cookies and LFS transfer URLs rely on, so anything shorter than the digest's
-// block-relevant size is not worth signing with.
+// MinSessionSecretLen is the shortest session secret accepted once
+// TF_PUBLIC_URL is anything but loopback. The secret keys an HMAC-SHA256 that
+// both session cookies and LFS transfer URLs rely on, so anything shorter
+// than the digest's block-relevant size is not worth signing with.
 const MinSessionSecretLen = 32
 
 type Config struct {
@@ -226,17 +227,36 @@ func Load() (*Config, error) {
 		// authoritative. Refuse to start rather than run half-wired.
 		return nil, fmt.Errorf("TF_GIT_HOOKS_PATH is required when TF_WAL_MODE=%s", c.WALMode)
 	}
-	// Production is anything served over https. The development defaults are
-	// public knowledge -- the seeded admin password is in .env.example and the
-	// default session secret lets anyone forge a tf_session for any user id --
-	// so a deployment reachable over TLS must not boot on them. http keeps
-	// working unchanged, which is what `docker compose up` and the e2e suite use.
-	if strings.HasPrefix(c.PublicURL, "https://") {
+	// The development defaults are public knowledge -- the seeded admin
+	// password is in .env.example, and the default session secret lets anyone
+	// forge a `tf_session` for any user id, which on a fresh instance means
+	// `1.0.<future>.<hmac>` and the initial administrator's whole authority.
+	//
+	// The line used to be drawn at https, and that was the wrong line. This
+	// server is built for internal and team use (design §1), and the most
+	// common way such an instance is actually run is plain http on a VPN or
+	// an office LAN -- precisely the case the https test let through. What
+	// separates a laptop from a deployment is not TLS, it is whether anyone
+	// else can reach it, so the test is the *host*: loopback boots on the
+	// defaults, anything else must be configured.
+	//
+	// Generating a secret at startup instead was considered and rejected. The
+	// secret keys the session cookie *and* the LFS transfer URLs, and Cloud
+	// Run runs several instances (infra/ defaults api_max_instances to 4), so
+	// a per-process value would sign cookies and upload URLs each replica
+	// rejects from the others. Persisting one would need somewhere to put it
+	// -- a schema change, or a file on storage that is not guaranteed to be
+	// shared -- which is a larger decision than this guard; a deployment that
+	// wants one runs `openssl rand -hex 32` once and sets it.
+	//
+	// `docker compose up`, `make dev-api` and the e2e suite all use
+	// http://localhost, so they keep booting on the defaults unchanged.
+	if !isLoopbackURL(c.PublicURL) {
 		if c.AdminPassword == DefaultAdminPassword {
-			return nil, fmt.Errorf("TF_ADMIN_PASSWORD must be set to something other than the default %q when TF_PUBLIC_URL is https", DefaultAdminPassword)
+			return nil, fmt.Errorf("TF_ADMIN_PASSWORD must be set to something other than the default %q unless TF_PUBLIC_URL points at localhost (got %q)", DefaultAdminPassword, c.PublicURL)
 		}
 		if c.SessionSecret == DefaultSessionSecret {
-			return nil, fmt.Errorf("TF_SESSION_SECRET must be set to a private value when TF_PUBLIC_URL is https")
+			return nil, fmt.Errorf("TF_SESSION_SECRET must be set to a private value unless TF_PUBLIC_URL points at localhost (got %q); generate one with `openssl rand -hex 32`", c.PublicURL)
 		}
 		if len(c.SessionSecret) < MinSessionSecretLen {
 			return nil, fmt.Errorf("TF_SESSION_SECRET must be at least %d bytes, got %d", MinSessionSecretLen, len(c.SessionSecret))
@@ -385,4 +405,26 @@ func originOf(raw string) string {
 		return ""
 	}
 	return u.Scheme + "://" + u.Host
+}
+
+// isLoopbackURL reports whether raw addresses this machine and nothing else.
+// It is what decides whether the development defaults may be used (see
+// Load), so it fails closed: a URL that will not parse, or has no host, is
+// treated as reachable from elsewhere. Better to make an operator spell out a
+// secret they did not need than to let a typo re-open the hole.
+//
+// "localhost" and any name under it (`foo.localhost`, which browsers and
+// RFC 6761 resolve to loopback) count, as does any literal loopback address
+// -- 127.0.0.0/8 and ::1.
+func isLoopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

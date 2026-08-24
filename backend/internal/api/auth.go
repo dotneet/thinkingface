@@ -26,6 +26,21 @@ const (
 	// cookie rather than a token. Only those are ambient-credential requests
 	// a foreign page could ride, so only those need the origin check.
 	ctxKeyCookieAuth
+	// ctxKeyAuthRecord carries the mutable *authRecord requestLogger installs
+	// and identify fills in (see authRecord in server.go).
+	ctxKeyAuthRecord
+)
+
+// authMethod names the credential a request arrived with. It is recorded on
+// the access log line (see requestLogger) and it is what tells the /admin
+// endpoints apart from everything else: those accept authSession only.
+type authMethod string
+
+const (
+	authNone     authMethod = ""
+	authToken    authMethod = "token"
+	authPassword authMethod = "password"
+	authSession  authMethod = "session"
 )
 
 // identify resolves the caller from a bearer token, HTTP basic credentials, or
@@ -34,30 +49,63 @@ const (
 func (s *Server) identify(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		user, scope, viaCookie := s.resolveIdentity(r)
+		user, scope, method := s.resolveIdentity(r)
 		if user != nil {
 			ctx = context.WithValue(ctx, ctxKeyUser, user)
 			ctx = context.WithValue(ctx, ctxKeyScope, scope)
-			ctx = context.WithValue(ctx, ctxKeyCookieAuth, viaCookie)
+			ctx = context.WithValue(ctx, ctxKeyCookieAuth, method == authSession)
+			// Hand the access log the subject it could not otherwise see:
+			// requestLogger runs upstream of this middleware, so it holds a
+			// pointer that is filled in here rather than a value it read.
+			if rec := authRecordFrom(ctx); rec != nil {
+				rec.username, rec.method = user.Username, method
+			}
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-func (s *Server) resolveIdentity(r *http.Request) (user *store.User, scope string, viaCookie bool) {
+// resolveIdentity is resolveCredential plus the one rule that applies to
+// every credential this server accepts: a suspended account authenticates as
+// nobody.
+//
+// The check is here, at the single exit of credential resolution, rather than
+// in each of the four branches below. That is the whole point -- the audit
+// finding this closes was that an administrator had no offboarding switch at
+// all, and the way such a switch usually fails is by covering three of the
+// four ways in. The two identity paths that do not pass through here are the
+// SSH public key (refused in store.LookupSSHKey, since internal/sshserver
+// authenticates before any of this package runs) and handleLogin's own
+// checkPassword call (which answers passwordDisabled).
+func (s *Server) resolveIdentity(r *http.Request) (*store.User, string, authMethod) {
+	user, scope, method := s.resolveCredential(r)
+	if user.Disabled() {
+		// Warn rather than Info: a credential for a suspended account is
+		// still being presented, which is worth seeing in a log even though
+		// the request simply proceeds as anonymous.
+		slog.Warn("authentication refused: account is disabled",
+			"username", user.Username, "user_id", user.ID,
+			"auth", string(method), "client_ip", s.clientIP(r),
+			"path", r.URL.Path)
+		return nil, "", authNone
+	}
+	return user, scope, method
+}
+
+func (s *Server) resolveCredential(r *http.Request) (*store.User, string, authMethod) {
 	ctx := r.Context()
 
 	if header := r.Header.Get("Authorization"); header != "" {
 		if token, ok := strings.CutPrefix(header, "Bearer "); ok {
 			u, sc := s.userForToken(ctx, strings.TrimSpace(token))
-			return u, sc, false
+			return u, sc, authToken
 		}
 		// git and git-lfs authenticate with Basic; the password carries the
 		// token and the username is ignored.
 		if username, password, ok := r.BasicAuth(); ok {
 			if strings.HasPrefix(password, auth.TokenPrefix) {
 				u, sc := s.userForToken(ctx, password)
-				return u, sc, false
+				return u, sc, authToken
 			}
 			// Basic-with-a-real-password is accepted on every route, so this
 			// is the cheapest place in the server to force bcrypt work. Both
@@ -65,21 +113,27 @@ func (s *Server) resolveIdentity(r *http.Request) (user *store.User, scope strin
 			// hash is computed, and nothing is written to the response: a
 			// throttled request simply looks anonymous, which every handler
 			// already knows how to answer.
-			if u, outcome := s.checkPassword(ctx, username, password); outcome == passwordOK {
-				return u, "write", false
+			u, outcome := s.checkPassword(ctx, username, password)
+			switch outcome {
+			case passwordOK:
+				return u, "write", authPassword
+			case passwordDisabled:
+				// Carried out so resolveIdentity can log it by name; the
+				// gate there is what turns it into an anonymous request.
+				return u, "", authPassword
 			}
-			return nil, "", false
+			return nil, "", authNone
 		}
 	}
 
 	if cookie, err := r.Cookie(auth.SessionCookieName); err == nil {
 		if userID, epoch, err := s.sessions.Verify(cookie.Value); err == nil {
 			if u, err := s.store.GetUserByID(ctx, userID); err == nil && u.SessionEpoch == epoch {
-				return u, "write", true
+				return u, "write", authSession
 			}
 		}
 	}
-	return nil, "", false
+	return nil, "", authNone
 }
 
 // checkPassword resolves a username/password pair under the brute-force and
@@ -106,6 +160,12 @@ const (
 	// passwordOverloaded means no bcrypt slot came free in time. It says
 	// nothing about the password -- the hash was never compared.
 	passwordOverloaded
+	// passwordDisabled means the password was right and the account is
+	// suspended. It is not a credential failure and carries no penalty: the
+	// caller proved they hold the password, so charging their failure budget
+	// would only make the account harder to restore later. The user is
+	// returned alongside it so the caller can name them in a log line.
+	passwordDisabled
 )
 
 func (s *Server) checkPassword(ctx context.Context, username, password string) (*store.User, passwordOutcome) {
@@ -128,6 +188,12 @@ func (s *Server) checkPassword(ctx context.Context, username, password string) (
 		return nil, passwordWrong
 	}
 	s.authGuard.reset(usernameKey(username))
+	// The suspension check sits *after* the comparison rather than before it,
+	// so a disabled account takes exactly as long to answer as an active one
+	// and the two are not distinguishable by timing.
+	if user.Disabled() {
+		return user, passwordDisabled
+	}
 	return user, passwordOK
 }
 
@@ -341,7 +407,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	addrKey, userKey := s.clientAddrKey(r), usernameKey(req.Username)
+	clientIP := s.clientIP(r)
 	if wait := s.authGuard.retryAfter(addrKey, userKey); wait > 0 {
+		// Logged, because a rate-limited sign-in is the only externally
+		// visible sign that the brute-force defence is doing anything. The
+		// username is the string the caller supplied; it is not evidence that
+		// such an account exists.
+		slog.Warn("login rate limited", "username", req.Username, "client_ip", clientIP)
 		tooManyAttempts(w, wait)
 		return
 	}
@@ -350,20 +422,37 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	case passwordThrottled:
 		// The username bucket is spent even though the address bucket was
 		// not. Do not penalize the address for it.
+		slog.Warn("login rate limited", "username", req.Username, "client_ip", clientIP)
 		tooManyAttempts(w, s.authGuard.retryAfter(userKey))
 		return
 	case passwordOverloaded:
 		// The password was never compared, so this is the server's problem,
 		// not the caller's: no penalty, and a status that says "retry".
+		slog.Warn("login refused: no bcrypt capacity", "username", req.Username, "client_ip", clientIP)
 		serviceOverloaded(w, bcryptWait)
 		return
 	case passwordWrong:
 		s.authGuard.penalize(addrKey)
+		// The one log line an operator needs to notice a guessing run. Never
+		// the password, not even its length.
+		slog.Warn("login failed", "username", req.Username, "client_ip", clientIP,
+			"reason", "invalid_credentials")
 		writeError(w, http.StatusUnauthorized, "unauthorized", "username or password is incorrect")
+		return
+	case passwordDisabled:
+		// Only reachable with the *correct* password, so saying the account
+		// is suspended enumerates nothing -- and it is the answer the person
+		// on the other end needs, rather than a wrong-password message that
+		// would send them round the reset loop forever.
+		slog.Warn("login failed", "username", user.Username, "user_id", user.ID,
+			"client_ip", clientIP, "reason", "account_disabled")
+		writeError(w, http.StatusForbidden, "account_disabled",
+			"this account has been disabled; ask a site administrator to restore it")
 		return
 	}
 	s.authGuard.reset(addrKey)
 	s.setSessionCookie(w, user)
+	slog.Info("login succeeded", "username", user.Username, "user_id", user.ID, "client_ip", clientIP)
 	writeJSON(w, http.StatusOK, apitypes.UserResponse{User: s.userResponse(r.Context(), user)})
 }
 
@@ -506,11 +595,20 @@ func (s *Server) handleChangeMyPassword(w http.ResponseWriter, r *http.Request) 
 		return
 	case passwordWrong:
 		s.authGuard.penalize(addrKey)
+		slog.Warn("password change failed", "username", user.Username, "user_id", user.ID,
+			"client_ip", s.clientIP(r), "reason", "invalid_credentials")
 		// writeError rather than unauthorized(): this is a form submitted by
 		// the web UI, and the WWW-Authenticate header the latter sets can
 		// make a browser pop its own credential dialog over the page.
 		// handleLogin answers a wrong password the same way.
 		writeError(w, http.StatusUnauthorized, "unauthorized", "current password is incorrect")
+		return
+	case passwordDisabled:
+		// Unreachable: identify() already refuses a suspended account, so the
+		// caller could not have got this far. Handled anyway rather than
+		// falling through the switch into the success path, which is what an
+		// unhandled outcome would do.
+		writeError(w, http.StatusForbidden, "account_disabled", "this account has been disabled")
 		return
 	}
 	// Proving the current password clears the address budget, exactly as
@@ -682,6 +780,12 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "create token", err)
 		return
 	}
+	// Minting a credential is an auditable event, so it is logged by id,
+	// name and scope. The token value itself appears in the response and
+	// nowhere else -- not in this line, not truncated, not as a prefix.
+	slog.Info("access token created", "username", user.Username, "user_id", user.ID,
+		"token_id", rec.ID, "token_name", rec.Name, "scope", rec.Scope,
+		"client_ip", s.clientIP(r))
 	// The plaintext value appears here and nowhere else.
 	writeJSON(w, http.StatusOK, apitypes.CreateTokenResponse{TokenItem: toTokenItem(rec), Token: token})
 }
@@ -709,5 +813,7 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 		handleStoreError(w, "delete token", err)
 		return
 	}
+	slog.Info("access token revoked", "username", user.Username, "user_id", user.ID,
+		"token_id", id, "actor", "self", "client_ip", s.clientIP(r))
 	w.WriteHeader(http.StatusNoContent)
 }

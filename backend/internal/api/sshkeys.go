@@ -7,6 +7,7 @@ package api
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -92,6 +93,13 @@ func (s *Server) handleCreateSSHKey(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "create ssh key", err)
 		return
 	}
+	// A registered key is a write-capable credential, so adding one is an
+	// auditable event. The fingerprint is safe to record -- it is a digest of
+	// public key material, and it is the only handle that identifies which
+	// key was added.
+	slog.Info("ssh key added", "username", user.Username, "user_id", user.ID,
+		"key_id", rec.ID, "fingerprint", rec.Fingerprint, "actor", "self",
+		"client_ip", s.clientIP(r))
 	writeJSON(w, http.StatusOK, toSSHKeyItem(rec))
 }
 
@@ -111,6 +119,8 @@ func (s *Server) handleDeleteSSHKey(w http.ResponseWriter, r *http.Request) {
 		handleStoreError(w, "delete ssh key", err)
 		return
 	}
+	slog.Info("ssh key removed", "username", user.Username, "user_id", user.ID,
+		"key_id", id, "actor", "self", "client_ip", s.clientIP(r))
 	w.WriteHeader(http.StatusNoContent)
 }
 

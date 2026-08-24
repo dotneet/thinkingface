@@ -95,6 +95,12 @@ func run(command string) error {
 			return err
 		}
 		return runGC(ctx, db, obj, cfg.SignedURLMaxTTL, os.Args[2:])
+	case "resync":
+		obj, err := newStorage(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		return runResync(ctx, db, obj, cfg, os.Args[2:])
 	case "compact":
 		obj, err := newStorage(ctx, cfg)
 		if err != nil {
@@ -115,7 +121,7 @@ func run(command string) error {
 		return runWALVerify(ctx, db, obj, cfg, os.Args[2:])
 	case "serve":
 	default:
-		return fmt.Errorf("unknown command %q (expected serve, migrate, seed, gc, compact, wal-seed, wal-verify or hook)", command)
+		return fmt.Errorf("unknown command %q (expected serve, migrate, seed, gc, resync, compact, wal-seed, wal-verify or hook)", command)
 	}
 
 	if err := seedAdmin(ctx, db, cfg); err != nil {
@@ -166,10 +172,16 @@ func run(command string) error {
 		Webhooks:    hooks,
 	})
 
-	if n, err := db.RequeueRunningJobs(ctx); err != nil {
-		return fmt.Errorf("requeue interrupted sync jobs: %w", err)
+	// Only jobs whose lease has lapsed, never every running row: with
+	// api_max_instances above 1 this process is starting up *beside* live
+	// replicas, and the unconditional sweep this replaced handed their
+	// in-flight jobs to a second worker. The syncer repeats this sweep on a
+	// ticker, so a job interrupted by this process's own shutdown is picked
+	// up once its lease expires rather than needing a restart to notice.
+	if n, err := db.RequeueExpiredSyncJobs(ctx); err != nil {
+		return fmt.Errorf("requeue expired sync jobs: %w", err)
 	} else if n > 0 {
-		slog.Info("requeued sync jobs interrupted by a previous shutdown", "count", n)
+		slog.Info("requeued sync jobs whose lease had expired", "count", n)
 	}
 
 	go sync.Run(ctx)

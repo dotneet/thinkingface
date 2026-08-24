@@ -21,7 +21,10 @@ import type {
   AdminUserResponse,
   AdminUserUpdateRequest,
   PasswordChangeRequest,
+  SyncJobListResponse,
 } from "@/types/api";
+
+export type { SyncJob } from "@/types/api";
 
 /**
  * Replace your own password. 204 on success, 401 when `current_password` is
@@ -87,6 +90,48 @@ export function updateAdminUser(
 }
 
 /**
+ * Suspend or restore an account — `updateAdminUser` with the one field, named
+ * so a call site reads as what it does.
+ *
+ * Suspending stops every identity path at once (session, password, HTTP
+ * Basic, access token, SSH key) and revokes the account's sessions
+ * immediately. It destroys nothing: restoring brings the account back exactly
+ * as it was, minus anything `revokeAdminUserCredentials` deleted in between,
+ * and minus the sessions — those stay dead on purpose.
+ *
+ * 400 `self_disable` for your own account and 409 `last_admin` for the last
+ * remaining site administrator, both refused before anything is written.
+ */
+export function setAdminUserDisabled(
+  username: string,
+  disabled: boolean,
+  opts?: FetchOpts,
+): Promise<ApiResult<AdminUserResponse>> {
+  return updateAdminUser(username, { disabled }, opts);
+}
+
+/**
+ * Delete every access token and registered SSH key the account holds, and
+ * revoke its sessions. 204 on success.
+ *
+ * Irreversible, and deliberately not part of the PATCH above: suspension is a
+ * switch that can be flipped back, this is a deletion. It does not suspend
+ * the account either — it is for credentials that are suspected (a lost
+ * laptop, a token in a build log) on an account that should keep working once
+ * new ones are issued. 400 `self_revoke` on your own account, whose tokens
+ * and keys are managed from /settings instead.
+ */
+export function revokeAdminUserCredentials(
+  username: string,
+  opts?: FetchOpts,
+): Promise<ApiResult<void>> {
+  return apiFetch<void>(`/api/v1/admin/users/${encodeURIComponent(username)}/revoke-credentials`, {
+    method: "POST",
+    headers: opts?.headers,
+  });
+}
+
+/**
  * The `error.type` values these endpoints answer with, mapped to translated
  * copy — the same shape as `orgErrorKey` in lib/orgs.ts. Returns null when
  * the caller should fall back to `errorMessage(t, result)`.
@@ -94,6 +139,13 @@ export function updateAdminUser(
 const ERROR_KEYS: Record<string, MessageKey> = {
   last_admin: "settings.adminUsers.errors.lastAdmin",
   self_demote: "settings.adminUsers.errors.selfDemote",
+  self_disable: "settings.adminUsers.errors.selfDisable",
+  self_revoke: "settings.adminUsers.errors.selfRevoke",
+  // Every /api/v1/admin endpoint accepts the session cookie only. A browser
+  // on these screens always has one, so this is what a session that expired
+  // mid-visit looks like — the message says to sign in again rather than
+  // repeating the generic "no permission".
+  session_required: "settings.adminUsers.errors.sessionRequired",
   reserved_name: "settings.adminUsers.errors.nameReserved",
   conflict: "settings.adminUsers.errors.usernameTaken",
 };
@@ -106,5 +158,58 @@ export function adminUserErrorKey(
   if (result.status === 401) return "settings.adminUsers.errors.loginRequired";
   if (result.status === 403) return "settings.adminUsers.errors.permissionDenied";
   if (result.status === 404) return "settings.adminUsers.errors.userNotFound";
+  return null;
+}
+
+export type SyncJobsParams = {
+  limit?: number;
+  offset?: number;
+};
+
+/**
+ * The jobs that exhausted their attempts and parked. Site administrators
+ * only, from a browser session: like every /api/v1/admin endpoint this
+ * refuses access tokens and HTTP Basic outright (403 `session_required`).
+ *
+ * Only failed jobs are listed — a job still retrying is not an operator's
+ * problem yet — so an empty page is the healthy state, not a missing feature.
+ */
+export function listFailedSyncJobs(
+  params: SyncJobsParams = {},
+  opts?: FetchOpts,
+): Promise<ApiResult<SyncJobListResponse>> {
+  return apiFetch<SyncJobListResponse>("/api/v1/admin/sync-jobs", {
+    query: params,
+    headers: opts?.headers,
+  });
+}
+
+/**
+ * Put one parked job back in the queue with a fresh attempt budget. 204 on
+ * success; 404 when the job is no longer failed — already retried by someone
+ * else, or gone with its repository — which is why the caller should reload
+ * the listing on that status rather than treat it as a hard error.
+ *
+ * The worker picks the job up on its next poll (about ten seconds), so a 204
+ * means "requeued", not "succeeded".
+ */
+export function retrySyncJob(id: number, opts?: FetchOpts): Promise<ApiResult<void>> {
+  return apiFetch<void>(`/api/v1/admin/sync-jobs/${id}/retry`, {
+    method: "POST",
+    headers: opts?.headers,
+  });
+}
+
+/**
+ * Same idea as `adminUserErrorKey`, for the sync-job endpoints: they answer
+ * no types of their own, so this is purely the status mapping. Returns null
+ * when the caller should fall back to `errorMessage(t, result)`.
+ */
+export function syncJobErrorKey(
+  result: Extract<ApiResult<unknown>, { ok: false }>,
+): MessageKey | null {
+  if (result.status === 401) return "settings.adminUsers.errors.loginRequired";
+  if (result.status === 403) return "settings.adminUsers.errors.permissionDenied";
+  if (result.status === 404) return "settings.adminSyncJobs.errors.jobGone";
   return null;
 }
