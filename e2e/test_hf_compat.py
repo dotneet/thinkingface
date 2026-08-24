@@ -22,7 +22,7 @@ import pyarrow.parquet as pq
 import pytest
 import requests
 from huggingface_hub import HfApi
-from huggingface_hub.utils import HfHubHTTPError, RevisionNotFoundError
+from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError, RevisionNotFoundError
 
 
 def test_whoami(hf_api: HfApi, namespace: str) -> None:
@@ -199,6 +199,77 @@ def test_branch_with_a_slash_in_its_name(hf_api: HfApi, namespace: str, unique_n
             b.name for b in hf_api.list_repo_refs(repo_id=repo_id, repo_type="dataset").branches
         }
         assert "feature/tokenizer" not in names
+    finally:
+        hf_api.delete_repo(repo_id=repo_id, repo_type="dataset")
+
+
+def test_upload_download_and_list_on_a_branch_name_with_a_slash(
+    hf_api: HfApi, namespace: str, unique_name: str
+) -> None:
+    """A slashed branch name must work through every read/write path, not just
+    `create_branch` / `delete_branch` (covered above by
+    `test_branch_with_a_slash_in_its_name`).
+
+    `huggingface_hub` percent-encodes `revision` wherever it appears in a URL
+    (`quote(revision, safe="")`), so `feature/tokenizer-update` is sent as
+    `feature%2Ftokenizer-update` by `upload_file` / `hf_hub_download` /
+    `list_repo_files` / `list_repo_tree` / `repo_info` alike. A server that
+    only unescapes the branch/tag routes -- or that decodes `%2F` back into a
+    path separator before routing -- would 404 or silently answer with the
+    wrong ref for any of these. This test also confirms the write actually
+    landed on the feature branch and not on `main`.
+    """
+    from huggingface_hub import hf_hub_download
+
+    repo_id = f"{namespace}/{unique_name}-slash-rw"
+    hf_api.create_repo(repo_id=repo_id, repo_type="dataset", private=False)
+    try:
+        branch = "feature/tokenizer-update"
+        hf_api.create_branch(repo_id=repo_id, repo_type="dataset", branch=branch)
+
+        payload = b"content that only exists on the feature branch\n"
+        hf_api.upload_file(
+            path_or_fileobj=payload,
+            path_in_repo="branch-only.txt",
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision=branch,
+            commit_message="Add a file on the feature branch",
+        )
+
+        # --- download: byte-for-byte round trip through the slashed revision
+        downloaded = hf_hub_download(
+            repo_id=repo_id, repo_type="dataset", filename="branch-only.txt", revision=branch
+        )
+        with open(downloaded, "rb") as f:
+            assert f.read() == payload
+
+        # --- listing endpoints see the file at that revision
+        files = hf_api.list_repo_files(repo_id=repo_id, repo_type="dataset", revision=branch)
+        assert "branch-only.txt" in files
+
+        tree_paths = {
+            entry.path
+            for entry in hf_api.list_repo_tree(
+                repo_id=repo_id, repo_type="dataset", revision=branch
+            )
+        }
+        assert "branch-only.txt" in tree_paths
+
+        # --- repo_info resolves the slashed revision to the branch's own tip,
+        # not to whatever `main` happens to point at.
+        branch_tip = {
+            b.name: b.target_commit
+            for b in hf_api.list_repo_refs(repo_id=repo_id, repo_type="dataset").branches
+        }[branch]
+        info = hf_api.repo_info(repo_id=repo_id, repo_type="dataset", revision=branch)
+        assert info.sha == branch_tip
+
+        # --- and `main` was never touched by any of the above.
+        main_files = hf_api.list_repo_files(repo_id=repo_id, repo_type="dataset", revision="main")
+        assert "branch-only.txt" not in main_files
+        main_info = hf_api.repo_info(repo_id=repo_id, repo_type="dataset", revision="main")
+        assert main_info.sha != info.sha
     finally:
         hf_api.delete_repo(repo_id=repo_id, repo_type="dataset")
 
@@ -636,3 +707,108 @@ def test_reupload_after_changing_lfs_file(
             assert f.read() == b"stable notes\n"
     finally:
         hf_api.delete_repo(repo_id=repo_id, repo_type="dataset")
+
+
+# --- repo_exists / file_exists / revision_exists on a missing repository -----
+
+
+def test_repo_exists_and_friends_return_false_for_a_missing_repo(
+    hf_api: HfApi, unique_name: str, namespace: str
+) -> None:
+    """`repo_exists` / `file_exists` / `revision_exists` must answer `False`,
+    not raise, for a repository that was never created.
+
+    `huggingface_hub` implements all three as a `try/except RepositoryNotFoundError`
+    around a plain read call (`repo_info` / `hf_hub_url` HEAD / etc.) -- see
+    `HfApi.repo_exists` in the installed `huggingface_hub` package. That
+    exception is only raised when the response carries
+    `X-Error-Code: RepoNotFound` (or a 401); a bare 404 with no header comes
+    back as a generic `HfHubHTTPError`, which none of these three catch, so
+    before the fix every one of them raised instead of returning `False`.
+    """
+    repo_id = f"{namespace}/{unique_name}-never-created"
+
+    assert hf_api.repo_exists(repo_id=repo_id, repo_type="model") is False
+    assert hf_api.repo_exists(repo_id=repo_id, repo_type="dataset") is False
+    assert hf_api.file_exists(repo_id=repo_id, filename="README.md", repo_type="model") is False
+    assert hf_api.revision_exists(repo_id=repo_id, revision="main", repo_type="model") is False
+
+    # repo_info itself still raises -- repo_exists() et al. are the layer that
+    # translates "not found" into a boolean, not a change to the read itself.
+    with pytest.raises(RepositoryNotFoundError):
+        hf_api.repo_info(repo_id=repo_id, repo_type="model")
+
+
+# --- create_pr is not implemented, and must fail rather than silently commit -
+
+
+def test_upload_file_with_create_pr_is_rejected(
+    hf_api: HfApi, namespace: str, unique_name: str
+) -> None:
+    """`create_pr=True` must fail outright rather than silently landing on `main`.
+
+    Pull requests are not implemented server-side, so a commit that asks for
+    one has to be rejected -- quietly accepting it and committing straight to
+    the default branch instead would be worse than an outright error, since it
+    would surprise a caller who expects a review step before their change
+    becomes visible. The exact status code / exception subtype is an
+    implementation detail (see docs/dev/api-contract.md); what this test pins
+    down is that the call does not succeed and that nothing was committed
+    anywhere as a side effect of the attempt.
+    """
+    repo_id = f"{namespace}/{unique_name}-create-pr"
+    hf_api.create_repo(repo_id=repo_id, repo_type="dataset", private=False)
+    try:
+        commits_before = hf_api.list_repo_commits(repo_id=repo_id, repo_type="dataset")
+
+        with pytest.raises(HfHubHTTPError):
+            hf_api.upload_file(
+                path_or_fileobj=b"should never land anywhere\n",
+                path_in_repo="pr-only.txt",
+                repo_id=repo_id,
+                repo_type="dataset",
+                commit_message="Attempt a PR",
+                create_pr=True,
+            )
+
+        # Nothing was silently committed to main as a side effect of the
+        # rejected attempt.
+        commits_after = hf_api.list_repo_commits(repo_id=repo_id, repo_type="dataset")
+        assert len(commits_after) == len(commits_before)
+        files = hf_api.list_repo_files(repo_id=repo_id, repo_type="dataset")
+        assert "pr-only.txt" not in files
+    finally:
+        hf_api.delete_repo(repo_id=repo_id, repo_type="dataset")
+
+
+# --- error responses must carry a message a human (or huggingface_hub) can read
+
+
+def test_error_response_carries_a_readable_x_error_message_header(
+    hf_endpoint: str, hf_token: str, namespace: str, unique_name: str
+) -> None:
+    """Every error response must carry `X-Error-Message` equal to the body's
+    `error.message`.
+
+    `huggingface_hub.utils._http.hf_raise_for_status` reads the *header*
+    before it ever looks at the body, and thinkingface spells its error body
+    as an object (`{"error": {"message": "...", "type": "..."}}`) rather than
+    upstream HF's plain string -- without the header, the only text
+    `huggingface_hub` can pull out of the body is that object's Python
+    `repr()` (`"{'message': '...', 'type': '...'}"`), which is what callers
+    used to see instead of the actual sentence. Checked directly over HTTP
+    rather than through `huggingface_hub`, since the client folds the header
+    text and the body text together into a single exception message and the
+    result doesn't cleanly isolate one from the other.
+    """
+    repo_id = f"{namespace}/{unique_name}-error-message"
+    resp = requests.get(
+        f"{hf_endpoint}/api/models/{repo_id}",
+        headers={"Authorization": f"Bearer {hf_token}"},
+        timeout=10,
+    )
+    assert resp.status_code == 404
+    assert resp.headers.get("X-Error-Code") == "RepoNotFound"
+
+    body = resp.json()
+    assert resp.headers.get("X-Error-Message") == body["error"]["message"]

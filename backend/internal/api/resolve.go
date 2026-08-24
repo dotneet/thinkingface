@@ -106,10 +106,26 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, kind stri
 		internalError(w, "open git repository", err)
 		return
 	}
-	rev := chi.URLParam(r, "rev")
+	rev, ok := revParam(w, r, "rev", repo)
+	if !ok {
+		return
+	}
 	entry, commit, err := gitRepo.Stat(rev, filePath)
 	if err != nil {
-		if errors.Is(err, gitrepo.ErrPathNotFound) || errors.Is(err, gitrepo.ErrEmptyRepo) {
+		if errors.Is(err, gitrepo.ErrPathNotFound) {
+			// EntryNotFound, not a bare 404: huggingface_hub only raises
+			// EntryNotFoundError -- the error `hf_hub_download` documents for a
+			// file that is not in the repository -- when this header is
+			// present. Without it a missing file came back as a generic
+			// HfHubHTTPError, indistinguishable from the repository itself
+			// being gone.
+			entryNotFound(w, filePath+" does not exist at revision "+rev)
+			return
+		}
+		if errors.Is(err, gitrepo.ErrEmptyRepo) {
+			// The revision did not resolve at all (an unborn HEAD reads the
+			// same way; see revisionOrEmpty). Left as a plain 404 rather than
+			// RevisionNotFound, because the two are not told apart here.
 			notFound(w, filePath+" does not exist at revision "+rev)
 			return
 		}
@@ -381,12 +397,16 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filePath := wildcardPath(r)
+	rev, ok := revParam(w, r, "rev", repo)
+	if !ok {
+		return
+	}
 	gitRepo, err := s.git.Open(repo.StoragePath)
 	if err != nil {
 		internalError(w, "open git repository", err)
 		return
 	}
-	entry, _, err := gitRepo.Stat(chi.URLParam(r, "rev"), filePath)
+	entry, _, err := gitRepo.Stat(rev, filePath)
 	if err != nil {
 		handleStoreError(w, "stat file", err)
 		return
