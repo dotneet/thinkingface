@@ -160,7 +160,7 @@ tf: ## Build the tf CLI into backend/bin/tf
 # docs/users/ is the published site (mkdocs.yml points docs_dir there);
 # docs/dev/ holds the internal design docs and is deliberately excluded.
 # Run in a disposable uv environment so MkDocs never lands in the ambient
-# python environment (same approach as make test-e2e).
+# python environment (the same approach as the pinned ruff above).
 MKDOCS := uv run --isolated --with-requirements docs/requirements.txt mkdocs
 DOCS_PORT ?= 8123
 

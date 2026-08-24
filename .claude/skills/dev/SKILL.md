@@ -77,8 +77,8 @@ NEXT_PUBLIC_API_URL=http://localhost:8081 API_URL=http://localhost:8081 make dev
 make test-e2e          # against :8080 once make up has run. Baseline: 37 passed / ~70 seconds
 ```
 
-- Dependencies go into a disposable `uv run --isolated` environment. It doesn't pollute the
-  current python environment.
+- `uv run --locked` resolves the dependencies from `e2e/uv.lock` into `e2e/.venv`, so they
+  don't pollute the current python environment.
 - Manual uploads via `huggingface_hub` need `HF_HUB_DISABLE_XET=1` (without it, parquet goes
   through the xet path and returns 501; `e2e/conftest.py` uses the same setting).
 - The local dev bucket still has objects from the old layout. When checking "X doesn't

@@ -1,8 +1,10 @@
 # Project definition for the E2E test suite.
 #
-# Keep the dependencies in sync with requirements.txt (requirements.txt is kept
-# around for the existing `pip install -r` flow / CI compatibility).
-# On environments with uv, `uv lock` / `uv sync` can reproduce it from the lockfile.
+# This file plus uv.lock is the whole dependency set: `uv run --locked` (what
+# `make test-e2e` runs) resolves from the lockfile and fails rather than
+# re-resolving if the two have drifted apart. After editing the dependencies
+# below, run `uv lock` here or `make lock-python` from the repo root, and commit
+# the regenerated uv.lock. See docs/dev/supply-chain.md.
 
 [project]
 name = "thinkingface-e2e"
