@@ -1241,6 +1241,67 @@ type WebhookDeliveryListResponse struct {
 	Total int64             `json:"total"`
 }
 
+// ------------------------------------------------------- site administration
+
+// PasswordChangeRequest is the body of PATCH /api/v1/me/password. The current
+// password is always required: holding a session is not on its own permission
+// to replace the credential that session was minted from.
+type PasswordChangeRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+// AdminUser is one account as GET /api/v1/admin/users lists it. The stored
+// password hash has no field here and never will: this type *is* the wire
+// contract, so a field that does not exist cannot be serialised by accident.
+type AdminUser struct {
+	ID       int64  `json:"id"`
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	// IsAdmin is the instance-wide administrator flag (users.is_admin), not
+	// a role in any organisation.
+	IsAdmin   bool      `json:"is_admin"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// AdminUserListResponse is one page of the account directory. Total counts
+// every account matching `search`, ignoring the page window.
+type AdminUserListResponse struct {
+	Items []AdminUser `json:"items"`
+	Total int64       `json:"total"`
+}
+
+// AdminUserResponse wraps the account after an administrative change.
+type AdminUserResponse struct {
+	User AdminUser `json:"user"`
+}
+
+// AdminUserCreateRequest is the body of POST /api/v1/admin/users: a site
+// administrator adds an account directly. It is the only way to create one on
+// an instance with TF_ALLOW_SIGNUP=false, so it deliberately does not consult
+// that setting.
+type AdminUserCreateRequest struct {
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	// IsAdmin makes the new account a site administrator. Optional; the
+	// account is an ordinary user when it is absent or false.
+	IsAdmin bool `json:"is_admin,omitempty"`
+}
+
+// AdminUserUpdateRequest is the body of PATCH
+// /api/v1/admin/users/{username}. Both fields are optional and an absent one
+// is left unchanged, but a body setting neither is refused (400) rather than
+// treated as a no-op.
+type AdminUserUpdateRequest struct {
+	// Password replaces the account's password and revokes its sessions.
+	// The account's access tokens are deliberately not revoked.
+	Password *string `json:"password,omitempty"`
+	// IsAdmin grants or revokes site administrator rights. Revoking your
+	// own is 400; revoking the last one on the instance is 409.
+	IsAdmin *bool `json:"is_admin,omitempty"`
+}
+
 // ------------------------------------------------------------------ errors
 
 // ApiError describes what went wrong.

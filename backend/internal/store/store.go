@@ -32,6 +32,14 @@ var ErrConflict = errors.New("store: already exists")
 // another admin first.
 var ErrLastAdmin = errors.New("store: organisation would be left without an admin")
 
+// ErrLastSiteAdmin is the instance-wide counterpart of ErrLastAdmin: clearing
+// users.is_admin on the last remaining site administrator would leave nobody
+// able to reset a password or appoint another administrator, and the only way
+// back would be editing the database by hand. It is a separate sentinel from
+// ErrLastAdmin so a handler cannot answer an organisation question with a
+// site-wide message, or the other way round.
+var ErrLastSiteAdmin = errors.New("store: instance would be left without a site administrator")
+
 // ErrLFSObjectGone is returned by RecordLFSObject when the object is no
 // longer in object storage after the lfs_objects row lock is acquired.
 // An LFS upload batch that already Stat'ed a hit must treat this as "not

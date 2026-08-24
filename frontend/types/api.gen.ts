@@ -1509,6 +1509,79 @@ export interface WebhookDeliveryListResponse {
   total: number /* int64 */;
 }
 /**
+ * PasswordChangeRequest is the body of PATCH /api/v1/me/password. The current
+ * password is always required: holding a session is not on its own permission
+ * to replace the credential that session was minted from.
+ */
+export interface PasswordChangeRequest {
+  current_password: string;
+  new_password: string;
+}
+/**
+ * AdminUser is one account as GET /api/v1/admin/users lists it. The stored
+ * password hash has no field here and never will: this type *is* the wire
+ * contract, so a field that does not exist cannot be serialised by accident.
+ */
+export interface AdminUser {
+  id: number /* int64 */;
+  username: string;
+  email: string;
+  /**
+   * IsAdmin is the instance-wide administrator flag (users.is_admin), not
+   * a role in any organisation.
+   */
+  is_admin: boolean;
+  created_at: string;
+}
+/**
+ * AdminUserListResponse is one page of the account directory. Total counts
+ * every account matching `search`, ignoring the page window.
+ */
+export interface AdminUserListResponse {
+  items: AdminUser[];
+  total: number /* int64 */;
+}
+/**
+ * AdminUserResponse wraps the account after an administrative change.
+ */
+export interface AdminUserResponse {
+  user: AdminUser;
+}
+/**
+ * AdminUserCreateRequest is the body of POST /api/v1/admin/users: a site
+ * administrator adds an account directly. It is the only way to create one on
+ * an instance with TF_ALLOW_SIGNUP=false, so it deliberately does not consult
+ * that setting.
+ */
+export interface AdminUserCreateRequest {
+  username: string;
+  email: string;
+  password: string;
+  /**
+   * IsAdmin makes the new account a site administrator. Optional; the
+   * account is an ordinary user when it is absent or false.
+   */
+  is_admin?: boolean;
+}
+/**
+ * AdminUserUpdateRequest is the body of PATCH
+ * /api/v1/admin/users/{username}. Both fields are optional and an absent one
+ * is left unchanged, but a body setting neither is refused (400) rather than
+ * treated as a no-op.
+ */
+export interface AdminUserUpdateRequest {
+  /**
+   * Password replaces the account's password and revokes its sessions.
+   * The account's access tokens are deliberately not revoked.
+   */
+  password?: string;
+  /**
+   * IsAdmin grants or revokes site administrator rights. Revoking your
+   * own is 400; revoking the last one on the instance is 409.
+   */
+  is_admin?: boolean;
+}
+/**
  * ApiError describes what went wrong.
  */
 export interface ApiError {
