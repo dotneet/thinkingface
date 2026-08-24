@@ -101,6 +101,10 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !ensureBranchRev(w, gitRepo, rev, "edits") {
+		return
+	}
+
 	rules := s.loadLFSRules(gitRepo, rev, repo.Kind)
 	if rules.ShouldUseLFS(path, int64(len(content))) {
 		badRequest(w, lfsEditRejection(path))
@@ -294,6 +298,10 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	gitRepo, err := s.git.Open(repo.StoragePath)
 	if err != nil {
 		internalError(w, "open git repository", err)
+		return
+	}
+
+	if !ensureBranchRev(w, gitRepo, rev, "deletions") {
 		return
 	}
 

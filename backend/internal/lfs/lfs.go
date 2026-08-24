@@ -9,8 +9,10 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net/url"
@@ -435,6 +437,30 @@ func (e *SizeMismatchError) Error() string {
 	return fmt.Sprintf("object %s is %d bytes, expected %d", e.OID, e.Got, e.Want)
 }
 
+// DigestMismatchError reports staged bytes whose sha256 is not the oid they
+// were uploaded under. Like a size mismatch the object stays in staging and is
+// never promoted: lfs/{oid} is what every repository on the instance gets when
+// it asks for that oid, so bytes that are not the ones the oid names must not
+// reach it.
+type DigestMismatchError struct {
+	OID string
+	Got string
+}
+
+func (e *DigestMismatchError) Error() string {
+	return fmt.Sprintf("object %s hashes to %s; the uploaded bytes are not the ones this oid names", e.OID, e.Got)
+}
+
+// StagedObjectChangedError reports that the staged bytes were rewritten while
+// they were being hashed, which makes the digest just computed a statement
+// about bytes that are no longer there. Nothing is promoted; the client's own
+// verify retry re-hashes whatever is in staging then.
+type StagedObjectChangedError struct{ OID string }
+
+func (e *StagedObjectChangedError) Error() string {
+	return fmt.Sprintf("object %s changed while it was being verified; retry the upload", e.OID)
+}
+
 // link records the object against the repository, re-confirming under the row
 // lock that the bytes are really at the content-addressed key.
 func (h *Handler) link(ctx context.Context, repoID int64, oid string, size int64) error {
@@ -443,34 +469,60 @@ func (h *Handler) link(ctx context.Context, repoID int64, oid string, size int64
 	})
 }
 
+// digestProof says whether anything has actually hashed the bytes a promotion
+// is about to publish. It is a parameter rather than an assumption because the
+// two upload paths differ in exactly this respect, and getting it wrong is the
+// difference between a content-addressed store and a client-addressed one.
+type digestProof int
+
+const (
+	// digestUnproven: nothing in this process has seen these bytes. That is
+	// the signed-URL path -- the client PUTs straight to the bucket -- and it
+	// is why promotion re-reads the staged object and hashes it.
+	digestUnproven digestProof = iota
+	// digestHashedOnIngest: the bytes streamed through this process and were
+	// hashed on their way to the staging key, so re-reading them from the
+	// bucket would buy nothing but latency and egress. Only a caller that
+	// hashed the whole body itself may claim this. Both that do -- the
+	// emulator proxy upload and the browser upload -- refuse the transfer
+	// outright when the digest is not the declared oid (and the browser
+	// upload derives the oid from the stream in the first place), so
+	// promotion never sees bytes nobody vouched for.
+	digestHashedOnIngest
+)
+
 // promote turns a staged upload into a real object. The order is the whole
 // point:
 //
 //  1. stat the staging key -- absent means nothing was uploaded;
 //  2. check the size before anything is published, so bytes that do not match
-//     what the client declared never reach the shared key;
-//  3. server-side Copy to storage.LFSKey(oid). GCS rewrites in chunks and the
+//     what the client declared never reach the shared key. It is one metadata
+//     call and it rejects a truncated transfer without reading a byte;
+//  3. confirm the digest, unless the bytes were already hashed on ingest.
+//     This is what makes lfs/{oid} content-addressed rather than
+//     client-labelled -- see confirmDigest;
+//  4. server-side Copy to storage.LFSKey(oid). GCS rewrites in chunks and the
 //     client library loops the rewrite token, so a 10 GiB object promotes
 //     without a byte passing through this process;
-//  4. only then link the object to the repository. A link recorded before the
+//  5. only then link the object to the repository. A link recorded before the
 //     copy would advertise an object whose bytes are not at the key yet --
 //     dedup, downloads and gc all read the link as proof the content exists;
-//  5. delete the staging object, best effort. A failure here leaves garbage
+//  6. delete the staging object, best effort. A failure here leaves garbage
 //     under tmp/uploads/ for the collector, which is strictly better than
 //     failing a verify whose object is already safely published.
 //
 // It is idempotent: a retried verify whose staging object is already gone
 // succeeds if the promoted object is present at the expected size, because
 // that is exactly what a completed promotion looks like.
-func (h *Handler) promote(ctx context.Context, repoID int64, oid string, size int64) error {
-	return h.promoteFrom(ctx, repoID, oid, size, storage.LFSStagingKey(repoID, oid))
+func (h *Handler) promote(ctx context.Context, repoID int64, oid string, size int64, proof digestProof) error {
+	return h.promoteFrom(ctx, repoID, oid, size, storage.LFSStagingKey(repoID, oid), proof)
 }
 
 // promoteFrom is promote with the staging key spelled out, for the one caller
 // that cannot use storage.LFSStagingKey: the browser upload endpoint hashes
 // the bytes as it receives them, so they are already written somewhere by the
 // time their oid -- and therefore that key -- exists.
-func (h *Handler) promoteFrom(ctx context.Context, repoID int64, oid string, size int64, staging string) error {
+func (h *Handler) promoteFrom(ctx context.Context, repoID int64, oid string, size int64, staging string, proof digestProof) error {
 	info, err := h.storage.Stat(ctx, staging)
 	if errors.Is(err, storage.ErrNotFound) {
 		return h.promoteAlreadyDone(ctx, repoID, oid, size)
@@ -478,10 +530,22 @@ func (h *Handler) promoteFrom(ctx context.Context, repoID int64, oid string, siz
 	if err != nil {
 		return fmt.Errorf("stat staged object: %w", err)
 	}
-	// size <= 0 means the client did not tell us; the batch API allows it and
-	// this stays as permissive as the previous implementation was.
-	if size > 0 && info.Size != size {
+	// The declared size is now checked exactly, including zero. It used to be
+	// skipped for size <= 0 ("the client did not tell us"), which let a caller
+	// turn the only check this path had off by declaring nothing: PUT any
+	// bytes to the staging key, verify with size 0, and they were promoted
+	// onto a content-addressed key that every repository shares. Callers that
+	// measured the object themselves pass what they measured, and the LFS
+	// batch and verify requests both carry a size, so nothing legitimate
+	// leaves it unstated. A genuinely empty object still passes: it declares
+	// zero and it is zero.
+	if info.Size != size {
 		return &SizeMismatchError{OID: oid, Got: info.Size, Want: size}
+	}
+	if proof == digestUnproven {
+		if err := h.confirmDigest(ctx, oid, staging); err != nil {
+			return err
+		}
 	}
 
 	if err := h.storage.Copy(ctx, staging, storage.LFSKey(oid)); err != nil {
@@ -493,6 +557,73 @@ func (h *Handler) promoteFrom(ctx context.Context, repoID int64, oid string, siz
 	if err := h.storage.Delete(ctx, staging); err != nil {
 		slog.Warn("lfs: staged object left behind after promotion",
 			"oid", oid, "repo_id", repoID, "key", staging, "error", err)
+	}
+	return nil
+}
+
+// confirmDigest streams the staged object once and checks that it really
+// hashes to the oid it was uploaded under.
+//
+// This is the only thing standing between a signed-URL upload and the shared
+// content-addressed key. Those bytes go straight from the client to the
+// bucket, so until this read nothing on the server has seen them: with only a
+// size check, anyone holding write access to a single repository could take an
+// oid the instance does not have yet, request an upload URL for it, PUT
+// whatever they liked, and have it promoted to lfs/{oid}. From then on every
+// repository pushing the real object would be deduplicated onto the forgery,
+// because Batch reads the bucket as proof the content exists.
+//
+// The cost is honest and unavoidable: one extra full read of the object out of
+// the bucket, and verify does not answer until it finishes. On a 10 GiB model
+// that is minutes of wall clock and 10 GiB of reads the previous
+// implementation did not pay -- git-lfs's verify request has no timeout of its
+// own, but a proxy in front of this server may, so the read budget is the one
+// thing to watch when tuning a deployment for very large objects. Nothing is
+// buffered: io.Copy streams into the hash in 32 KiB chunks, so memory is flat
+// whatever the object's size.
+//
+// There is deliberately no way to switch this off. An integrity gate with an
+// opt-out is the same hole with an extra step, and the paths that can afford
+// to skip the read (digestHashedOnIngest) already have a stronger proof.
+func (h *Handler) confirmDigest(ctx context.Context, oid, staging string) error {
+	rc, generation, err := h.storage.GetWithGeneration(ctx, staging)
+	if errors.Is(err, storage.ErrNotFound) {
+		// Deleted between the stat above and this read -- gc sweeping an
+		// upload it judged abandoned. Nothing was promoted, so this is the
+		// same answer as never having uploaded.
+		return ErrNotStaged
+	}
+	if err != nil {
+		return fmt.Errorf("read staged object: %w", err)
+	}
+	defer rc.Close()
+
+	sum := sha256.New()
+	if _, err := io.Copy(sum, rc); err != nil {
+		return fmt.Errorf("hash staged object: %w", err)
+	}
+	if got := hex.EncodeToString(sum.Sum(nil)); got != oid {
+		return &DigestMismatchError{OID: oid, Got: got}
+	}
+
+	// The upload URL for this staging key can still be live while verify runs,
+	// so the bytes may have been rewritten between the read above and the copy
+	// that follows. Generations only move forward, so comparing the one that
+	// was read against the one that is current narrows that window from "as
+	// long as hashing the object takes" -- minutes, for a large model -- to a
+	// single round trip. A driver that does not report generations reports
+	// zero for both and this simply passes; the residual gap before the copy
+	// is not closable here, since storage.Copy takes no generation
+	// precondition.
+	after, err := h.storage.Stat(ctx, staging)
+	if errors.Is(err, storage.ErrNotFound) {
+		return ErrNotStaged
+	}
+	if err != nil {
+		return fmt.Errorf("re-stat staged object: %w", err)
+	}
+	if after.Generation != generation {
+		return &StagedObjectChangedError{OID: oid}
 	}
 	return nil
 }
@@ -518,6 +649,12 @@ func (h *Handler) promoteFrom(ctx context.Context, repoID int64, oid string, siz
 // So the fallback proof is a link this repository already holds. Nothing
 // legitimate needs more: a dedup hit is linked by Batch and never reaches
 // verify, and a genuine upload always has staging.
+//
+// It does not re-hash the promoted object. The link it requires can only have
+// been written by a promotion that already confirmed the digest, and lfs/{oid}
+// is never a signed PUT target, so nothing can have rewritten it since. Making
+// every git-lfs verify retry re-read a 10 GiB object would be a large bill for
+// no additional proof.
 func (h *Handler) promoteAlreadyDone(ctx context.Context, repoID int64, oid string, size int64) error {
 	owned, err := h.store.RepoHasLFSObject(ctx, repoID, oid)
 	if err != nil {
@@ -536,6 +673,11 @@ func (h *Handler) promoteAlreadyDone(ctx context.Context, repoID int64, oid stri
 	if err != nil {
 		return fmt.Errorf("stat lfs object: %w", err)
 	}
+	// Deliberately more permissive about the declared size than promoteFrom
+	// is, and it costs nothing: this path publishes nothing and links nothing,
+	// so a client that leaves the size out gets an answer about an object it
+	// already legitimately holds rather than a failed retry. On promoteFrom
+	// the same leniency is what let unverified bytes onto the shared key.
 	if size > 0 && info.Size != size {
 		return &SizeMismatchError{OID: oid, Got: info.Size, Want: size}
 	}
@@ -547,11 +689,16 @@ func (h *Handler) promoteAlreadyDone(ctx context.Context, repoID int64, oid stri
 // emulator proxy upload path uses it after it has hashed the body, so both
 // upload paths share one promotion sequence -- and the E2E suite, which can
 // only exercise the proxy path, covers it.
+//
+// The caller must have hashed the whole body and found it to be oid: that
+// promise is what lets promotion skip re-reading the object out of the bucket,
+// and it is the caller's half of keeping lfs/{oid} content-addressed. A caller
+// that cannot make it has to go through Verify, which hashes for itself.
 func (h *Handler) PromoteStaged(ctx context.Context, repoID int64, oid string, size int64) error {
 	if !ValidOID(oid) {
 		return errors.New("oid must be a sha256 hex digest")
 	}
-	return h.promote(ctx, repoID, oid, size)
+	return h.promote(ctx, repoID, oid, size, digestHashedOnIngest)
 }
 
 // PromoteStagedFrom is PromoteStaged for bytes staged under a key the caller
@@ -561,6 +708,11 @@ func (h *Handler) PromoteStaged(ctx context.Context, repoID int64, oid string, s
 // storage.LFSIncomingKey). Everything after that point -- the size check, the
 // copy onto the content-addressed key, the link, the staging cleanup, and
 // their ordering -- is the sequence every other upload path runs.
+//
+// Computing the digest from the stream is also the strongest form of the
+// promise PromoteStaged asks its callers for -- the oid cannot disagree with
+// the bytes when it was derived from them -- so promotion does not read the
+// object back to hash it a second time.
 func (h *Handler) PromoteStagedFrom(ctx context.Context, repoID int64, oid string, size int64, stagingKey string) error {
 	if !ValidOID(oid) {
 		return errors.New("oid must be a sha256 hex digest")
@@ -568,7 +720,7 @@ func (h *Handler) PromoteStagedFrom(ctx context.Context, repoID int64, oid strin
 	if stagingKey == "" {
 		return errors.New("lfs: staging key is required")
 	}
-	return h.promoteFrom(ctx, repoID, oid, size, stagingKey)
+	return h.promoteFrom(ctx, repoID, oid, size, stagingKey, digestHashedOnIngest)
 }
 
 // Verify is the second half of a signed-URL upload: it promotes the staged
@@ -577,13 +729,26 @@ func (h *Handler) PromoteStagedFrom(ctx context.Context, repoID int64, oid strin
 // the proxy path), and a commit referencing an LFS file is rejected unless the
 // repository holds the link.
 //
+// Everything it is told comes from the client, and the transfer it is
+// attesting to never touched this process, so it takes none of it on trust:
+// the staged bytes are hashed before they are published, and the size must be
+// the one the object actually has. Size is not the security property here --
+// the digest is -- but it is a cheap first cut that fails a truncated upload
+// without reading the object.
+//
 // Storage and database faults are logged rather than described to the client:
-// their text carries bucket names and connection detail.
+// their text carries bucket names and connection detail. A digest mismatch is
+// described, because it is the client's own upload being reported back to it,
+// and logged, because it is either a corrupt transfer or an attempt to publish
+// bytes under somebody else's oid.
 func (h *Handler) Verify(ctx context.Context, repoID int64, oid string, size int64) error {
 	if !ValidOID(oid) {
 		return errors.New("oid must be a sha256 hex digest")
 	}
-	err := h.promote(ctx, repoID, oid, size)
+	if size < 0 {
+		return fmt.Errorf("object %s: size must not be negative", oid)
+	}
+	err := h.promote(ctx, repoID, oid, size, digestUnproven)
 	switch {
 	case err == nil:
 		return nil
@@ -593,6 +758,16 @@ func (h *Handler) Verify(ctx context.Context, repoID int64, oid string, size int
 		var mismatch *SizeMismatchError
 		if errors.As(err, &mismatch) {
 			return mismatch
+		}
+		var digest *DigestMismatchError
+		if errors.As(err, &digest) {
+			slog.Warn("lfs verify: staged object does not hash to its oid",
+				"oid", oid, "repo_id", repoID, "actual_oid", digest.Got)
+			return digest
+		}
+		var changed *StagedObjectChangedError
+		if errors.As(err, &changed) {
+			return changed
 		}
 		slog.Error("lfs verify: promote object", "oid", oid, "repo_id", repoID, "error", err)
 		return fmt.Errorf("object %s could not be verified", oid)

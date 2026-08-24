@@ -82,6 +82,7 @@ the server and so raises rather than silently starting from zero.
 from __future__ import annotations
 
 import atexit
+import copy
 import os
 import threading
 import time
@@ -193,7 +194,13 @@ class _Run:
         self._buffer: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self._finished = False
+        # Whether the config has ever been sent, and (once it has) a snapshot
+        # of exactly what was last sent -- so a later change to `self.config`
+        # (e.g. `run.config.update(...)` from ThinkingFaceLightningLogger) is
+        # detected and resent on the next flush, while an unchanged config is
+        # not re-posted on every tick. See flush().
         self._config_sent = False
+        self._last_sent_config: dict[str, Any] = {}
         self._timer: threading.Timer | None = None
 
         # Artifacts and produced models are gathered during the run and sent
@@ -315,8 +322,12 @@ class _Run:
         with self._lock:
             if not self._buffer:
                 return
+            # Settle the config before the buffer is drained: _config_to_send
+            # reads values the caller owns, and anything raised after the drain
+            # would strand points that are no longer in _buffer and not yet
+            # requeued.
+            config = self._config_to_send()
             points, self._buffer = self._buffer, []
-            config = None if self._config_sent else self.config
 
         payload: dict[str, Any] = {
             "run": self.name,
@@ -348,6 +359,8 @@ class _Run:
         if resp.ok:
             with self._lock:
                 self._config_sent = True
+                if config is not None:
+                    self._last_sent_config = config
             return
 
         # A 4xx (bad token, unknown repo, malformed payload) will not fix itself
@@ -368,6 +381,33 @@ class _Run:
                 f"{self.name!r}: server returned {resp.status_code} ({detail!r}). "
                 "Check THINKINGFACE_TOKEN / THINKINGFACE_REPO."
             )
+
+    def _config_to_send(self) -> dict[str, Any] | None:
+        """The config for the next flush, or None to leave it out.
+
+        Resent whenever it differs from what was last accepted -- not just on
+        the very first flush -- so a config mutated afterwards (`run.config`
+        updated in place, or a hyperparameter logged once training has started)
+        still reaches the server instead of being dropped forever.
+
+        The caller holds _lock. Both the comparison and the copy run over
+        values the caller put in config, so either can raise: a value with its
+        own __eq__, or one deepcopy refuses, such as an open file or a module.
+        Neither is worth failing a flush over -- the points are the part that
+        cannot be reconstructed, and an exception out of flush() on the timer
+        thread would also stop _schedule_flush from ever running again -- so a
+        config that cannot be prepared is reported and skipped.
+        """
+        try:
+            if self._config_sent and self.config == self._last_sent_config:
+                return None
+            return copy.deepcopy(self.config)
+        except Exception as exc:  # noqa: BLE001 - metrics matter more
+            warnings.warn(
+                f"thinkingface.trackio: could not prepare the config for run "
+                f"{self.name!r} ({exc!r}); sending metrics without it."
+            )
+            return None
 
     def _requeue(self, points: list[dict[str, Any]]) -> None:
         """Put unsent points back at the front, capped at _BUFFER_MAX_POINTS."""

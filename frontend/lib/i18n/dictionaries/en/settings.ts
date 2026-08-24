@@ -152,7 +152,7 @@ export const settings = {
     accountLoadFailed: "Failed to load your account",
     accountLoadFailedHint: "The backend API may be unreachable.",
     noNamespaceTitle: "No namespace to manage",
-    noNamespaceDescription: "You need write or admin access to a namespace to configure webhooks.",
+    noNamespaceDescription: "You need admin access to a namespace to configure webhooks.",
     namespaceLabel: "Namespace",
     scopeLabel: "Scope",
     scopeHint: "Leave blank to fire for every repository",
@@ -195,6 +195,19 @@ export const settings = {
     repoPush: { label: "Repository push", hint: "A commit landed on any ref" },
     repoCreated: { label: "Repository created", hint: "A new dataset or model was created" },
     repoDeleted: { label: "Repository deleted", hint: "A repository was deleted" },
+    repoMoved: {
+      label: "Repository moved",
+      hint: "A repository was renamed or transferred to a new namespace",
+    },
+    repoTransferRequested: {
+      label: "Repository transfer requested",
+      hint: "A repository transfer is awaiting approval on this namespace",
+    },
+    repoArchived: { label: "Repository archived", hint: "A repository was made read-only" },
+    repoUnarchived: {
+      label: "Repository unarchived",
+      hint: "A repository's read-only archive was lifted",
+    },
     runFinished: { label: "Run finished", hint: "An experiment run completed" },
     runFailed: { label: "Run failed", hint: "An experiment run failed" },
   },

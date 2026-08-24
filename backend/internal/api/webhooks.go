@@ -40,11 +40,15 @@ func (s *Server) fireWebhook(ctx context.Context, event, ns string, repoID *int6
 // a lookup so create/update can reject a typo instead of silently storing an
 // event nothing will ever fire.
 var validWebhookEvents = map[apitypes.WebhookEvent]bool{
-	apitypes.WebhookEventRepoPush:    true,
-	apitypes.WebhookEventRepoCreated: true,
-	apitypes.WebhookEventRepoDeleted: true,
-	apitypes.WebhookEventRunFinished: true,
-	apitypes.WebhookEventRunFailed:   true,
+	apitypes.WebhookEventRepoPush:              true,
+	apitypes.WebhookEventRepoCreated:           true,
+	apitypes.WebhookEventRepoDeleted:           true,
+	apitypes.WebhookEventRepoMoved:             true,
+	apitypes.WebhookEventRepoTransferRequested: true,
+	apitypes.WebhookEventRepoArchived:          true,
+	apitypes.WebhookEventRepoUnarchived:        true,
+	apitypes.WebhookEventRunFinished:           true,
+	apitypes.WebhookEventRunFailed:             true,
 }
 
 func generateWebhookSecret() (string, error) {

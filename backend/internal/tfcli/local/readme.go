@@ -83,24 +83,57 @@ func BuildReadme(opts CardOptions) []byte {
 	return []byte(b.String())
 }
 
+// yamlNeedsQuote reports whether s would round-trip as something other than
+// the literal string s if emitted as a plain (unquoted) YAML scalar --
+// because it parses as a number/bool/null, carries leading/trailing
+// whitespace, or is empty. Shared by yamlScalar (string-based front matter
+// rendering in BuildReadme) and yamlSetScalar (yaml.Node-based front matter
+// editing in MergeReadme) so the two code paths can't drift apart.
+func yamlNeedsQuote(s string) bool {
+	if s == "" || s != strings.TrimSpace(s) {
+		return true
+	}
+	var probe any
+	if err := yaml.Unmarshal([]byte(s), &probe); err != nil {
+		return true
+	}
+	str, ok := probe.(string)
+	return !ok || str != s
+}
+
 // yamlScalar renders a plain string as a YAML scalar, double-quoting it when
 // it would otherwise be misread (leading/trailing space, indicator characters,
 // something that parses as a number or boolean).
 func yamlScalar(s string) string {
-	if s == "" {
-		return `""`
-	}
-	var probe any
-	if err := yaml.Unmarshal([]byte(s), &probe); err == nil && s == strings.TrimSpace(s) {
-		if str, ok := probe.(string); ok && str == s {
-			return s
-		}
+	if !yamlNeedsQuote(s) {
+		return s
 	}
 	quoted, err := json.Marshal(s)
 	if err != nil {
 		return `""`
 	}
 	return string(quoted)
+}
+
+// yamlSetScalar turns node into a plain-string scalar holding value,
+// clearing whatever kind/content it previously held. It applies the same
+// quoting decision as yamlScalar, but via yaml.Node's Style field rather
+// than by embedding quote characters in Value: yaml.Node.Value must hold the
+// literal string, since Style (not the string content) controls how the
+// encoder renders it, and the encoder ignores Tag for this purpose -- an
+// explicit "!!str" tag alone does not force quoted output.
+func yamlSetScalar(node *yaml.Node, value string) {
+	node.Kind = yaml.ScalarNode
+	node.Tag = ""
+	node.Value = value
+	node.Content = nil
+	node.Anchor = ""
+	node.Alias = nil
+	if yamlNeedsQuote(value) {
+		node.Style = yaml.DoubleQuotedStyle
+	} else {
+		node.Style = 0
+	}
 }
 
 // MergeReadme updates the front matter of an existing README with the fields
@@ -186,18 +219,14 @@ func mappingGet(mapping *yaml.Node, key string) *yaml.Node {
 // entry in place (preserving its position) or appending a new one.
 func mappingSet(mapping *yaml.Node, key, value string) {
 	if v := mappingGet(mapping, key); v != nil {
-		v.Kind = yaml.ScalarNode
-		v.Tag = ""
-		v.Style = 0
-		v.Value = value
-		v.Content = nil
-		v.Anchor = ""
-		v.Alias = nil
+		yamlSetScalar(v, value)
 		return
 	}
+	valueNode := &yaml.Node{}
+	yamlSetScalar(valueNode, value)
 	mapping.Content = append(mapping.Content,
 		&yaml.Node{Kind: yaml.ScalarNode, Value: key},
-		&yaml.Node{Kind: yaml.ScalarNode, Value: value},
+		valueNode,
 	)
 }
 
@@ -235,6 +264,8 @@ func mappingAppendTags(mapping *yaml.Node, tags []string) {
 			continue
 		}
 		existing[tag] = true
-		seq.Content = append(seq.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: tag})
+		tagNode := &yaml.Node{}
+		yamlSetScalar(tagNode, tag)
+		seq.Content = append(seq.Content, tagNode)
 	}
 }

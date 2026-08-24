@@ -194,6 +194,12 @@ func (s *Server) handleUploadFiles(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "open git repository", err)
 		return
 	}
+	// Before a single part is read: an upload to a rev that is a tag would be
+	// stored on a branch nobody reads (see ensureBranchRev), and the LFS parts
+	// would already be in the bucket by the time anyone noticed.
+	if !ensureBranchRev(w, gitRepo, rev, "uploads") {
+		return
+	}
 	rules := s.loadLFSRules(gitRepo, rev, repo.Kind)
 
 	var (

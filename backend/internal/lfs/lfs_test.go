@@ -1,7 +1,10 @@
 package lfs
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -14,7 +17,20 @@ import (
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
 
-const goodOID = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+// Promotion hashes what it publishes, so a test that stages bytes has to stage
+// the *right* bytes: goodBody is the object, goodOID its digest and goodSize
+// its length. They are derived rather than written out so the three can never
+// drift apart.
+var (
+	goodBody = []byte("the bytes this oid names")
+	goodOID  = oidOf(goodBody)
+	goodSize = int64(len(goodBody))
+)
+
+func oidOf(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
 
 func TestValidOID(t *testing.T) {
 	tests := []struct {
@@ -166,11 +182,13 @@ func (f *fakeRecorder) RecordLFSObject(_ context.Context, repoID int64, oid stri
 
 // stubStorage is enough of storage.Storage for Batch/Verify: Stat plus the
 // unsigned-URL upload path. presentFor is how many Stat calls return a hit
-// (0 means the object is missing from the start).
+// (0 means the object is missing from the start). content is what a read of
+// any key returns, for the tests that reach the digest check.
 type stubStorage struct {
 	nStat      int
 	presentFor int
 	size       int64
+	content    []byte
 }
 
 func (s *stubStorage) SupportsSignedURL() bool { return false }
@@ -184,10 +202,10 @@ func (s *stubStorage) Put(context.Context, string, io.Reader, string) error {
 	return errors.New("unused")
 }
 func (s *stubStorage) Get(context.Context, string) (io.ReadCloser, error) {
-	return nil, errors.New("unused")
+	return io.NopCloser(bytes.NewReader(s.content)), nil
 }
 func (s *stubStorage) GetWithGeneration(context.Context, string) (io.ReadCloser, int64, error) {
-	return nil, 0, errors.New("unused")
+	return io.NopCloser(bytes.NewReader(s.content)), 1, nil
 }
 func (s *stubStorage) PutIfGeneration(context.Context, string, int64, io.Reader, string) (int64, error) {
 	return 0, errors.New("unused")
@@ -198,7 +216,10 @@ func (s *stubStorage) GetRange(context.Context, string, int64, int64) (io.ReadCl
 func (s *stubStorage) Stat(context.Context, string) (storage.ObjectInfo, error) {
 	s.nStat++
 	if s.nStat <= s.presentFor {
-		return storage.ObjectInfo{Size: s.size}, nil
+		// Generation matches what GetWithGeneration reports: this stub never
+		// rewrites an object, so the digest check's "did it change while I was
+		// reading it" comparison must pass.
+		return storage.ObjectInfo{Size: s.size, Generation: 1}, nil
 	}
 	return storage.ObjectInfo{}, storage.ErrNotFound
 }
@@ -385,10 +406,13 @@ func TestBatchUploadDedupDoesNotRequireExistingLink(t *testing.T) {
 
 func TestVerifyFailsWhenGCDeletedDuringRecord(t *testing.T) {
 	rec := &fakeRecorder{}
-	st := &stubStorage{presentFor: 1, size: 10}
+	// Verify stats the staging key twice -- once to size it, once after
+	// hashing to confirm it did not change underneath -- so the third Stat is
+	// confirmPresent's, and that is the one that must miss here.
+	st := &stubStorage{presentFor: 2, size: goodSize, content: goodBody}
 	h := testHandler(rec, st)
 
-	err := h.Verify(context.Background(), 1, goodOID, 10)
+	err := h.Verify(context.Background(), 1, goodOID, goodSize)
 	if err == nil || !strings.Contains(err.Error(), "was not uploaded") {
 		t.Fatalf("Verify error = %v, want 'was not uploaded'", err)
 	}
@@ -399,10 +423,10 @@ func TestVerifyFailsWhenGCDeletedDuringRecord(t *testing.T) {
 
 func TestVerifySucceedsWhenObjectStillPresent(t *testing.T) {
 	rec := &fakeRecorder{}
-	st := &stubStorage{presentFor: 2, size: 10}
+	st := &stubStorage{presentFor: 3, size: goodSize, content: goodBody}
 	h := testHandler(rec, st)
 
-	if err := h.Verify(context.Background(), 1, goodOID, 10); err != nil {
+	if err := h.Verify(context.Background(), 1, goodOID, goodSize); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 	if rec.calls != 1 {
@@ -425,20 +449,48 @@ func (l *opLog) add(op string) {
 // are touched: a tiny key -> size namespace instead of a Stat call counter.
 // Everything it does not override is inherited from stubStorage and panics
 // loudly enough (an error) if a test reaches it.
+//
+// objects holds sizes so a test can name a 100 GiB object without allocating
+// one; bodies holds the actual bytes for the keys whose content matters, which
+// is every key a promotion reads to confirm the digest.
 type keyStorage struct {
 	*stubStorage
-	signing bool
-	objects map[string]int64
-	log     *opLog
+	signing     bool
+	objects     map[string]int64
+	bodies      map[string][]byte
+	generations map[string]int64
+	log         *opLog
 	// signedPuts records every key a PUT was signed for, in order.
 	signedPuts []string
+	// onRead runs when an object's bytes are read, so a test can simulate a
+	// client overwriting a staged object while it is being hashed.
+	onRead func(key string)
 }
 
 func newKeyStorage(objects map[string]int64) *keyStorage {
 	if objects == nil {
 		objects = map[string]int64{}
 	}
-	return &keyStorage{stubStorage: &stubStorage{}, objects: objects, log: &opLog{}}
+	k := &keyStorage{
+		stubStorage: &stubStorage{},
+		objects:     objects,
+		bodies:      map[string][]byte{},
+		generations: map[string]int64{},
+		log:         &opLog{},
+	}
+	for key := range objects {
+		k.generations[key] = 1
+	}
+	return k
+}
+
+// put stores real bytes at key, which is what a test has to do for any object
+// a promotion will hash. Writing an object always advances its generation, as
+// the object store does.
+func (k *keyStorage) put(key string, body []byte) {
+	k.objects[key] = int64(len(body))
+	k.bodies[key] = body
+	k.generations[key]++
 }
 
 func (k *keyStorage) SupportsSignedURL() bool { return k.signing }
@@ -464,7 +516,28 @@ func (k *keyStorage) Stat(_ context.Context, key string) (storage.ObjectInfo, er
 	if !ok {
 		return storage.ObjectInfo{}, storage.ErrNotFound
 	}
-	return storage.ObjectInfo{Key: key, Size: size}, nil
+	return storage.ObjectInfo{Key: key, Size: size, Generation: k.generations[key]}, nil
+}
+
+func (k *keyStorage) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	rc, _, err := k.GetWithGeneration(ctx, key)
+	return rc, err
+}
+
+func (k *keyStorage) GetWithGeneration(_ context.Context, key string) (io.ReadCloser, int64, error) {
+	k.log.add("read " + key)
+	body, ok := k.bodies[key]
+	if !ok {
+		if _, sized := k.objects[key]; sized {
+			return nil, 0, fmt.Errorf("keyStorage: %s has a size but no bytes; use put() when the test hashes it", key)
+		}
+		return nil, 0, storage.ErrNotFound
+	}
+	generation := k.generations[key]
+	if k.onRead != nil {
+		k.onRead(key)
+	}
+	return io.NopCloser(bytes.NewReader(body)), generation, nil
 }
 
 func (k *keyStorage) Copy(_ context.Context, srcKey, dstKey string) error {
@@ -474,12 +547,17 @@ func (k *keyStorage) Copy(_ context.Context, srcKey, dstKey string) error {
 		return storage.ErrNotFound
 	}
 	k.objects[dstKey] = size
+	if body, ok := k.bodies[srcKey]; ok {
+		k.bodies[dstKey] = body
+	}
+	k.generations[dstKey]++
 	return nil
 }
 
 func (k *keyStorage) Delete(_ context.Context, key string) error {
 	k.log.add("delete " + key)
 	delete(k.objects, key)
+	delete(k.bodies, key)
 	return nil
 }
 
@@ -660,14 +738,17 @@ func TestBatchUploadSignsStagingKeyNotContentKey(t *testing.T) {
 func TestVerifyPromotesStagedObjectInOrder(t *testing.T) {
 	staging := storage.LFSStagingKey(1, goodOID)
 	rec := &fakeRecorder{}
-	st := newKeyStorage(map[string]int64{staging: 10})
+	st := newKeyStorage(nil)
+	st.put(staging, goodBody)
 	h := keyTestHandler(rec, st)
 
-	if err := h.Verify(context.Background(), 1, goodOID, 10); err != nil {
+	if err := h.Verify(context.Background(), 1, goodOID, goodSize); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 	want := []string{
 		"stat " + staging,
+		"read " + staging, // hashed before anything is published
+		"stat " + staging, // and re-checked for a rewrite during that read
 		"copy " + staging + " -> " + storage.LFSKey(goodOID),
 		"record",
 		"stat " + storage.LFSKey(goodOID), // confirmPresent, under the row lock
@@ -687,8 +768,8 @@ func TestVerifyPromotesStagedObjectInOrder(t *testing.T) {
 	if _, still := st.objects[staging]; still {
 		t.Error("the staged object was left behind after a successful promotion")
 	}
-	if size := st.objects[storage.LFSKey(goodOID)]; size != 10 {
-		t.Errorf("promoted object size = %d, want 10", size)
+	if size := st.objects[storage.LFSKey(goodOID)]; size != goodSize {
+		t.Errorf("promoted object size = %d, want %d", size, goodSize)
 	}
 }
 
@@ -698,12 +779,13 @@ func TestVerifyPromotesStagedObjectInOrder(t *testing.T) {
 func TestVerifyRefusesSizeMismatchWithoutPromoting(t *testing.T) {
 	staging := storage.LFSStagingKey(1, goodOID)
 	rec := &fakeRecorder{}
-	st := newKeyStorage(map[string]int64{staging: 5})
+	st := newKeyStorage(nil)
+	st.put(staging, goodBody[:5])
 	h := keyTestHandler(rec, st)
 
-	err := h.Verify(context.Background(), 1, goodOID, 10)
+	err := h.Verify(context.Background(), 1, goodOID, goodSize)
 	if err == nil {
-		t.Fatal("Verify accepted a 5-byte object declared as 10 bytes")
+		t.Fatalf("Verify accepted a 5-byte object declared as %d bytes", goodSize)
 	}
 	var mismatch *SizeMismatchError
 	if !errors.As(err, &mismatch) {
@@ -722,6 +804,11 @@ func TestVerifyRefusesSizeMismatchWithoutPromoting(t *testing.T) {
 		if strings.HasPrefix(op, "copy ") {
 			t.Errorf("operations = %v, want no copy", st.log.ops)
 		}
+		// The size check is the cheap first cut: a truncated 10 GiB upload
+		// must be rejected on metadata alone, without reading it back.
+		if strings.HasPrefix(op, "read ") {
+			t.Errorf("operations = %v, want no read for a size that already disagrees", st.log.ops)
+		}
 	}
 }
 
@@ -731,13 +818,14 @@ func TestVerifyRefusesSizeMismatchWithoutPromoting(t *testing.T) {
 func TestVerifyIsIdempotent(t *testing.T) {
 	staging := storage.LFSStagingKey(1, goodOID)
 	rec := &fakeRecorder{}
-	st := newKeyStorage(map[string]int64{staging: 10})
+	st := newKeyStorage(nil)
+	st.put(staging, goodBody)
 	h := keyTestHandler(rec, st)
 
-	if err := h.Verify(context.Background(), 1, goodOID, 10); err != nil {
+	if err := h.Verify(context.Background(), 1, goodOID, goodSize); err != nil {
 		t.Fatalf("first Verify: %v", err)
 	}
-	if err := h.Verify(context.Background(), 1, goodOID, 10); err != nil {
+	if err := h.Verify(context.Background(), 1, goodOID, goodSize); err != nil {
 		t.Fatalf("second Verify: %v", err)
 	}
 	// The retry does not re-link: the link this repository already holds is
@@ -745,9 +833,51 @@ func TestVerifyIsIdempotent(t *testing.T) {
 	if rec.calls != 1 {
 		t.Errorf("RecordLFSObject calls = %d, want 1 (the retry re-links nothing)", rec.calls)
 	}
-	if size := st.objects[storage.LFSKey(goodOID)]; size != 10 {
-		t.Errorf("promoted object size = %d, want 10", size)
+	if size := st.objects[storage.LFSKey(goodOID)]; size != goodSize {
+		t.Errorf("promoted object size = %d, want %d", size, goodSize)
 	}
+	// The retry must not re-read the promoted object either: nothing can have
+	// rewritten a content-addressed key, and a 10 GiB re-hash per retry would
+	// be a large bill for no additional proof.
+	if reads := countOps(st.log.ops, "read "); reads != 1 {
+		t.Errorf("reads = %d, want 1: only the first verify hashes", reads)
+	}
+}
+
+// A verify that finds nothing in staging is answering about an object this
+// repository is already linked to, so it publishes nothing and can afford to
+// be lenient about a size the client left out. The proxy upload path promotes
+// before git-lfs ever calls verify, so this is the ordinary shape of a verify
+// there, not an edge case.
+func TestVerifyRetryToleratesAnUnstatedSize(t *testing.T) {
+	staging := storage.LFSStagingKey(1, goodOID)
+	rec := &fakeRecorder{}
+	st := newKeyStorage(nil)
+	st.put(staging, goodBody)
+	h := keyTestHandler(rec, st)
+
+	if err := h.Verify(context.Background(), 1, goodOID, goodSize); err != nil {
+		t.Fatalf("first Verify: %v", err)
+	}
+	if err := h.Verify(context.Background(), 1, goodOID, 0); err != nil {
+		t.Fatalf("retry with an unstated size: %v", err)
+	}
+	// The same leniency must not exist where bytes are published: a staged
+	// object declared as zero is refused (see
+	// TestVerifyRefusesForgedBytesDeclaredAsZeroSize).
+	if rec.calls != 1 {
+		t.Errorf("RecordLFSObject calls = %d, want 1", rec.calls)
+	}
+}
+
+func countOps(ops []string, prefix string) int {
+	n := 0
+	for _, op := range ops {
+		if strings.HasPrefix(op, prefix) {
+			n++
+		}
+	}
+	return n
 }
 
 // A repository that never staged the object must not be able to claim it by
@@ -790,8 +920,10 @@ func TestVerifyFailsWhenNothingWasUploaded(t *testing.T) {
 }
 
 // PromoteStaged is the emulator proxy path's entry point into the same
-// sequence Verify uses.
-func TestPromoteStagedPublishesAndLinks(t *testing.T) {
+// sequence Verify uses. That path hashed the body as it received it, so
+// promotion takes its word for the digest and never reads the object back --
+// the fake has no bytes for this key at all, which is the assertion.
+func TestPromoteStagedPublishesAndLinksWithoutRehashing(t *testing.T) {
 	staging := storage.LFSStagingKey(3, goodOID)
 	rec := &fakeRecorder{}
 	st := newKeyStorage(map[string]int64{staging: 42})
@@ -806,11 +938,154 @@ func TestPromoteStagedPublishesAndLinks(t *testing.T) {
 	if rec.calls != 1 {
 		t.Errorf("RecordLFSObject calls = %d, want 1", rec.calls)
 	}
+	if reads := countOps(st.log.ops, "read "); reads != 0 {
+		t.Errorf("reads = %d, want 0: the ingest hash is the proof on this path", reads)
+	}
 }
 
 func TestPromoteStagedRejectsMalformedOID(t *testing.T) {
 	h := keyTestHandler(&fakeRecorder{}, newKeyStorage(nil))
 	if err := h.PromoteStaged(context.Background(), 3, "../../etc/passwd", 1); err == nil {
 		t.Fatal("PromoteStaged accepted an oid that is not a digest")
+	}
+}
+
+// assertNotPublished is the assertion every refused verify shares: the bytes
+// stayed in staging and lfs/{oid} was left alone. That key is shared by every
+// repository on the instance and Batch treats its presence as proof the
+// content exists, so anything that lands there wrongly is served to everybody.
+func assertNotPublished(t *testing.T, rec *fakeRecorder, st *keyStorage, repoID int64, oid, staging string) {
+	t.Helper()
+	if _, ok := st.objects[storage.LFSKey(oid)]; ok {
+		t.Errorf("bytes were promoted to %s", storage.LFSKey(oid))
+	}
+	if rec.calls != 0 {
+		t.Errorf("RecordLFSObject calls = %d, want 0", rec.calls)
+	}
+	if rec.owned[fmt.Sprintf("%d/%s", repoID, oid)] {
+		t.Errorf("repository %d was linked to %s", repoID, oid)
+	}
+	if _, ok := st.objects[staging]; !ok {
+		t.Error("the staged object was deleted; it should be left for the collector")
+	}
+}
+
+// The signed-URL upload path is the one place where nothing on the server ever
+// sees the bytes, so verify hashing them is the only thing that keeps
+// lfs/{oid} content-addressed. Without it, write access to any one repository
+// is enough to publish arbitrary bytes under an oid the instance does not have
+// yet -- and every later push of the real object is deduplicated onto the
+// forgery, in every repository.
+func TestVerifyRefusesStagedBytesThatDoNotHashToTheOID(t *testing.T) {
+	staging := storage.LFSStagingKey(1, goodOID)
+	rec := &fakeRecorder{}
+	st := newKeyStorage(nil)
+	forged := []byte("not the bytes this oid names!")
+	if int64(len(forged)) == goodSize {
+		t.Fatal("test is not meaningful: the forgery must be caught by the digest, not the size")
+	}
+	st.put(staging, forged)
+	h := keyTestHandler(rec, st)
+
+	err := h.Verify(context.Background(), 1, goodOID, int64(len(forged)))
+	if err == nil {
+		t.Fatal("Verify accepted bytes that do not hash to the oid they were uploaded under")
+	}
+	var mismatch *DigestMismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("Verify error = %v, want a DigestMismatchError", err)
+	}
+	if mismatch.Got != oidOf(forged) {
+		t.Errorf("reported digest = %s, want the one the bytes actually have (%s)", mismatch.Got, oidOf(forged))
+	}
+	assertNotPublished(t, rec, st, 1, goodOID, staging)
+}
+
+// The declared size used to be checked only when it was positive, so a verify
+// declaring zero turned the check off entirely: upload anything, verify with
+// size 0, and it was promoted. Both halves have to hold now -- a size that
+// disagrees with the object is refused whatever its value, and the digest is
+// checked regardless of what the size said.
+func TestVerifyRefusesForgedBytesDeclaredAsZeroSize(t *testing.T) {
+	staging := storage.LFSStagingKey(1, goodOID)
+	rec := &fakeRecorder{}
+	st := newKeyStorage(nil)
+	st.put(staging, []byte("not the bytes this oid names!"))
+	h := keyTestHandler(rec, st)
+
+	if err := h.Verify(context.Background(), 1, goodOID, 0); err == nil {
+		t.Fatal("Verify accepted a non-empty object declared as 0 bytes")
+	}
+	assertNotPublished(t, rec, st, 1, goodOID, staging)
+}
+
+// The same declaration with an object whose size really is zero: the size
+// agrees, so only the digest can catch it. A genuinely empty object is legal,
+// which is why zero is checked rather than rejected outright.
+func TestVerifyRefusesEmptyStagedObjectUnderAnotherOID(t *testing.T) {
+	staging := storage.LFSStagingKey(1, goodOID)
+	rec := &fakeRecorder{}
+	st := newKeyStorage(nil)
+	st.put(staging, []byte{})
+	h := keyTestHandler(rec, st)
+
+	err := h.Verify(context.Background(), 1, goodOID, 0)
+	var mismatch *DigestMismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("Verify error = %v, want a DigestMismatchError", err)
+	}
+	assertNotPublished(t, rec, st, 1, goodOID, staging)
+
+	// ...and the empty object under its own oid is fine.
+	emptyOID := oidOf(nil)
+	emptyStaging := storage.LFSStagingKey(1, emptyOID)
+	st.put(emptyStaging, []byte{})
+	if err := h.Verify(context.Background(), 1, emptyOID, 0); err != nil {
+		t.Fatalf("Verify of a genuinely empty object: %v", err)
+	}
+}
+
+func TestVerifyRejectsNegativeSize(t *testing.T) {
+	staging := storage.LFSStagingKey(1, goodOID)
+	rec := &fakeRecorder{}
+	st := newKeyStorage(nil)
+	st.put(staging, goodBody)
+	h := keyTestHandler(rec, st)
+
+	if err := h.Verify(context.Background(), 1, goodOID, -1); err == nil {
+		t.Fatal("Verify accepted a negative size")
+	}
+	assertNotPublished(t, rec, st, 1, goodOID, staging)
+}
+
+// The upload URL for a staging key can still be live while verify runs, so
+// bytes that hashed correctly may be replaced before the copy. Generations
+// move forward on every write, so a staging object that moved while it was
+// being read is refused rather than promoted on the strength of a digest that
+// no longer describes it.
+func TestVerifyRefusesStagedObjectRewrittenWhileHashing(t *testing.T) {
+	staging := storage.LFSStagingKey(1, goodOID)
+	rec := &fakeRecorder{}
+	st := newKeyStorage(nil)
+	st.put(staging, goodBody)
+	st.onRead = func(key string) {
+		if key == staging {
+			st.onRead = nil // only the first read races
+			st.put(staging, goodBody)
+		}
+	}
+	h := keyTestHandler(rec, st)
+
+	err := h.Verify(context.Background(), 1, goodOID, goodSize)
+	var changed *StagedObjectChangedError
+	if !errors.As(err, &changed) {
+		t.Fatalf("Verify error = %v, want a StagedObjectChangedError", err)
+	}
+	assertNotPublished(t, rec, st, 1, goodOID, staging)
+
+	// git-lfs retries verify, and the retry hashes whatever is in staging
+	// now, so a benign concurrent re-upload still ends in a published object.
+	if err := h.Verify(context.Background(), 1, goodOID, goodSize); err != nil {
+		t.Fatalf("Verify after the rewrite settled: %v", err)
 	}
 }

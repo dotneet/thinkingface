@@ -15,12 +15,13 @@ unimplemented endpoint.
 from __future__ import annotations
 
 import io
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from huggingface_hub import HfApi
-from huggingface_hub.utils import HfHubHTTPError
+from huggingface_hub.utils import HfHubHTTPError, RevisionNotFoundError
 
 
 def test_whoami(hf_api: HfApi, namespace: str) -> None:
@@ -284,5 +285,279 @@ def test_list_repo_commits(hf_api: HfApi, namespace: str, unique_name: str) -> N
             hf_api.list_repo_commits(
                 repo_id=repo_id, repo_type="dataset", revision="no-such-revision"
             )
+    finally:
+        hf_api.delete_repo(repo_id=repo_id, repo_type="dataset")
+
+
+def test_revision_not_found_for_repo_with_commits(
+    hf_api: HfApi, namespace: str, unique_name: str, tmp_path
+) -> None:
+    """An unknown `revision` on a repo that has commits must look not-found.
+
+    repo-info / tree / paths-info used to treat any unrecognized `{rev}` as if
+    it resolved to the default branch (or answered empty), so
+    `huggingface_hub` never raised `RevisionNotFoundError` -- `revision_exists`
+    incorrectly returned `True`, `list_repo_files` silently returned `[]`
+    instead of raising, and `snapshot_download` would quietly materialize an
+    empty (or wrong) snapshot instead of failing. The `X-Error-Code:
+    RevisionNotFound` response header is what makes `huggingface_hub` raise
+    the specific error instead of treating the call as a success.
+    """
+    repo_id = f"{namespace}/{unique_name}-revs"
+    hf_api.create_repo(repo_id=repo_id, repo_type="model", private=False)
+    try:
+        hf_api.upload_file(
+            path_or_fileobj=b"hello\n",
+            path_in_repo="notes.txt",
+            repo_id=repo_id,
+            repo_type="model",
+            commit_message="Add notes",
+        )
+        commit_sha = hf_api.list_repo_commits(repo_id=repo_id, repo_type="model")[0].commit_id
+        hf_api.create_branch(repo_id=repo_id, repo_type="model", branch="feature")
+        hf_api.create_tag(repo_id=repo_id, repo_type="model", tag="v1.0")
+
+        # --- the bug: an unrecognized revision must not look like success -
+        assert (
+            hf_api.revision_exists(repo_id=repo_id, revision="no-such-rev", repo_type="model")
+            is False
+        )
+
+        with pytest.raises(RevisionNotFoundError):
+            hf_api.list_repo_files(repo_id=repo_id, repo_type="model", revision="no-such-rev")
+
+        with pytest.raises(RevisionNotFoundError):
+            list(hf_api.list_repo_tree(repo_id=repo_id, repo_type="model", revision="no-such-rev"))
+
+        with pytest.raises(RevisionNotFoundError):
+            hf_api.get_paths_info(
+                repo_id=repo_id, repo_type="model", revision="no-such-rev", paths=["notes.txt"]
+            )
+
+        with pytest.raises(RevisionNotFoundError):
+            hf_api.snapshot_download(
+                repo_id=repo_id,
+                repo_type="model",
+                revision="no-such-rev",
+                local_dir=tmp_path / "snapshot",
+            )
+
+        # --- regression: real branches / tags / commit SHAs keep working --
+        for revision in ("main", "feature", "v1.0", commit_sha):
+            assert (
+                hf_api.revision_exists(repo_id=repo_id, revision=revision, repo_type="model")
+                is True
+            )
+            files = hf_api.list_repo_files(repo_id=repo_id, repo_type="model", revision=revision)
+            assert "notes.txt" in files
+    finally:
+        hf_api.delete_repo(repo_id=repo_id, repo_type="model")
+
+
+def test_repo_info_succeeds_right_after_create_repo(
+    hf_api: HfApi, namespace: str, unique_name: str
+) -> None:
+    """`create_repo()` immediately followed by `repo_info()` must stay a 200.
+
+    `create_repo` always writes an initial commit synchronously before
+    returning (see `createRepo` in backend/internal/api/repos.go), so a
+    genuinely 0-commit repository is never observable through this suite --
+    but the invariant that matters to a client is exactly this boundary: the
+    revision-not-found check added for the bug above must not turn the
+    ordinary create -> read flow into a 404, whatever revision string
+    `repo_info()` happens to be called with by default.
+    """
+    repo_id = f"{namespace}/{unique_name}-fresh"
+    hf_api.create_repo(repo_id=repo_id, repo_type="dataset", private=False)
+    try:
+        info = hf_api.repo_info(repo_id=repo_id, repo_type="dataset")
+        assert info.id == repo_id
+
+        info_main = hf_api.repo_info(repo_id=repo_id, repo_type="dataset", revision="main")
+        assert info_main.sha == info.sha
+
+        assert list(hf_api.list_repo_tree(repo_id=repo_id, repo_type="dataset"))
+    finally:
+        hf_api.delete_repo(repo_id=repo_id, repo_type="dataset")
+
+
+# --- preupload oid / diff-upload skipping ------------------------------------
+#
+# `POST .../preupload/{rev}` reports, for every file huggingface_hub is about
+# to upload, whether the repository already has a file at that path with the
+# exact same content -- `oid` in the response is the git blob sha1 for
+# `uploadMode: "regular"` and the content sha256 for `uploadMode: "lfs"`, or
+# `null` when there is nothing to compare against (docs/dev/api-contract.md).
+# huggingface_hub stores this as `CommitOperationAdd._remote_oid`, compares it
+# against the locally computed oid, and drops any operation whose oid matches
+# from the commit -- if every operation is dropped, it never POSTs to
+# /commit at all, so a byte-identical re-upload must not grow the commit log.
+# The tests below exercise both directions: nothing changed -> no commit, and
+# exactly one file changed -> exactly one commit whose *content* reflects the
+# change (not just its existence), since silently skipping a file that did
+# change would be silent data loss.
+
+
+def _write_folder(root: Path, *, note: bytes, weights: bytes) -> None:
+    """Populate `root` with one regular file and one LFS-tracked file.
+
+    `notes.txt` is a plain-text file, so preupload reports it with
+    `uploadMode: "regular"`. `weights.bin` matches the `*.bin` pattern in the
+    default `.gitattributes` (backend/internal/gitrepo/gitattributes.go), so
+    it is always `uploadMode: "lfs"` regardless of its size.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "notes.txt").write_bytes(note)
+    (root / "weights.bin").write_bytes(weights)
+
+
+def test_reupload_of_unchanged_folder_adds_no_commit(
+    hf_api: HfApi, namespace: str, unique_name: str, tmp_path
+) -> None:
+    """Re-uploading a folder with byte-identical content creates no commit.
+
+    Before the preupload oid fix, this endpoint always reported `oid: null`,
+    so huggingface_hub could never recognize an already-present file as
+    unchanged and every re-upload of an unmodified folder created a fresh,
+    empty-diff commit.
+    """
+    repo_id = f"{namespace}/{unique_name}-noop-reupload"
+    hf_api.create_repo(repo_id=repo_id, repo_type="dataset", private=False)
+    try:
+        src = tmp_path / "folder"
+        _write_folder(src, note=b"hello from e2e\n", weights=b"\x00\x01lfs-weights-v1" * 100)
+
+        hf_api.upload_folder(
+            folder_path=str(src),
+            repo_id=repo_id,
+            repo_type="dataset",
+            commit_message="Initial upload",
+        )
+        commits_after_first = hf_api.list_repo_commits(repo_id=repo_id, repo_type="dataset")
+
+        # Same folder, same bytes: nothing to commit.
+        hf_api.upload_folder(
+            folder_path=str(src),
+            repo_id=repo_id,
+            repo_type="dataset",
+            commit_message="Re-upload, unchanged",
+        )
+        commits_after_second = hf_api.list_repo_commits(repo_id=repo_id, repo_type="dataset")
+
+        assert len(commits_after_second) == len(commits_after_first)
+        assert commits_after_second[0].commit_id == commits_after_first[0].commit_id
+    finally:
+        hf_api.delete_repo(repo_id=repo_id, repo_type="dataset")
+
+
+def test_reupload_after_changing_one_regular_file(
+    hf_api: HfApi, namespace: str, unique_name: str, tmp_path
+) -> None:
+    """A modified regular file is re-uploaded; an unmodified sibling is not.
+
+    (b) below is the safety-critical assertion: naively treating every file
+    in the folder as "unchanged, skip it" would also skip a file that
+    genuinely changed, which is silent data loss on the server.
+    """
+    from huggingface_hub import hf_hub_download
+
+    repo_id = f"{namespace}/{unique_name}-regular-reupload"
+    hf_api.create_repo(repo_id=repo_id, repo_type="dataset", private=False)
+    try:
+        src = tmp_path / "folder"
+        _write_folder(src, note=b"version 1\n", weights=b"\x00\x01lfs-weights-v1" * 100)
+        hf_api.upload_folder(
+            folder_path=str(src),
+            repo_id=repo_id,
+            repo_type="dataset",
+            commit_message="Initial upload",
+        )
+        commits_before = hf_api.list_repo_commits(repo_id=repo_id, repo_type="dataset")
+
+        # Only notes.txt changes; weights.bin is rewritten with identical bytes.
+        (src / "notes.txt").write_bytes(b"version 2 -- updated\n")
+        (src / "weights.bin").write_bytes(b"\x00\x01lfs-weights-v1" * 100)
+
+        hf_api.upload_folder(
+            folder_path=str(src),
+            repo_id=repo_id,
+            repo_type="dataset",
+            commit_message="Update notes only",
+        )
+
+        # (a) exactly one new commit for the one real change.
+        commits_after = hf_api.list_repo_commits(repo_id=repo_id, repo_type="dataset")
+        assert len(commits_after) == len(commits_before) + 1
+
+        # (b) the changed file's new content actually landed on the server.
+        downloaded_notes = hf_hub_download(
+            repo_id=repo_id, repo_type="dataset", filename="notes.txt"
+        )
+        with open(downloaded_notes, "rb") as f:
+            assert f.read() == b"version 2 -- updated\n"
+
+        # (c) the untouched file's content is exactly as it was.
+        downloaded_weights = hf_hub_download(
+            repo_id=repo_id, repo_type="dataset", filename="weights.bin"
+        )
+        with open(downloaded_weights, "rb") as f:
+            assert f.read() == b"\x00\x01lfs-weights-v1" * 100
+    finally:
+        hf_api.delete_repo(repo_id=repo_id, repo_type="dataset")
+
+
+def test_reupload_after_changing_lfs_file(
+    hf_api: HfApi, namespace: str, unique_name: str, tmp_path
+) -> None:
+    """Same guarantee as `test_reupload_after_changing_one_regular_file`, but
+    for a file that goes through the LFS path.
+
+    `weights.bin` is LFS-tracked via `.gitattributes`, so its preupload `oid`
+    is a content sha256 rather than a git blob sha1 -- this exercises that
+    branch of the fix independently of the regular-file case above, covering
+    both directions (unchanged-skip via the shared setup, changed-reupload
+    here) for `uploadMode: "lfs"`.
+    """
+    from huggingface_hub import hf_hub_download
+
+    repo_id = f"{namespace}/{unique_name}-lfs-reupload"
+    hf_api.create_repo(repo_id=repo_id, repo_type="dataset", private=False)
+    try:
+        src = tmp_path / "folder"
+        _write_folder(src, note=b"stable notes\n", weights=b"\x00\x01lfs-weights-v1" * 100)
+        hf_api.upload_folder(
+            folder_path=str(src),
+            repo_id=repo_id,
+            repo_type="dataset",
+            commit_message="Initial upload",
+        )
+        commits_before = hf_api.list_repo_commits(repo_id=repo_id, repo_type="dataset")
+
+        # Only the LFS file changes this time; notes.txt is rewritten with
+        # identical bytes.
+        (src / "notes.txt").write_bytes(b"stable notes\n")
+        (src / "weights.bin").write_bytes(b"\xff\xfelfs-weights-v2" * 100)
+
+        hf_api.upload_folder(
+            folder_path=str(src),
+            repo_id=repo_id,
+            repo_type="dataset",
+            commit_message="Update weights only",
+        )
+
+        commits_after = hf_api.list_repo_commits(repo_id=repo_id, repo_type="dataset")
+        assert len(commits_after) == len(commits_before) + 1
+
+        downloaded_weights = hf_hub_download(
+            repo_id=repo_id, repo_type="dataset", filename="weights.bin"
+        )
+        with open(downloaded_weights, "rb") as f:
+            assert f.read() == b"\xff\xfelfs-weights-v2" * 100
+
+        downloaded_notes = hf_hub_download(
+            repo_id=repo_id, repo_type="dataset", filename="notes.txt"
+        )
+        with open(downloaded_notes, "rb") as f:
+            assert f.read() == b"stable notes\n"
     finally:
         hf_api.delete_repo(repo_id=repo_id, repo_type="dataset")

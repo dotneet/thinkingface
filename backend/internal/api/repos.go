@@ -589,7 +589,8 @@ func (s *Server) repoWebURLFor(kind, ns, name string) string {
 }
 
 func (s *Server) handleHFDeleteRepo(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireWrite(w, r); !ok {
+	user, ok := s.requireWrite(w, r)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -605,8 +606,12 @@ func (s *Server) handleHFDeleteRepo(w http.ResponseWriter, r *http.Request) {
 		kind = strings.TrimSuffix(req.Type, "s")
 	}
 	ns, name := req.Organization, req.Name
+	// huggingface_hub sends either "name" or "org/name".
 	if before, after, found := strings.Cut(req.Name, "/"); found {
 		ns, name = before, after
+	}
+	if ns == "" {
+		ns = user.Username
 	}
 	repo, ok := s.loadRepoForDelete(w, r, kind, ns, name, redirectNone)
 	if !ok {
