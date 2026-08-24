@@ -5,13 +5,20 @@ import (
 	"strings"
 )
 
+// LFSPrefix is where every LFSKey lives. `thinkingface gc` lists it to find
+// objects whose lfs_objects row never got written, so the prefix is spelled
+// once here rather than in both places: the two are connected by nothing but
+// the string, and a prefix changed on the write side alone would leave the
+// collector scanning an empty tree while leaked objects pile up.
+const LFSPrefix = "lfs/"
+
 // LFSKey returns the content-addressed key for an LFS object. This layer is the
 // source of truth: immutable, deduplicated across every repository.
 func LFSKey(oid string) string {
 	if len(oid) < 4 {
-		return "lfs/" + oid
+		return LFSPrefix + oid
 	}
-	return "lfs/" + oid[0:2] + "/" + oid[2:4] + "/" + oid
+	return LFSPrefix + oid[0:2] + "/" + oid[2:4] + "/" + oid
 }
 
 // LFSStagingKey returns the key an in-flight LFS upload writes to before it is

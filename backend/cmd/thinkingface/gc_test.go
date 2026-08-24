@@ -24,7 +24,14 @@ type fakeGCDB struct {
 	// liveRefs is the reference set at delete time, which can differ from
 	// the scan-time snapshot in referenced.
 	liveRefs map[string]bool
-	removed  []string
+	// liveRows is the set of oids that hold an lfs_objects row at delete
+	// time. The untracked pass only ever sees oids that had none when it
+	// scanned, so this is how a row appearing in between -- an upload
+	// deduplicating against the very bytes gc is about to remove -- is
+	// modelled.
+	liveRows         map[string]bool
+	removed          []string
+	removedUntracked []string
 	// blobRefs is what ListReferencedBlobSHAs answers.
 	blobRefs map[string]bool
 }
@@ -52,15 +59,28 @@ func (f *fakeGCDB) DeleteOrphanedLFSObject(_ context.Context, oid string, remove
 	return true, nil
 }
 
+func (f *fakeGCDB) DeleteUntrackedLFSObject(_ context.Context, oid string, removeStorage func() error) (bool, error) {
+	if f.liveRows[oid] {
+		return false, nil
+	}
+	if err := removeStorage(); err != nil {
+		return false, err
+	}
+	f.removedUntracked = append(f.removedUntracked, oid)
+	return true, nil
+}
+
 type fakeGCStorage struct {
 	deleted []string
 	fail    map[string]error
-	blobs   []storage.ObjectInfo
+	// objects is the whole bucket: every pass gets the subset of it that
+	// matches the prefix it lists.
+	objects []storage.ObjectInfo
 }
 
 func (f *fakeGCStorage) List(_ context.Context, prefix string) ([]storage.ObjectInfo, error) {
 	var out []storage.ObjectInfo
-	for _, o := range f.blobs {
+	for _, o := range f.objects {
 		if strings.HasPrefix(o.Key, prefix) {
 			out = append(out, o)
 		}
@@ -192,7 +212,7 @@ func TestRunGC_DeletesOrphanedBlobsAndKeepsReferencedOnes(t *testing.T) {
 		liveRefs:   map[string]bool{},
 		blobRefs:   map[string]bool{"aaaa1111": true},
 	}
-	obj := &fakeGCStorage{blobs: []storage.ObjectInfo{
+	obj := &fakeGCStorage{objects: []storage.ObjectInfo{
 		blobObject("aaaa1111", 90*24*time.Hour),
 		blobObject("bbbb2222", 90*24*time.Hour),
 		blobObject("cccc3333", time.Minute),
@@ -212,7 +232,7 @@ func TestRunGC_DeletesOrphanedBlobsAndKeepsReferencedOnes(t *testing.T) {
 
 func TestRunGC_DryRunDeletesNoBlobs(t *testing.T) {
 	db := &fakeGCDB{referenced: map[string]bool{}, liveRefs: map[string]bool{}, blobRefs: map[string]bool{}}
-	obj := &fakeGCStorage{blobs: []storage.ObjectInfo{blobObject("bbbb2222", 90*24*time.Hour)}}
+	obj := &fakeGCStorage{objects: []storage.ObjectInfo{blobObject("bbbb2222", 90*24*time.Hour)}}
 
 	err := withDiscardedStdout(func() error {
 		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, nil)
@@ -229,8 +249,8 @@ func TestRunGC_BlobStorageFailureIsReported(t *testing.T) {
 	key := storage.BlobKey("bbbb2222")
 	db := &fakeGCDB{referenced: map[string]bool{}, liveRefs: map[string]bool{}, blobRefs: map[string]bool{}}
 	obj := &fakeGCStorage{
-		blobs: []storage.ObjectInfo{blobObject("bbbb2222", 90*24*time.Hour)},
-		fail:  map[string]error{key: errors.New("boom")},
+		objects: []storage.ObjectInfo{blobObject("bbbb2222", 90*24*time.Hour)},
+		fail:    map[string]error{key: errors.New("boom")},
 	}
 
 	err := withDiscardedStdout(func() error {
@@ -283,7 +303,7 @@ func TestStagingGraceOutlastsEveryURLItCanFace(t *testing.T) {
 
 func TestRunGC_KeepsStagingObjectsWithinGrace(t *testing.T) {
 	db := &fakeGCDB{referenced: map[string]bool{}, liveRefs: map[string]bool{}, blobRefs: map[string]bool{}}
-	obj := &fakeGCStorage{blobs: []storage.ObjectInfo{
+	obj := &fakeGCStorage{objects: []storage.ObjectInfo{
 		// Well within stagingGrace: this looks like an upload still in
 		// flight and must survive even a --yes run.
 		stagingObject("tmp/uploads/lfs/1/aaaa", time.Minute),
@@ -302,7 +322,7 @@ func TestRunGC_KeepsStagingObjectsWithinGrace(t *testing.T) {
 
 func TestRunGC_DryRunLeavesOldStagingObjects(t *testing.T) {
 	db := &fakeGCDB{referenced: map[string]bool{}, liveRefs: map[string]bool{}, blobRefs: map[string]bool{}}
-	obj := &fakeGCStorage{blobs: []storage.ObjectInfo{
+	obj := &fakeGCStorage{objects: []storage.ObjectInfo{
 		stagingObject("tmp/uploads/lfs/1/bbbb", stagingGrace(testSignedURLMaxTTL)+time.Hour),
 	}}
 
@@ -320,7 +340,7 @@ func TestRunGC_DryRunLeavesOldStagingObjects(t *testing.T) {
 func TestRunGC_DeletesOldStagingObjectsWithYes(t *testing.T) {
 	key := "tmp/uploads/lfs/1/cccc"
 	db := &fakeGCDB{referenced: map[string]bool{}, liveRefs: map[string]bool{}, blobRefs: map[string]bool{}}
-	obj := &fakeGCStorage{blobs: []storage.ObjectInfo{
+	obj := &fakeGCStorage{objects: []storage.ObjectInfo{
 		stagingObject(key, stagingGrace(testSignedURLMaxTTL)+time.Hour),
 	}}
 
@@ -339,8 +359,8 @@ func TestRunGC_StagingStorageFailureIsReported(t *testing.T) {
 	key := "tmp/uploads/lfs/1/dddd"
 	db := &fakeGCDB{referenced: map[string]bool{}, liveRefs: map[string]bool{}, blobRefs: map[string]bool{}}
 	obj := &fakeGCStorage{
-		blobs: []storage.ObjectInfo{stagingObject(key, stagingGrace(testSignedURLMaxTTL)+time.Hour)},
-		fail:  map[string]error{key: errors.New("boom")},
+		objects: []storage.ObjectInfo{stagingObject(key, stagingGrace(testSignedURLMaxTTL)+time.Hour)},
+		fail:    map[string]error{key: errors.New("boom")},
 	}
 
 	err := withDiscardedStdout(func() error {
@@ -348,5 +368,216 @@ func TestRunGC_StagingStorageFailureIsReported(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("runGC: want a staging storage failure, got nil")
+	}
+}
+
+// ----------------------------------------------------- untracked lfs objects
+
+// Two full-length oids, so the keys these produce are the real three-level
+// shape (lfs/aa/aa/aaaa…) rather than the short-oid fallback.
+const (
+	untrackedOID = "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"
+	deduppedOID  = "2222333344445555666677778888999900001111bbbbccccddddeeeeffffaaaa"
+)
+
+func lfsObject(oid string, age time.Duration) storage.ObjectInfo {
+	return storage.ObjectInfo{
+		Key:     storage.LFSKey(oid),
+		Size:    int64(len(oid)),
+		Updated: time.Now().Add(-age),
+	}
+}
+
+// The leak this pass exists for: bytes at the content-addressed key that no
+// lfs_objects row mentions. Enumerating rows cannot find them by
+// construction, so before this pass they were charged for forever.
+func TestRunGC_DeletesStoredLFSObjectWithNoRow(t *testing.T) {
+	db := &fakeGCDB{referenced: map[string]bool{}, liveRefs: map[string]bool{}, blobRefs: map[string]bool{}}
+	obj := &fakeGCStorage{objects: []storage.ObjectInfo{lfsObject(untrackedOID, 90*24*time.Hour)}}
+
+	err := withDiscardedStdout(func() error {
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
+	})
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	want := storage.LFSKey(untrackedOID)
+	if len(obj.deleted) != 1 || obj.deleted[0] != want {
+		t.Fatalf("deleted = %v, want [%s]", obj.deleted, want)
+	}
+	if len(db.removedUntracked) != 1 || db.removedUntracked[0] != untrackedOID {
+		t.Fatalf("removedUntracked = %v, want [%s]", db.removedUntracked, untrackedOID)
+	}
+}
+
+// A row is written after the bytes on every upload path, so an object young
+// enough to be one still being uploaded looks exactly like a leak. gc must
+// leave it alone rather than fail somebody's push.
+func TestRunGC_KeepsUntrackedLFSObjectWithinGrace(t *testing.T) {
+	db := &fakeGCDB{referenced: map[string]bool{}, liveRefs: map[string]bool{}, blobRefs: map[string]bool{}}
+	obj := &fakeGCStorage{objects: []storage.ObjectInfo{lfsObject(untrackedOID, time.Minute)}}
+
+	err := withDiscardedStdout(func() error {
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
+	})
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if len(obj.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none (object is within untrackedLFSGrace)", obj.deleted)
+	}
+}
+
+// The race age cannot cover: an upload batch that finds these bytes already
+// present deduplicates against them and writes the row without touching
+// storage, so the object gains a row while its timestamp stays ancient.
+// DeleteUntrackedLFSObject re-checks under the row lock, and gc must honour
+// its answer instead of deleting bytes a repository now links to.
+func TestRunGC_KeepsUntrackedLFSObjectThatGainedARowAfterTheScan(t *testing.T) {
+	db := &fakeGCDB{
+		referenced: map[string]bool{},
+		liveRefs:   map[string]bool{},
+		blobRefs:   map[string]bool{},
+		liveRows:   map[string]bool{deduppedOID: true},
+	}
+	obj := &fakeGCStorage{objects: []storage.ObjectInfo{
+		lfsObject(untrackedOID, 90*24*time.Hour),
+		lfsObject(deduppedOID, 90*24*time.Hour),
+	}}
+
+	err := withDiscardedStdout(func() error {
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
+	})
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	want := storage.LFSKey(untrackedOID)
+	if len(obj.deleted) != 1 || obj.deleted[0] != want {
+		t.Fatalf("deleted = %v, want only [%s]", obj.deleted, want)
+	}
+}
+
+// An object that is both stored and tracked-but-unreferenced belongs to the
+// first pass. The second must not consider it again -- deleting a key twice
+// would turn a completed reclaim into a storage error on the next call.
+func TestRunGC_UnreferencedLFSObjectIsNotAlsoTreatedAsUntracked(t *testing.T) {
+	db := &fakeGCDB{
+		all:        []store.LFSObjectRef{{OID: untrackedOID, Size: 10}},
+		referenced: map[string]bool{},
+		liveRefs:   map[string]bool{},
+		blobRefs:   map[string]bool{},
+	}
+	obj := &fakeGCStorage{objects: []storage.ObjectInfo{lfsObject(untrackedOID, 90*24*time.Hour)}}
+
+	err := withDiscardedStdout(func() error {
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
+	})
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if len(obj.deleted) != 1 {
+		t.Fatalf("deleted = %v, want exactly one delete for the key", obj.deleted)
+	}
+	if len(db.removed) != 1 || len(db.removedUntracked) != 0 {
+		t.Fatalf("removed = %v, removedUntracked = %v, want the row-driven pass to own it",
+			db.removed, db.removedUntracked)
+	}
+}
+
+func TestRunGC_DryRunDeletesNoUntrackedLFSObjects(t *testing.T) {
+	db := &fakeGCDB{referenced: map[string]bool{}, liveRefs: map[string]bool{}, blobRefs: map[string]bool{}}
+	obj := &fakeGCStorage{objects: []storage.ObjectInfo{lfsObject(untrackedOID, 90*24*time.Hour)}}
+
+	err := withDiscardedStdout(func() error {
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, nil)
+	})
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if len(obj.deleted) != 0 || len(db.removedUntracked) != 0 {
+		t.Fatalf("dry run deleted storage=%v db=%v", obj.deleted, db.removedUntracked)
+	}
+}
+
+func TestRunGC_UntrackedLFSStorageFailureIsReported(t *testing.T) {
+	key := storage.LFSKey(untrackedOID)
+	db := &fakeGCDB{referenced: map[string]bool{}, liveRefs: map[string]bool{}, blobRefs: map[string]bool{}}
+	obj := &fakeGCStorage{
+		objects: []storage.ObjectInfo{lfsObject(untrackedOID, 90*24*time.Hour)},
+		fail:    map[string]error{key: errors.New("boom")},
+	}
+
+	err := withDiscardedStdout(func() error {
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
+	})
+	if err == nil {
+		t.Fatal("runGC: want an untracked lfs storage failure, got nil")
+	}
+	if len(db.removedUntracked) != 0 {
+		t.Fatalf("removedUntracked = %v, want none after storage failure", db.removedUntracked)
+	}
+}
+
+// The staging area lives under tmp/uploads/lfs/, not lfs/, so listing the
+// content-addressed prefix must not reach it: an in-flight upload would
+// otherwise be deleted by the pass that has no idea what staging is.
+func TestRunGC_UntrackedPassIgnoresStagingObjects(t *testing.T) {
+	db := &fakeGCDB{referenced: map[string]bool{}, liveRefs: map[string]bool{}, blobRefs: map[string]bool{}}
+	obj := &fakeGCStorage{objects: []storage.ObjectInfo{
+		stagingObject(storage.LFSStagingKey(7, untrackedOID), time.Minute),
+	}}
+
+	err := withDiscardedStdout(func() error {
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
+	})
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if len(obj.deleted) != 0 || len(db.removedUntracked) != 0 {
+		t.Fatalf("deleted storage=%v db=%v, want none", obj.deleted, db.removedUntracked)
+	}
+}
+
+// An object gc cannot remove must not cost every *other* object a full
+// scheduling interval. The passes share no state, so a failure in one is
+// reported and the rest still run.
+func TestRunGC_OnePassFailingDoesNotStopTheOthers(t *testing.T) {
+	failing := storage.LFSKey(deduppedOID)
+	db := &fakeGCDB{
+		all:        []store.LFSObjectRef{{OID: deduppedOID, Size: 10}},
+		referenced: map[string]bool{},
+		liveRefs:   map[string]bool{},
+		blobRefs:   map[string]bool{},
+	}
+	obj := &fakeGCStorage{
+		objects: []storage.ObjectInfo{
+			// Reclaimed by the unreferenced pass, and its delete fails.
+			lfsObject(deduppedOID, 90*24*time.Hour),
+			// Each of these belongs to one of the passes that follow.
+			lfsObject(untrackedOID, 90*24*time.Hour),
+			blobObject("bbbb2222", 90*24*time.Hour),
+			stagingObject("tmp/uploads/lfs/1/cccc", stagingGrace(testSignedURLMaxTTL)+time.Hour),
+		},
+		fail: map[string]error{failing: errors.New("boom")},
+	}
+
+	err := withDiscardedStdout(func() error {
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
+	})
+	if err == nil {
+		t.Fatal("runGC: want the failed delete reported, got nil")
+	}
+	want := []string{
+		storage.LFSKey(untrackedOID),
+		storage.BlobKey("bbbb2222"),
+		"tmp/uploads/lfs/1/cccc",
+	}
+	if len(obj.deleted) != len(want) {
+		t.Fatalf("deleted = %v, want %v", obj.deleted, want)
+	}
+	for i, key := range want {
+		if obj.deleted[i] != key {
+			t.Fatalf("deleted = %v, want %v", obj.deleted, want)
+		}
 	}
 }

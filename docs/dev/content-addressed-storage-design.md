@@ -163,11 +163,41 @@ Both `lfs/` and `blobs/` are layers that "disappear once nothing references them
 neither carries an age-based bucket lifecycle rule (§9). `thinkingface gc` reclaims both
 with the same command.
 
-- **`lfs/` side**: among all oids in `lfs_objects`, any that appear in no repository's
-  `repo_lfs_objects` are detected as orphans. Deletion is done by
-  `store.DeleteOrphanedLFSObject`, which `FOR UPDATE`-locks the `lfs_objects` row and then
-  deletes storage before the row (to re-check, while holding the lock, whether some other
-  push/verify has just added a reference)
+- **`lfs/` side**: two passes, because the layer leaks in two shapes.
+  - **Unreferenced** (`gcLFSUnreferenced`): among all oids in `lfs_objects`, any that appear
+    in no repository's `repo_lfs_objects` are detected as orphans. Deletion is done by
+    `store.DeleteOrphanedLFSObject`, which `FOR UPDATE`-locks the `lfs_objects` row and then
+    deletes storage before the row (to re-check, while holding the lock, whether some other
+    push/verify has just added a reference)
+  - **Untracked** (`gcLFSUntracked`): an object with **no `lfs_objects` row at all**, which
+    a pass that enumerates rows cannot see by construction. Every write path stores the
+    bytes at `storage.LFSKey(oid)` *before* it records the row — deliberately, since the
+    reverse order would advertise a row promising bytes that are not there, which nothing
+    repairs — so a crash or a failed request in between (LFS verify's `promote`, the
+    emulator proxy upload, `POST /api/v1/upload`, the experiment flusher) strands an object
+    no query names. This pass therefore Lists the `lfs/` prefix the way the blobs side does,
+    treats `lfs_objects` as the reference set (`store.UntrackedLFSObjects`), and skips keys
+    that are not the canonical `LFSKey` of the oid in their basename
+    - **A 24-hour grace period (`untrackedLFSGrace`)**, for the same reason `blobGrace`
+      exists: an object whose row is about to be written looks exactly like one whose row
+      never will be
+    - **The grace is not what makes it safe, though.** Unlike a blob, an untracked `lfs/`
+      object is *live*: an upload batch that Stats it present deduplicates against it and
+      links the oid **without rewriting anything**, so the row can appear at any moment
+      while the object's storage timestamp stays as old as it ever was — no age threshold
+      can anticipate that. Deletion therefore goes through
+      `store.DeleteUntrackedLFSObject`, which **claims the oid by inserting the row it is
+      about to delete** (`INSERT … ON CONFLICT DO NOTHING RETURNING oid`) and holds it for
+      the storage delete. A concurrent `RecordLFSObject` either committed first — in which
+      case nothing is returned and the collector skips the object — or blocks on that tuple
+      and afterwards fails its own `confirmPresent` check with `ErrLFSObjectGone`, which
+      the batch path turns back into an upload action. This is the same protocol the
+      unreferenced pass gets from `SELECT … FOR UPDATE`, obtained the only way available
+      when the row whose absence *is* the condition has to be locked
+    - Unlike the blobs side, **a deleted `lfs/` object is not automatically restored**:
+      nothing republishes it the way the next push republishes a blob, so a client has to
+      upload the content again. That asymmetry is why this pass locks rather than relying
+      on the residual-window argument the blobs side accepts
 - **`blobs/` side**: there is no corresponding DB table (no row records the mere existence
   of a `blobs/` object), so `repo_files.blob_sha` (rows where `lfs_oid IS NULL`, i.e.
   non-LFS files) is used as the reference count. The `blobs/` prefix in the bucket is
@@ -186,8 +216,7 @@ with the same command.
     more than 24 hours earlier) — this is accepted as tolerable. **A lost blob is not
     permanently lost**: the next push that includes that sha causes `publishBlobs` to
     republish it
-- The `--dry-run` (default `true`) / `--yes` convention is shared between the LFS side and
-  the blobs side
+- The `--dry-run` (default `true`) / `--yes` convention is shared by every pass
 
 ## 6. New API: `GET /api/v1/repos/{kind}/{ns}/{name}/gcs/{rev}`
 
@@ -335,8 +364,8 @@ compatibility with existing data.**
 | Target | Contents |
 |---|---|
 | `internal/syncer` | That `publishBlobs` targets every pushed ref (branches and tags alike), that it skips existing keys via Stat, and that it never deletes anything |
-| `internal/store` | Correctness of `ListReferencedLFSOIDs` / `ListReferencedBlobSHAs`. Both the SQLite and PostgreSQL paths (`make test-store-pg`) |
-| `cmd/thinkingface` (`gc`) | Orphan detection on both the LFS side and the blobs side, the `blobGrace` boundary, and switching between dry-run and real deletion |
+| `internal/store` | Correctness of `ListReferencedLFSOIDs` / `ListReferencedBlobSHAs` / `UntrackedLFSObjects`, and that `DeleteUntrackedLFSObject`'s claim really blocks a concurrent `RecordLFSObject` into `ErrLFSObjectGone` rather than letting it link bytes being deleted. Both the SQLite and PostgreSQL paths (`make test-store-pg`) |
+| `cmd/thinkingface` (`gc`) | Orphan detection on both the LFS side and the blobs side, the `blobGrace` / `untrackedLFSGrace` boundaries, that an object reclaimed by the unreferenced pass is not considered again by the untracked one, that the untracked pass never reaches `tmp/uploads/`, and switching between dry-run and real deletion |
 | `internal/api` | That the script generated by `GET .../gcs/{rev}` matches the spec byte-for-byte (ordering, escaping, the `DEST` default). That `TreeEntryUI.gcloud_command` is correctly differentiated between an indexed ref and an unindexed rev (e.g. a bare commit sha) |
 | `e2e` | `make test-e2e` — that upload → download → clone succeeds. That when two different repositories share a file with identical content, deleting one still leaves the other readable (a regression check for deduplication) |
 
