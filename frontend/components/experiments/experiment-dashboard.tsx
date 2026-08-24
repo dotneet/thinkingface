@@ -16,6 +16,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { Checkbox, Input, Select, Slider } from "@/components/ui/field";
 import { SegmentedControl } from "@/components/ui/segmented-control";
+import { Skeleton } from "@/components/ui/skeleton";
 import { SpinnerSlot } from "@/components/ui/spinner";
 import { deleteRun, getMetrics, listRuns, updateRunAnnotations } from "@/lib/experiments";
 import type { MessageKey } from "@/lib/i18n";
@@ -204,7 +205,7 @@ export function ExperimentDashboard({
     });
   }
 
-  const { data, isFetching, isError, error } = useQuery({
+  const { data, isFetching, isPending, isError, error } = useQuery({
     queryKey: ["exp-metrics", ns, repo, project, selectedNames.join(","), xMode],
     queryFn: async () => {
       const result = await getMetrics(ns, repo, project, {
@@ -393,6 +394,12 @@ export function ExperimentDashboard({
                   : t("experiments.dashboard.metricsLoadFailed")
               }
             />
+          ) : isPending ? (
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              {Array.from({ length: 2 }, (_, i) => `chart-${i}`).map((key) => (
+                <Skeleton key={key} className="h-56 w-full" />
+              ))}
+            </div>
           ) : (
             <MetricsCharts
               series={data?.series ?? []}
