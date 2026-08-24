@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -686,9 +687,20 @@ func (s *Store) SetRepoHead(ctx context.Context, repoID int64, headSHA string) e
 	return err
 }
 
+// IncrementDownloads advances a repository's all-time download counter. It is
+// called from the same detached goroutine as RecordDownload (see
+// api.Server.recordDownload) and for the same request, so the two counters
+// move together.
+//
+// Best effort: a lost download count never justifies failing a download, so
+// the error is swallowed rather than returned -- but it is logged, the way
+// RecordDownload logs, so a counter that has silently stopped moving is
+// visible somewhere.
 func (s *Store) IncrementDownloads(ctx context.Context, repoID int64) {
-	// Best effort: a lost download count never justifies failing a download.
-	_, _ = s.db.Exec(ctx, `UPDATE repositories SET downloads = downloads + 1 WHERE id = $1`, repoID)
+	_, err := s.db.Exec(ctx, `UPDATE repositories SET downloads = downloads + 1 WHERE id = $1`, repoID)
+	if err != nil {
+		slog.Error("increment downloads", "repo_id", repoID, "error", err)
+	}
 }
 
 type Stats struct {

@@ -852,13 +852,15 @@ Constraints and status codes:
   whole body rather than 416. A HEAD ignores `Range` and always reports the full `Content-Length`,
   which is what `hf_hub_download` reads the size from.
 - Download stats: once a request is known not to be for a directory, it counts as 1 request = 1
-  count, UPSERTed into `repo_download_stats(repo_id, date, count)`. Both HEAD and an LFS 302 count
-  as one (range splitting, or a client's actual fetch from the GCS location a 302 pointed to, isn't
+  count, and **the same single count advances both counters** — the running total
+  `repositories.downloads` and today's row in `repo_download_stats(repo_id, date, count)`
+  (UPSERTed). One rule governs both, so the last-30-days figure is always a window over the same
+  total the UI shows it beside, and can never exceed it. Both HEAD and an LFS 302 count as one
+  (range splitting, or a client's actual fetch from the GCS location a 302 pointed to, isn't
   counted — that traffic doesn't pass through this server, so there's no way to observe it).
-  Recording happens in a goroutine decoupled from the request's response path; a failure there is
-  only logged and doesn't affect the response (`Server.recordDownload` → `store.RecordDownload`).
-  The running total is the existing `repositories.downloads` (unchanged — that one doesn't count
-  HEAD).
+  Recording happens in a goroutine decoupled from the request's response path; a failure on either
+  write is only logged and doesn't affect the response (`Server.recordDownload` →
+  `store.IncrementDownloads` + `store.RecordDownload`).
 
 ### `GET /api/v1/raw/{kind}/{ns}/{name}/{rev}/{path...}`  (for the UI preview)
 res: `{"path","size","truncated":bool,"content":"...","encoding":"utf-8"|"base64"}`
