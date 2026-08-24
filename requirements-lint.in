@@ -1,0 +1,5 @@
+# The Python linter used by `make lint` / `make fmt` and the CI python job.
+#
+# The pinned, hash-verified requirements-lint.txt next to this file is
+# generated from it -- edit this file, then run `make lock-python`.
+ruff==0.16.4

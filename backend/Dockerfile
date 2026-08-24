@@ -1,7 +1,11 @@
 # syntax=docker/dockerfile:1
 
 # ---- builder -----------------------------------------------------------
-FROM golang:1.25-alpine AS builder
+# Base images are pinned by digest as well as by tag: a tag is mutable, so
+# `golang:1.25-alpine` on its own means "whatever was pushed most recently".
+# The tag stays for readability and Renovate (renovate.json) bumps the tag and
+# the digest together. See docs/dev/supply-chain.md.
+FROM golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 AS builder
 
 # No apk packages needed: golang:alpine already ships ca-certificates (for
 # `go mod download` over HTTPS), and the build no longer needs a C
@@ -35,7 +39,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
 # (https://github.com/benbjohnson/litestream/releases/tag/v0.5.16); bump
 # LITESTREAM_VERSION and both LITESTREAM_SHA256_* args together after
 # checking the new release's checksums.txt.
-FROM alpine:3.21 AS litestream
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS litestream
 
 ARG LITESTREAM_VERSION=0.5.16
 ARG LITESTREAM_SHA256_AMD64=9e29112380a942e4a62ee07773684396cb8b308dc4d67e130bef41f75e937f0a
@@ -55,7 +59,7 @@ RUN apk add --no-cache curl && \
     rm /tmp/litestream.tar.gz
 
 # ---- runtime -------------------------------------------------------------
-FROM alpine:3.21 AS runtime
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS runtime
 
 # git + git-lfs are required at runtime: the server execs `git` for the
 # smart HTTP endpoints (upload-pack / receive-pack) and `git-lfs` filters

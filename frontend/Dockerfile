@@ -1,11 +1,22 @@
 # syntax=docker/dockerfile:1
 
-FROM oven/bun:1 AS deps
+# Base images are pinned by digest, not just by tag: a tag is mutable, so
+# `oven/bun:1` alone lets whatever was pushed most recently into the build.
+# The tag is kept alongside the digest for readability, and Renovate
+# (renovate.json) bumps the pair together. See docs/dev/supply-chain.md.
+FROM oven/bun:1@sha256:5ff609364c049b54eb0ff560ec96319729a972078ef2c755d758f0c6ef89c2d6 AS deps
 WORKDIR /app
-COPY package.json bun.lock* bun.lockb* ./
-RUN bun install --frozen-lockfile || bun install
+# bun.lock without a glob: if the lockfile is ever missing from the build
+# context, this must fail loudly rather than fall through to an unpinned
+# install. bunfig.toml carries the install policy (minimumReleaseAge).
+COPY package.json bun.lock bunfig.toml ./
+# No `|| bun install` fallback. The fallback used to turn a lockfile that had
+# drifted out of sync into a silent, fully unpinned resolution -- the newest
+# version of every dependency, baked into a production image. A drifted
+# lockfile is a bug to fix, not something to route around.
+RUN bun install --frozen-lockfile
 
-FROM oven/bun:1 AS builder
+FROM oven/bun:1@sha256:5ff609364c049b54eb0ff560ec96319729a972078ef2c755d758f0c6ef89c2d6 AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -14,7 +25,7 @@ COPY . .
 # depends on API connectivity.
 RUN bun run build
 
-FROM oven/bun:1-slim AS runner
+FROM oven/bun:1-slim@sha256:e0ee68d16ccb9927bf02aa7dd8fd4bf3369ee6d46da04faa72b05ce8bfd135f6 AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
