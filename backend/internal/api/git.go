@@ -187,8 +187,10 @@ func (s *Server) handleLFSProxyUpload(w http.ResponseWriter, r *http.Request) {
 	// Write to the staging key first, exactly as the signed-URL path does:
 	// the digest is only known once the whole body has been read, and a
 	// mismatched object must never land on the shared content-addressed key.
-	// This path can hash the bytes because they pass through the server; the
-	// signed-URL path cannot, which is why size is all Verify can check.
+	// This path can hash the bytes as they pass through the server, so the
+	// digest is settled by the time promotion runs; the signed-URL path never
+	// sees them and pays for the same guarantee later instead, by reading the
+	// staged object back and hashing it inside lfs.Verify.
 	stagingKey := storage.LFSStagingKey(repoID, oid)
 	hashReader := newHashingReader(r.Body)
 	if err := s.storage.Put(r.Context(), stagingKey, hashReader, "application/octet-stream"); err != nil {
