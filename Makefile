@@ -206,7 +206,15 @@ audit: ## Scan Go / frontend / Python dependencies for known vulnerabilities
 	@echo "==> pip-audit (docs, lint)"
 	$(PIP_AUDIT) -r docs/requirements.txt -r requirements-lint.txt
 	@echo "==> pip-audit (e2e, from uv.lock)"
-	cd e2e && uv export --frozen --no-emit-project --quiet | $(PIP_AUDIT) -r /dev/stdin
+# Via a temp file, not a pipe: make's shell is /bin/sh without pipefail, so
+# `uv export | pip-audit` would report the *audit's* status. A failed or empty
+# export would then be audited as an empty requirement set, print "No known
+# vulnerabilities found", and pass -- a clean bill of health for a tree nothing
+# looked at. -s rejects an empty export for the same reason.
+	@cd e2e && tmp="$$(mktemp)" && trap 'rm -f "$$tmp"' EXIT && \
+		uv export --frozen --no-emit-project --quiet > "$$tmp" && \
+		[ -s "$$tmp" ] && \
+		$(PIP_AUDIT) -r "$$tmp"
 
 # ---- quality gates ---------------------------------------------------------
 

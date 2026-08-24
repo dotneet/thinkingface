@@ -65,6 +65,12 @@ To take a fresh release deliberately: `bun update <pkg> --minimum-release-age=0`
 - **Go toolchain.** `backend/go.mod`'s `toolchain` line, kept in step with the
   `golang:` image in `backend/Dockerfile`. Without it CI builds with whatever
   `go 1.25.0` resolves to and inherits every standard-library CVE fixed since.
+  The two are a pair because the official golang images set
+  `GOTOOLCHAIN=local`: the Docker build uses the Go in the image and ignores
+  the `toolchain` line entirely, so an image that lags the pin would ship a
+  binary built with an older Go while CI's govulncheck — which does honour the
+  line — stayed green. The builder stage asserts the two match and fails the
+  build otherwise, so this cannot drift silently.
 
 Renovate keeps all of these current once it is enabled; the commands above are
 for doing it by hand.

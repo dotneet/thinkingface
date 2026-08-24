@@ -17,6 +17,22 @@ WORKDIR /src
 # Copy go.mod/go.sum first so `go mod download` is cached as its own layer
 # and only re-runs when dependencies actually change.
 COPY go.mod go.sum ./
+
+# The official golang images set GOTOOLCHAIN=local, so this build uses the Go
+# that ships in the image and silently ignores go.mod's `toolchain` line. That
+# makes the base image tag and the toolchain pin a pair that must move
+# together: if the image lags, the binary that actually ships is built with an
+# older Go while CI's govulncheck -- which does honour the toolchain line --
+# stays green. Assert they match instead of trusting the convention.
+RUN set -eu; \
+    want="$(awk '$1 == "toolchain" { print $2 }' go.mod)"; \
+    have="$(go env GOVERSION)"; \
+    if [ "$want" != "$have" ]; then \
+      echo "go.mod pins $want but this builder image ships $have." >&2; \
+      echo "Bump the golang base image and go.mod's toolchain line together (docs/dev/supply-chain.md)." >&2; \
+      exit 1; \
+    fi
+
 RUN go mod download
 
 COPY . .
