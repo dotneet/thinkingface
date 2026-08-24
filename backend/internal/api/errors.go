@@ -66,6 +66,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeError(w http.ResponseWriter, status int, errType, message string) {
+	// huggingface_hub reads X-Error-Message before it looks at the body, and
+	// it is the only place a message survives intact: hf_raise_for_status
+	// falls back to `body["error"]`, which HF spells as a plain string while
+	// this API spells it as an object, so without the header a caller is shown
+	// the Python repr of a dict instead of the sentence inside it. The body
+	// stays as it is -- the Web UI's client is typed against that shape.
+	w.Header().Set("X-Error-Message", message)
 	writeJSON(w, status, apitypes.ApiErrorBody{Error: apitypes.ApiError{Message: message, Type: errType}})
 }
 
@@ -75,6 +82,25 @@ func badRequest(w http.ResponseWriter, message string) {
 
 func notFound(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusNotFound, "not_found", message)
+}
+
+// repoNotFound answers a repository that does not exist (or that the caller
+// may not see). huggingface_hub raises RepositoryNotFoundError only for this
+// X-Error-Code or a 401 -- a bare 404 comes back as HfHubHTTPError, which
+// repo_exists / file_exists / revision_exists do not catch, so they raise
+// instead of answering False.
+func repoNotFound(w http.ResponseWriter, message string) {
+	w.Header().Set("X-Error-Code", "RepoNotFound")
+	notFound(w, message)
+}
+
+// entryNotFound answers a path that does not exist at a revision that does.
+// EntryNotFoundError is what huggingface_hub raises for it, and what
+// hf_hub_download / HfFileSystem branch on to tell "no such file" apart from
+// "no such repository".
+func entryNotFound(w http.ResponseWriter, message string) {
+	w.Header().Set("X-Error-Code", "EntryNotFound")
+	notFound(w, message)
 }
 
 func unauthorized(w http.ResponseWriter, message string) {

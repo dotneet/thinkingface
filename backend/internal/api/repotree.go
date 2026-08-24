@@ -44,9 +44,9 @@ func (s *Server) handleHFRepoInfo(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	rev := chi.URLParam(r, "rev")
-	if rev == "" {
-		rev = repo.DefaultBranch
+	rev, ok := revParam(w, r, "rev", repo)
+	if !ok {
+		return
 	}
 
 	gitRepo, err := s.git.Open(repo.StoragePath)
@@ -169,10 +169,14 @@ func (s *Server) handleHFTree(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	recursive := r.URL.Query().Get("recursive") == "true" || r.URL.Query().Get("recursive") == "1"
+	rev, ok := revParam(w, r, "rev", repo)
+	if !ok {
+		return
+	}
 	// An unknown revision is a RevisionNotFound 404, not an empty listing --
 	// otherwise list_repo_files(revision="typo") answers [] and the typo is
 	// never seen. A repository with no commits at all still answers 200 [].
-	commit, empty, ok := s.revisionOrEmpty(w, gitRepo, repo, chi.URLParam(r, "rev"))
+	commit, empty, ok := s.revisionOrEmpty(w, gitRepo, repo, rev)
 	if !ok {
 		return
 	}
@@ -268,7 +272,11 @@ func (s *Server) handleHFPathsInfo(w http.ResponseWriter, r *http.Request) {
 	// indistinguishable from "none of these paths exist" and
 	// snapshot_download(revision="typo") would happily write an empty
 	// snapshot. A repository with no commits keeps its 200 [].
-	commit, empty, ok := s.revisionOrEmpty(w, gitRepo, repo, chi.URLParam(r, "rev"))
+	requestedRev, ok := revParam(w, r, "rev", repo)
+	if !ok {
+		return
+	}
+	commit, empty, ok := s.revisionOrEmpty(w, gitRepo, repo, requestedRev)
 	if !ok {
 		return
 	}
@@ -361,7 +369,10 @@ func (s *Server) handleUITree(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "open git repository", err)
 		return
 	}
-	rev := chi.URLParam(r, "rev")
+	rev, ok := revParam(w, r, "rev", repo)
+	if !ok {
+		return
+	}
 	dir := wildcardPath(r)
 
 	entries, _, err := gitRepo.Tree(rev, dir, false)
@@ -520,7 +531,11 @@ func (s *Server) handleUICommits(w http.ResponseWriter, r *http.Request) {
 		after = parsed
 	}
 
-	metas, next, err := gitRepo.ListCommits(chi.URLParam(r, "rev"), r.URL.Query().Get("path"), after, limit)
+	rev, ok := revParam(w, r, "rev", repo)
+	if !ok {
+		return
+	}
+	metas, next, err := gitRepo.ListCommits(rev, r.URL.Query().Get("path"), after, limit)
 	if err != nil {
 		handleStoreError(w, "list commits", err)
 		return

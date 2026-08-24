@@ -9,6 +9,34 @@ The confirmed specification between the backend (Go) and frontend (Next.js), and
   - **Cookie session** `tf_session` (for the Web UI, httpOnly)
   - **Bearer token** `Authorization: Bearer tf_xxx` (for CLI / Python). git uses HTTP Basic (`user:tf_xxx`)
 - Error responses uniformly use `{"error": {"message": "...", "type": "..."}}` + an appropriate HTTP status
+- **Every error response also carries `X-Error-Message`, equal to `error.message` verbatim**
+  (`writeError` in `internal/api/errors.go`). `huggingface_hub.utils._http.hf_raise_for_status`
+  reads this header before it ever looks at the body, and this API spells `error` as an *object*
+  rather than upstream HF's plain string — without the header, the only text `huggingface_hub` can
+  pull out of the body is that object's Python `repr()` (`"{'message': '...', 'type': '...'}"`),
+  which is what a caller used to see in place of the actual sentence. **Exception:**
+  `POST /api/repos/create`'s duplicate-name 409 keeps HF's own error body
+  (`{"error": "You already created this model repo"}`, a plain string, exactly what
+  `huggingface_hub` expects there) instead of going through `writeError`, so that one route alone
+  carries neither header.
+- **Some 404s also carry `X-Error-Code`**, which is what lets `huggingface_hub` raise the specific
+  subclass (`RepositoryNotFoundError` / `RevisionNotFoundError` / `EntryNotFoundError`) instead of a
+  bare `HfHubHTTPError` — and, for `RepositoryNotFoundError` specifically, what makes
+  `repo_exists()` / `file_exists()` / `revision_exists()` answer `False` instead of raising, since
+  those three only catch that one exception:
+  - `RepoNotFound` — the repository does not exist, or exists but the caller cannot see it
+    (private/gated and unauthenticated or unauthorized). Applies uniformly across every
+    HF-compatible read *and* write on a repository (repo-info, tree, paths-info, resolve, commits,
+    preupload, commit, LFS batch) and to the equivalent Web UI route, whether the miss is the
+    repository or the whole namespace — see `backend/internal/api/errors_signal_test.go`. **Not**
+    used for a 403/409/401 that is about permission or archival state or a genuine name conflict —
+    an archived-but-readable repository or a name collision must not look like `RepoNotFound`, or
+    `repo_exists()` would answer `False` for a repository the same client can still list.
+  - `RevisionNotFound` — the repository exists but `{rev}` does not resolve on it.
+  - `EntryNotFound` — the repository and `{rev}` both resolve, but the path inside doesn't (e.g.
+    `tree/{rev}/{path}` for a path that isn't there). `HfFileSystem.glob` — and so
+    `datasets.push_to_hub`, which globs before uploading — depends on this one specifically.
+  A 200 never carries either header.
 - **Security headers attached to every response** (`internal/api.securityHeaders`):
   `X-Content-Type-Options: nosniff` / `X-Frame-Options: DENY` /
   `Referrer-Policy: strict-origin-when-cross-origin`
@@ -29,7 +57,14 @@ The confirmed specification between the backend (Go) and frontend (Next.js), and
   Requests authenticated via Bearer / Basic are exempt.
 
 `{kind}` is `dataset` | `model`. The plural forms in the URL are `datasets` / `models`.
-`{rev}` is a branch name, tag name, or commit SHA (a single segment).
+`{rev}` is a branch name, tag name, or commit SHA (a single segment) — but a branch or tag name is
+itself allowed to contain `/` (e.g. `feature/tokenizer`), which `huggingface_hub` always sends
+percent-encoded (`quote(revision, safe="")`), so `{rev}` arrives in the request path as
+`feature%2Ftokenizer`, not as two path segments. This applies everywhere `{rev}` appears — resolve,
+tree, paths-info, commit, preupload, branch/tag writes, commits, repo-info's `/revision/{rev}` —
+not only the branch/tag routes. chi routes on the raw (still-escaped) path, so every handler that
+reads `{rev}` unescapes it itself rather than relying on the router to have decoded it; a handler
+that skipped this would see the escaped form itself where the client meant a plain revision string.
 `{path...}` is everything remaining (including slashes).
 
 ---
@@ -795,6 +830,10 @@ res 200:
 ```
 (models uses `modelId`; datasets don't need it, but returning it does no harm)
 
+- A repository that does not exist at all (or isn't visible to the caller) is **404 +
+  `X-Error-Code: RepoNotFound`**, distinct from the `RevisionNotFound` case just below — see the
+  header contract in the preamble at the top of this document. This is what `repo_exists()` /
+  `file_exists()` / `revision_exists()` rely on to answer `False` instead of raising.
 - A `{rev}` that does not resolve is **404 + `X-Error-Code: RevisionNotFound`**, matching the
   branch/tag and commits endpoints below — the header is what makes `huggingface_hub` raise
   `RevisionNotFoundError` instead of a bare `HfHubHTTPError` (or, without it, silently returning
@@ -818,6 +857,10 @@ res 200 (an array):
 - Same `{rev}` handling as `repo-info` above: 404 + `X-Error-Code: RevisionNotFound` when the
   repository has commits but `{rev}` doesn't resolve; 200 (empty array) for a repository with
   zero commits.
+- `{path...}` naming something that doesn't exist at a `{rev}` that *does* resolve is a different
+  case: **404 + `X-Error-Code: EntryNotFound`**, not `RevisionNotFound`. `HfFileSystem.glob` — and
+  so `datasets.push_to_hub`, which globs `data/*` before uploading — depends on being able to tell
+  the two apart.
 
 ### `POST /api/{datasets|models}/{ns}/{name}/paths-info/{rev}`  (HF-compatible)
 req: `{"paths": ["a.txt", "data/"], "expand": false}` → res 200: `hfTreeEntry[]` (same shape as `tree`)
@@ -1137,6 +1180,15 @@ An NDJSON line that can't be parsed returns 400 `bad_request`. The message is on
 strings `commit body must be newline-delimited JSON` / `invalid file entry` /
 `invalid lfsFile entry`; the decoder's internal error text is never returned (the same policy as
 `decodeJSON`).
+
+**Pull requests are not implemented.** `huggingface_hub`'s `create_commit(..., create_pr=True)`
+(and therefore `upload_file` / `upload_folder` / `delete_file` with the same flag) sends this as a
+`?create_pr=1` query parameter on this same endpoint, rather than as a field in the NDJSON body.
+The server rejects it outright — **400 `bad_request`** — instead of silently committing straight to
+`main` as if the flag had been ignored: doing that would surprise a caller who explicitly asked for
+a review step before their change becomes visible, and it would leave `pullRequestUrl` in the
+response with nothing behind it. The exact wording of the 400 is not part of the contract, only
+that the request fails and nothing is committed as a side effect of the attempt.
 
 ### `PUT /api/v1/edit/{kind}/{ns}/{name}/{rev}/{path...}`  (editing from the Web UI)
 

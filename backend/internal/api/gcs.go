@@ -35,7 +35,10 @@ func (s *Server) handleRepoGCS(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	rev := chi.URLParam(r, "rev")
+	rev, ok := revParam(w, r, "rev", repo)
+	if !ok {
+		return
+	}
 
 	rows, err := s.store.ListRepoFiles(r.Context(), repo.ID, rev)
 	if err != nil {

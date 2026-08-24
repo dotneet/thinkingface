@@ -15,7 +15,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -45,16 +44,19 @@ type hfRefResult struct {
 
 // refParam reads a branch or tag name out of the URL path.
 //
-// The unescaping is not optional: huggingface_hub percent-encodes the name
-// with `quote(branch, safe="")`, so a branch called "feature/x" arrives as
+// The decoding is not optional: huggingface_hub percent-encodes the name with
+// `quote(branch, safe="")`, so a branch called "feature/x" arrives as
 // "feature%2Fx", and chi routes on the *escaped* path whenever one is present
 // (r.URL.RawPath), handing the parameter over still encoded. Without this a
 // slashed branch name would either 404 or create a ref literally named
-// "feature%2Fx".
+// "feature%2Fx". It is also not unconditional -- pathParam explains why, and
+// it matters here too: ValidateRefName permits "%" in a ref name, so a branch
+// called "50%-trained" reaches this with RawPath empty and already decoded,
+// and a second decode would reject it as bad percent-encoding.
 //
 // what names the thing in the error message ("branch" / "tag").
 func refParam(w http.ResponseWriter, r *http.Request, key, what string) (string, bool) {
-	name, err := url.PathUnescape(chi.URLParam(r, key))
+	name, err := pathParam(r, key)
 	if err != nil {
 		badRequest(w, what+" name is not valid percent-encoding")
 		return "", false
@@ -69,8 +71,13 @@ func refParam(w http.ResponseWriter, r *http.Request, key, what string) (string,
 // revParam reads a revision out of the URL path, falling back to the
 // repository's default branch. Unlike refParam it is not validated as a ref
 // name, because a revision may also be a commit SHA.
+//
+// Every handler that takes a revision from the path goes through this. The
+// four ref handlers used to be the only ones that did, which is why
+// create_branch("feature/x") succeeded and every read or write that named the
+// new branch afterwards came back 404 or empty.
 func revParam(w http.ResponseWriter, r *http.Request, key string, repo *store.Repo) (string, bool) {
-	rev, err := url.PathUnescape(chi.URLParam(r, key))
+	rev, err := pathParam(r, key)
 	if err != nil {
 		badRequest(w, "revision is not valid percent-encoding")
 		return "", false
