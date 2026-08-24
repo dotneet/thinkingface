@@ -152,6 +152,51 @@ func (r *Repo) Stat(rev, p string) (Entry, plumbing.Hash, error) {
 	return e, commit, err
 }
 
+// StatMany resolves rev once and stats every path against that one tree, which
+// is what a batch endpoint wants: Stat re-resolves the revision and reloads the
+// root tree on every call, so asking about a few hundred paths one at a time
+// pays for the same walk a few hundred times.
+//
+// Paths that are absent, or whose blob cannot be read, are simply missing from
+// the returned map -- a caller batching lookups has nothing useful to do with a
+// per-path error, and "not there" and "unreadable" lead to the same answer. A
+// revision that does not resolve at all (an empty repository included) comes
+// back as an error with a nil map, since that is a fact about the request
+// rather than about any one path.
+func (r *Repo) StatMany(rev string, paths []string) (map[string]Entry, plumbing.Hash, error) {
+	root, commit, err := r.treeAt(rev)
+	if err != nil {
+		return nil, commit, err
+	}
+	out := make(map[string]Entry, len(paths))
+	for _, p := range paths {
+		// Keyed by the path as the caller spelled it, so the lookup on the
+		// way back needs no second round of cleaning.
+		if _, done := out[p]; done {
+			continue
+		}
+		clean := strings.Trim(p, "/")
+		if clean == "" {
+			out[p] = Entry{Path: "", Name: "", IsDir: true, Mode: filemode.Dir, Hash: root.Hash}
+			continue
+		}
+		te, err := root.FindEntry(clean)
+		if err != nil {
+			continue
+		}
+		if te.Mode == filemode.Dir {
+			out[p] = Entry{Path: clean, Name: path.Base(clean), IsDir: true, Mode: te.Mode, Hash: te.Hash}
+			continue
+		}
+		e, err := r.blobEntry(*te, clean)
+		if err != nil {
+			continue
+		}
+		out[p] = e
+	}
+	return out, commit, nil
+}
+
 // BlobReader streams a blob's bytes.
 func (r *Repo) BlobReader(hash plumbing.Hash) (io.ReadCloser, int64, error) {
 	obj, err := r.storer().EncodedObject(plumbing.BlobObject, hash)

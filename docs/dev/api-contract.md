@@ -1067,6 +1067,29 @@ file of exactly 10MiB is `lfs`). Every write path decides this with the same
 `LFSRules.ShouldUseLFS` call — preupload, the Web UI upload endpoint, and the fallback used when a
 repository's own `.gitattributes` cannot be read.
 
+`oid` reports the hash of the file *currently* at that path in the repository at `rev`, in
+whichever form matches `uploadMode`, so `huggingface_hub` can tell an unchanged file from a new
+one without transferring it:
+- `uploadMode: "regular"` → the git blob sha1 of the existing file (what `git hash-object` would
+  compute for it).
+- `uploadMode: "lfs"` → the sha256 of the existing file's content (the same value that becomes its
+  LFS pointer's `oid`).
+- `null` — the safe default — whenever there is nothing meaningful to compare against: the path
+  does not exist at `rev`, the path is a directory rather than a file, the entry is a symlink
+  (whose blob holds the target path, not the bytes the client hashes), or the existing entry's
+  storage form doesn't match the freshly computed `uploadMode` (e.g. a path that used to be a
+  regular file but would now be routed through LFS, or vice versa).
+
+`huggingface_hub` stores this value as `CommitOperationAdd._remote_oid` and compares it against
+the oid it computes locally for the file being uploaded (git blob sha1 or content sha256,
+matching the two cases above). A match means the file is byte-identical to what's already
+committed, so the operation is dropped from the commit before it is sent; `oid: null` always
+means "upload it", since there is no basis for comparison. This is what lets a repeated
+`upload_folder` / `create_commit` over an unchanged tree add no new commit — see
+`e2e/test_hf_compat.py::test_reupload_of_unchanged_folder_adds_no_commit` and the two
+`test_reupload_after_changing_*` tests alongside it, which also confirm a genuinely modified file
+is never skipped by mistake.
+
 ### `POST /api/{datasets|models}/{ns}/{name}/commit/{rev}`  (HF-compatible)
 Content-Type: `application/x-ndjson`. One operation per line.
 
