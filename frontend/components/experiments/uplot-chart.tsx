@@ -4,6 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import uPlot from "uplot";
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/i18n/client";
+import {
+  CHART_THEME_FALLBACKS,
+  type ChartThemeColors,
+  readChartThemeColors,
+  subscribeThemeChange,
+} from "@/lib/theme-colors";
 import "uplot/dist/uPlot.min.css";
 
 /**
@@ -71,6 +77,14 @@ export function UplotChart({
   // closed over at plot-creation time) because data updates are applied via
   // plot.setData() below without recreating the plot/hooks.
   const dataRef = useRef(data);
+  // Resolved axis/grid colours for the current theme. uPlot draws on a canvas,
+  // and Canvas2D does not resolve CSS custom properties — see lib/theme-colors.
+  // Kept in a ref and read through the axis stroke *functions* below, which
+  // uPlot re-invokes on every draw: a theme change then only needs a redraw,
+  // never a rebuild of the plot (a dashboard renders one of these per metric).
+  // The fallback holds only until the mount effect reads the real tokens;
+  // `document` does not exist while this renders on the server.
+  const themeColorsRef = useRef<ChartThemeColors>(CHART_THEME_FALLBACKS);
   const [isZoomed, setIsZoomed] = useState(false);
 
   // Identity of the plotted series as a single string: swapping run A for run B
@@ -85,6 +99,10 @@ export function UplotChart({
 
   useEffect(() => {
     if (!containerRef.current) return;
+
+    themeColorsRef.current = readChartThemeColors();
+    const axisStroke = () => themeColorsRef.current.axis;
+    const gridStroke = () => themeColorsRef.current.grid;
 
     const width = containerRef.current.clientWidth || 400;
 
@@ -136,14 +154,16 @@ export function UplotChart({
       },
       axes: [
         {
-          stroke: "var(--tf-fg-subtle)",
-          grid: { stroke: "var(--tf-border)" },
+          stroke: axisStroke,
+          grid: { stroke: gridStroke },
+          ticks: { stroke: gridStroke },
           label: xLabel,
           labelSize: xLabel ? 24 : undefined,
         },
         {
-          stroke: "var(--tf-fg-subtle)",
-          grid: { stroke: "var(--tf-border)" },
+          stroke: axisStroke,
+          grid: { stroke: gridStroke },
+          ticks: { stroke: gridStroke },
           label: yLabel,
           labelSize: yLabel ? 24 : undefined,
         },
@@ -186,6 +206,20 @@ export function UplotChart({
     // below instead of rebuilding the plot.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [title, xIsTime, logScale, mode, xLabel, yLabel, seriesSignature, height, t, syncKey]);
+
+  // Follow theme switches (the toggle's `data-theme` attribute, or the OS
+  // changing `prefers-color-scheme` while the preference is "system"). Only a
+  // real theme change gets here, and it costs a repaint of the existing plot —
+  // the axis strokes are read back out of the ref on the next draw — so the
+  // chart keeps its zoom and no series paths are rebuilt.
+  useEffect(
+    () =>
+      subscribeThemeChange(() => {
+        themeColorsRef.current = readChartThemeColors();
+        plotRef.current?.redraw(false);
+      }),
+    [],
+  );
 
   useEffect(() => {
     dataRef.current = data;
