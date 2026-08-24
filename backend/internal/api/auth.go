@@ -488,6 +488,14 @@ func (s *Server) handleChangeMyPassword(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusUnauthorized, "unauthorized", "current password is incorrect")
 		return
 	}
+	// Proving the current password clears the address budget, exactly as
+	// handleLogin does on a successful sign-in. Without this the failed
+	// attempts that preceded it stay charged against the address, and the
+	// hashNewPassword call two lines down -- or the next login from the same
+	// office -- is throttled on the strength of a challenge that has since
+	// been answered.
+	s.authGuard.reset(addrKey)
+
 	hash, ok := s.hashNewPassword(w, r, req.NewPassword)
 	if !ok {
 		return

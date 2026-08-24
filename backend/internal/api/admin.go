@@ -240,11 +240,21 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 
 	if req.Password != nil {
 		// The write revokes the target's sessions as part of the same
-		// statement. Unlike the self-service change there is no cookie to
-		// re-issue: those sessions belong to the target, not the actor.
-		if _, err := s.store.UpdateUserPassword(r.Context(), target.ID, hash); err != nil {
+		// statement.
+		epoch, err := s.store.UpdateUserPassword(r.Context(), target.ID, hash)
+		if err != nil {
 			handleStoreError(w, "update password", err)
 			return
+		}
+		// Normally those sessions belong to the target, not the actor, and
+		// there is nothing to re-issue. Resetting your *own* password from
+		// this screen is the exception: the revocation would include the
+		// cookie this request arrived on, signing the administrator out on
+		// their next click. Re-issue it at the new epoch, the same way
+		// PATCH /api/v1/me/password does.
+		if target.ID == actor.ID && cookieAuthenticated(r.Context()) {
+			actor.SessionEpoch = epoch
+			s.setSessionCookie(w, actor)
 		}
 		slog.Info("password reset by site administrator",
 			"actor", actor.Username, "actor_id", actor.ID,

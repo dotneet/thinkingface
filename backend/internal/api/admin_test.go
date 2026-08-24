@@ -970,3 +970,56 @@ func TestPasswordWrites_SaturationIs503AndRateLimitIs429(t *testing.T) {
 		})
 	}
 }
+
+// TestAdminUpdateUser_SelfResetKeepsTheActorSignedIn pins the exception in
+// handleAdminUpdateUser's cookie handling. The write revokes the target's
+// sessions, which is right when the target is somebody else. Resetting your
+// own password from the same screen would otherwise revoke the very cookie
+// the request arrived on and sign the administrator out on their next click.
+func TestAdminUpdateUser_SelfResetKeepsTheActorSignedIn(t *testing.T) {
+	f := newSecFixture(t)
+	f.adminUser("root", "correct horse battery")
+	rootCookie := f.login("root", "correct horse battery")
+
+	rec := f.do(secRequest{method: "PATCH", path: "/api/v1/admin/users/root",
+		cookies: []*http.Cookie{rootCookie},
+		body:    map[string]any{"password": "a brand new passphrase"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	fresh := sessionCookie(rec)
+	if fresh == nil {
+		t.Fatal("no session cookie re-issued: the administrator is signed out by their own reset")
+	}
+	// Present is not enough -- it has to still authenticate at the new epoch.
+	if rec := f.do(secRequest{method: "GET", path: "/api/v1/me",
+		cookies: []*http.Cookie{fresh}}); rec.Code != http.StatusOK {
+		t.Fatalf("GET /me with the re-issued cookie = %d, want 200", rec.Code)
+	}
+	// The cookie the request arrived with is genuinely dead, so this is a
+	// re-issue rather than the revocation having been skipped.
+	if rec := f.do(secRequest{method: "GET", path: "/api/v1/me",
+		cookies: []*http.Cookie{rootCookie}}); rec.Code == http.StatusOK {
+		t.Fatal("the pre-reset cookie still authenticates: sessions were not revoked")
+	}
+}
+
+// The mirror case: resetting somebody else's password must not hand the actor
+// a cookie, since the revoked sessions were never theirs.
+func TestAdminUpdateUser_ResettingAnotherAccountIssuesNoCookie(t *testing.T) {
+	f := newSecFixture(t)
+	f.adminUser("root", "correct horse battery")
+	f.user("alice", "forgotten forever")
+	rootCookie := f.login("root", "correct horse battery")
+
+	rec := f.do(secRequest{method: "PATCH", path: "/api/v1/admin/users/alice",
+		cookies: []*http.Cookie{rootCookie},
+		body:    map[string]any{"password": "issued by the admin"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if c := sessionCookie(rec); c != nil {
+		t.Fatalf("session cookie issued (%q) while resetting another account's password", c.Value)
+	}
+}
