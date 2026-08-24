@@ -237,6 +237,12 @@ export const repo = {
     // Shown under the input as the user types, so the path that will actually
     // be created is never something they have to work out themselves.
     newFileResolved: "Creates {path}",
+    // Shown in place of "Creates …" when the typed path can't be used, so the
+    // disabled Create button is never a mystery (DESIGN.md §9). Each names
+    // what git itself refuses, since that is the reason underneath.
+    newFileRelativeSegment:
+      'A path can\'t contain "." or ".." segments — git refuses them, and the file would not be created where this says.',
+    newFileGitDirectory: 'A path can\'t contain a ".git" segment — git reserves that name.',
     newFilePathLabel: "File path",
     newFilePathPlaceholder: "notes.md",
     newFileConfirm: "Create file",

@@ -112,6 +112,25 @@ export function decodeRouteParams<T extends Record<string, string | string[] | u
 }
 
 /**
+ * Why a typed path cannot be used. Each maps to a segment git itself refuses
+ * (`gitrepo.validatePath`, backend/internal/gitrepo/commit.go).
+ */
+export type NewFilePathIssue = "relativeSegment" | "gitDirectory";
+
+/**
+ * The outcome of resolving what "Create a new file" would create.
+ *
+ * Three states, not two: nothing typed yet is not the same as typed something
+ * unusable (DESIGN.md §9). The dialog keeps Create disabled for both but says
+ * something different about each — a disabled button with no stated reason is
+ * the failure mode this type exists to prevent.
+ */
+export type NewFilePathResult =
+  | { status: "empty" }
+  | { status: "invalid"; issue: NewFilePathIssue }
+  | { status: "ok"; path: string };
+
+/**
  * Resolves what "Create a new file" will actually create: the typed path is
  * relative to the directory being browsed, the way GitHub's own "Add file" is.
  * Creating `README.md` from inside `docs/` therefore makes `docs/README.md` —
@@ -122,9 +141,41 @@ export function decodeRouteParams<T extends Record<string, string | string[] | u
  * typo, not an escape hatch, and silently rooting the path is exactly the
  * ambiguity this function exists to remove. The dialog shows the resolved
  * path back to the user as they type.
+ *
+ * **`.`, `..` and `.git` segments are refused here, and the backend is still
+ * the authority on them.** This is not a second line of validation — the
+ * commit path re-checks every path with `gitrepo.ValidatePath` and nothing
+ * that gets past this function can write outside the tree. It is about the
+ * dialog not making a promise it cannot keep:
+ *
+ * - The resolved path is shown to the user *and* pushed as a URL, and the two
+ *   disagree the moment it contains `..`. `docs/../x.md` renders in the hint
+ *   as written, while the router resolves the pushed URL to `…/edit/main/x.md`
+ *   and the editor opens on a file at the repository root. Shown one path,
+ *   given another, with the file eventually created somewhere the dialog never
+ *   named. A bare `.` or `..` collapses the URL down to a path with no file
+ *   segment at all, which matches no route.
+ * - `.git` survives URL resolution intact, so it fails differently: the editor
+ *   opens happily and the commit is refused afterwards, which is a dead end
+ *   reached only after the user has typed a whole file.
+ *
+ * Both are answered here, before navigation, with a reason the dialog renders.
  */
-export function resolveNewFilePath(dir: string[], typed: string): string {
+export function resolveNewFilePath(dir: string[], typed: string): NewFilePathResult {
   const relative = typed.trim().replace(/^\/+/, "").replace(/\/+/g, "/").replace(/\/+$/, "");
-  if (!relative) return "";
-  return [...dir, relative].join("/");
+  if (!relative) return { status: "empty" };
+
+  for (const segment of relative.split("/")) {
+    if (segment === "." || segment === "..") {
+      return { status: "invalid", issue: "relativeSegment" };
+    }
+    // toLowerCase, never toLocaleLowerCase: the latter maps "I" to a dotless
+    // "ı" in a Turkish locale, so ".GIT" would stop matching for exactly the
+    // users whose filesystem is just as case-insensitive as everyone else's.
+    // git compares this fold-insensitively too (strings.EqualFold).
+    if (segment.toLowerCase() === ".git") {
+      return { status: "invalid", issue: "gitDirectory" };
+    }
+  }
+  return { status: "ok", path: [...dir, relative].join("/") };
 }

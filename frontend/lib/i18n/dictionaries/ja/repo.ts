@@ -225,6 +225,9 @@ export const repo = {
     newFileBodyIn:
       "ファイルは {dir} の下に作成されます。さらにサブディレクトリに置くには / を使います。",
     newFileResolved: "{path} を作成します",
+    newFileRelativeSegment:
+      'パスに "." や ".." のセグメントは使えません — git が拒否しますし、ここに表示された場所には作成されません。',
+    newFileGitDirectory: 'パスに ".git" のセグメントは使えません — git が予約している名前です。',
     newFilePathLabel: "ファイルパス",
     newFilePathPlaceholder: "notes.md",
     newFileConfirm: "ファイルを作成",
