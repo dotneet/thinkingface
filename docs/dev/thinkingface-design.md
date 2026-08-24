@@ -559,8 +559,11 @@ namespaces       (id, name, kind: user|org, owner_user_id)
 org_members      (namespace_id, user_id, role: admin|write|read)
 repositories     (id, namespace_id, name, kind: dataset|model, default_branch,
                   description, card jsonb, head_sha, total_size, downloads,
-                  is_experiment, archived_at nullable, created_at, updated_at)
+                  is_experiment, storage_path, archived_at nullable,
+                  created_at, updated_at)
                                                                -- no visibility column; see §11
+                                                               -- storage_path is the opaque
+                                                               -- ULID prefix used by §4 and §5
 repo_files       (repo_id, ref, path, size, mode,
                   lfs_oid nullable, blob_sha, updated_at)      -- file tree cache
 lfs_objects      (oid pk, size, created_at)
@@ -783,8 +786,12 @@ flowchart LR
   versioning enabled, a gc delete alone only turns an object noncurrent, so a lifecycle rule
   (`var.lfs_blobs_noncurrent_retention_days`, default 30 days, scoped to `lfs/`/`blobs/` only)
   deletes the noncurrent version 30 days later so gc's deletes actually free storage. Accident
-  prevention is handled by `soft_delete_policy` (shared bucket-wide, and shorter-lived than the
-  30-day noncurrent window). PG relies on Cloud SQL automated backups + PITR
+  prevention is handled by `soft_delete_policy`, which is bucket-wide and covers deletes that
+  versioning cannot undo. Note that both windows default to 30 days
+  (`var.bucket_soft_delete_retention_days`, `var.lfs_blobs_noncurrent_retention_days`), so out of
+  the box they expire together rather than one outliving the other — raise the soft-delete window
+  if you want a grace period that survives the lifecycle rule. PG relies on Cloud SQL automated
+  backups + PITR
 - IaC is Terraform (the `infra/` directory). The goal is for compose and production to differ only in environment variables and the Storage driver
 
 > **Operator warning — the bundled Terraform publishes the instance to the entire internet.**
@@ -792,8 +799,9 @@ flowchart LR
 > the user-facing docs repeat it. The Terraform in `infra/` does not put such a boundary
 > anywhere: both Cloud Run services are created with `ingress = "INGRESS_TRAFFIC_ALL"`
 > (`infra/main.tf`, the `api` and `web` services) and both get `roles/run.invoker` granted to
-> `allUsers`, with no IAP, no Cloud Armor policy and no load balancer in front — nothing in
-> `infra/` references any of the three. That is deliberate for `api` (git / git-lfs / HF clients
+> `allUsers`, with no IAP, no Cloud Armor policy and no load balancer in front — `infra/` creates
+> none of the three (`infra/README.md` discusses adding a load balancer with Cloud Armor or IAP,
+> but no resource does it). That is deliberate for `api` (git / git-lfs / HF clients
 > invoke it directly and authenticate inside the app), but it means **applying `infra/` as-is
 > makes every repository on the instance world-readable, unauthenticated, from any IP**.
 > An operator who wants an actual boundary has to add one: `ingress =
@@ -864,7 +872,7 @@ thinkingface/
 | **2. Direct git operations** | Smart HTTP, LFS Batch + signed URLs, Sync Worker, the two content-addressed layers (`lfs/` + `blobs/`) | ✅ Done |
 | **3. Viewer** | Parquet schema/row API, table UI | ✅ Done (safetensors inspector not yet implemented) |
 | **4. Experiments** | Indexing for trackio path A, ingest API (path B), chart UI | ✅ Done |
-| **5. Operations** | Organizations/roles, search improvements, Terraform, backups, E2E compatibility test CI | ✅ Organizations are done end to end — the `/api/v1/orgs*` routes in `backend/internal/api/server.go`, the directory/settings screens under `frontend/app/orgs/`, roles, audit log, webhooks and transfers (design: `docs/dev/organization-design.md`). ⚠️ Terraform is written and `fmt`/`init`/`validate`-checked by the `terraform` job in CI, but never `apply`-ed there (that needs GCP credentials), so server-side limits only surface at apply time. ⚠️ The E2E suite is written (`e2e/`) but **has no CI job** — `.github/workflows/ci.yml` runs backend / frontend / contract / python / terraform only, so E2E is a local gate (`make test-e2e` after `make up`) |
+| **5. Operations** | Organizations/roles, search improvements, Terraform, backups, E2E compatibility test CI | ✅ Organizations are done end to end — the `/api/v1/orgs*` routes in `backend/internal/api/server.go`, the directory/settings screens under `frontend/app/orgs/`, roles, audit log, webhooks and transfers (design: `docs/dev/organization-design.md`). ⚠️ Terraform is written and `fmt`/`init`/`validate`-checked by the `terraform` job in CI, but never `apply`-ed there (that needs GCP credentials), so server-side limits only surface at apply time. ⚠️ The E2E suite has a CI job (`e2e`, a postgres/sqlite matrix in `.github/workflows/ci.yml`) but it **does not run on pull requests** — it brings the whole compose stack up, so it is gated to pushes on `main` and to `workflow_dispatch`. On a PR it reports as skipped, which means E2E is effectively a local gate before merge (`make test-e2e` after `make up`) and a post-merge one on `main` |
 | **6. Namespace unification** | Unify username = personal namespace and organization ID = organization namespace into a single `/{ns}` (with `/orgs/{name}` redirecting), and give users a profile too (display name, bio, website, avatar URL). Includes making reserved names a single source of truth, plus the HF-compatible `users/{u}/overview` / `organizations/{o}/overview` | ✅ Done — `frontend/app/[ns]/page.tsx` is the one namespace page, `frontend/app/orgs/[name]/page.tsx` is a `permanentRedirect` to it (settings stay under `/orgs/{name}/settings`), and `/api/users/{username}/overview` / `/api/organizations/{org}/overview` are served from `backend/internal/api/server.go`. Design and phase breakdown: `docs/dev/namespace-design.md` (§13) |
 
 The goal of this ordering was for the system to already be useful from the Python ecosystem as
