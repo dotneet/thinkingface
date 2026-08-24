@@ -147,8 +147,11 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, kind stri
 
 	w.Header().Set("ETag", `"`+entry.Hash.String()+`"`)
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Length", strconv.FormatInt(entry.Size, 10))
 	if r.Method == http.MethodHead {
+		// A HEAD reports the whole file even when a Range is attached (same as
+		// the LFS path): huggingface_hub reads Content-Length here to learn the
+		// real size before it decides how to fetch the body.
+		w.Header().Set("Content-Length", strconv.FormatInt(entry.Size, 10))
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -159,11 +162,45 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, kind stri
 		return
 	}
 	defer rc.Close()
+
+	// Honour a single Range, the same way serveLFSFile does. An unparseable or
+	// unsatisfiable one falls back to the whole body with a 200 rather than a
+	// 416, again matching that path.
+	body := io.Reader(rc)
+	if offset, length, partial := parseRange(r.Header.Get("Range"), entry.Size); partial {
+		// go-git blob readers are sequential, so the prefix has to be read
+		// past rather than seeked over -- and these blobs run to gigabytes, so
+		// it is discarded as it streams instead of being buffered.
+		if _, err := io.CopyN(io.Discard, rc, offset); err != nil {
+			internalError(w, "read blob", err)
+			return
+		}
+		span := writePartialContent(w, offset, length, entry.Size)
+		body = io.LimitReader(rc, span)
+	} else {
+		w.Header().Set("Content-Length", strconv.FormatInt(entry.Size, 10))
+	}
 	s.store.IncrementDownloads(r.Context(), repo.ID)
-	if _, err := io.Copy(w, rc); err != nil {
+	if _, err := io.Copy(w, body); err != nil {
 		// The client hung up mid-transfer; nothing useful left to do.
 		return
 	}
+}
+
+// writePartialContent writes the 206 status line and the range headers for one
+// satisfiable range, and reports how many bytes the body must carry. A length
+// of -1 means "through the end of the object".
+func writePartialContent(w http.ResponseWriter, offset, length, size int64) int64 {
+	end := size - 1
+	if length >= 0 {
+		end = offset + length - 1
+	}
+	span := end - offset + 1
+	w.Header().Set("Content-Range", "bytes "+strconv.FormatInt(offset, 10)+"-"+
+		strconv.FormatInt(end, 10)+"/"+strconv.FormatInt(size, 10))
+	w.Header().Set("Content-Length", strconv.FormatInt(span, 10))
+	w.WriteHeader(http.StatusPartialContent)
+	return span
 }
 
 // recordDownload records a resolve hit off the request path. It must never
@@ -270,14 +307,7 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 	defer rc.Close()
 
 	if partial {
-		end := entry.LFS.Size - 1
-		if length >= 0 {
-			end = offset + length - 1
-		}
-		w.Header().Set("Content-Range", "bytes "+strconv.FormatInt(offset, 10)+"-"+
-			strconv.FormatInt(end, 10)+"/"+strconv.FormatInt(entry.LFS.Size, 10))
-		w.Header().Set("Content-Length", strconv.FormatInt(end-offset+1, 10))
-		w.WriteHeader(http.StatusPartialContent)
+		writePartialContent(w, offset, length, entry.LFS.Size)
 	}
 	s.store.IncrementDownloads(r.Context(), repo.ID)
 	_, _ = io.Copy(w, rc)
@@ -299,6 +329,11 @@ func parseRange(header string, size int64) (offset, length int64, ok bool) {
 		}
 		if n > size {
 			n = size
+		}
+		if n == 0 {
+			// An empty file: there is no last byte to hand back, and a
+			// "bytes 0--1/0" would be nonsense.
+			return 0, -1, false
 		}
 		return size - n, n, true
 	}

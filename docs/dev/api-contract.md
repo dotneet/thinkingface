@@ -17,6 +17,11 @@ The confirmed specification between the backend (Go) and frontend (Next.js), and
   back. A non-matching `Origin` gets no CORS headers at all (the request itself still goes through).
   When unset, the default is the origin of `TF_PUBLIC_URL`, plus, if `TF_PUBLIC_URL` is not https,
   `http://localhost:3000` / `http://127.0.0.1:3000`. `Vary: Origin` is always attached.
+  `Access-Control-Expose-Headers` names what browser JS is allowed to read back: `ETag`,
+  `X-Repo-Commit`, `X-Linked-Etag`, `X-Linked-Size`, `Content-Length`, `Content-Range`,
+  `Accept-Ranges`, `Location`. `Content-Range` / `Accept-Ranges` are on the list so a
+  cross-origin range read of `resolve` can tell which bytes it was given — a header left off
+  it is invisible to the caller, not merely unadvertised.
 - **CSRF**: For requests other than GET/HEAD/OPTIONS authenticated via cookie session,
   if the `Origin` (or the `Referer`'s origin if absent) doesn't match the allowlist, the response
   is **403 `forbidden`**. Requests with neither `Origin` nor `Referer` are allowed through
@@ -1016,7 +1021,12 @@ Constraints and status codes:
   - `X-Repo-Commit: <commit sha>`
   - `X-Linked-Etag` / `X-Linked-Size` (for LFS)
   - `Content-Length`, `Content-Type`, `Accept-Ranges: bytes`
-- Range requests are supported (regular files from memory, LFS via a storage range read).
+- Range requests are supported on both paths: a regular file streams the requested slice straight
+  out of the git blob (never buffered — these run to gigabytes), LFS uses a storage range read. One
+  range per request (`bytes=a-b` / `bytes=a-` / `bytes=-n`); a satisfiable one answers 206 with
+  `Content-Range`, while an unparseable, multi-range or unsatisfiable one falls back to 200 with the
+  whole body rather than 416. A HEAD ignores `Range` and always reports the full `Content-Length`,
+  which is what `hf_hub_download` reads the size from.
 - Download stats: once a request is known not to be for a directory, it counts as 1 request = 1
   count, UPSERTed into `repo_download_stats(repo_id, date, count)`. Both HEAD and an LFS 302 count
   as one (range splitting, or a client's actual fetch from the GCS location a 302 pointed to, isn't
