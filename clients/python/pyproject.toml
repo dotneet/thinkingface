@@ -26,6 +26,15 @@ lightning = ["lightning>=2.0"]
 [project.urls]
 Homepage = "https://github.com/dotneet/thinkingface"
 
+# The unit-test environment, resolved from uv.lock by `make test-clients-python`
+# (and the CI python job). Deliberately *not* including the `transformers` /
+# `lightning` extras: tests/test_trackio_integrations.py asserts that
+# thinkingface.trackio.integrations imports cleanly with neither installed
+# (`_HAS_TRANSFORMERS is False`), and it fakes both via sys.modules to cover the
+# autolog behavior. Installing them here would silently void that contract.
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["thinkingface"]
 

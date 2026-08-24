@@ -29,6 +29,8 @@ on:
       - "requirements-lint.txt"
       - "e2e/pyproject.toml"
       - "e2e/uv.lock"
+      - "clients/python/pyproject.toml"
+      - "clients/python/uv.lock"
       - "Makefile"
       - ".github/workflows/security.yml"
   push:
@@ -45,6 +47,8 @@ on:
       - "requirements-lint.txt"
       - "e2e/pyproject.toml"
       - "e2e/uv.lock"
+      - "clients/python/pyproject.toml"
+      - "clients/python/uv.lock"
       - "Makefile"
       - ".github/workflows/security.yml"
   workflow_dispatch:

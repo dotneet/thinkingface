@@ -133,7 +133,7 @@ make check
 |---|---|
 | `make check-backend` | `gofmt` check, `go vet`, `go test ./...` in `backend/` |
 | `make check-frontend` | `bun run typecheck`, `lint` (ESLint), `format:check` (Biome), `check:ui` (`frontend/scripts/check-ui.mjs`, the UI conventions from `frontend/DESIGN.md`), `test` (vitest) |
-| `make check-python` | `ruff check` + `ruff format --check` for `e2e/`, `clients/python/`, `scripts/` |
+| `make check-python` | `ruff check` + `ruff format --check` for `e2e/`, `clients/python/`, `scripts/`, then the `clients/python` unit tests (`uv run --locked pytest`) |
 | `make check-types` | Regenerates `frontend/types/api.gen.ts` from `backend/internal/apitypes` with tygo and fails on any diff |
 | `make check-terraform` | `terraform fmt -check -recursive`, then `terraform init -backend=false` + `terraform validate` in `infra/` |
 
@@ -198,7 +198,8 @@ because `ci.yml` already covers the mechanical checks above.
 
 | Command | Scope | Needs |
 |---|---|---|
-| `make test` | Go unit tests + frontend unit tests | nothing |
+| `make test` | Go unit tests + frontend unit tests + the `clients/python` unit tests | nothing |
+| `make test-clients-python` | `clients/python/tests/` — the trackio shim's resume contract, run grouping, artifact upload and system metrics (`docs/dev/thinkingface-design.md` §8) | nothing |
 | `make test-store-pg` | `backend/internal/store` integration tests against PostgreSQL (the SQLite path always runs as part of `go test`) | `make up` |
 | `make test-e2e` | `e2e/` — `huggingface_hub` / `datasets` / git / GCS compatibility against a running server | `make up` |
 
@@ -210,6 +211,19 @@ required for it. **Run it
 whenever you change an HF-compatible endpoint** (whoami / create_repo / preupload / commit /
 resolve / tree / LFS batch) — compatibility with the upstream client libraries is the project's
 top priority. What the suite covers is listed in [`e2e/README.md`](../../e2e/README.md).
+
+Two parts of it need something beyond a running API. The git-over-SSH cases talk to the
+separate SSH listener (`TF_SSH_ENABLED`, port 2222 in Compose) and **skip themselves** when
+nothing answers there — point them elsewhere with `TF_SSH_HOST` / `TF_SSH_PORT`. The LFS push
+case needs `git-lfs` on `PATH` and skips without it. Neither turns into a red run on a machine
+or deployment that simply does not have them.
+
+`clients/python` is a separate, much cheaper suite: pure unit tests with no server and no
+Docker, so unlike E2E it runs on every PR. Like E2E it resolves from a lockfile
+(`clients/python/uv.lock`) into `clients/python/.venv`. Its `dev` dependency group is `pytest`
+only — `transformers` / `lightning` are deliberately left out, because
+`tests/test_trackio_integrations.py` pins the contract that the autolog integrations import
+cleanly when neither is installed.
 
 ## Things that must stay in sync
 
@@ -226,9 +240,10 @@ top priority. What the suite covers is listed in [`e2e/README.md`](../../e2e/REA
 - **Frontend conventions.** `frontend/DESIGN.md` describes the primitives, semantic color
   tokens, the loading / empty / error state rule, and the i18n dictionaries; `bun run check:ui`
   enforces the mechanical parts.
-- **Dependency pins.** After editing `docs/requirements.in`, `requirements-lint.in` or
-  `e2e/pyproject.toml`, run `make lock-python` and commit the regenerated files (CI checks
-  `e2e/uv.lock` with `uv lock --check`). A Docker base image's tag and its `@sha256:` digest
+- **Dependency pins.** After editing `docs/requirements.in`, `requirements-lint.in`,
+  `e2e/pyproject.toml` or `clients/python/pyproject.toml`, run `make lock-python` and commit
+  the regenerated files (CI checks both `e2e/uv.lock` and `clients/python/uv.lock` with
+  `uv lock --check`). A Docker base image's tag and its `@sha256:` digest
   move together, as do a GitHub Action's SHA and its `# vX.Y.Z` comment, and
   `backend/go.mod`'s `toolchain` line and the `golang:` image in `backend/Dockerfile`. The
   reasoning behind all of it is in [`supply-chain.md`](supply-chain.md).

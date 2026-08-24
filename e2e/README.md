@@ -17,10 +17,34 @@ work unmodified against `HF_ENDPOINT=<thinkingface>` (see
     row count matches via pyarrow
   - `HfApi().list_repo_tree()` returns both files and directories
   - `datasets.load_dataset("parquet", data_files=...)` reads the downloaded
-    file back
+    file back (the *Hub* path -- `load_dataset("{ns}/{name}")` -- lives in
+    `test_datasets_hub.py` below)
   - model repo: `create_repo` → upload a safetensors-named binary →
     download → bytes match
   - `delete_repo` removes the repo (`repo_info` 404s afterwards)
+- `test_datasets_hub.py` — `datasets.load_dataset("{ns}/{name}")` driven by
+  the repo id, so `datasets` walks the whole Hub path itself (`dataset_info` →
+  `HfFileSystem` glob → `/resolve/{rev}/...`) instead of being handed a local
+  file. Covers automatic train/test split detection from the canonical
+  `data/{split}-00000-of-00001.parquet` layout, `split="train"` returning a
+  bare `Dataset`, `streaming=True` (range reads rather than a download),
+  `revision=` pinning a tag while `main` moves on, and a missing repo raising
+  rather than yielding an empty dataset. This is the second of the design
+  doc's three pillars (§1), and Phase 1's
+  `load_dataset("admin/imdb-splits")` acceptance criterion (§14).
+- `test_git_transport.py` — writing with the plain `git` binary, i.e.
+  `git-receive-pack`, which nothing else in this suite exercises (every other
+  write goes through the HF REST commit API). Covers `git push` over git smart
+  HTTP for a model and for a dataset (the `/datasets/` prefix is a separate
+  route), a push carrying an LFS object (`*.bin` picked up from the
+  `.gitattributes` the server seeds, batch-uploaded by `git-lfs`, verified to
+  land as an LFS entry of the right size), and git over SSH: generate an
+  ed25519 key → register it at `POST /api/v1/me/ssh-keys` (what
+  `/settings/ssh-keys` does) → `ssh://` clone and push for both repo kinds →
+  the key is deleted again. An unregistered key is checked to be *rejected*, so
+  the SSH cases cannot pass on a server that lets everybody in. **Skips** when
+  nothing listens on the SSH port (see `TF_SSH_HOST` / `TF_SSH_PORT` below) or
+  when `git-lfs` is not installed — both are optional parts of a deployment.
 - `test_gcs_export.py` — after a commit, polls fake-gcs-server's JSON API
   directly (not through the thinkingface API) to confirm the pushed bytes land
   at their content-addressed keys (`blobs/{sha}` for a plain git blob,
@@ -125,6 +149,12 @@ Environment variables (all optional, default to the local compose setup):
 | `TF_ADMIN_PASSWORD` | `admin` | Seeded admin password |
 | `GCS_EMULATOR_URL` | `http://localhost:4443` | fake-gcs-server base URL |
 | `GCS_BUCKET` | `thinkingface` | Bucket name to inspect for content-addressed objects |
+| `TF_SSH_HOST` | host part of `TF_ENDPOINT` | Host of the git-over-SSH listener |
+| `TF_SSH_PORT` | `2222` | Port of the git-over-SSH listener (`TF_SSH_ADDR` server-side) |
+
+The SSH tests skip themselves when nothing answers at `TF_SSH_HOST:TF_SSH_PORT`
+rather than failing: `TF_SSH_ENABLED` can legitimately be off, and a hosted
+deployment may not publish the port at all.
 
 ## Status
 

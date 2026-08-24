@@ -51,6 +51,23 @@ define RUFF
 	@uv run --isolated --with-requirements requirements-lint.txt ruff $(1)
 endef
 
+# The clients/python unit suite (trackio resume contract, run grouping,
+# artifact upload, system metrics). Like e2e it resolves from a lockfile --
+# clients/python/uv.lock -- so pytest, huggingface_hub, pyarrow and the whole
+# transitive tree come in at the exact versions and hashes the lockfile
+# records, and never land in whatever interpreter happens to be active.
+# `--locked` fails instead of re-resolving when pyproject.toml and uv.lock have
+# drifted apart; run `make lock-python` to update them. There is deliberately
+# no plain-pip fallback (docs/dev/supply-chain.md).
+#
+# Note the extras: `dev` brings in pytest only. transformers / lightning are
+# left out on purpose because tests/test_trackio_integrations.py asserts the
+# autolog integrations import cleanly with neither installed.
+define CLIENTS_PYTHON_PYTEST
+	@uv --version >/dev/null 2>&1 || { echo "uv is required: https://docs.astral.sh/uv/getting-started/installation/" >&2; exit 1; }
+	cd clients/python && uv run --locked pytest $(1)
+endef
+
 # Whatever terraform is on PATH; override to point at another binary
 # (`make check-terraform TERRAFORM=tofu`). Every target that uses it first
 # checks the binary exists, because terraform is an optional prerequisite --
@@ -58,7 +75,8 @@ endef
 TERRAFORM ?= terraform
 
 .PHONY: build-web help up down up-sqlite down-sqlite logs rebuild psql check check-backend check-frontend check-python \
-        check-types check-terraform gen-types test test-backend test-frontend test-store-pg test-e2e fmt lint clean tf \
+        check-types check-terraform gen-types test test-backend test-frontend test-clients-python test-store-pg \
+        test-e2e fmt lint clean tf \
         dev-web dev-api gcs-proxy dev-stop docs docs-build frontend-deps lock-python audit
 
 # The full SQLite override set. See the comment at the top of
@@ -157,9 +175,10 @@ docs-build: ## Build the docs site into site/ the same way CI does
 
 # Every Python entry point installs from a fully pinned, hash-verified file:
 # docs/requirements.txt and requirements-lint.txt are compiled from the .in
-# files next to them, and e2e resolves from e2e/uv.lock. Edit the .in files or
-# e2e/pyproject.toml, run this, and commit the result -- CI's python job
-# re-checks that e2e/uv.lock is in sync. See docs/dev/supply-chain.md.
+# files next to them, e2e resolves from e2e/uv.lock, and the clients/python
+# unit suite from clients/python/uv.lock. Edit the .in files or the relevant
+# pyproject.toml, run this, and commit the result -- CI's python job re-checks
+# that both lockfiles are in sync. See docs/dev/supply-chain.md.
 #
 # --python-version 3.12 matches CI; --universal keeps the markers valid on
 # other interpreters too, so a developer on 3.13/3.14 resolves the same set.
@@ -173,6 +192,8 @@ lock-python: ## Regenerate the pinned Python requirement files and e2e/uv.lock
 	$(PIP_COMPILE) requirements-lint.in -o requirements-lint.txt
 	@echo "==> uv lock (e2e)"
 	cd e2e && uv lock
+	@echo "==> uv lock (clients/python)"
+	cd clients/python && uv lock
 
 # ---- vulnerability audits --------------------------------------------------
 
@@ -212,6 +233,14 @@ audit: ## Scan Go / frontend / Python dependencies for known vulnerabilities
 # vulnerabilities found", and pass -- a clean bill of health for a tree nothing
 # looked at. -s rejects an empty export for the same reason.
 	@cd e2e && tmp="$$(mktemp)" && trap 'rm -f "$$tmp"' EXIT && \
+		uv export --frozen --no-emit-project --quiet > "$$tmp" && \
+		[ -s "$$tmp" ] && \
+		$(PIP_AUDIT) -r "$$tmp"
+	@echo "==> pip-audit (clients/python, from uv.lock)"
+# Same temp-file dance as e2e above, and for the same reason. --no-emit-project
+# drops the first-party `thinkingface` wheel, which has no advisory feed and no
+# hash in the lockfile; only its third-party tree is audited.
+	@cd clients/python && tmp="$$(mktemp)" && trap 'rm -f "$$tmp"' EXIT && \
 		uv export --frozen --no-emit-project --quiet > "$$tmp" && \
 		[ -s "$$tmp" ] && \
 		$(PIP_AUDIT) -r "$$tmp"
@@ -260,11 +289,13 @@ check-frontend: frontend-deps ## typecheck + lint + format:check + check:ui + te
 
 # Mirrors the CI `python` job exactly (lint *and* format), so a green
 # `make check` cannot be followed by a red CI on formatting alone.
-check-python: ## ruff check + ruff format --check for e2e/, clients/python/ and scripts/
+check-python: ## ruff check + ruff format --check for e2e/, clients/python/ and scripts/ + the clients/python unit tests
 	@echo "==> python: ruff check"
 	$(call RUFF,check e2e clients/python scripts)
 	@echo "==> python: ruff format --check"
 	$(call RUFF,format --check e2e clients/python scripts)
+	@echo "==> python: pytest (clients/python)"
+	$(call CLIENTS_PYTHON_PYTEST,-q)
 
 # Mirrors the CI `terraform` job. Two things to know about it:
 #
@@ -289,13 +320,21 @@ check-terraform: ## terraform fmt -check + validate for infra/ (skipped when ter
 		$(TERRAFORM) validate; \
 	fi
 
-test: test-backend test-frontend ## Run backend and frontend unit tests
+test: test-backend test-frontend test-clients-python ## Run backend, frontend and Python client unit tests
 
 test-backend: ## Run the Go test suite
 	cd backend && go test ./...
 
 test-frontend: frontend-deps ## Run the frontend unit tests
 	cd frontend && $(BUN) run test
+
+# Pure unit tests: no server, no docker. A couple of the system-metrics cases
+# do let _Run.finish() attempt its real HTTP POST to the default endpoint
+# (http://localhost:8080); that call is wrapped in `except Exception` behind a
+# request timeout, so it degrades to a UserWarning whether or not a server
+# happens to be listening. Unlike test-e2e, this needs nothing brought up.
+test-clients-python: ## Run the clients/python unit tests (trackio resume / grouping / artifacts / system metrics)
+	$(call CLIENTS_PYTHON_PYTEST,-v)
 
 # `make check` deliberately leaves the production build out (it is the slowest
 # gate and CI runs it anyway), but when you do want it locally, run it through
