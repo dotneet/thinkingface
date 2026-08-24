@@ -188,6 +188,11 @@ because `ci.yml` already covers the mechanical checks above.
 - The review prompt lives in the workflow file. It points at this repository's invariants
   (`CLAUDE.md`) and UI conventions (`frontend/DESIGN.md`), so keep it in step when those
   change.
+- **A PR that edits the workflow file is not reviewed by it.** The action refuses to run
+  unless the workflow file matches the copy on the default branch — otherwise a PR could
+  rewrite the prompt and have the result run with the review token. The job still reports
+  green, with `Workflow validation failed ...` in its log. That is expected; the new version
+  takes effect once the PR is merged.
 
 ## Tests
 
