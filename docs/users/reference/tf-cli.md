@@ -154,7 +154,7 @@ tf up PATH [--to NS/NAME|NAME] [--kind dataset|model] [--rev BRANCH]
 | `--desc` | (unset) | The repository card's `description`, also used as the opening paragraph of a generated README |
 | `--include` | include everything | Only include files matching this shell glob (repeatable) |
 | `--exclude` | (none) | Exclude files matching this shell glob (repeatable) |
-| `--delete` | off | Delete remote files that are not present locally |
+| `--delete` | off | Delete remote files that are not present anywhere on disk under PATH, regardless of `--include`/`--exclude` — a file those flags kept out of this run's upload but that still exists on disk is never deleted |
 | `--dry-run` | off | Show what would happen without changing anything |
 | `--workers` | `4` | Number of parallel LFS transfers |
 | `--quiet` | off | Suppress progress output on stderr |
@@ -174,6 +174,11 @@ dataset, but a model repository of the same name already exists — that one is 
     absent locally. `.gitattributes` is server-generated and decides LFS routing for later
     uploads; `README.md` may hold a repository card generated from `--license`/`--tag`/`--desc`
     on a previous run.
+
+!!! note "`--delete` and `--include`/`--exclude` together"
+    A file kept out of the upload by `--include`/`--exclude` is still checked against disk,
+    not against the upload set: as long as it exists somewhere under PATH, it survives
+    `--delete`. Only files genuinely absent from PATH are removed.
 
 **README handling**: if any of `--license`, `--tag`, or `--desc` is given and there's no
 local `README.md`, one is generated with a repository card and included in the upload. If a

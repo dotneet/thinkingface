@@ -502,6 +502,46 @@ func TestUploadDeleteMissingKeepsGitattributesAndReadme(t *testing.T) {
 	}
 }
 
+// TestUploadDeleteMissingRespectsLocalPaths is the regression test for the
+// `tf up --exclude ... --delete` data-loss bug: a remote path that
+// --include/--exclude filtered out of Files must not be deleted as long as it
+// is reported present via LocalPaths (the unfiltered disk listing), while a
+// remote path absent from both Files and LocalPaths -- truly gone locally --
+// is still deleted as before.
+func TestUploadDeleteMissingRespectsLocalPaths(t *testing.T) {
+	hub := newFakeHub(t)
+	hub.seedRegular(t, ".gitattributes", "*.bin filter=lfs\n")
+	hub.seedRegular(t, "data/train.parquet.bak", "old backup, still on disk\n")
+	hub.seedRegular(t, "data/gone.txt", "no longer on disk\n")
+	c := hub.client()
+
+	res, err := Upload(context.Background(), c, Plan{
+		Ref:   testRef(),
+		Rev:   "main",
+		Files: []LocalFile{localFile("data/train.parquet", []byte("new data\n"))},
+		// LocalPaths is the full disk listing: train.parquet.bak is on disk
+		// even though --exclude kept it out of Files.
+		LocalPaths:    []string{"data/train.parquet", "data/train.parquet.bak"},
+		DeleteMissing: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if !equalStrings(res.Deleted, []string{"data/gone.txt"}) {
+		t.Fatalf("Deleted = %v, want [data/gone.txt] (data/train.parquet.bak is excluded but on disk, and must survive)", res.Deleted)
+	}
+	hub.mu.Lock()
+	_, bakStillThere := hub.files["data/train.parquet.bak"]
+	_, goneStillThere := hub.files["data/gone.txt"]
+	hub.mu.Unlock()
+	if !bakStillThere {
+		t.Error("data/train.parquet.bak was deleted despite being present in LocalPaths")
+	}
+	if goneStillThere {
+		t.Error("data/gone.txt should have been deleted: it is absent from both Files and LocalPaths")
+	}
+}
+
 func TestUploadDryRun(t *testing.T) {
 	hub := newFakeHub(t)
 	c := hub.client()

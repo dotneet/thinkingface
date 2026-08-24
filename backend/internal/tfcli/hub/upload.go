@@ -32,13 +32,22 @@ type Plan struct {
 
 	Files []LocalFile
 
-	// DeleteMissing removes remote files that are not in Files (like
-	// `hf upload --delete "*"`). Two root files are never deleted: the
-	// server seeds .gitattributes and it decides which paths route through
-	// LFS, so dropping it would silently change later uploads; and README.md
-	// is the repository card, which `tf up --license/--tag` generates
-	// server-side without a local copy, so a later mirror run must not take
-	// it away. Both are simply left alone when absent locally.
+	// LocalPaths, when set, is every repo-relative path actually present on
+	// disk, independent of Files -- i.e. before any --include/--exclude
+	// filtering the caller applied when building Files. DeleteMissing
+	// consults this (falling back to Files' own paths when nil) so that a
+	// file excluded from this run's upload but still on disk is never
+	// mistaken for "gone locally" and deleted from the remote.
+	LocalPaths []string
+
+	// DeleteMissing removes remote files that are not in Files or
+	// LocalPaths (like `hf upload --delete "*"`). Two root files are never
+	// deleted: the server seeds .gitattributes and it decides which paths
+	// route through LFS, so dropping it would silently change later
+	// uploads; and README.md is the repository card, which `tf up
+	// --license/--tag` generates server-side without a local copy, so a
+	// later mirror run must not take it away. Both are simply left alone
+	// when absent locally.
 	DeleteMissing bool
 
 	Summary     string // commit title; "" -> "Upload <n> files with tf"
@@ -190,10 +199,19 @@ func Upload(ctx context.Context, c *Client, plan Plan, report func(Event)) (*Res
 	// bytes under two paths are uploaded once and committed twice.
 	var lfsGroups []*lfsGroup
 	groupByOID := make(map[string]*lfsGroup)
-	local := make(map[string]struct{}, len(plan.Files))
+	// onDisk is what DeleteMissing checks a remote path against. It starts
+	// from LocalPaths (the unfiltered disk listing, when the caller
+	// provided one) rather than from Files: Files is what --include/--exclude
+	// chose to upload this run, which is not the same question as "does this
+	// still exist locally". A file this run is uploading is obviously present
+	// too, so its path is added below regardless of LocalPaths.
+	onDisk := make(map[string]struct{}, len(plan.Files)+len(plan.LocalPaths))
+	for _, p := range plan.LocalPaths {
+		onDisk[p] = struct{}{}
+	}
 
 	for _, f := range plan.Files {
-		local[f.RepoPath] = struct{}{}
+		onDisk[f.RepoPath] = struct{}{}
 		mode := modes[f.RepoPath]
 		if mode != ModeLFS {
 			mode = ModeRegular
@@ -246,7 +264,7 @@ func Upload(ctx context.Context, c *Client, plan Plan, report func(Event)) (*Res
 			if protectedPaths[e.Path] {
 				continue
 			}
-			if _, ok := local[e.Path]; ok {
+			if _, ok := onDisk[e.Path]; ok {
 				continue
 			}
 			res.Deleted = append(res.Deleted, e.Path)

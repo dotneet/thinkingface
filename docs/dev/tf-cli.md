@@ -166,7 +166,7 @@ tf up PATH [--to NS/NAME|NAME] [--kind dataset|model] [--rev BRANCH]
 | `--tag` | (unset) | The repository card's `tags` (repeatable; comma-separated values can also be given together: `--tag a,b --tag c`) |
 | `--desc` | (unset) | The repository card's `description` (also becomes the opening paragraph of the body in a generated README) |
 | `--include` / `--exclude` | include everything | Narrows the file set via shell globs (repeatable) |
-| `--delete` | off | Deletes remote files that don't exist locally (excludes `.gitattributes` and `README.md` at the repository root — the former is server-generated LFS rules, and the latter may be a card generated from `--license` etc., so neither is removed just because it's absent locally) |
+| `--delete` | off | Deletes remote files that don't exist anywhere on disk under PATH (excludes `.gitattributes` and `README.md` at the repository root — the former is server-generated LFS rules, and the latter may be a card generated from `--license` etc., so neither is removed just because it's absent locally). Independent of `--include`/`--exclude`: a file those flags kept out of this run's upload but that is still on disk is never deleted |
 | `--dry-run` | off | Only shows what would happen; changes nothing |
 | `--workers` | 4 | Number of parallel LFS transfers |
 | `--quiet` | off | Suppresses progress output (stderr) |

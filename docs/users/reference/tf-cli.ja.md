@@ -156,7 +156,7 @@ tf up PATH [--to NS/NAME|NAME] [--kind dataset|model] [--rev BRANCH]
 | `--desc` | （未設定） | リポジトリカードの `description`。生成される README の冒頭の段落としても使われます |
 | `--include` | すべて含める | このシェル glob に一致するファイルだけを含めます（繰り返し指定可） |
 | `--exclude` | （なし） | このシェル glob に一致するファイルを除外します（繰り返し指定可） |
-| `--delete` | off | ローカルに存在しないリモートのファイルを削除します |
+| `--delete` | off | PATH 以下のディスク上のどこにも存在しないリモートのファイルを削除します。`--include`/`--exclude` とは独立していて、それらのフラグが今回のアップロード対象から外したファイルでも、ディスク上に存在する限り削除されません |
 | `--dry-run` | off | 何も変更せずに、何が起きるかを表示します |
 | `--workers` | `4` | LFS の並列転送数 |
 | `--quiet` | off | stderr への進捗表示を抑制します |
@@ -176,6 +176,11 @@ tf up PATH [--to NS/NAME|NAME] [--kind dataset|model] [--rev BRANCH]
     することはありません。`.gitattributes` はサーバーが生成するもので、以後のアップロードでの
     LFS の振り分けを決めます。`README.md` には、前回の実行で `--license`/`--tag`/`--desc` から
     生成されたリポジトリカードが入っている可能性があります。
+
+!!! note "`--delete` と `--include`/`--exclude` の組み合わせ"
+    `--include`/`--exclude` でアップロード対象から外れたファイルも、アップロード対象かどうかで
+    はなくディスク上の存在で判定されます。PATH 以下のどこかに存在する限り `--delete` の対象には
+    なりません。実際に PATH 以下から消えたファイルだけが削除されます。
 
 **README の扱い**: `--license`、`--tag`、`--desc` のいずれかが指定されていて、ローカルに
 `README.md` がない場合は、リポジトリカードを含む README が生成され、アップロードに含まれます。
