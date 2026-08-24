@@ -361,6 +361,80 @@ def test_list_repo_commits(hf_api: HfApi, namespace: str, unique_name: str) -> N
         hf_api.delete_repo(repo_id=repo_id, repo_type="dataset")
 
 
+def test_list_repo_commits_rejects_a_bogus_cursor(
+    hf_api: HfApi, hf_endpoint: str, hf_token: str, namespace: str, unique_name: str
+) -> None:
+    """A cursor naming no commit is the caller's mistake, not a bad revision.
+
+    `list_repo_commits` follows the server's own `Link` header, so a bogus
+    `after` is only reachable by hand -- hence plain `requests` here. What is
+    being pinned is that the answer is a 400 and *not* a 404 with
+    `X-Error-Code: RevisionNotFound`: the revision resolved fine, and telling
+    the client otherwise sends it hunting for a `revision=` problem it does not
+    have.
+    """
+    repo_id = f"{namespace}/{unique_name}-cursor"
+    hf_api.create_repo(repo_id=repo_id, repo_type="model", private=False)
+    try:
+        url = f"{hf_endpoint}/api/models/{repo_id}/commits/main"
+        headers = {"Authorization": f"Bearer {hf_token}"}
+
+        # Sanity check: the same URL without a cursor is a normal 200, so the
+        # assertions below are about the cursor and nothing else.
+        ok = requests.get(url, headers=headers, timeout=10)
+        assert ok.status_code == 200, ok.text
+        assert isinstance(ok.json(), list)
+
+        bogus = requests.get(url, params={"after": "a" * 40}, headers=headers, timeout=10)
+        assert bogus.status_code == 400, bogus.text
+        assert bogus.headers.get("X-Error-Code") != "RevisionNotFound"
+        assert bogus.json()["error"]["type"] == "bad_request"
+
+        # A cursor that is not a full hash at all is rejected the same way.
+        malformed = requests.get(url, params={"after": "not-a-hash"}, headers=headers, timeout=10)
+        assert malformed.status_code == 400, malformed.text
+    finally:
+        hf_api.delete_repo(repo_id=repo_id, repo_type="model")
+
+
+def test_list_repo_commits_pages_with_a_link_header(
+    hf_api: HfApi, hf_endpoint: str, hf_token: str, namespace: str, unique_name: str
+) -> None:
+    """The cursor the server hands out must be one it accepts back.
+
+    This is the other half of the test above: the 400 must not be rejecting
+    legitimate pagination.
+    """
+    repo_id = f"{namespace}/{unique_name}-paging"
+    hf_api.create_repo(repo_id=repo_id, repo_type="model", private=False)
+    try:
+        for i in range(3):
+            hf_api.upload_file(
+                path_or_fileobj=f"revision {i}\n".encode(),
+                path_in_repo="notes.txt",
+                repo_id=repo_id,
+                commit_message=f"Edit {i}",
+            )
+
+        url = f"{hf_endpoint}/api/models/{repo_id}/commits/main"
+        headers = {"Authorization": f"Bearer {hf_token}"}
+        first = requests.get(url, params={"limit": 2}, headers=headers, timeout=10)
+        assert first.status_code == 200, first.text
+        assert len(first.json()) == 2
+
+        # requests parses the Link header the same way huggingface_hub's
+        # paginate() does.
+        next_url = first.links["next"]["url"]
+        second = requests.get(next_url, headers=headers, timeout=10)
+        assert second.status_code == 200, second.text
+        assert second.json(), "the server's own cursor returned an empty page"
+
+        first_ids = {c["id"] for c in first.json()}
+        assert not (first_ids & {c["id"] for c in second.json()})
+    finally:
+        hf_api.delete_repo(repo_id=repo_id, repo_type="model")
+
+
 def test_revision_not_found_for_repo_with_commits(
     hf_api: HfApi, namespace: str, unique_name: str, tmp_path
 ) -> None:

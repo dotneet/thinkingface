@@ -260,11 +260,20 @@ func tooManyAttempts(w http.ResponseWriter, retryAfter time.Duration) {
 // 503 rather than 429: the caller is not the one being limited, and Retry-After
 // tells honest clients when to come back.
 func serviceOverloaded(w http.ResponseWriter, retryAfter time.Duration) {
+	serviceOverloadedWith(w, retryAfter,
+		"the server is busy verifying other sign-ins; try again shortly")
+}
+
+// serviceOverloadedWith is serviceOverloaded for a caller that has its own
+// reason to give. The shape -- 503 `overloaded` plus Retry-After -- is the
+// whole point of sharing it: "nothing is wrong with your request, come back in
+// a moment" has one representation on this server, whether the contended
+// resource is the bcrypt budget or a repository's WAL index.
+func serviceOverloadedWith(w http.ResponseWriter, retryAfter time.Duration, message string) {
 	secs := int(retryAfter.Seconds())
 	if secs < 1 {
 		secs = 1
 	}
 	w.Header().Set("Retry-After", strconv.Itoa(secs))
-	writeError(w, http.StatusServiceUnavailable, "overloaded",
-		"the server is busy verifying other sign-ins; try again shortly")
+	writeError(w, http.StatusServiceUnavailable, "overloaded", message)
 }

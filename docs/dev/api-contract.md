@@ -900,14 +900,21 @@ return `None`); it is there for callers driving the API by hand.
 
 Errors — **the status codes are a compatibility contract, not a style choice**:
 
-- **409** for a ref that already exists. This is the only status `create_branch(exist_ok=True)`
-  and `create_tag(exist_ok=True)` swallow; anything else turns a tolerated duplicate into a
-  raised exception.
+- **409** for a ref that already exists, **and for nothing else**. `exist_ok=True` swallows
+  every 409 by status alone — the client never reads the body — so 409 has exactly one meaning
+  here: *the ref you asked for is there*. Using it for anything else tells a client that
+  tolerates duplicates that a ref exists when it does not.
 - **409** for `DELETE .../branch/{default branch}`. The default branch is what HEAD, the
   metadata index and every revision-less read depend on. `huggingface_hub` documents this case
-  ("`main` cannot be deleted") and raises `HfHubHTTPError` for it.
-- **409** when a concurrent writer wins the WAL CAS on the same ref (`TF_WAL_MODE=authoritative`
-  only). Unlike a commit there is nothing to rebuild, so it is never retried server-side.
+  ("`main` cannot be deleted") and raises `HfHubHTTPError` for it. (Safe as a 409: `exist_ok`
+  exists only on the create calls, so nothing swallows this one.)
+- **503 `overloaded` + `Retry-After`** when a concurrent writer wins the WAL index CAS on the
+  same ref (`TF_WAL_MODE=shadow` / `authoritative`). **Deliberately not 409**: nothing was
+  written — the local ref is rolled back — so a client told "already exists" would go on to use
+  a ref that does not exist. Unlike a commit there is nothing to rebuild, so it is never retried
+  server-side; the caller retries. 503 falls through `hf_raise_for_status` to a plain
+  `HfHubHTTPError`, and these four calls use `get_session()` directly rather than `http_backoff`,
+  so the client surfaces it rather than silently retrying.
 - **404 + `X-Error-Code: RevisionNotFound`** for a `startingPoint` / `{rev}` that does not
   resolve, and for deleting a ref that is not there. The header is what makes `huggingface_hub`
   raise `RevisionNotFoundError` instead of a bare `HfHubHTTPError`.
@@ -921,6 +928,14 @@ Errors — **the status codes are a compatibility contract, not a style choice**
 `message` on a tag produces a real annotated tag object (what `git tag -m` makes), so
 `refs` reports the *tag object* as `targetCommit` for it while every revision lookup peels it to
 the tagged commit. Without a message the tag is lightweight.
+
+The tag object and the ref that names it are written against **one** repository handle
+(`createTagRefThroughWAL`). A fresh tag object is loose, local, and not yet in the WAL, so it
+only exists inside the materialisation that produced it; any `gitrepo.Manager.Open` in between
+runs `EnsureLocal`, whose rebuild path begins with `os.RemoveAll(gitDir)` (reached after a
+compaction changes the base, after cache eviction reclaims the directory, or whenever the local
+state file cannot be trusted). Splitting the two writes across two opens leaves a window in
+which `pack-objects` fails with `bad object <tag>` and a valid tag comes back as a 500.
 
 Server-side effects:
 
@@ -964,9 +979,13 @@ res 200 (an array, newest first):
   helper understands: a further page is advertised as
   `Link: <{PublicURL}/api/…/commits/{rev}?…&after={sha}>; rel="next"`, absolute because the
   client follows the URL verbatim. The last page carries no `Link` header.
-- A revision that does not resolve is 404 + `X-Error-Code: RevisionNotFound`. (The UI's own
-  `GET /api/v1/repos/{kind}/{ns}/{name}/commits/{rev}` is unchanged and keeps its own
-  `{commits, next_cursor}` shape.)
+- A revision that does not resolve is 404 + `X-Error-Code: RevisionNotFound`.
+- **`after` errors are 400, never `RevisionNotFound`.** The revision is resolved before the walk
+  starts, so by then a failure is the cursor's: one that is not 40 lowercase hex is rejected
+  outright, and one that names no commit in this repository is 400 as well. Answering those with
+  `RevisionNotFound` would send the client looking for a `revision=` problem it does not have.
+  Anything else is a 500. (The UI's own `GET /api/v1/repos/{kind}/{ns}/{name}/commits/{rev}` is
+  unchanged and keeps its own `{commits, next_cursor}` shape.)
 
 ### `GET /api/v1/repos/{kind}/{ns}/{name}/tree/{rev}/{path...}`  (for the UI)
 res:

@@ -102,7 +102,28 @@ func revisionNotFound(w http.ResponseWriter, message string) {
 // revision sends `{}`, so only a body that is present and malformed may be
 // an error.
 
+// refContentionRetryAfter is what a caller that lost the WAL index CAS is told
+// to wait. Contention on one repository's index settles in milliseconds, so
+// this is really just the smallest value the header can carry -- Retry-After is
+// integer seconds.
+const refContentionRetryAfter = time.Second
+
 // writeRefError maps the shared failures of the four write handlers.
+//
+// The split between "this ref already exists" and "somebody else won the race"
+// is the load-bearing part, and it is a compatibility requirement rather than a
+// nicety. `create_branch(exist_ok=True)` and `create_tag(exist_ok=True)` swallow
+// *every* 409 -- the client only looks at the status, never at the body -- so
+// answering contention with 409 would tell a client that tolerates duplicates
+// "the ref is there" for a ref that was rolled back and never recorded. It
+// would then carry on committing to a branch that does not exist.
+//
+// 503 `overloaded` + Retry-After is the honest answer: nothing is wrong with
+// the request, the ref does not exist, and retrying is the right move.
+// huggingface_hub raises HfHubHTTPError for it in all four calls (503 falls
+// through hf_raise_for_status to the generic branch), and these calls go
+// through `get_session()` directly rather than `http_backoff`, so the client
+// surfaces it immediately instead of silently retrying.
 func writeRefError(w http.ResponseWriter, what, name string, err error) {
 	switch {
 	case errors.Is(err, gitrepo.ErrRefExists):
@@ -117,7 +138,16 @@ func writeRefError(w http.ResponseWriter, what, name string, err error) {
 	case errors.Is(err, gitrepo.ErrInvalidRefName):
 		badRequest(w, what+" "+strconv.Quote(name)+" "+err.Error())
 	case errors.Is(err, errWALConflict):
-		conflict(w, what+" "+name+" changed concurrently; retry")
+		// Never 409 here: see the doc comment. The local change was rolled
+		// back, so the operation is safe to repeat.
+		//
+		// "unchanged" rather than "not written": the delete handlers share
+		// this helper, and a refused delete did not fail to write anything --
+		// it failed to remove something. Unchanged is the one word true of
+		// both, and it is also the fact the caller needs: whatever they asked
+		// for did not happen, and retrying cannot double-apply.
+		serviceOverloadedWith(w, refContentionRetryAfter,
+			what+" "+name+" is unchanged: another writer is updating this repository; retry")
 	default:
 		internalError(w, "write "+what, err)
 	}
@@ -313,30 +343,26 @@ func (s *Server) handleHFCreateTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gitRepo, target, ok := s.resolveRev(w, repo, rev)
+	_, target, ok := s.resolveRev(w, repo, rev)
 	if !ok {
 		return
 	}
-	refTarget := target
-	if req.Message != "" {
-		tagger := gitrepo.Signature{
-			Name: "thinkingface", Email: "noreply@thinkingface.local", When: time.Now(),
-		}
-		if user := currentUser(r.Context()); user != nil {
-			tagger.Name = user.Username
-			if user.Email != "" {
-				tagger.Email = user.Email
-			}
-		}
-		var err error
-		refTarget, err = gitRepo.WriteTagObject(req.Tag, target, req.Message, tagger)
-		if err != nil {
-			internalError(w, "write tag object", err)
-			return
+	tagger := gitrepo.Signature{
+		Name: "thinkingface", Email: "noreply@thinkingface.local", When: time.Now(),
+	}
+	if user := currentUser(r.Context()); user != nil {
+		tagger.Name = user.Username
+		if user.Email != "" {
+			tagger.Email = user.Email
 		}
 	}
-
-	if err := s.createRefThroughWAL(r.Context(), repo, gitrepo.TagRef(req.Tag), refTarget); err != nil {
+	// The tag object -- when there is one -- is written inside
+	// createTagRefThroughWAL, on the same repository handle the ref write and
+	// the WAL entry pack use. Writing it out here instead would put a
+	// gitrepo.Manager.Open (and therefore a materialisation) between the loose
+	// object and the code that needs it; see that function's comment.
+	refTarget, err := s.createTagRefThroughWAL(r.Context(), repo, req.Tag, target, req.Message, tagger)
+	if err != nil {
 		writeRefError(w, "tag", req.Tag, err)
 		return
 	}
@@ -438,7 +464,17 @@ func (s *Server) handleHFCommits(w http.ResponseWriter, r *http.Request) {
 
 	metas, next, err := gitRepo.ListCommits(rev, r.URL.Query().Get("path"), after, limit)
 	if err != nil {
-		revisionNotFound(w, "revision "+rev+" not found in "+repo.FullName())
+		// Not a RevisionNotFound: resolveRev already proved rev exists a few
+		// lines above, so answering every failure that way sends the client
+		// looking for a revision problem it does not have. What is left is a
+		// cursor naming an object this repository has no commit for
+		// (ListCommits wraps ErrPathNotFound for exactly that), which is the
+		// caller's input and a 400 -- and anything else, which is ours.
+		if errors.Is(err, gitrepo.ErrPathNotFound) {
+			badRequest(w, "after must name a commit reachable from "+rev)
+			return
+		}
+		internalError(w, "list commits", err)
 		return
 	}
 
