@@ -724,6 +724,35 @@ resource "google_cloud_scheduler_job" "compact" {
 # with any single repository's WAL, like compact.
 # ---------------------------------------------------------------------------
 
+# These four resources existed unindexed before gc became postgres-only, so
+# adding count renames them from `.gc` to `.gc[0]`. Without these blocks
+# Terraform reads that as "the old ones are gone, build new ones" and plans a
+# destroy/create against any state from #5. That is worst for the service
+# account: deleting and recreating one under the same account_id mints a new
+# unique ID, which breaks IAM bindings that referenced the old one and which
+# GCP will not let you re-create freely afterwards. In sqlite mode the move
+# still resolves first and the resources are then destroyed, which is the
+# intent there.
+moved {
+  from = google_cloud_run_v2_job.gc
+  to   = google_cloud_run_v2_job.gc[0]
+}
+
+moved {
+  from = google_service_account.gc_scheduler
+  to   = google_service_account.gc_scheduler[0]
+}
+
+moved {
+  from = google_cloud_run_v2_job_iam_member.gc_scheduler_invoker
+  to   = google_cloud_run_v2_job_iam_member.gc_scheduler_invoker[0]
+}
+
+moved {
+  from = google_cloud_scheduler_job.gc
+  to   = google_cloud_scheduler_job.gc[0]
+}
+
 resource "google_cloud_run_v2_job" "gc" {
   # postgres only -- see the block comment above.
   count = var.database_backend == "postgres" ? 1 : 0
