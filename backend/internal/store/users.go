@@ -161,20 +161,27 @@ const (
 	maxUserPageSize     = 200
 )
 
-// UpdateUserPassword replaces the stored bcrypt hash. It does not touch
-// session_epoch: revoking the outstanding sessions is a separate decision the
-// caller makes (the API layer bumps the epoch and, for a self-service change,
-// re-issues the caller's own cookie), and access tokens are unaffected either
-// way -- they are an independent credential (docs/dev/api-contract.md §1.3).
-func (s *Store) UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) error {
-	n, err := s.db.Exec(ctx, `UPDATE users SET password_hash = $2 WHERE id = $1`, userID, passwordHash)
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
+// UpdateUserPassword replaces the stored bcrypt hash **and** revokes every
+// outstanding session, in one statement, returning the new session_epoch.
+//
+// The two used to be separate calls, which left a window where the password
+// had changed but the old cookies still worked -- a failure between them
+// meant the caller saw an error while a stale session stayed valid. There is
+// no caller that wants one without the other, so the pair is not a choice to
+// offer: a single UPDATE makes "changing a password revokes its sessions" an
+// invariant of the write rather than a rule every call site has to remember.
+// (RETURNING works on both engines; see dialect_sqlite.go's
+// updateExpRunAnnotation for the other use.)
+//
+// Access tokens are untouched. They are an independent credential and a
+// password change is not evidence about any of them
+// (docs/dev/api-contract.md §1.3).
+func (s *Store) UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) (int64, error) {
+	var epoch int64
+	err := s.db.QueryRow(ctx,
+		`UPDATE users SET password_hash = $2, session_epoch = session_epoch + 1
+		 WHERE id = $1 RETURNING session_epoch`, userID, passwordHash).Scan(&epoch)
+	return epoch, norm(err)
 }
 
 // SetUserAdmin grants or revokes instance-wide administrator rights.

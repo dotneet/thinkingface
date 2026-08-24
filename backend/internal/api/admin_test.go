@@ -807,3 +807,166 @@ func TestAdminCreateUser_InvalidPasswordCreatesNothing(t *testing.T) {
 		t.Fatalf("the refused request still created a namespace (%v)", err)
 	}
 }
+
+// ------------------------------------------------- ordering and saturation
+
+// saturateBcrypt fills the password-hashing semaphore so the next hash can
+// only time out, and returns a function that frees it again. Same technique
+// as TestLogin_OverloadIsNotACredentialFailure.
+func saturateBcrypt(t *testing.T, f *secFixture) func() {
+	t.Helper()
+	guard := f.s.authGuard
+	for i := 0; i < cap(guard.sem); i++ {
+		guard.sem <- struct{}{}
+	}
+	return func() {
+		for i := 0; i < cap(guard.sem); i++ {
+			<-guard.sem
+		}
+	}
+}
+
+// A PATCH that asks for both changes must not leave one of them behind when
+// the other cannot be carried out. Hashing is the step that fails here --
+// under saturation it refuses before bcrypt ever runs -- and it used to run
+// *after* SetUserAdmin had already committed. Reported by Cursor Bugbot on
+// #11.
+func TestAdminUpdateUser_FailedHashLeavesAdminFlagUntouched(t *testing.T) {
+	f := newSecFixture(t)
+	f.adminUser("root", "correct horse battery")
+	f.user("alice", "forgotten forever")
+	tok := f.token(f.mustUser("root"), "write")
+
+	release := saturateBcrypt(t, f)
+
+	rec := f.do(secRequest{method: "PATCH", path: "/api/v1/admin/users/alice",
+		headers: map[string]string{"Authorization": "Bearer " + tok},
+		body:    map[string]any{"password": "issued by the admin", "is_admin": true}})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// The whole point: the request failed, so *nothing* may have happened.
+	alice, err := f.st.GetUserByUsername(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("reload alice: %v", err)
+	}
+	if alice.IsAdmin {
+		t.Fatalf("the failed request still granted alice site administrator rights")
+	}
+	if alice.SessionEpoch != f.mustUser("alice").SessionEpoch {
+		t.Fatalf("the failed request moved alice's session epoch")
+	}
+
+	release()
+	if !f.canLogIn("alice", "forgotten forever") {
+		t.Fatalf("the failed request still changed alice's password")
+	}
+}
+
+// The same guarantee for the flag-only half: a demotion that the store
+// refuses must not have been preceded by a password write.
+func TestAdminUpdateUser_RefusedFlagLeavesPasswordUntouched(t *testing.T) {
+	f := newSecFixture(t)
+	f.adminUser("root", "correct horse battery")
+	tok := f.token(f.mustUser("root"), "write")
+
+	// Self-demotion is refused, and the request also carries a password.
+	rec := f.do(secRequest{method: "PATCH", path: "/api/v1/admin/users/root",
+		headers: map[string]string{"Authorization": "Bearer " + tok},
+		body:    map[string]any{"password": "issued by the admin", "is_admin": false}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !f.canLogIn("root", "correct horse battery") {
+		t.Fatalf("the refused request still reset root's own password")
+	}
+	root, err := f.st.GetUserByUsername(context.Background(), "root")
+	if err != nil || !root.IsAdmin {
+		t.Fatalf("root lost is_admin on a refused request (%v)", err)
+	}
+}
+
+// Running out of bcrypt slots is the server's problem, not the caller's, so
+// it answers 503 `overloaded` -- the same way login already does. A spent
+// address bucket is a real client limit and stays 429 `rate_limited`; the two
+// must not be collapsed. Reported by Cursor Bugbot on #11.
+func TestPasswordWrites_SaturationIs503AndRateLimitIs429(t *testing.T) {
+	paths := []struct {
+		name    string
+		request func(f *secFixture, tok string) secRequest
+	}{
+		{
+			name: "self-service change",
+			request: func(_ *secFixture, tok string) secRequest {
+				return secRequest{method: "PATCH", path: "/api/v1/me/password",
+					headers: map[string]string{"Authorization": "Bearer " + tok},
+					body: map[string]any{
+						"current_password": "correct horse battery",
+						"new_password":     "staple battery horse",
+					}}
+			},
+		},
+		{
+			name: "administrator reset",
+			request: func(_ *secFixture, tok string) secRequest {
+				return secRequest{method: "PATCH", path: "/api/v1/admin/users/alice",
+					headers: map[string]string{"Authorization": "Bearer " + tok},
+					body:    map[string]any{"password": "issued by the admin"}}
+			},
+		},
+		{
+			name: "administrator create",
+			request: func(_ *secFixture, tok string) secRequest {
+				return secRequest{method: "POST", path: "/api/v1/admin/users",
+					headers: map[string]string{"Authorization": "Bearer " + tok},
+					body: map[string]any{
+						"username": "dana", "email": "dana@example.com",
+						"password": "issued by the admin",
+					}}
+			},
+		},
+	}
+	for _, tc := range paths {
+		t.Run(tc.name+": no bcrypt slot is 503", func(t *testing.T) {
+			f := newSecFixture(t)
+			f.adminUser("root", "correct horse battery")
+			f.user("alice", "correct horse battery")
+			tok := f.token(f.mustUser("root"), "write")
+
+			release := saturateBcrypt(t, f)
+			defer release()
+
+			rec := f.do(tc.request(f, tok))
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503 (body %s)", rec.Code, rec.Body.String())
+			}
+			if got := recErrorType(t, rec); got != "overloaded" {
+				t.Fatalf("error type = %q, want overloaded", got)
+			}
+			if rec.Header().Get("Retry-After") == "" {
+				t.Error("Retry-After header missing: an honest client has nothing to go on")
+			}
+		})
+
+		t.Run(tc.name+": a spent address bucket is 429", func(t *testing.T) {
+			f := newSecFixture(t)
+			f.adminUser("root", "correct horse battery")
+			f.user("alice", "correct horse battery")
+			tok := f.token(f.mustUser("root"), "write")
+
+			// httptest's default RemoteAddr; drain its bucket outright.
+			addr := "addr:192.0.2.1"
+			for i := 0; i < 40; i++ {
+				f.s.authGuard.penalize(addr)
+			}
+			rec := f.do(tc.request(f, tok))
+			if rec.Code != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want 429 (body %s)", rec.Code, rec.Body.String())
+			}
+			if got := recErrorType(t, rec); got != "rate_limited" {
+				t.Fatalf("error type = %q, want rate_limited", got)
+			}
+		})
+	}
+}

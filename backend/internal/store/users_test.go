@@ -73,7 +73,8 @@ func TestIntegrationUpdateUserPassword(t *testing.T) {
 		f := newFixture(t, s)
 		ctx := f.ctx
 
-		if err := s.UpdateUserPassword(ctx, f.alice.ID, "new-hash"); err != nil {
+		epoch, err := s.UpdateUserPassword(ctx, f.alice.ID, "new-hash")
+		if err != nil {
 			t.Fatalf("update password: %v", err)
 		}
 		got, err := s.GetUserByUsername(ctx, "alice")
@@ -83,11 +84,22 @@ func TestIntegrationUpdateUserPassword(t *testing.T) {
 		if got.PasswordHash != "new-hash" {
 			t.Fatalf("hash = %q, want new-hash", got.PasswordHash)
 		}
-		// Revoking sessions is the caller's decision, not a side effect.
-		if got.SessionEpoch != f.alice.SessionEpoch {
-			t.Fatalf("session_epoch moved to %d on its own", got.SessionEpoch)
+		// The revocation is part of the same statement, so a stored password
+		// can never be newer than the sessions still running against it.
+		if got.SessionEpoch != f.alice.SessionEpoch+1 {
+			t.Fatalf("session_epoch = %d, want %d: the write did not revoke sessions",
+				got.SessionEpoch, f.alice.SessionEpoch+1)
 		}
-		if err := s.UpdateUserPassword(ctx, 999999, "x"); !errors.Is(err, ErrNotFound) {
+		if epoch != got.SessionEpoch {
+			t.Fatalf("returned epoch %d, stored %d: the caller would sign a stale cookie",
+				epoch, got.SessionEpoch)
+		}
+		// Each change revokes again, so two changes never share an epoch.
+		next, err := s.UpdateUserPassword(ctx, f.alice.ID, "newer-hash")
+		if err != nil || next != epoch+1 {
+			t.Fatalf("second change returned %d, %v; want %d", next, err, epoch+1)
+		}
+		if _, err := s.UpdateUserPassword(ctx, 999999, "x"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("update on a missing user = %v, want ErrNotFound", err)
 		}
 	})

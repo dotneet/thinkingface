@@ -415,12 +415,17 @@ func validatePassword(password string) error {
 // Every route that turns a plaintext password into a stored hash goes through
 // here so no endpoint becomes the cheap way to spend the server's CPU.
 func (s *Server) hashNewPassword(w http.ResponseWriter, r *http.Request, password string) (string, bool) {
+	// The two refusals are different things and must not answer alike. A
+	// spent address bucket is this caller's own failure budget: 429. No free
+	// bcrypt slot is the server running out of hashing capacity, which says
+	// nothing about the request: 503, the same answer checkPassword's
+	// passwordOverloaded gets (see TestLogin_OverloadIsNotACredentialFailure).
 	if wait := s.authGuard.retryAfter(s.clientAddrKey(r)); wait > 0 {
 		tooManyAttempts(w, wait)
 		return "", false
 	}
 	if !s.authGuard.acquireBcrypt() {
-		tooManyAttempts(w, bcryptWait)
+		serviceOverloaded(w, bcryptWait)
 		return "", false
 	}
 	hash, err := auth.HashPassword(password)
@@ -486,24 +491,21 @@ func (s *Server) handleChangeMyPassword(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	if err := s.store.UpdateUserPassword(r.Context(), user.ID, hash); err != nil {
+	// One statement: the hash and the revocation land together or not at all,
+	// so a failure can never leave the old cookies working against a new
+	// password.
+	epoch, err := s.store.UpdateUserPassword(r.Context(), user.ID, hash)
+	if err != nil {
 		handleStoreError(w, "update password", err)
 		return
 	}
-	if err := s.store.BumpSessionEpoch(r.Context(), user.ID); err != nil {
-		internalError(w, "revoke sessions", err)
-		return
-	}
 	if cookieAuthenticated(r.Context()) {
-		// Re-read so the cookie carries the epoch the bump just wrote;
-		// signing the stale one would revoke the caller along with everyone
-		// else.
-		fresh, err := s.store.GetUserByID(r.Context(), user.ID)
-		if err != nil {
-			internalError(w, "reload account", err)
-			return
-		}
-		s.setSessionCookie(w, fresh)
+		// Signed with the epoch the write just returned; the stale one would
+		// revoke the caller along with everyone else. Copied rather than
+		// mutated -- `user` is the request context's value.
+		refreshed := *user
+		refreshed.SessionEpoch = epoch
+		s.setSessionCookie(w, &refreshed)
 	}
 	slog.Info("password changed", "username", user.Username, "user_id", user.ID, "actor", "self")
 	w.WriteHeader(http.StatusNoContent)

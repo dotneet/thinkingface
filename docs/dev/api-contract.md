@@ -345,6 +345,16 @@ type AdminUser = {
 `AdminUser` deliberately has no password field of any kind. The stored bcrypt hash lives on
 `store.User` and is never copied onto a wire type.
 
+All three endpoints below run bcrypt, so all three answer the two throttling responses §1's login
+endpoint documents, and they mean the same things here: **429 `rate_limited`** when the caller's own
+per-address failure budget is spent, and **503 `overloaded`** when no bcrypt slot came free. The
+second is the server's capacity, not the caller's conduct, and must not be reported as the first.
+
+Writing a password is atomic with revoking that account's sessions — one `UPDATE` sets the hash and
+increments `session_epoch` together, so no failure can leave old cookies valid against a new
+password. `PATCH /api/v1/me/password` re-signs the caller's own cookie from the epoch that write
+returns.
+
 #### `PATCH /api/v1/me/password`
 
 Write scope required. req `{"current_password": string, "new_password": string}` → **204**.
@@ -429,8 +439,12 @@ res 200 `{"user": AdminUser}`. Errors:
 | 404 | `not_found` | No account with that username |
 | 409 | `last_admin` | Clearing `is_admin` would leave the instance with no site administrator |
 
-Both fields are validated before either is applied, so a request carrying an impossible
-password cannot still have granted administrator rights on its way to the 400.
+Everything that can fail on its own terms — validation, the target lookup, the self-demotion rule,
+and the bcrypt hash — completes before the first durable write, so a refused request cannot have
+granted administrator rights on its way out. The two writes are not wrapped in a single
+transaction: `SetUserAdmin` goes first because it is the one that can still refuse (409), the
+password write carries its own revocation, and what remains between them is an infrastructure
+failure that an identical retry converges from.
 
 Setting `password` revokes the *target's* sessions (their tokens, again, survive). The
 self-demotion 400 makes the 409 unreachable through this endpoint in practice — any other

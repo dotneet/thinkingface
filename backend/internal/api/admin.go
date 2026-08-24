@@ -148,9 +148,10 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 // alone; a body that sets neither is a 400 rather than a no-op 200, so a
 // misspelled field name cannot look like a successful change.
 //
-// Both mutations are validated before either is applied, so a request that
-// asks for an impossible password cannot still have granted admin rights on
-// its way to the 400.
+// Everything that can fail on its own terms -- validation, the target lookup,
+// the self-demotion rule, and the bcrypt hash -- completes before the first
+// durable write, so a refused request cannot have granted admin rights on its
+// way out.
 func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireSiteAdmin(w, r, true)
 	if !ok {
@@ -195,6 +196,32 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Hash before the first write, not between the two.
+	//
+	// hashNewPassword can refuse -- a spent address bucket (429) or no free
+	// bcrypt slot (503) -- and it used to run *after* SetUserAdmin had
+	// committed, so `{"password": ..., "is_admin": true}` under load answered
+	// an error with the administrator flag already changed. Every step that
+	// can fail for a reason of its own now happens before anything durable
+	// moves. Reported by Cursor Bugbot on #11.
+	var hash string
+	if req.Password != nil {
+		var ok bool
+		if hash, ok = s.hashNewPassword(w, r, *req.Password); !ok {
+			return
+		}
+	}
+
+	// The two writes are not wrapped in one transaction, and the order is
+	// deliberate. SetUserAdmin goes first because it is the one that can
+	// still refuse on its own terms (ErrLastSiteAdmin), so a logical
+	// rejection happens before any write at all; UpdateUserPassword is a
+	// single statement carrying its own session revocation. What is left
+	// between them is an infrastructure failure -- a lost connection -- and
+	// PATCH is idempotent here, so retrying the identical request converges.
+	// Sharing one transaction would mean reimplementing SetUserAdmin's
+	// advisory lock and last-admin count inline, which buys less than it
+	// costs.
 	if req.IsAdmin != nil && *req.IsAdmin != target.IsAdmin {
 		if err := s.store.SetUserAdmin(r.Context(), target.ID, *req.IsAdmin); err != nil {
 			if errors.Is(err, store.ErrLastSiteAdmin) {
@@ -212,18 +239,11 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Password != nil {
-		hash, ok := s.hashNewPassword(w, r, *req.Password)
-		if !ok {
-			return
-		}
-		if err := s.store.UpdateUserPassword(r.Context(), target.ID, hash); err != nil {
+		// The write revokes the target's sessions as part of the same
+		// statement. Unlike the self-service change there is no cookie to
+		// re-issue: those sessions belong to the target, not the actor.
+		if _, err := s.store.UpdateUserPassword(r.Context(), target.ID, hash); err != nil {
 			handleStoreError(w, "update password", err)
-			return
-		}
-		// Unlike the self-service change there is no cookie to re-issue:
-		// the sessions being revoked belong to the target, not the actor.
-		if err := s.store.BumpSessionEpoch(r.Context(), target.ID); err != nil {
-			internalError(w, "revoke sessions", err)
 			return
 		}
 		slog.Info("password reset by site administrator",
