@@ -87,10 +87,16 @@ jobs:
       # Informational and non-blocking: the full picture, including the
       # advisories make audit accepts. Read this when the blocking step below
       # goes green but the accepted list needs revisiting.
+      #
+      # `|| true` rather than continue-on-error. Both let the job succeed, but
+      # continue-on-error still records the step's non-zero exit as a failure
+      # annotation, so a green run carries a red "Process completed with exit
+      # code 1" that reads as a broken security scan at a glance. This step
+      # finding something is the normal case -- it belongs in the log, not in
+      # the run's status.
       - name: bun audit (full report, informational)
-        continue-on-error: true
         working-directory: frontend
-        run: bun audit
+        run: bun audit || true
 
       - name: make audit
         run: make audit
