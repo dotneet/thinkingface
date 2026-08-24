@@ -72,6 +72,9 @@ services:
       TF_ADMIN_PASSWORD: ${TF_ADMIN_PASSWORD:-admin}
       TF_ADMIN_EMAIL: ${TF_ADMIN_EMAIL:-admin@example.com}
       TF_SESSION_SECRET: ${TF_SESSION_SECRET:-dev-insecure-session-secret}
+      # Scratch space for WAL compaction (backend/cmd/thinkingface/walops.go);
+      # the parquet viewer no longer uses this directory (§9 of
+      # docs/dev/thinkingface-design.md).
       TF_VIEWER_CACHE_DIR: /data/cache
       TF_SYNC_WORKERS: ${TF_SYNC_WORKERS:-2}
       TF_ALLOW_SIGNUP: ${TF_ALLOW_SIGNUP:-true}

@@ -36,7 +36,7 @@ func (m *memStorage) SignedGetURL(context.Context, string, time.Duration, string
 	return "", errors.New("memStorage: signed URLs not supported")
 }
 
-func (m *memStorage) SignedPutURL(context.Context, string, time.Duration, int64) (string, error) {
+func (m *memStorage) SignedPutURL(context.Context, string, time.Duration) (string, error) {
 	return "", errors.New("memStorage: signed URLs not supported")
 }
 
@@ -164,7 +164,7 @@ func newExpHarness(t *testing.T) *expHarness {
 	git := gitrepo.NewManager(t.TempDir())
 	obj := newMemStorage()
 	// A zero cache budget disables eviction; the viewer still caches on disk.
-	parquet := viewer.New(obj, t.TempDir(), 0)
+	parquet := viewer.New(obj, 8<<20)
 
 	if _, err := st.CreateUser(ctx, "alice", "alice@example.com", "x", false); err != nil {
 		t.Fatalf("create user: %v", err)

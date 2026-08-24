@@ -50,7 +50,7 @@ func (f *fakeStore) SignedGetURL(context.Context, string, time.Duration, string)
 	return "", errors.New("fakeStore: no signed URLs")
 }
 
-func (f *fakeStore) SignedPutURL(context.Context, string, time.Duration, int64) (string, error) {
+func (f *fakeStore) SignedPutURL(context.Context, string, time.Duration) (string, error) {
 	return "", errors.New("fakeStore: no signed URLs")
 }
 

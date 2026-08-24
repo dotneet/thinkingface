@@ -106,6 +106,10 @@ func runCompact(ctx context.Context, db *store.Store, obj storage.Storage, cfg *
 	// One work directory per repository, reused across runs when the job's
 	// filesystem persists and rebuilt from the WAL when it does not — exactly
 	// the contract wal.Compact documents.
+	//
+	// This reuses ViewerCacheDir's directory purely as scratch space on the
+	// memory-backed filesystem; the parquet viewer itself no longer caches
+	// anything there (it reads via storage range requests).
 	workRoot := filepath.Join(cfg.ViewerCacheDir, "compact-work")
 
 	return forEachRepo(ctx, db, func(ref store.RepoRef) error {
