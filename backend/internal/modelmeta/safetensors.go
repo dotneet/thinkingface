@@ -1,9 +1,11 @@
 package modelmeta
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,6 +15,14 @@ import (
 // headers are a few hundred kilobytes even for very large shards; anything
 // past this is a corrupt or hostile file.
 const maxSafetensorsHeader = 64 << 20
+
+// maxHeaderEntries bounds how many tensor records we take out of the header.
+// A 64 MiB header can name over a million tensors, and every one of them costs
+// a name string, a shape slice and a record to sort -- roughly ten times the
+// header's own size in live objects at the peak. The limit is a wide multiple
+// of maxTensors, so the listing is already truncated long before it bites; the
+// biggest real checkpoints are two orders of magnitude below it.
+const maxHeaderEntries = maxTensors * 4
 
 // safetensorsEntry is one tensor's record in the JSON header.
 type safetensorsEntry struct {
@@ -50,9 +60,17 @@ func inspectSafetensors(ctx context.Context, size int64, fetch Fetcher) (*Info, 
 		return nil, fmt.Errorf("modelmeta: short read on safetensors header")
 	}
 
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &doc); err != nil {
+	// The header is decoded one entry at a time rather than unmarshalled into
+	// a map of raw messages: the map would hold every entry's bytes alongside
+	// the records built from them, so a 64 MiB header peaked at several
+	// hundred megabytes of live heap before anything was truncated.
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	open, err := dec.Token()
+	if err != nil {
 		return nil, fmt.Errorf("modelmeta: safetensors header is not valid JSON: %w", err)
+	}
+	if open != json.Delim('{') {
+		return nil, fmt.Errorf("modelmeta: safetensors header is not a JSON object")
 	}
 
 	info := &Info{Format: FormatSafetensors, HeaderBytes: int64(headerLen) + 8}
@@ -60,15 +78,35 @@ func inspectSafetensors(ctx context.Context, size int64, fetch Fetcher) (*Info, 
 		tensor Tensor
 		offset int64
 	}
-	placedTensors := make([]placed, 0, len(doc))
+	var placedTensors []placed
+	overEntries := 0
 
-	for name, rawEntry := range doc {
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return nil, fmt.Errorf("modelmeta: safetensors header is not valid JSON: %w", err)
+		}
+		name, _ := key.(string)
 		if name == "__metadata__" {
-			info.Metadata = decodeSafetensorsMetadata(rawEntry, info)
+			info.Metadata = decodeSafetensorsMetadata(dec, info)
+			continue
+		}
+		if len(placedTensors) >= maxHeaderEntries {
+			if err := skipJSONValue(dec); err != nil {
+				return nil, fmt.Errorf("modelmeta: safetensors header is not valid JSON: %w", err)
+			}
+			overEntries++
 			continue
 		}
 		var entry safetensorsEntry
-		if err := json.Unmarshal(rawEntry, &entry); err != nil {
+		if err := dec.Decode(&entry); err != nil {
+			// A type error means this one entry is malformed and the decoder
+			// is still positioned on the next key; anything else has left the
+			// stream unusable, so the whole header is rejected.
+			var typeErr *json.UnmarshalTypeError
+			if !errors.As(err, &typeErr) {
+				return nil, fmt.Errorf("modelmeta: safetensors header is not valid JSON: %w", err)
+			}
 			warn(info, "tensor %q has an unreadable header entry: %v", name, err)
 			continue
 		}
@@ -84,6 +122,12 @@ func inspectSafetensors(ctx context.Context, size int64, fetch Fetcher) (*Info, 
 			},
 			offset: entry.DataOffsets[0],
 		})
+	}
+	if overEntries > 0 {
+		// Unlike the usual listing cut-off, this one also leaves the totals
+		// short, so it is reported rather than only flagged as Truncated.
+		warn(info, "header names more than %d tensors; %d were skipped and are not counted in the totals",
+			maxHeaderEntries, overEntries)
 	}
 
 	// The header is a JSON object, so map iteration order is arbitrary. File
@@ -103,25 +147,89 @@ func inspectSafetensors(ctx context.Context, size int64, fetch Fetcher) (*Info, 
 	return info, nil
 }
 
-// decodeSafetensorsMetadata flattens `__metadata__`. The spec says the values
-// are strings, but files in the wild carry numbers and nested objects too, so
-// anything non-string is rendered as compact JSON.
-func decodeSafetensorsMetadata(raw json.RawMessage, info *Info) map[string]string {
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		warn(info, "__metadata__ is not an object: %v", err)
-		return map[string]string{}
+// decodeSafetensorsMetadata flattens `__metadata__`, consuming exactly that
+// one value from dec. The spec says the values are strings, but files in the
+// wild carry numbers and nested objects too, so anything non-string is
+// rendered as compact JSON.
+//
+// The map is left as summarize finds it; capMetadata is what enforces the
+// size ceiling, so both readers answer to one limit.
+func decodeSafetensorsMetadata(dec *json.Decoder, info *Info) map[string]string {
+	out := map[string]string{}
+	open, err := dec.Token()
+	if err != nil {
+		warn(info, "__metadata__ is unreadable: %v", err)
+		return out
 	}
-	out := make(map[string]string, len(doc))
-	for k, v := range doc {
+	if open != json.Delim('{') {
+		warn(info, "__metadata__ is not an object")
+		// A scalar has already been consumed whole; an array still has to be
+		// drained so the header scan resumes on the next key.
+		if open == json.Delim('[') {
+			_ = drainJSONContainer(dec)
+		}
+		return out
+	}
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			warn(info, "__metadata__ is unreadable: %v", err)
+			return out
+		}
+		name, _ := key.(string)
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			warn(info, "__metadata__ is unreadable: %v", err)
+			return out
+		}
 		var s string
-		if err := json.Unmarshal(v, &s); err == nil {
-			out[k] = s
+		if err := json.Unmarshal(value, &s); err == nil {
+			out[name] = s
 			continue
 		}
-		out[k] = string(v)
+		out[name] = string(value)
+	}
+	// Consume the closing brace so the caller's scan stays in step.
+	if _, err := dec.Token(); err != nil {
+		warn(info, "__metadata__ is unreadable: %v", err)
 	}
 	return out
+}
+
+// skipJSONValue consumes the next value from dec and throws it away. Decoding
+// into a field-less struct parses the value without building anything, so
+// walking past the entry cap costs no memory; a value that is not an object
+// still counts as consumed, since Decode reads it whole before complaining
+// about its type.
+func skipJSONValue(dec *json.Decoder) error {
+	var discard struct{}
+	err := dec.Decode(&discard)
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		return nil
+	}
+	return err
+}
+
+// drainJSONContainer consumes the rest of a container whose opening delimiter
+// has already been read, which is the one case skipJSONValue cannot handle.
+func drainJSONContainer(dec *json.Decoder) error {
+	depth := 1
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		switch tok {
+		case json.Delim('{'), json.Delim('['):
+			depth++
+		case json.Delim('}'), json.Delim(']'):
+			depth--
+		}
+		if depth <= 0 {
+			return nil
+		}
+	}
 }
 
 // safetensorsDType maps safetensors dtype codes onto the same neutral names

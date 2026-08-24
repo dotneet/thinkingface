@@ -45,6 +45,13 @@ const (
 // over every tensor; only the listing is cut off, with Truncated set.
 const maxTensors = 4096
 
+// maxMetadataBytes bounds the embedded metadata an Info carries, counting keys
+// and values. Neither container format bounds it on its own: a safetensors
+// `__metadata__` block may be as large as the header limit allows (64 MiB), so
+// without a ceiling a few hostile files would pin gigabytes in the inspection
+// cache, which only counts entries. Real checkpoints carry a few kilobytes.
+const maxMetadataBytes = 256 << 10
+
 // Fetcher returns the bytes in [off, off+n) of the file being inspected.
 // Implementations may return fewer bytes only at end of file.
 type Fetcher func(ctx context.Context, off, n int64) ([]byte, error)
@@ -122,6 +129,40 @@ func summarize(i *Info, tensors []Tensor) {
 	if i.Warnings == nil {
 		i.Warnings = []string{}
 	}
+	capMetadata(i)
+}
+
+// capMetadata drops entries once i.Metadata passes maxMetadataBytes. Keys are
+// considered in sorted order rather than map order so the surviving subset is
+// the same on every read of the same file.
+func capMetadata(i *Info) {
+	total := 0
+	for k, v := range i.Metadata {
+		total += len(k) + len(v)
+	}
+	if total <= maxMetadataBytes {
+		return
+	}
+
+	keys := make([]string, 0, len(i.Metadata))
+	for k := range i.Metadata {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	kept := make(map[string]string, len(keys))
+	used := 0
+	for _, k := range keys {
+		size := len(k) + len(i.Metadata[k])
+		if used+size > maxMetadataBytes {
+			break
+		}
+		kept[k] = i.Metadata[k]
+		used += size
+	}
+	warn(i, "metadata is %d bytes, over the %d byte limit; %d of %d entries were dropped",
+		total, maxMetadataBytes, len(i.Metadata)-len(kept), len(i.Metadata))
+	i.Metadata = kept
 }
 
 // warn records a recoverable problem on i.
