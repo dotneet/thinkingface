@@ -229,6 +229,12 @@ func (r *Repo) Commit(req CommitRequest) (newHash, oldHash plumbing.Hash, err er
 	return newHash, oldHash, nil
 }
 
+// ValidatePath is the exported form of the path check Commit applies to every
+// op. Handlers use it to refuse a traversal ("../"), a .git component or a NUL
+// byte with a 400 *before* any bytes are stored, rather than letting Commit
+// fail at the end of a multi-gigabyte upload.
+func ValidatePath(p string) error { return validatePath(p) }
+
 func validatePath(p string) error {
 	if strings.ContainsRune(p, 0) {
 		return fmt.Errorf("commit: path contains a NUL byte")

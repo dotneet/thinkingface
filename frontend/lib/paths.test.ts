@@ -7,6 +7,7 @@ import {
   repoEditHref,
   repoTreeHref,
   repoViewerHref,
+  resolveNewFilePath,
 } from "@/lib/paths";
 
 describe("publicApiBase", () => {
@@ -84,5 +85,33 @@ describe("blob / edit / viewer hrefs", () => {
 
   it("collapses an empty path into a trailing separator", () => {
     expect(repoBlobHref("model", "acme", "bert", "main", "")).toBe("/models/acme/bert/blob/main/");
+  });
+});
+
+describe("resolveNewFilePath", () => {
+  it("resolves a typed name against the directory being browsed", () => {
+    expect(resolveNewFilePath([], "notes.md")).toBe("notes.md");
+    expect(resolveNewFilePath(["docs"], "notes.md")).toBe("docs/notes.md");
+    expect(resolveNewFilePath(["docs", "guides"], "notes.md")).toBe("docs/guides/notes.md");
+  });
+
+  it("keeps typed subdirectories below the browsed one", () => {
+    expect(resolveNewFilePath(["docs"], "guides/notes.md")).toBe("docs/guides/notes.md");
+  });
+
+  it("treats a leading slash as a typo, not an escape to the root", () => {
+    expect(resolveNewFilePath(["docs"], "/notes.md")).toBe("docs/notes.md");
+    expect(resolveNewFilePath(["docs"], "///notes.md")).toBe("docs/notes.md");
+  });
+
+  it("collapses repeated and trailing separators", () => {
+    expect(resolveNewFilePath(["docs"], "guides//notes.md")).toBe("docs/guides/notes.md");
+    expect(resolveNewFilePath([], "notes.md/")).toBe("notes.md");
+  });
+
+  it("is empty for a blank entry, so the dialog can keep Create disabled", () => {
+    expect(resolveNewFilePath([], "")).toBe("");
+    expect(resolveNewFilePath(["docs"], "   ")).toBe("");
+    expect(resolveNewFilePath(["docs"], "/")).toBe("");
   });
 });

@@ -1,6 +1,7 @@
 import { FolderOpen } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { AddFileMenu } from "@/components/repo/add-file-menu";
 import { FileNav } from "@/components/repo/file-nav";
 import { FileTreeTable } from "@/components/repo/file-tree-table";
 import { IndexingBanner } from "@/components/repo/indexing-banner";
@@ -81,15 +82,29 @@ export async function RepoTree({
 
       {repo.indexing && <IndexingBanner />}
 
-      <FileNav
-        kind={kind}
-        ns={ns}
-        name={name}
-        rev={rev}
-        path={path}
-        refs={refsResult.ok ? refsResult.data : undefined}
-        target="tree"
-      />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {/* min-w-0 flex-1: the breadcrumb wraps inside its own box rather
+            than pushing the menu out of the row on a deep path. */}
+        <div className="min-w-0 flex-1">
+          <FileNav
+            kind={kind}
+            ns={ns}
+            name={name}
+            rev={rev}
+            path={path}
+            refs={refsResult.ok ? refsResult.data : undefined}
+            target="tree"
+          />
+        </div>
+        {/* Above the listing rather than inside it, so an empty repository --
+            the case that used to be a dead end, with no way to add a file
+            without git -- still offers both routes in. Only a branch can be
+            committed to, and can_write already folds in archived and
+            signed-out. */}
+        {repo.can_write && repo.branches.includes(rev) && (
+          <AddFileMenu kind={kind} ns={ns} name={name} rev={rev} path={path} />
+        )}
+      </div>
 
       {!treeResult.ok ? (
         <ErrorState

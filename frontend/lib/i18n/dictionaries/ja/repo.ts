@@ -213,6 +213,54 @@ export const repo = {
       "512KB を超えるファイルは Web エディタに読み込めません。ローカルで編集して push してください。",
     notText: "このファイルはプレーンテキストではないため Web UI から編集できません。",
   },
+  // ブラウザからのファイル追加: ツリーの「ファイルを追加」メニュー、新規
+  // ファイルのパス入力、アップロードダイアログ。
+  upload: {
+    menuLabel: "ファイルを追加",
+    menuNewFile: "新しいファイルを作成",
+    menuUpload: "ファイルをアップロード",
+    newFileTitle: "新しいファイルを作成",
+    newFileBody:
+      "ファイルはリポジトリのルート直下に作成されます。サブディレクトリに置くには / を使います。",
+    newFileBodyIn:
+      "ファイルは {dir} の下に作成されます。さらにサブディレクトリに置くには / を使います。",
+    newFileResolved: "{path} を作成します",
+    newFilePathLabel: "ファイルパス",
+    newFilePathPlaceholder: "notes.md",
+    newFileConfirm: "ファイルを作成",
+    newFileIsLFS:
+      "{file} はこのリポジトリで Git LFS の管理対象です。そのため中身をブラウザのエディタから書くことはできません。代わりに「ファイルを追加 → ファイルをアップロード」から追加してください — アップロードなら LFS も自動で処理されます。",
+    newFileIsLFSAction: "代わりにアップロードする",
+    title: "ファイルをアップロード",
+    dropLabel: "ここにファイルをドロップ、またはクリックして選択",
+    dropHint: "{rev} の {dir} にコミットされます。",
+    browseHint: "アップロードするファイルを選択",
+    selectedOne: "{count} 件",
+    selectedOther: "{count} 件",
+    totalSize: "合計 {size}",
+    remove: "{file} を取り消す",
+    emptyTitle: "ファイルがまだ選択されていません",
+    emptyDescription: "ファイルを 1 つ以上選ぶまで、何もアップロードされません。",
+    commitMessageLabel: "コミットメッセージ",
+    // Not translated, to match the server's default commit message (English).
+    commitMessagePlaceholder: "Upload files",
+    submit: "アップロード",
+    uploading: "アップロード中…",
+    progressLabel: "アップロードの進捗",
+    progressCount: "{done} / {total} 送信済み",
+    tooMany: "一度にアップロードできるのは最大 {count} 件です。",
+    lfsNote: "大きいファイルと既知のバイナリ形式は自動的に Git LFS に保存されます。",
+  },
+  // ファイル画面からの削除。破壊的な操作なので必ず ConfirmDialog を挟む。
+  deleteFile: {
+    action: "削除",
+    title: "このファイルを削除しますか？",
+    body: "{file} は新しいコミットで {rev} から削除されます。過去のコミットには残ります。",
+    lfsNote: "LFS オブジェクトの実体は、どこからも参照されなくなり GC が回収するまで保持されます。",
+    confirm: "ファイルを削除",
+    deleting: "削除中…",
+    cancel: "キャンセル",
+  },
   editor: {
     conflict:
       "編集中にこのファイルが変更されました。ページを再読み込みして変更を適用し直してください — 現在の編集内容はそのまま残っています。",

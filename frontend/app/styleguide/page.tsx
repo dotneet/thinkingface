@@ -1,6 +1,7 @@
 import { Boxes, Database, FileQuestion } from "lucide-react";
 import { notFound } from "next/navigation";
 import { StyleguideDialogDemo } from "@/app/styleguide/dialog-demo";
+import { StyleguideFileDropDemo } from "@/app/styleguide/file-drop-demo";
 import { StyleguideSegmentedDemo } from "@/app/styleguide/segmented-demo";
 import { Alert, type AlertTone } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -375,6 +376,10 @@ export default function StyleguidePage() {
           </div>
           <SkeletonLines lines={3} className="max-w-md" />
         </div>
+      </Section>
+
+      <Section title="File picker and progress" hint="FileDropZone and ProgressBar">
+        <StyleguideFileDropDemo />
       </Section>
 
       <Section title="Empty and error states">

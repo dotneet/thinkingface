@@ -39,6 +39,22 @@ func LFSStagingKey(repoID int64, oid string) string {
 	return LFSStagingPrefix + strconv.FormatInt(repoID, 10) + "/" + oid
 }
 
+// LFSIncomingKey returns a staging key for an upload whose oid is not known
+// yet. Every other upload path is told the digest up front (the LFS batch
+// request declares it), but the browser upload endpoint receives raw form
+// parts and only learns it from the last byte, so it needs somewhere to put
+// the bytes while it hashes them. name must be unique per in-flight upload.
+//
+//	tmp/uploads/lfs/{repoID}/incoming-{name}
+//
+// It deliberately lives under LFSStagingPrefix like every other staged
+// upload, so `thinkingface gc` sweeps it by age when a request dies before
+// the object is promoted. The "incoming-" prefix keeps it out of the value
+// space of LFSStagingKey, whose names are 64-character digests.
+func LFSIncomingKey(repoID int64, name string) string {
+	return LFSStagingPrefix + strconv.FormatInt(repoID, 10) + "/incoming-" + name
+}
+
 // LFSStagingPrefix is where every LFSStagingKey lives. `thinkingface gc`
 // sweeps it by age, and it is spelled once here rather than in both places:
 // the two are only connected by the string, so a prefix changed on the write

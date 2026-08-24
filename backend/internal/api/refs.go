@@ -12,9 +12,7 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -91,25 +89,11 @@ func revisionNotFound(w http.ResponseWriter, message string) {
 	notFound(w, message)
 }
 
-// decodeOptionalJSON is decodeJSON for a body that may legitimately be absent.
-// `HfApi.delete_branch` sends no body at all, and `create_branch` without a
-// revision sends `{}`; a hand-rolled curl call sends nothing. Only a body that
-// is present and malformed is an error.
-func decodeOptionalJSON(w http.ResponseWriter, r *http.Request, v any, badMsg string) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, maxMetaBody)
-	err := json.NewDecoder(r.Body).Decode(v)
-	if err == nil || errors.Is(err, io.EOF) {
-		return true
-	}
-	var tooLarge *http.MaxBytesError
-	if errors.As(err, &tooLarge) {
-		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
-			"request body must be at most "+strconv.FormatInt(maxMetaBody, 10)+" bytes")
-		return false
-	}
-	badRequest(w, badMsg)
-	return false
-}
+// The optional-body decoder these handlers use is decodeOptionalJSON in
+// edit.go -- one helper for the package. It matters here because
+// `HfApi.delete_branch` sends no body at all and `create_branch` without a
+// revision sends `{}`, so only a body that is present and malformed may be
+// an error.
 
 // writeRefError maps the shared failures of the four write handlers.
 func writeRefError(w http.ResponseWriter, what, name string, err error) {
@@ -181,7 +165,7 @@ func (s *Server) handleHFCreateBranch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		StartingPoint string `json:"startingPoint"`
 	}
-	if !decodeOptionalJSON(w, r, &req, "request body must be JSON with an optional startingPoint field") {
+	if !decodeOptionalJSON(w, r, maxMetaBody, &req, "request body must be JSON with an optional startingPoint field") {
 		return
 	}
 	start := req.StartingPoint
@@ -282,7 +266,7 @@ func (s *Server) handleHFCreateTag(w http.ResponseWriter, r *http.Request) {
 		Tag     string `json:"tag"`
 		Message string `json:"message"`
 	}
-	if !decodeOptionalJSON(w, r, &req, "request body must be JSON with a tag field") {
+	if !decodeOptionalJSON(w, r, maxMetaBody, &req, "request body must be JSON with a tag field") {
 		return
 	}
 	if err := gitrepo.ValidateRefName(req.Tag); err != nil {

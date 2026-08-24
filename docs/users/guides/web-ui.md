@@ -112,6 +112,35 @@ If someone else committed to the same file while you were editing, saving fails 
 conflict message rather than overwriting their change; your edit stays in the box so you can
 reload and reapply it.
 
+## Add files from the file tree
+
+The Files tab carries an **Add file** menu above the listing whenever you have write access
+to the repository and are looking at a branch. It has two entries:
+
+- **Upload files** opens a dialog you can drop files onto (or click to pick them). Chosen
+  files are listed with their sizes and can be removed again before you commit; a commit
+  message field sits below them. Everything in one dialog becomes a **single commit**, placed
+  in the directory you were browsing. Files that belong in Git LFS are routed there
+  automatically — you do not install or configure anything. A progress bar shows how much has
+  been sent, and the dialog stays open, with the error explained, if the upload is refused.
+- **Create a new file** asks for a path and opens the same editor described below at that
+  path, with an empty document. This is the way to start a `README.md` in a repository that
+  has nothing in it yet.
+
+The menu is also there when the directory is empty, which is what makes a repository created
+in the UI usable without touching git.
+
+## Delete a file
+
+A file's page shows a **Delete** button next to Edit, under the same conditions (write
+access, on a branch). It always asks for confirmation first, and then removes the file in a
+commit of its own — the file remains in every commit that came before, so nothing is lost
+from the history.
+
+Unlike editing, this works for LFS-tracked files as well: deleting one removes the pointer
+from the tree, while the stored object stays in the bucket until nothing references it any
+more and garbage collection reclaims it.
+
 ## Commit history
 
 The Commits view (`/commits/{revision}`, or reachable from a directory's or file's history

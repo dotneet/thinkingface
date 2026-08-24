@@ -222,6 +222,58 @@ export const repo = {
       "Files over 512KB can't be loaded into the web editor. Edit it locally and push instead.",
     notText: "This file isn't plain text and can't be edited from the web UI.",
   },
+  // Adding files from the browser: the "Add file" menu on the tree, the
+  // new-file path prompt, and the upload dialog.
+  upload: {
+    menuLabel: "Add file",
+    menuNewFile: "Create a new file",
+    menuUpload: "Upload files",
+    newFileTitle: "Create a new file",
+    // Two bodies rather than one with a "/" in it: at the repository root
+    // there is no directory worth naming, and printing one there would be
+    // noise on the most common case.
+    newFileBody: "The file is created at the repository root. Use / to put it in a subdirectory.",
+    newFileBodyIn: "The file is created in {dir}. Use / to put it in a subdirectory of that.",
+    // Shown under the input as the user types, so the path that will actually
+    // be created is never something they have to work out themselves.
+    newFileResolved: "Creates {path}",
+    newFilePathLabel: "File path",
+    newFilePathPlaceholder: "notes.md",
+    newFileConfirm: "Create file",
+    newFileIsLFS:
+      "{file} is tracked by Git LFS in this repository, so its contents can't be written in the browser editor. Add it with Add file → Upload files instead — uploads handle LFS for you.",
+    newFileIsLFSAction: "Upload it instead",
+    title: "Upload files",
+    dropLabel: "Drop files here, or click to choose",
+    dropHint: "They will be committed to {dir} on {rev}.",
+    browseHint: "Choose files to upload",
+    selectedOne: "{count} file",
+    selectedOther: "{count} files",
+    totalSize: "{size} in total",
+    remove: "Remove {file}",
+    emptyTitle: "No files chosen yet",
+    emptyDescription: "Nothing is uploaded until you choose at least one file.",
+    commitMessageLabel: "Commit message",
+    commitMessagePlaceholder: "Upload files",
+    submit: "Upload",
+    uploading: "Uploading…",
+    progressLabel: "Upload progress",
+    progressCount: "{done} of {total} sent",
+    tooMany: "You can upload at most {count} files at once.",
+    lfsNote: "Large files and known binary formats are stored with Git LFS automatically.",
+  },
+  // Deleting a file from the file view. Destructive, so it always goes
+  // through ConfirmDialog.
+  deleteFile: {
+    action: "Delete",
+    title: "Delete this file?",
+    body: "{file} will be removed from {rev} in a new commit. Earlier commits still contain it.",
+    lfsNote:
+      "The stored LFS object itself is kept until nothing references it any more and garbage collection reclaims it.",
+    confirm: "Delete file",
+    deleting: "Deleting…",
+    cancel: "Cancel",
+  },
   editor: {
     conflict:
       "This file changed while you were editing. Reload the page and reapply your changes — your edit is still here in the meantime.",

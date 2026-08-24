@@ -99,6 +99,16 @@ const WINDOW_CONFIRM_ALLOWLIST = new Set([]);
  */
 const RAW_SEARCH_TYPE_ALLOWLIST = new Set([]);
 
+/**
+ * Files allowed a bare `type="file"` outside components/ui/. Same reasoning
+ * as the search allowlist: a file input cannot be styled, so every screen that
+ * ever needs one hand-rolls the "visually hidden input plus a label" trick and
+ * gets the details (focusability, drag-and-drop, resetting `value` so picking
+ * the same file twice fires) subtly wrong. `FileDropZone`
+ * (components/ui/file-drop.tsx) is the one place that gets to render one.
+ */
+const RAW_FILE_TYPE_ALLOWLIST = new Set([]);
+
 const TAILWIND_PALETTE = [
   "slate",
   "gray",
@@ -149,6 +159,8 @@ const WINDOW_CONFIRM_ALERT_RE = /\bwindow\.(confirm|alert)\s*\(/g;
 // `type="search"` / `type={"search"}` on any element. Only the primitives in
 // components/ui/ are allowed to render one (see rule 10).
 const RAW_SEARCH_TYPE_RE = /\btype=\{?["']search["']\}?/g;
+// `type="file"` on any element. Only FileDropZone renders one (rule 11).
+const RAW_FILE_TYPE_RE = /\btype=\{?["']file["']\}?/g;
 
 const CLASSNAME_START_RE = /\bclass(?:Name)?\s*=\s*/g;
 
@@ -597,6 +609,21 @@ for (const dir of SCAN_DIRS) {
           "raw-search-input",
           "use <SearchInput> (submits on clear) or <FilterInput> (filters as you type) from " +
             'components/ui/search-input — a bare type="search" field\'s × never submits',
+        );
+      }
+    }
+
+    // (g) a hand-rolled `type="file"` input outside the primitives.
+    if (!isUiPrimitive(relPath) && !RAW_FILE_TYPE_ALLOWLIST.has(allowKey)) {
+      RAW_FILE_TYPE_RE.lastIndex = 0;
+      for (const hit of source.matchAll(RAW_FILE_TYPE_RE)) {
+        report(
+          relPath,
+          lineOf(source, hit.index),
+          "raw-file-input",
+          "use <FileDropZone> from components/ui/file-drop — a bare " +
+            'type="file" input cannot be styled, so every call site re-invents ' +
+            "the hidden-input trick and its drag-and-drop and reset handling",
         );
       }
     }
