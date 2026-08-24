@@ -258,7 +258,13 @@ What the repository actually gives you differs by backend:
   and any overwritten object stay recoverable unless explicitly deleted. Deletion of
   orphaned LFS objects and blobs is handled by reference-counted garbage collection
   (`thinkingface gc`, with a `--dry-run` default), not by an age-based lifecycle rule, so
-  nothing in the bucket disappears on its own.
+  nothing in the bucket disappears on its own. The Terraform configuration schedules this
+  for you: a weekly Cloud Run Job (`gc`), triggered by Cloud Scheduler, offset from the
+  `compact` schedule so the two never run at the same time. It only *reports* orphaned
+  objects until you opt in — set `gc_delete_enabled = true` (Terraform variable) once you've
+  reviewed a few dry-run reports and are confident they agree with what your deployment
+  actually still references; see `infra/README.md` for the full rationale and how to trigger
+  a supervised one-off deletion pass instead of waiting for the default weekly schedule.
 - **Local Docker Compose deployment**: there is no backup story at all. Data lives in the
   `pg-data` / `sqlite-data`, `gcs-data`, and `git-data` named volumes, and nothing in the
   repository snapshots or ships them anywhere. If you need backups for a Compose-based

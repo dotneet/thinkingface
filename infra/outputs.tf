@@ -61,6 +61,11 @@ output "compact_job_name" {
   value = google_cloud_run_v2_job.compact.name
 }
 
+output "gc_job_name" {
+  description = "Cloud Run Job name for reference-counted GC (`thinkingface gc`). See var.gc_delete_enabled for whether scheduled runs actually delete anything."
+  value       = google_cloud_run_v2_job.gc.name
+}
+
 output "web_url" {
   description = "Public URL of the Cloud Run web frontend."
   value       = google_cloud_run_v2_service.web.uri
