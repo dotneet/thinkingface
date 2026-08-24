@@ -34,6 +34,7 @@ at the end of this document.
 | Go (`backend/`) | `go.mod` + `go.sum`, toolchain pinned by the `toolchain` directive | `go build` / `go test` (checksums verified against `sum.golang.org`) | Renovate |
 | Frontend (`frontend/`) | `bun.lock` | `bun install --frozen-lockfile` | `bunfig.toml` + Renovate |
 | E2E (`e2e/`) | `pyproject.toml` + `uv.lock` | `uv run --locked` | Renovate |
+| Python client (`clients/python/`) | `pyproject.toml` + `uv.lock` | `uv run --locked` | Renovate |
 | Docs / lint tooling | `docs/requirements.in` → `docs/requirements.txt`, `requirements-lint.in` → `requirements-lint.txt` (pinned + hashed) | `pip install --require-hashes -r ...` | manual bump + `pip-audit` |
 | Docker base images | tag **and** `@sha256:` digest in the Dockerfiles and compose files | `docker build` / `docker compose` | Renovate |
 | GitHub Actions | commit SHA in `uses:`, version in the trailing comment | — | Renovate |
@@ -100,12 +101,30 @@ for doing it by hand.
 ```bash
 cd frontend && bun update      # bun.lock (respects bunfig.toml's quarantine)
 cd backend  && go get -u ./... && go mod tidy
-make lock-python               # docs/requirements.txt, requirements-lint.txt, e2e/uv.lock
+make lock-python               # docs/requirements.txt, requirements-lint.txt,
+                               # e2e/uv.lock, clients/python/uv.lock
 ```
 
 `make lock-python` compiles the `.in` files with `uv pip compile --generate-hashes`
-and refreshes `e2e/uv.lock`. CI's python job runs `uv lock --check`, so a
-`pyproject.toml` edit without a regenerated lockfile fails the PR.
+and refreshes both `uv.lock` files. CI's python job runs `uv lock --check` on
+each, so a `pyproject.toml` edit without a regenerated lockfile fails the PR.
+
+`clients/python/uv.lock` covers a package rather than a bare requirement set,
+so it locks the project's own runtime dependencies *and* the `dev` dependency
+group the unit tests run under. The `transformers` / `lightning` extras are
+declared but left out of that group on purpose: the tests assert that the
+autolog integrations import with neither installed, so pulling them in would
+quietly void the contract and drag two very large trees into every PR.
+
+That project also sets `[tool.uv] package = false`, which is what keeps its
+*build* dependencies out of the picture. `uv run` would otherwise build the
+package before running anything, and a build resolves `[build-system] requires`
+from PyPI at that moment -- a lockfile records runtime dependencies, not build
+ones, so every `make check` and every CI run would fetch an unpinned hatchling.
+The tests import the package from the source tree beside them
+(`[tool.pytest.ini_options] pythonpath`), so nothing needs building to run
+them; `[build-system]` still describes how a wheel is produced for
+distribution.
 
 ## Auditing
 
@@ -114,7 +133,8 @@ make audit
 ```
 
 Runs the three scanners `.github/workflows/security.yml` runs — govulncheck
-(Go), `bun audit` (frontend), `pip-audit` (all three Python sets) — at pinned
+(Go), `bun audit` (frontend), `pip-audit` (the docs / lint requirement files
+plus both `uv.lock` trees, exported with `uv export --frozen`) — at pinned
 versions, so a local run and CI agree. The workflow fires weekly, on any PR
 that touches a dependency manifest, and on demand; the weekly run is the one
 that matters, because an advisory published today applies to code that has not

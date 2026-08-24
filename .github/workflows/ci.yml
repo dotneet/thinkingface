@@ -174,7 +174,7 @@ jobs:
           fi
 
   python:
-    name: python (ruff)
+    name: python (ruff + clients/python unit tests)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -212,11 +212,32 @@ jobs:
         working-directory: e2e
         run: uv lock --check
 
+      - name: Verify clients/python's lockfile is in sync with pyproject.toml
+        # The pytest step below uses --locked and would catch this too; a
+        # dedicated step just makes "you edited pyproject.toml without running
+        # make lock-python" readable in the job summary.
+        working-directory: clients/python
+        run: uv lock --check
+
       - name: ruff check
         run: ruff check e2e clients/python scripts
 
       - name: ruff format --check
         run: ruff format --check e2e clients/python scripts
+
+      # The clients/python unit suite (trackio resume contract, run grouping,
+      # artifact upload, system metrics). These are pure unit tests -- no
+      # server and no docker -- so unlike the e2e job they belong on every PR.
+      #
+      # --locked installs the exact versions and hashes clients/python/uv.lock
+      # records and fails if the lockfile and pyproject.toml have drifted
+      # apart, so nothing here lets a registry choose a version. The `dev`
+      # dependency group is pytest only: the transformers / lightning extras
+      # are deliberately absent because tests/test_trackio_integrations.py
+      # asserts the autolog integrations import cleanly without them.
+      - name: pytest (clients/python)
+        working-directory: clients/python
+        run: uv run --locked pytest -v
 
   terraform:
     name: terraform (infra)
