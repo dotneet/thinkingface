@@ -845,7 +845,12 @@ Constraints and status codes:
   - `X-Repo-Commit: <commit sha>`
   - `X-Linked-Etag` / `X-Linked-Size` (for LFS)
   - `Content-Length`, `Content-Type`, `Accept-Ranges: bytes`
-- Range requests are supported (regular files from memory, LFS via a storage range read).
+- Range requests are supported on both paths: a regular file streams the requested slice straight
+  out of the git blob (never buffered — these run to gigabytes), LFS uses a storage range read. One
+  range per request (`bytes=a-b` / `bytes=a-` / `bytes=-n`); a satisfiable one answers 206 with
+  `Content-Range`, while an unparseable, multi-range or unsatisfiable one falls back to 200 with the
+  whole body rather than 416. A HEAD ignores `Range` and always reports the full `Content-Length`,
+  which is what `hf_hub_download` reads the size from.
 - Download stats: once a request is known not to be for a directory, it counts as 1 request = 1
   count, UPSERTed into `repo_download_stats(repo_id, date, count)`. Both HEAD and an LFS 302 count
   as one (range splitting, or a client's actual fetch from the GCS location a 302 pointed to, isn't
