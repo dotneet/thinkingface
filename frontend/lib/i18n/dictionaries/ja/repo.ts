@@ -272,6 +272,7 @@ export const repo = {
       },
     },
     defaultBranch: {
+      hint: "すでにデフォルトになっているブランチを保存すると、そのブランチのインデックスを再作成します。",
       title: "デフォルトブランチ",
       description:
         "clone で checkout されるブランチで、ファイル一覧・README・リネージもここから読み込まれます。",

@@ -72,7 +72,10 @@ export function DefaultBranchForm({
 
   return (
     <div className="flex max-w-sm flex-col gap-3">
-      <Field label={t("repo.settings.defaultBranch.label")}>
+      <Field
+        label={t("repo.settings.defaultBranch.label")}
+        hint={t("repo.settings.defaultBranch.hint")}
+      >
         <Select
           value={selected}
           onChange={(e) => {
@@ -89,7 +92,12 @@ export function DefaultBranchForm({
       </Field>
       <Button
         variant="secondary"
-        disabled={saving || selected === defaultBranch}
+        // Saving the branch that is already the default is not a no-op: the
+        // API re-queues the reindex for it, which is how a switch whose
+        // enqueue failed gets repaired (docs/dev/api-contract.md "Changing
+        // the default branch"). Disabling the button here would make that
+        // documented repair unreachable from the UI.
+        disabled={saving}
         onClick={handleSave}
         className="self-start"
       >

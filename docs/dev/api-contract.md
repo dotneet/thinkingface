@@ -580,6 +580,13 @@ future fields: every field is a pointer and absent ones are left alone.
     the enqueue fails the undo too — leaving `HEAD` and the row naming different branches, which
     is worse than a stale index. If the **row** write fails, `HEAD` is put back, since that is the
     one pair that must never disagree: a clone follows `HEAD` while every listing reads the row.
+  - **Not atomic across the two stores.** `HEAD` (a file) and `default_branch` (a row) are
+    separate writes with no lock spanning them, so two concurrent `PATCH`es naming *different*
+    branches can interleave and leave the two disagreeing. It is bounded and self-healing — any
+    later `PATCH` (including a same-value one) puts them back in step — and it is not worth a
+    cross-store lock: under `TF_WAL_MODE=authoritative` the bare repository is per-instance local
+    state materialised from the WAL, so "the" `HEAD` is not a single shared object to begin with,
+    which is the same reason `alignHEAD` below cannot resolve it either.
   - Webhook: no dedicated event was added for this. `repo.push` fires once the reindex above
     completes (payload as documented in §9), which is enough signal for a mirroring consumer that
     the default branch's effective content may have changed; a purpose-built event would carry

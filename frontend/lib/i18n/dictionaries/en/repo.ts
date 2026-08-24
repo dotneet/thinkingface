@@ -280,6 +280,7 @@ export const repo = {
       },
     },
     defaultBranch: {
+      hint: "Saving the branch that is already the default re-runs indexing for it.",
       title: "Default branch",
       description:
         "The branch clone checks out, and that the file list, README, and lineage are read from.",
