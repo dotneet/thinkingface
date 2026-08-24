@@ -130,3 +130,25 @@ func InitBare(ctx context.Context, dir, defaultBranch string) error {
 	}
 	return nil
 }
+
+// SetHead repoints a bare repository's HEAD symref at refs/heads/branch --
+// the same thing --initial-branch= sets at InitBare time, applied to a
+// repository that already exists. This is what a bare `git clone` checks out
+// by default, so it is the on-disk half of changing a repository's default
+// branch (the other half is the `repositories.default_branch` row;
+// gitrepo.Repo.SetHead and store.SetRepoDefaultBranch are its two callers).
+//
+// It does not check that branch exists first -- callers are expected to have
+// resolved refs/heads/branch already (they need its tip SHA anyway), and a
+// HEAD pointing at a branch that does not exist yet is exactly what a fresh
+// InitBare also produces (an unborn branch), so this is not a state git or
+// this package treats as invalid.
+func SetHead(ctx context.Context, dir, branch string) error {
+	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "HEAD", "refs/heads/"+branch)
+	cmd.Dir = dir
+	cmd.Env = Env()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git symbolic-ref HEAD refs/heads/%s: %w: %s", branch, err, out)
+	}
+	return nil
+}

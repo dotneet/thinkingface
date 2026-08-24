@@ -1,6 +1,6 @@
 import { type ApiResult, apiFetch } from "@/lib/api";
 import type { FetchOpts } from "@/lib/repos";
-import type { RepoDetail, RepoKind } from "@/types/api";
+import type { RepoDetail, RepoKind, RepoUpdateRequest } from "@/types/api";
 
 /**
  * The owner-level operations on a repository as a whole: freezing it
@@ -36,6 +36,25 @@ export function unarchiveRepo(
 ): Promise<ApiResult<{ repo: RepoDetail }>> {
   return apiFetch<{ repo: RepoDetail }>(`${repoPath(kind, ns, name)}/archive`, {
     method: "DELETE",
+    headers: opts?.headers,
+  });
+}
+
+/**
+ * Partial update over repository configuration; today the only field is
+ * `default_branch`. Namespace-admin only, like the operations above, and
+ * refused while the repository is archived.
+ */
+export function updateRepo(
+  kind: RepoKind,
+  ns: string,
+  name: string,
+  req: RepoUpdateRequest,
+  opts?: FetchOpts,
+): Promise<ApiResult<{ repo: RepoDetail }>> {
+  return apiFetch<{ repo: RepoDetail }>(repoPath(kind, ns, name), {
+    method: "PATCH",
+    body: req,
     headers: opts?.headers,
   });
 }

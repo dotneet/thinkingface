@@ -30,23 +30,10 @@ import (
 	"github.com/dotneet/thinkingface/backend/internal/wal"
 )
 
-// recordingEnqueuer captures the sync jobs a handler schedules, so a test can
-// assert that creating a branch refreshes that ref's file index -- the index is
+// The sync-job recorder these tests assert against is recordingEnqueuer in
+// default_branch_test.go -- one helper for the whole package. What matters
+// here is that creating a branch refreshes that ref's file index: the index is
 // keyed by (repo_id, ref, path), so a branch with no job has no index at all.
-type recordingEnqueuer struct {
-	jobs []syncJob
-}
-
-type syncJob struct {
-	repoID         int64
-	ref            string
-	oldSHA, newSHA string
-}
-
-func (e *recordingEnqueuer) Enqueue(_ context.Context, repoID int64, ref, oldSHA, newSHA string) error {
-	e.jobs = append(e.jobs, syncJob{repoID: repoID, ref: ref, oldSHA: oldSHA, newSHA: newSHA})
-	return nil
-}
 
 type refsFixture struct {
 	t     *testing.T
@@ -218,12 +205,13 @@ func TestHFCreateBranch_DefaultsToTheDefaultBranchAndSchedulesIndexing(t *testin
 	}
 
 	// The file index is per-ref, so a new branch must schedule its own job.
-	if len(f.sync.jobs) != 1 {
-		t.Fatalf("sync jobs = %+v, want exactly one", f.sync.jobs)
+	jobs := f.sync.snapshot()
+	if len(jobs) != 1 {
+		t.Fatalf("sync jobs = %+v, want exactly one", jobs)
 	}
-	job := f.sync.jobs[0]
-	if job.repoID != repo.ID || job.ref != "experiment" || job.oldSHA != "" ||
-		job.newSHA != branches["experiment"] {
+	job := jobs[0]
+	if job.RepoID != repo.ID || job.Ref != "experiment" || job.OldSHA != "" ||
+		job.NewSHA != branches["experiment"] {
 		t.Fatalf("sync job = %+v, want the new branch at its tip", job)
 	}
 }
@@ -472,8 +460,8 @@ func TestHFCreateTag_LightweightAndAnnotated(t *testing.T) {
 	}
 
 	// Tags schedule no indexing, the same as `git push v1.0` does not.
-	if len(f.sync.jobs) != 0 {
-		t.Fatalf("sync jobs = %+v, want none for tags", f.sync.jobs)
+	if jobs := f.sync.snapshot(); len(jobs) != 0 {
+		t.Fatalf("sync jobs = %+v, want none for tags", jobs)
 	}
 }
 
