@@ -144,9 +144,18 @@ func TestHFListFilterSortMapping(t *testing.T) {
 		{"sort=author", "name", ""},
 		// No sort at all keeps the default ordering, whatever direction says.
 		{"direction=-1", "", ""},
-		// A descending-only ordering asked for ascending, and the reverse.
-		{"sort=downloads", "", "direction=-1"},
-		{"sort=createdAt", "", "direction=-1"},
+		// An absent direction takes the ordering's natural one. `sort=downloads`
+		// on its own is how essentially everybody asks for "most downloaded",
+		// and refusing it would have been a compatibility regression dressed
+		// up as strictness.
+		{"sort=downloads", "downloads", ""},
+		{"sort=createdAt", "created", ""},
+		{"sort=id", "name", ""},
+		// An *explicit* direction the store cannot produce is still refused,
+		// which is the case worth refusing: the caller named an order, and
+		// answering with its reverse would be a lie.
+		{"sort=downloads&direction=1", "", "direction=-1"},
+		{"sort=createdAt&direction=1", "", "direction=-1"},
 		{"sort=id&direction=-1", "", "ascending"},
 		// Metrics this server does not have must never come back as the
 		// default order dressed up as a ranking.
@@ -181,6 +190,13 @@ func TestHFListFilterRefusesUnsupportedNarrowingParameters(t *testing.T) {
 	for _, raw := range []string{"limit=0", "limit=-3", "limit=many", "offset=-1", "offset=x"} {
 		if _, msg := hfListFilter("model", mustQuery(t, raw)); msg == "" {
 			t.Errorf("%q was accepted", raw)
+		}
+	}
+	// gated=False asks for exactly what this server returns anyway, so it is
+	// honoured. Only the True side can be answered with a superset.
+	for _, raw := range []string{"gated=False", "gated=false", "gated=0"} {
+		if _, msg := hfListFilter("model", mustQuery(t, raw)); msg != "" {
+			t.Errorf("%q was refused with %q, but it asks for the default result set", raw, msg)
 		}
 	}
 }

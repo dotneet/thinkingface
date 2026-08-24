@@ -528,21 +528,31 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 			})
 			lfsOIDs = append(lfsOIDs, v.OID)
 
+		// The two delete operations refuse a malformed entry rather than
+		// skipping it, for the same reason the default case below refuses an
+		// unknown key: a commit that drops one of its operations and answers
+		// 200 tells the caller the deletion happened. Silently keeping a file
+		// somebody asked to remove is the worse half of that -- it can leave
+		// data published that was meant to be gone.
 		case "deletedFile":
 			var v struct {
 				Path string `json:"path"`
 			}
-			if err := json.Unmarshal(line.Value, &v); err == nil && v.Path != "" {
-				ops = append(ops, gitrepo.Op{Kind: gitrepo.OpDelete, Path: v.Path})
+			if err := json.Unmarshal(line.Value, &v); err != nil || v.Path == "" {
+				badRequest(w, "deletedFile entry must be an object with a non-empty path")
+				return
 			}
+			ops = append(ops, gitrepo.Op{Kind: gitrepo.OpDelete, Path: v.Path})
 
 		case "deletedFolder":
 			var v struct {
 				Path string `json:"path"`
 			}
-			if err := json.Unmarshal(line.Value, &v); err == nil && v.Path != "" {
-				ops = append(ops, gitrepo.Op{Kind: gitrepo.OpDeleteDir, Path: strings.TrimSuffix(v.Path, "/")})
+			if err := json.Unmarshal(line.Value, &v); err != nil || v.Path == "" {
+				badRequest(w, "deletedFolder entry must be an object with a non-empty path")
+				return
 			}
+			ops = append(ops, gitrepo.Op{Kind: gitrepo.OpDeleteDir, Path: strings.TrimSuffix(v.Path, "/")})
 
 		case "copyFile":
 			// huggingface_hub's CommitOperationCopy. srcRevision arrives as
