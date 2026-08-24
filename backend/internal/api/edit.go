@@ -71,14 +71,14 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "no file path given")
 		return
 	}
-	rev := chi.URLParam(r, "rev")
+	rev, ok := revParam(w, r, "rev", repo)
+	if !ok {
+		return
+	}
 	// Committing to a detached SHA is meaningless; the API only writes branches.
 	if looksLikeSHA(rev) {
 		badRequest(w, "edits must target a branch, not a commit SHA")
 		return
-	}
-	if rev == "" {
-		rev = repo.DefaultBranch
 	}
 
 	var req apitypes.EditFileRequest
@@ -281,13 +281,13 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "no file path given")
 		return
 	}
-	rev := chi.URLParam(r, "rev")
+	rev, ok := revParam(w, r, "rev", repo)
+	if !ok {
+		return
+	}
 	if looksLikeSHA(rev) {
 		badRequest(w, "deletions must target a branch, not a commit SHA")
 		return
-	}
-	if rev == "" {
-		rev = repo.DefaultBranch
 	}
 
 	var req apitypes.DeleteFileRequest

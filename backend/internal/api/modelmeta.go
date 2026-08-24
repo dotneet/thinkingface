@@ -32,12 +32,16 @@ func (s *Server) handleModelMeta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rev, ok := revParam(w, r, "rev", repo)
+	if !ok {
+		return
+	}
 	gitRepo, err := s.git.Open(repo.StoragePath)
 	if err != nil {
 		internalError(w, "open git repository", err)
 		return
 	}
-	entry, _, err := gitRepo.Stat(chi.URLParam(r, "rev"), filePath)
+	entry, _, err := gitRepo.Stat(rev, filePath)
 	if err != nil {
 		handleStoreError(w, "stat file", err)
 		return

@@ -67,7 +67,10 @@ func (s *Server) resolveParquet(w http.ResponseWriter, r *http.Request) (pt parq
 		internalError(w, "open git repository", err)
 		return parquetTarget{}, false
 	}
-	rev := chi.URLParam(r, "rev")
+	rev, ok := revParam(w, r, "rev", repo)
+	if !ok {
+		return parquetTarget{}, false
+	}
 	key, size, err := s.objectKeyFor(r.Context(), repo, gitRepo, rev, filePath)
 	if err != nil {
 		handleStoreError(w, "locate parquet file", err)

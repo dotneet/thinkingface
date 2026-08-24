@@ -331,9 +331,23 @@ func repoName(raw string) string {
 	return strings.TrimSuffix(raw, ".git")
 }
 
-// wildcardPath returns the chi "*" parameter, cleaned of leading slashes.
+// wildcardPath returns the chi "*" parameter -- the file path of every route
+// that ends in one -- decoded exactly once and cleaned of leading slashes.
+//
+// The decoding is conditional, and has to be: see pathParam in urlparams.go.
+// A request whose revision is percent-encoded ("feature%2Fx") makes chi route
+// on the escaped path, which leaves this parameter encoded as well; a request
+// without one leaves it already decoded, and unescaping it a second time
+// mangles any file name containing a literal "%".
 func wildcardPath(r *http.Request) string {
-	return strings.Trim(chi.URLParam(r, "*"), "/")
+	path, err := pathParam(r, "*")
+	if err != nil {
+		// Unreachable in practice (pathParam documents why). Keep the value
+		// chi gave us rather than inventing one: the lookup then simply misses
+		// and the handler answers 404 for a path that does not exist.
+		path = chi.URLParam(r, "*")
+	}
+	return strings.Trim(path, "/")
 }
 
 // originAllowed reports whether a browser origin may make credentialed calls.
