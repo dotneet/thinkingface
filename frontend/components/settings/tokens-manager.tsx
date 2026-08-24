@@ -4,6 +4,7 @@ import { KeyRound, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Alert } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button, buttonClass } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { CopyButton } from "@/components/ui/copy-button";
@@ -14,9 +15,32 @@ import { SkeletonLines } from "@/components/ui/skeleton";
 import { TimeText } from "@/components/ui/time-text";
 import { isUnauthorized } from "@/lib/api";
 import { errorMessage } from "@/lib/api-error-message";
+import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
 import { createToken, deleteToken, listTokens } from "@/lib/tokens";
 import type { TokenItem } from "@/types/api";
+
+// 0 means "no expiration" -- the same convention the API uses for
+// expires_in_days, so the selected value can be sent straight through.
+// 90 days balances CLI/git workflows that would be annoying to re-auth
+// weekly against not leaving a leaked token valid forever, matching the
+// "default to the safer option" precedent the scope field already sets
+// (defaulting to "read" rather than "write").
+const EXPIRY_OPTIONS = [0, 7, 30, 60, 90, 365] as const;
+const DEFAULT_EXPIRY_DAYS = 90;
+
+const EXPIRY_LABEL_KEYS: Record<(typeof EXPIRY_OPTIONS)[number], MessageKey> = {
+  0: "settings.tokens.expiry.never",
+  7: "settings.tokens.expiry.days7",
+  30: "settings.tokens.expiry.days30",
+  60: "settings.tokens.expiry.days60",
+  90: "settings.tokens.expiry.days90",
+  365: "settings.tokens.expiry.days365",
+};
+
+function isTokenExpired(token: TokenItem): boolean {
+  return token.expires_at !== null && new Date(token.expires_at).getTime() <= Date.now();
+}
 
 export function TokensManager() {
   const t = useT();
@@ -25,6 +49,7 @@ export function TokensManager() {
   const [needsLogin, setNeedsLogin] = useState(false);
   const [newName, setNewName] = useState("");
   const [newScope, setNewScope] = useState<"read" | "write">("read");
+  const [newExpiryDays, setNewExpiryDays] = useState(DEFAULT_EXPIRY_DAYS);
   const [creating, setCreating] = useState(false);
   const [justCreated, setJustCreated] = useState<{ name: string; token: string } | null>(null);
   // Id of the row whose delete is in flight, so a second click on the same
@@ -59,7 +84,7 @@ export function TokensManager() {
     if (!newName.trim()) return;
     setCreating(true);
     setError(null);
-    const result = await createToken(newName.trim(), newScope);
+    const result = await createToken(newName.trim(), newScope, newExpiryDays);
     setCreating(false);
     if (!result.ok) {
       setError(
@@ -114,6 +139,18 @@ export function TokensManager() {
             >
               <option value="read">{t("settings.tokens.scopeRead")}</option>
               <option value="write">{t("settings.tokens.scopeWrite")}</option>
+            </Select>
+          </Field>
+          <Field label={t("settings.tokens.expiry.label")}>
+            <Select
+              value={String(newExpiryDays)}
+              onChange={(e) => setNewExpiryDays(Number(e.target.value))}
+            >
+              {EXPIRY_OPTIONS.map((days) => (
+                <option key={days} value={days}>
+                  {t(EXPIRY_LABEL_KEYS[days])}
+                </option>
+              ))}
             </Select>
           </Field>
           <Button
@@ -171,13 +208,14 @@ export function TokensManager() {
         />
       ) : (
         <div className="scroll-x rounded-lg border border-border">
-          <table className="w-full min-w-[560px] border-collapse text-sm">
+          <table className="w-full min-w-[720px] border-collapse text-sm">
             <thead>
               <tr className="border-b border-border text-left text-xs font-medium text-fg-subtle">
                 <th className="px-3 py-2 font-medium">{t("settings.tokens.colName")}</th>
                 <th className="px-3 py-2 font-medium">{t("settings.tokens.colScope")}</th>
                 <th className="px-3 py-2 font-medium">{t("settings.tokens.colCreated")}</th>
                 <th className="px-3 py-2 font-medium">{t("settings.tokens.colLastUsed")}</th>
+                <th className="px-3 py-2 font-medium">{t("settings.tokens.expiry.column")}</th>
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
@@ -194,6 +232,18 @@ export function TokensManager() {
                       <TimeText iso={token.last_used_at} style="dateTime" />
                     ) : (
                       t("settings.tokens.neverUsed")
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-fg-subtle">
+                    {token.expires_at === null ? (
+                      t("settings.tokens.expiry.noExpiration")
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <TimeText iso={token.expires_at} style="dateTime" />
+                        {isTokenExpired(token) && (
+                          <Badge tone="negative">{t("settings.tokens.expiry.expiredBadge")}</Badge>
+                        )}
+                      </div>
                     )}
                   </td>
                   <td className="px-3 py-2 text-right">

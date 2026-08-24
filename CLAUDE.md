@@ -83,8 +83,13 @@ cd e2e      && uv run --isolated --with-requirements requirements.txt pytest -v
 
 `make check` breaks down into `check-backend` (gofmt / go vet / go test), `check-frontend`
 (typecheck / lint / format:check / check:ui / test), `check-python` (ruff check +
-ruff format --check), and `check-types` (tygo regeneration + zero-diff verification). It is
-kept aligned with the backend / frontend / python / contract jobs in CI (`.github/workflows/ci.yml`).
+ruff format --check), `check-types` (tygo regeneration + zero-diff verification), and
+`check-terraform` (terraform fmt -check + init -backend=false + validate on `infra/`; skipped
+when terraform is not installed, since it is an optional prerequisite). It is kept aligned with
+the backend / frontend / python / contract / terraform jobs in CI (`.github/workflows/ci.yml`).
+Note that `terraform validate` only checks the config against the provider schemas — it never
+contacts GCP, so server-side limits (e.g. Cloud Run's 4 GiB of memory per vCPU) still only
+surface at apply time. `terraform plan` / `apply` need credentials and are not run in CI.
 
 You can optionally install lefthook (`lefthook.yml`) for early feedback before committing:
 `lefthook install` (to remove it, `lefthook uninstall`; to skip it just this once,

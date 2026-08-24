@@ -88,7 +88,8 @@ gh pr checks N --watch          # blocks until every check finishes; non-zero ex
 gh pr checks N                  # current status, without waiting
 ```
 
-CI is GitHub Actions (`.github/workflows/ci.yml`: backend / frontend / python / contract).
+CI is GitHub Actions (`.github/workflows/ci.yml`: backend / frontend / python / contract /
+terraform).
 A full run takes several minutes, so start `--watch` in the background and work on something
 else in the meantime.
 
