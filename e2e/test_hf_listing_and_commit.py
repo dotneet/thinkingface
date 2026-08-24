@@ -13,9 +13,33 @@ Requires a running server; see e2e/README.md.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi
 from huggingface_hub.utils import HfHubHTTPError
+
+# A push is indexed by the background sync worker, so the tags a card declares
+# reach the listing facets a moment after the upload returns. Same shape as
+# test_gcs_export's polling.
+SYNC_TIMEOUT_SECONDS = 30
+SYNC_POLL_INTERVAL_SECONDS = 0.5
+
+
+def _wait_for_tagged(hf_api: HfApi, tag: str, expected: set[str]) -> set[str]:
+    """Poll `filter=tag` until every expected repository shows up.
+
+    Returns the last listing either way, so the assertion that follows reports
+    what was actually there rather than a timeout with no detail.
+    """
+    deadline = time.monotonic() + SYNC_TIMEOUT_SECONDS
+    seen: set[str] = set()
+    while time.monotonic() < deadline:
+        seen = {m.id for m in hf_api.list_models(filter=tag, limit=100)}
+        if expected <= seen:
+            return seen
+        time.sleep(SYNC_POLL_INTERVAL_SECONDS)
+    return seen
 
 
 @pytest.fixture(scope="module")
@@ -67,9 +91,14 @@ def test_list_models_sort_variants_all_return_results(
 
 
 def test_list_models_filter_narrows_to_the_tag(hf_api: HfApi, listing_repos: list[str]) -> None:
-    tagged = {m.id for m in hf_api.list_models(filter="e2e-listing", limit=100)}
-    assert set(listing_repos) <= tagged, "filter dropped repositories carrying the tag"
+    want = set(listing_repos)
+    tagged = _wait_for_tagged(hf_api, "e2e-listing", want)
+    assert want <= tagged, f"filter dropped repositories carrying the tag: missing {want - tagged}"
 
+    # Narrowing is the half that can silently pass by returning everything, so
+    # it is checked against a tag only one of the fixtures carries. No wait
+    # needed: the repository that must be absent is the one already indexed
+    # above, so a stale index cannot make this assertion pass by accident.
     alpha = {m.id for m in hf_api.list_models(filter="alpha", limit=100)}
     assert listing_repos[0] in alpha
     assert listing_repos[1] not in alpha, "filter returned a repository without the tag"
