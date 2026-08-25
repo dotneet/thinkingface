@@ -198,9 +198,11 @@ func (f *Flusher) Flush(ctx context.Context, repo *store.Repo, projectID int64, 
 // would be tolerable if the damage stayed inside the one project, but it does
 // not. exp_points grows without bound for it (and Series loads all of it to
 // draw the live chart), and the poller takes its candidates from
-// ListPendingFlushProjects, which is `ORDER BY p.id LIMIT 100` -- a hundred
-// wedged projects and *no* project on the instance is flushed again. A buffer
-// that can never drain is not a harmless buffer.
+// ListPendingFlushProjects, which takes the hundred projects whose oldest
+// unflushed point has waited longest -- and a wedged project's oldest point
+// only ever gets older, so a hundred of them sit at the front of that order
+// forever and *no* project on the instance is flushed again. A buffer that
+// can never drain is not a harmless buffer.
 //
 // The cost is real, which is why this is an error and carries the counts: the
 // points were accepted with a 200 and are now gone from the chart as well.

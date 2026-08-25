@@ -79,6 +79,12 @@ type Syncer struct {
 	flushInterval time.Duration
 	flushMu       sync.Mutex
 	lastFlush     map[int64]time.Time // exp_projects.id -> last successful flush
+
+	// One post-push pipeline per repository+ref at a time (reflock.go). The
+	// queue's lease already serialises worker against worker; this is what
+	// serialises them against the metrics flush, which runs the same pipeline
+	// without taking a job.
+	refLocks refLocks
 }
 
 func New(st *store.Store, git *gitrepo.Manager, obj storage.Storage, v *viewer.Reader, ix *experiments.Indexer, wh WebhookFirer, workers int) *Syncer {
@@ -316,6 +322,17 @@ type pushOutcome struct {
 // file/parquet/lineage/experiment indexes. A nil outcome with a nil error
 // means there was nothing to index (missing or empty repository).
 func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *store.SyncJob) (*pushOutcome, error) {
+	// Held across the whole pipeline, because the stale write this prevents
+	// is a read at the top being overwritten by a write at the bottom. Every
+	// caller goes through here, which is the point: a second entry point that
+	// indexed a ref without taking the lock would put the hazard straight
+	// back (see refLocks).
+	release, err := s.refLocks.lock(ctx, repo.ID, job.Ref)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	gitRepo, err := s.git.Open(repo.StoragePath)
 	if err != nil {
 		if errors.Is(err, gitrepo.ErrRepoNotFound) {
