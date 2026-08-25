@@ -231,9 +231,15 @@ func writePartialContent(w http.ResponseWriter, offset, length, size int64) int6
 // from the request context (the request may well be finished by the time this
 // runs), and neither can fail a download: IncrementDownloads and
 // RecordDownload only log.
+//
+// Detached does not mean unbounded: one resolve is one goroutine and two
+// writes, and resolve needs no authentication, so a database that stops
+// answering would otherwise pile them up without limit. detachedWrite
+// (auth.go) gives the pair a deadline of its own.
 func (s *Server) recordDownload(ctx context.Context, repoID int64) {
-	detached := context.WithoutCancel(ctx)
+	detached, cancel := detachedWrite(ctx)
 	go func() {
+		defer cancel()
 		s.store.IncrementDownloads(detached, repoID)
 		s.store.RecordDownload(detached, repoID)
 	}()

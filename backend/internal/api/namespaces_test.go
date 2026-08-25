@@ -347,6 +347,15 @@ func TestHFOverviewEndpoints(t *testing.T) {
 	}); resp.status() != 200 {
 		t.Fatalf("set profile: %d", resp.status())
 	}
+	// acme's roster is made public so the unauthenticated overview below can
+	// still show the membership. With the default "members" it would not, and
+	// deliberately so -- that is TestHFUserOverviewOrgsVisibility's subject;
+	// here the point is the shape of the response, not who may see it.
+	if resp := f.do("PATCH", "/api/v1/orgs/acme", tok, map[string]any{
+		"members_visibility": "public",
+	}); resp.status() != 200 {
+		t.Fatalf("make acme's roster public: %d", resp.status())
+	}
 
 	resp := f.do("GET", "/api/users/alice/overview", "", nil)
 	if resp.status() != 200 {

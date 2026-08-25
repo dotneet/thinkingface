@@ -172,8 +172,20 @@ Called by `HfApi.get_user_overview()`. Anyone can call it (even unauthenticated)
   "details": "Short bio", "type": "user",
   "numModels": 3, "numDatasets": 2, "numSpaces": 0, "numLikes": 0,
   "numFollowers": 0, "numFollowing": 0, "isPro": false,
-  "orgs": [ /* same shape as whoami-v2's orgs. That user's memberships */ ] }
+  "orgs": [ /* same shape as whoami-v2's orgs */ ] }
 ```
+`orgs` is **that user's memberships filtered to the ones the caller may see** — not all of them.
+This endpoint is public and describes somebody else, so it applies exactly the rule
+`GET /api/v1/orgs/{org}/members` applies (§1.1, `docs/dev/organization-design.md` §4 *1): an
+organization appears only when it has `members_visibility=public`, or when the caller is a member
+of it (any role; a site admin counts). Everything else is silently omitted — the array is
+narrowed, never a 403. Without this narrowing the members-only roster the member-list endpoint
+refuses could be rebuilt one username at a time from this side.
+`roleInOrg` is kept on the rows that survive the filter: the UI's own member list already returns
+every member's role to that same audience.
+Note that `GET /api/whoami-v2` is unaffected — it describes the caller's own account, where every
+membership is theirs to see.
+
 Passing an organization name returns 404 (the endpoint is split by kind, matching HF's behavior).
 Returns 404 if it doesn't exist.
 `numLikes` / `numFollowers` / `numFollowing` / `numSpaces` are fixed at 0 since they aren't modeled.
@@ -261,8 +273,8 @@ type OrgAuditEntry = {
 | `GET /api/v1/orgs/{org}/members` | A member, or anyone if `members_visibility=public` | – | 200 `{"items": OrgMember[]}` |
 | `POST /api/v1/orgs/{org}/members` | admin | `{"username","role?"}` (`role` defaults to `read` when omitted) | 201 `{"member": OrgMember}` / 404 (user doesn't exist) / 409 `already_member` |
 | `PATCH /api/v1/orgs/{org}/members/{username}` | admin | `{"role"}` | 200 `{"member": OrgMember}` / 409 `last_admin` (attempted to demote the last admin) |
-| `DELETE /api/v1/orgs/{org}/members/{username}` | admin, or the member themself (leaving) | – | 204 / 409 `last_admin` |
-| `GET /api/v1/orgs/{org}/audit-log` | admin | query `before?` (cursor) `limit?` | 200 `{"items": OrgAuditEntry[], "next_before": number}` (0 marks the end) |
+| `DELETE /api/v1/orgs/{org}/members/{username}` | admin, or the member themself (leaving; `{username}` is matched case-insensitively, like every other account lookup) | – | 204 / 409 `last_admin` |
+| `GET /api/v1/orgs/{org}/audit-log` | admin | query `before?` (cursor) `limit?` (default 50, **clamped to 200**) | 200 `{"items": OrgAuditEntry[], "next_before": number}` (0 marks the end) |
 
 The four profile fields on `POST /api/v1/orgs` and `PATCH /api/v1/orgs/{org}`
 (`display_name` / `description` / `website` / `avatar_url`) go through the **same validation**
@@ -873,6 +885,15 @@ normal not-found page.
 req: `{"kind","namespace","name","description":""}` → `{"repo": RepoDetail}`
 On success, if the namespace is an organization, records a `repo.created` audit log entry
 (`docs/dev/organization-design.md` §5).
+
+Failures (the same for `POST /api/repos/create` below, which shares the implementation):
+
+| Status | When |
+|---|---|
+| 400 `bad_request` | A fault in the request itself: an unknown `kind`, a name or namespace that fails `validateName`, or a `namespace` that **does not exist**. A namespace's existence is public information anyway (`GET /api/v1/namespaces/{ns}` answers it unauthenticated), so naming a missing one is treated as bad input rather than as a permission answer |
+| 401 | Not authenticated |
+| 403 `forbidden` | Authenticated, the namespace exists, but the caller has no `write` role in it (or holds a read-scoped token). Same as every other permission failure — this used to be reported as 400, which read as "fix your request" for something no request body can fix |
+| 409 | A repository of that name already exists in the namespace |
 
 ### `POST /api/repos/create`  (HF-compatible)
 req: `{"type":"dataset"|"model","name":"foo" | "ns/foo","organization":null}`
@@ -1932,7 +1953,9 @@ to it directly. While archived, both ingest (`log` / `finish`) and PATCH/DELETE 
   git history isn't rewritten). To remove it permanently, delete the whole repository.
 - `GET /api/v1/experiments/{ns}/{repo}/{project}/metrics`
   query: `runs` (comma-separated; all runs when omitted) / `keys` (comma-separated; all keys when
-  omitted) / `x` (`step`|`time`, default `step`) / `max_points` (default 1000)
+  omitted) / `x` (`step`|`time`, default `step`) / `max_points` (default 1000, **clamped to 5000**;
+  the ceiling exists because downsampling is the only thing bounding this response and the
+  endpoint needs no authentication — a larger value is silently reduced, not rejected)
   res:
   ```ts
   { series: { run: string; key: string; points: [number, number][] }[] }

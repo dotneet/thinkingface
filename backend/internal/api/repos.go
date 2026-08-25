@@ -240,6 +240,15 @@ func (s *Server) createRepo(ctx context.Context, user *store.User, kind, ns, nam
 	namespace, err := s.store.GetNamespace(ctx, ns)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
+			// Deliberately still a 400 rather than a 403 or a 404. A
+			// namespace's existence is not a secret -- GET
+			// /api/v1/namespaces/{ns} answers it unauthenticated, and every
+			// repository URL spells one out (docs/dev/namespace-design.md §10)
+			// -- so distinguishing it leaks nothing, and naming a namespace
+			// that is not there is a fault in the request body, not an
+			// authorization outcome. 404 would be the wrong shape for a POST
+			// whose own URL exists, and would change what huggingface_hub's
+			// create_repo sees.
 			return nil, badInput("namespace %q does not exist", ns)
 		}
 		return nil, err
@@ -249,7 +258,12 @@ func (s *Server) createRepo(ctx context.Context, user *store.User, kind, ns, nam
 		return nil, err
 	}
 	if role < RoleWrite {
-		return nil, badInput("you do not have write access to namespace %q", ns)
+		// A permission failure, so 403 like every other one in this package
+		// (loadRepoForWriteAllowArchived, requireOrgRole, loadRepoForDelete);
+		// folding it into inputError reported "you do not have write access"
+		// as a 400 bad_request, which reads as "fix your request" for
+		// something no request body can fix.
+		return nil, forbiddenError{fmt.Sprintf("you do not have write access to namespace %q", ns)}
 	}
 	// storagePath is freshly minted (store.NewStoragePath(), a random ULID)
 	// and never reused, so it cannot collide with the WAL or bare directory
@@ -296,7 +310,17 @@ func (s *Server) createRepo(ctx context.Context, user *store.User, kind, ns, nam
 	}
 
 	if err := s.sync.Enqueue(ctx, repo.ID, "main", "", newHash.String()); err != nil {
-		return nil, err
+		// Rolled back like the two failures above, rather than logged and
+		// shrugged off the way refs.go does for a branch creation. The
+		// difference is that this is the *first* job for the repository: the
+		// syncer diffs OldSHA..NewSHA (syncer.changedPaths), so the next push
+		// enqueues a diff rooted at this very commit and .gitattributes and
+		// README.md would never be indexed at all. Leaving the row and the
+		// bare directory behind while answering 500 also blocks the retry the
+		// client will make with a 409 on a name it does not own yet.
+		_ = s.git.Remove(repo.StoragePath)
+		_ = s.store.DeleteRepo(ctx, repo.ID)
+		return nil, fmt.Errorf("schedule initial index: %w", err)
 	}
 	s.fireWebhook(ctx, string(apitypes.WebhookEventRepoCreated), ns, &repo.ID, map[string]any{
 		"namespace": ns, "name": name, "kind": kind, "full_name": ns + "/" + name,
@@ -313,9 +337,12 @@ func (s *Server) createRepo(ctx context.Context, user *store.User, kind, ns, nam
 // returns false without writing anything in that one case.
 func writeCreateRepoError(w http.ResponseWriter, err error) bool {
 	var bad inputError
+	var forb forbiddenError
 	switch {
 	case errors.Is(err, store.ErrConflict):
 		return false
+	case errors.As(err, &forb):
+		forbidden(w, forb.Error())
 	case errors.As(err, &bad):
 		badRequest(w, bad.Error())
 	default:

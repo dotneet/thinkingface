@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/dotneet/thinkingface/backend/internal/config"
@@ -127,5 +129,106 @@ func TestSSHCloneURL(t *testing.T) {
 				t.Fatalf("sshCloneURL = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCreateRepoForeignNamespaceIsForbidden pins the status of the one
+// createRepo failure that is not about the request body. Naming a namespace
+// you may not write to used to be folded into inputError and answered 400
+// bad_request, which reads as "fix your request" for something no request can
+// fix; every other permission failure in this package (loadRepoForDelete,
+// requireOrgRole, loadRepoForWriteAllowArchived) says 403, and
+// docs/dev/api-contract.md distinguishes the two.
+func TestCreateRepoForeignNamespaceIsForbidden(t *testing.T) {
+	f := newTransferFixture(t)
+	tok := f.token(f.alice, "write")
+
+	for _, c := range []struct {
+		what, path string
+		body       any
+	}{
+		{"UI", "/api/v1/repos", map[string]any{"kind": "model", "namespace": "bob", "name": "x"}},
+		{"HF", "/api/repos/create", map[string]any{"type": "model", "name": "bob/x"}},
+	} {
+		resp := f.do("POST", c.path, tok, c.body)
+		if resp.status() != 403 {
+			t.Fatalf("%s create in bob's namespace: status = %d, want 403, body = %s",
+				c.what, resp.status(), resp.rec.Body.String())
+		}
+	}
+
+	// A namespace that is not there at all stays a 400: its absence is a
+	// fault in the request, and existence is public information anyway
+	// (GET /api/v1/namespaces/{ns} answers it unauthenticated).
+	resp := f.do("POST", "/api/v1/repos", tok, map[string]any{
+		"kind": "model", "namespace": "nobody", "name": "x",
+	})
+	if resp.status() != 400 {
+		t.Fatalf("create in a namespace that does not exist: status = %d, want 400, body = %s",
+			resp.status(), resp.rec.Body.String())
+	}
+}
+
+// failEnqueuer stands in for a syncer whose queue cannot be written to --
+// the database is down, or the jobs table is locked.
+type failEnqueuer struct {
+	st          *store.Store
+	storagePath string
+	calls       int
+}
+
+func (e *failEnqueuer) Enqueue(ctx context.Context, repoID int64, _, _, _ string) error {
+	e.calls++
+	// Read the path while the row is still there, so the test can check the
+	// bare repository was cleaned up too.
+	if r, err := e.st.GetRepoByID(ctx, repoID); err == nil {
+		e.storagePath = r.StoragePath
+	}
+	return errors.New("sync queue unavailable")
+}
+
+// TestCreateRepoRollsBackWhenTheIndexJobCannotBeQueued covers the third way
+// createRepo can fail after it has started writing. `git init` and the initial
+// commit both roll back; queuing the first index job did not, so a 500 left a
+// repositories row, a bare directory and a commit behind -- and the client's
+// retry then collided with the name it had just failed to create. The job is
+// also the only one that will ever cover the initial commit: the next push
+// enqueues a diff rooted at it (syncer.changedPaths), so the seeded README.md
+// and .gitattributes would never be indexed.
+func TestCreateRepoRollsBackWhenTheIndexJobCannotBeQueued(t *testing.T) {
+	f := newTransferFixture(t)
+	enq := &failEnqueuer{st: f.st}
+	f.s.sync = enq
+	tok := f.token(f.alice, "write")
+
+	resp := f.do("POST", "/api/v1/repos", tok, map[string]any{
+		"kind": "model", "namespace": "alice", "name": "half-made",
+	})
+	if resp.status() != 500 {
+		t.Fatalf("create with a broken queue: status = %d, want 500, body = %s",
+			resp.status(), resp.rec.Body.String())
+	}
+	if enq.calls != 1 {
+		t.Fatalf("enqueue called %d times, want 1", enq.calls)
+	}
+
+	ctx := context.Background()
+	if _, err := f.st.GetRepo(ctx, "model", "alice", "half-made"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("repository row survived the failed create: err = %v", err)
+	}
+	if enq.storagePath == "" {
+		t.Fatal("test could not observe the storage path")
+	}
+	if f.git.Exists(enq.storagePath) {
+		t.Fatalf("bare repository %s survived the failed create", enq.storagePath)
+	}
+
+	// And the name is free again, so the obvious retry works.
+	f.s.sync = noopEnqueuer{}
+	if retry := f.do("POST", "/api/v1/repos", tok, map[string]any{
+		"kind": "model", "namespace": "alice", "name": "half-made",
+	}); retry.status() != 200 {
+		t.Fatalf("retry after a failed create: status = %d, want 200, body = %s",
+			retry.status(), retry.rec.Body.String())
 	}
 }

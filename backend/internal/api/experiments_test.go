@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
+	"github.com/dotneet/thinkingface/backend/internal/experiments"
 )
 
 // expFixture is archiveFixture under a name that fits this file: it already
@@ -247,5 +248,55 @@ func TestExperimentIngest_RejectsAProjectNameThatCannotBeCommitted(t *testing.T)
 			t.Errorf("finish in project %q status = %d, want 400 (body %s)",
 				project, resp.status(), resp.rec.Body.String())
 		}
+	}
+}
+
+// TestExperimentMetricsClampsMaxPoints covers the one caller-supplied limit on
+// this endpoint. Downsampling is the only thing keeping a long run's series
+// out of the response body, and the metrics endpoint needs no authentication,
+// so max_points went straight through to experiments.SeriesRequest -- which
+// only has a floor -- and ?max_points=100000000 meant "serialise every point
+// you have".
+func TestExperimentMetricsClampsMaxPoints(t *testing.T) {
+	f := newExpFixture(t)
+	f.repo("alice", "exp", "dataset")
+	tok := f.token(f.alice, "write")
+	// The shared fixture leaves the indexer out -- the ingest tests never
+	// read a series back -- so this one wires it up. Live points come from
+	// the store, so the parquet reader is not needed.
+	f.s.exp = experiments.NewIndexer(f.st, f.git, newMemStore(), nil)
+
+	const logged = maxMetricPoints + 100
+	points := make([]map[string]any, 0, logged)
+	for i := range logged {
+		points = append(points, point(i+1, map[string]any{"loss": float64(logged - i)}))
+	}
+	f.logBatch(tok, map[string]any{"run": "run-1", "points": points})
+
+	series := func(query string) int {
+		t.Helper()
+		resp := f.do("GET", "/api/v1/experiments/alice/exp/proj/metrics"+query, "", nil)
+		if resp.status() != 200 {
+			t.Fatalf("metrics%s status = %d, body = %s", query, resp.status(), resp.rec.Body.String())
+		}
+		var body apitypes.ExpMetricsResponse
+		resp.json(t, &body)
+		if len(body.Series) != 1 {
+			t.Fatalf("metrics%s returned %d series, want 1", query, len(body.Series))
+		}
+		return len(body.Series[0].Points)
+	}
+
+	// Unauthenticated, and asking for far more than exists.
+	if got := series("?max_points=100000000"); got != maxMetricPoints {
+		t.Fatalf("max_points=100000000 returned %d points, want the ceiling %d", got, maxMetricPoints)
+	}
+	// A value under the ceiling is still honoured, and omitting it still
+	// falls back to the package default of 1000 rather than the ceiling.
+	if got := series("?max_points=50"); got != 50 {
+		t.Fatalf("max_points=50 returned %d points", got)
+	}
+	if got := series(""); got != 1000 {
+		t.Fatalf("no max_points returned %d points, want the default 1000", got)
 	}
 }

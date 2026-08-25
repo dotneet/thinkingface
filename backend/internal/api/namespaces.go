@@ -248,6 +248,10 @@ func (s *Server) handleUpdateMyProfile(w http.ResponseWriter, r *http.Request) {
 // The follower/like counters are not modelled at all and are reported as 0
 // rather than omitted: huggingface_hub's User dataclass tolerates missing
 // keys, but a caller reading `num_likes` should get a number.
+//
+// `orgs` is the one field that is not simply the profile read back: it is
+// filtered to the memberships the caller may see (visibleOrgsFor), so an
+// unauthenticated request cannot rebuild a members-only roster from it.
 func (s *Server) handleHFUserOverview(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	p, ok := s.loadNamespaceOfKind(w, r, chi.URLParam(r, "username"), apitypes.NamespaceKindUser, "user")
@@ -266,6 +270,10 @@ func (s *Server) handleHFUserOverview(w http.ResponseWriter, r *http.Request) {
 		handleStoreError(w, "load user", err)
 		return
 	}
+	// visibleOrgsFor, not whoamiOrgs: this endpoint is public and describes
+	// somebody else, so the memberships it lists are narrowed to the ones the
+	// caller could already read off that organisation's member list.
+	orgs := s.visibleOrgsFor(ctx, user, currentUser(ctx))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user":         p.Name,
 		"fullname":     displayNameOr(p, p.Name),
@@ -279,7 +287,7 @@ func (s *Server) handleHFUserOverview(w http.ResponseWriter, r *http.Request) {
 		"numFollowers": 0,
 		"numFollowing": 0,
 		"isPro":        false,
-		"orgs":         s.whoamiOrgs(ctx, user),
+		"orgs":         orgs,
 	})
 }
 

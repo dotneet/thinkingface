@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -512,7 +513,13 @@ func (s *Server) handleRemoveOrgMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	username := chi.URLParam(r, "username")
-	leaving := username == actor.Username
+	// Case-insensitively, like every other account lookup in the system
+	// (store.GetUserByUsername and store.NamespaceRoleFor both compare on
+	// LOWER()). With a raw == a member spelling their own name differently
+	// from the row -- DELETE .../members/Alice as `alice` -- was refused as
+	// somebody else's removal, and an admin doing the same to themselves had
+	// it logged as member.removed rather than member.left.
+	leaving := strings.EqualFold(username, actor.Username)
 
 	role, err := s.roleIn(r.Context(), actor, org.Name)
 	if err != nil {
@@ -590,6 +597,14 @@ func (s *Server) handleOrgAuditLog(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 {
 		limit = defaultAuditPageSize
 	}
+	// Clamped to the same ceiling the store applies, because the "is there
+	// another page?" test below compares the page against `limit`. With an
+	// unclamped one -- ?limit=500 -- a full page of 200 rows can never equal
+	// it, so next_before came back 0 and the client read that as the end of
+	// the log (docs/dev/api-contract.md §1.1).
+	if limit > store.MaxOrgPageSize {
+		limit = store.MaxOrgPageSize
+	}
 	entries, err := s.store.ListOrgAudit(r.Context(), org.ID, before, limit)
 	if err != nil {
 		internalError(w, "list audit log", err)
@@ -648,7 +663,8 @@ func (s *Server) handleHFOrgMembers(w http.ResponseWriter, r *http.Request) {
 
 // whoamiOrgs builds the `orgs` array of GET /api/whoami-v2 in HuggingFace's
 // shape (docs/dev/organization-design.md §7.2). `hf auth whoami` prints name and
-// roleInOrg from it.
+// roleInOrg from it. It is the caller's own memberships, so every row is
+// theirs to see and there is nothing to filter.
 func (s *Server) whoamiOrgs(ctx context.Context, user *store.User) []map[string]any {
 	orgs, err := s.store.ListOrgsForUser(ctx, user.ID)
 	if err != nil {
@@ -657,23 +673,73 @@ func (s *Server) whoamiOrgs(ctx context.Context, user *store.User) []map[string]
 	}
 	out := make([]map[string]any, 0, len(orgs))
 	for i := range orgs {
-		o := &orgs[i]
-		fullname := o.DisplayName
-		if fullname == "" {
-			fullname = o.Name
-		}
-		out = append(out, map[string]any{
-			"type":         "org",
-			"id":           strconv.FormatInt(o.ID, 10),
-			"name":         o.Name,
-			"fullname":     fullname,
-			"email":        nil,
-			"canPay":       false,
-			"periodEnd":    nil,
-			"avatarUrl":    o.AvatarURL,
-			"isEnterprise": false,
-			"roleInOrg":    o.Role,
-		})
+		out = append(out, hfOrgEntry(&orgs[i]))
 	}
 	return out
+}
+
+// visibleOrgsFor is whoamiOrgs for somebody else's account: the `orgs` array
+// of GET /api/users/{username}/overview, where the subject and the viewer are
+// two different people.
+//
+// A membership is not public by default. The roster endpoints
+// (GET /api/v1/orgs/{org}/members and its HF twin) answer 403 to a non-member
+// unless members_visibility is "public", and listing an organisation here
+// would hand back the same fact -- "alice belongs to acme" -- from the other
+// side, letting anyone reconstruct a members-only roster by walking usernames.
+// So this shows an organisation only to someone who could have read its member
+// list anyway: a member of it (RoleRead or better, which a site admin gets
+// too), or anybody at all when the roster is public
+// (docs/dev/organization-design.md §4 *1).
+//
+// roleInOrg survives that filter rather than being dropped, because the UI's
+// own member list already returns every member's role to exactly this
+// audience (toOrgMemberAPI); withholding it here would hide nothing that is
+// not one request away.
+func (s *Server) visibleOrgsFor(ctx context.Context, subject *store.User, viewer *store.User) []map[string]any {
+	orgs, err := s.store.ListOrgsForUser(ctx, subject.ID)
+	if err != nil {
+		slog.Error("list organisations for overview", "user", subject.Username, "error", err)
+		return []map[string]any{}
+	}
+	out := make([]map[string]any, 0, len(orgs))
+	for i := range orgs {
+		o := &orgs[i]
+		if o.MembersVisibility != "public" {
+			role, err := s.roleIn(ctx, viewer, o.Name)
+			if err != nil {
+				// Fail closed: an unreadable role is not a licence to
+				// publish a members-only membership.
+				slog.Error("check organisation role for overview",
+					"organisation", o.Name, "error", err)
+				continue
+			}
+			if role < RoleRead {
+				continue
+			}
+		}
+		out = append(out, hfOrgEntry(o))
+	}
+	return out
+}
+
+// hfOrgEntry is one element of the `orgs` array both endpoints above return,
+// in HuggingFace's organisation shape.
+func hfOrgEntry(o *store.OrgSummary) map[string]any {
+	fullname := o.DisplayName
+	if fullname == "" {
+		fullname = o.Name
+	}
+	return map[string]any{
+		"type":         "org",
+		"id":           strconv.FormatInt(o.ID, 10),
+		"name":         o.Name,
+		"fullname":     fullname,
+		"email":        nil,
+		"canPay":       false,
+		"periodEnd":    nil,
+		"avatarUrl":    o.AvatarURL,
+		"isEnterprise": false,
+		"roleInOrg":    o.Role,
+	}
 }

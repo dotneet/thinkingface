@@ -92,8 +92,11 @@ func TestOrgPermissionMatrix(t *testing.T) {
 			call: func(f *orgFixture) response { return f.call("GET", "/api/v1/repos/model/acme/secret", nil) },
 		},
 		{
+			// 403 rather than 400 for the two roles that may not: an
+			// insufficient role is not something the request body can fix,
+			// and every other operation in this matrix says so with a 403.
 			op:   "create a repository",
-			want: map[string]int{"none": 400, "read": 400, "write": 200, "admin": 200, "site-admin": 200},
+			want: map[string]int{"none": 403, "read": 403, "write": 200, "admin": 200, "site-admin": 200},
 			call: func(f *orgFixture) response {
 				return f.call("POST", "/api/v1/repos", map[string]any{
 					"kind": "model", "namespace": "acme", "name": "fresh",
@@ -775,4 +778,174 @@ func containsString(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// ------------------------------------------------- membership disclosure
+
+// TestHFUserOverviewOrgsVisibility pins what GET /api/users/{username}/overview
+// may say about an account's organisations. The endpoint is public, so its
+// `orgs` array had to be narrowed to the same audience the roster endpoints
+// serve: without that, `GET /api/v1/orgs/acme/members` answering 403 to a
+// non-member meant nothing, because the same roster could be rebuilt one
+// username at a time from this side.
+func TestHFUserOverviewOrgsVisibility(t *testing.T) {
+	f := newTransferFixture(t)
+	// acme keeps the default members_visibility ("members"); alice and bob
+	// are in it, carol is not.
+	org := f.org("acme", f.alice)
+	f.addOrgMember(org.ID, f.bob.ID, "read")
+	carol := f.mustUser(context.Background(), "carol", false)
+
+	orgsIn := func(what, token string) []string {
+		t.Helper()
+		resp := f.do("GET", "/api/users/alice/overview", token, nil)
+		if resp.status() != 200 {
+			t.Fatalf("%s: overview status = %d, body = %s", what, resp.status(), resp.rec.Body.String())
+		}
+		var body struct {
+			Orgs []map[string]any `json:"orgs"`
+		}
+		resp.json(t, &body)
+		names := make([]string, 0, len(body.Orgs))
+		for _, o := range body.Orgs {
+			name, _ := o["name"].(string)
+			names = append(names, name)
+		}
+		return names
+	}
+
+	// The two cases the roster endpoint refuses.
+	if got := orgsIn("anonymous", ""); len(got) != 0 {
+		t.Fatalf("unauthenticated overview leaked memberships: %v", got)
+	}
+	if got := orgsIn("non-member", f.token(carol, "read")); len(got) != 0 {
+		t.Fatalf("non-member overview leaked memberships: %v", got)
+	}
+	// A fellow member may already list the roster, so nothing is hidden.
+	if got := orgsIn("member", f.token(f.bob, "read")); !containsString(got, "acme") {
+		t.Fatalf("member overview = %v, want acme", got)
+	}
+	// So may the subject themself, and a site admin.
+	if got := orgsIn("self", f.token(f.alice, "read")); !containsString(got, "acme") {
+		t.Fatalf("own overview = %v, want acme", got)
+	}
+	if got := orgsIn("site admin", f.token(f.admin, "read")); !containsString(got, "acme") {
+		t.Fatalf("site admin overview = %v, want acme", got)
+	}
+
+	// members_visibility=public is the setting that opens the roster, and it
+	// opens this the same way.
+	vis := "public"
+	if _, err := f.st.UpdateOrg(context.Background(), org.ID, store.OrgUpdate{MembersVisibility: &vis}); err != nil {
+		t.Fatalf("make roster public: %v", err)
+	}
+	if got := orgsIn("anonymous, public roster", ""); !containsString(got, "acme") {
+		t.Fatalf("public roster overview = %v, want acme", got)
+	}
+}
+
+// TestWhoamiOrgsUnchangedByOverviewFiltering guards the other half of that
+// change: /api/whoami-v2 describes the caller's own account, every row in it
+// is theirs, and `hf auth whoami` prints name and roleInOrg from it. The
+// filtering above must not reach it.
+func TestWhoamiOrgsUnchangedByOverviewFiltering(t *testing.T) {
+	f := newTransferFixture(t)
+	f.org("acme", f.alice) // default members_visibility, and alice is its admin
+
+	resp := f.do("GET", "/api/whoami-v2", f.token(f.alice, "read"), nil)
+	if resp.status() != 200 {
+		t.Fatalf("whoami status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+	var body struct {
+		Orgs []map[string]any `json:"orgs"`
+	}
+	resp.json(t, &body)
+	if len(body.Orgs) != 1 {
+		t.Fatalf("whoami orgs = %#v, want the one membership", body.Orgs)
+	}
+	if body.Orgs[0]["name"] != "acme" || body.Orgs[0]["roleInOrg"] != "admin" ||
+		body.Orgs[0]["type"] != "org" || body.Orgs[0]["isEnterprise"] != false {
+		t.Fatalf("whoami orgs[0] = %#v", body.Orgs[0])
+	}
+}
+
+// ------------------------------------------------------------ audit paging
+
+// TestOrgAuditLogLimitAboveStoreCeiling covers the paging cursor for a limit
+// larger than the store's own ceiling. The store clamps to
+// store.MaxOrgPageSize, so a page can never be as long as the limit the
+// handler was asked for; comparing the two made every such response look like
+// the end of the log (next_before 0) and a client following the cursor
+// stopped reading after the first 200 entries.
+func TestOrgAuditLogLimitAboveStoreCeiling(t *testing.T) {
+	f := newTransferFixture(t)
+	org := f.org("acme", f.alice)
+	ctx := context.Background()
+	// Comfortably more than one clamped page.
+	const total = store.MaxOrgPageSize + 25
+	for i := range total {
+		if err := f.st.AppendOrgAudit(ctx, org.ID, store.AuditEntry{
+			Action: auditOrgUpdated, TargetName: fmt.Sprintf("acme-%d", i),
+		}); err != nil {
+			t.Fatalf("append audit %d: %v", i, err)
+		}
+	}
+
+	tok := f.token(f.alice, "write")
+	page := func(query string) apitypes.OrgAuditLogResponse {
+		t.Helper()
+		resp := f.do("GET", "/api/v1/orgs/acme/audit-log"+query, tok, nil)
+		if resp.status() != 200 {
+			t.Fatalf("audit log%s status = %d, body = %s", query, resp.status(), resp.rec.Body.String())
+		}
+		var body apitypes.OrgAuditLogResponse
+		resp.json(t, &body)
+		return body
+	}
+
+	first := page("?limit=500")
+	if len(first.Items) != store.MaxOrgPageSize {
+		t.Fatalf("limit=500 returned %d items, want the store ceiling %d",
+			len(first.Items), store.MaxOrgPageSize)
+	}
+	if first.NextBefore == 0 {
+		t.Fatalf("next_before = 0 with %d entries left to read", total-len(first.Items))
+	}
+	rest := page(fmt.Sprintf("?limit=500&before=%d", first.NextBefore))
+	if len(rest.Items) != total-store.MaxOrgPageSize {
+		t.Fatalf("second page = %d items, want %d", len(rest.Items), total-store.MaxOrgPageSize)
+	}
+	// A genuinely short page still marks the end.
+	if rest.NextBefore != 0 {
+		t.Fatalf("next_before = %d on the last page, want 0", rest.NextBefore)
+	}
+}
+
+// ------------------------------------------------------- leaving, by name
+
+// TestLeaveOrgIsCaseInsensitive drives DELETE .../members/{username} with the
+// caller's own name spelled differently from the row. Identity is
+// case-insensitive everywhere else (store.GetUserByUsername and
+// store.NamespaceRoleFor both compare on LOWER()), so a write member
+// addressing themself as "Alice" must still be leaving -- it used to be
+// refused as an attempt to remove somebody else.
+func TestLeaveOrgIsCaseInsensitive(t *testing.T) {
+	f := newTransferFixture(t)
+	org := f.org("acme", f.bob) // bob stays behind as the last admin
+	f.addOrgMember(org.ID, f.alice.ID, "write")
+
+	resp := f.do("DELETE", "/api/v1/orgs/acme/members/Alice", f.token(f.alice, "write"), nil)
+	if resp.status() != 204 {
+		t.Fatalf("leave as Alice: status = %d, want 204, body = %s", resp.status(), resp.rec.Body.String())
+	}
+
+	// And it is recorded as leaving rather than as a removal, which is what
+	// the audit log's two actions are for.
+	entries, err := f.st.ListOrgAudit(context.Background(), org.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	if len(entries) == 0 || entries[0].Action != auditMemberLeft {
+		t.Fatalf("audit = %+v, want a %s entry on top", entries, auditMemberLeft)
+	}
 }
