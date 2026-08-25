@@ -4,7 +4,8 @@
 //
 // File location: $TF_CONFIG if set, else $XDG_CONFIG_HOME/thinkingface/config.json,
 // else ~/.config/thinkingface/config.json. Written 0600 inside a 0700 directory,
-// atomically (write temp + rename).
+// atomically (write temp + rename). The 0700 is re-applied on every Save, but
+// only to a directory this package invented -- see ensurePrivateDir.
 package config
 
 import (
@@ -84,6 +85,9 @@ func (f *File) Save() error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("config: create %s: %w", dir, err)
 	}
+	if err := ensurePrivateDir(dir); err != nil {
+		return err
+	}
 
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
@@ -111,6 +115,46 @@ func (f *File) Save() error {
 	}
 	if err := os.Rename(tmpPath, p); err != nil {
 		return fmt.Errorf("config: rename %s to %s: %w", tmpPath, p, err)
+	}
+	return nil
+}
+
+// ensurePrivateDir drops the group and other bits from the directory holding
+// the config file.
+//
+// os.MkdirAll only applies its mode to the directories it actually creates, so
+// a thinkingface/ directory left over from an older version -- or from
+// anything else that happened to create it first, under whatever umask -- keeps
+// the permissions it was born with, and Save alone would never correct them.
+// The token itself stays unreadable either way (the file is 0600), but a
+// group- or world-searchable directory still tells every other local account
+// that this machine has tf credentials, and re-tightening costs one stat.
+//
+// It deliberately does nothing when TF_CONFIG names the file: that path is the
+// user's own choice, its parent is a directory we did not invent and may well
+// be shared on purpose (in the extreme, TF_CONFIG=$HOME/tf.json makes it the
+// home directory itself), and silently narrowing somebody else's directory is
+// a surprise far bigger than the exposure it removes. Only the
+// $XDG_CONFIG_HOME/thinkingface and ~/.config/thinkingface directories, which
+// exist solely because Path() made them up, are ours to tighten.
+//
+// A failure to stat or chmod is returned rather than ignored: at that point we
+// are about to write a token into a directory whose permissions we could not
+// establish.
+func ensurePrivateDir(dir string) error {
+	if os.Getenv("TF_CONFIG") != "" {
+		return nil
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("config: stat %s: %w", dir, err)
+	}
+	perm := info.Mode().Perm()
+	if perm&0o077 == 0 {
+		return nil
+	}
+	if err := os.Chmod(dir, perm&^0o077); err != nil {
+		return fmt.Errorf("config: chmod %s: %w", dir, err)
 	}
 	return nil
 }

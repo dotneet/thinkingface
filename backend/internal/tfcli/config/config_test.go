@@ -138,6 +138,80 @@ func TestSaveLoadRoundTripAndPermissions(t *testing.T) {
 	}
 }
 
+// A thinkingface/ directory that already exists keeps whatever mode it was
+// created with -- os.MkdirAll leaves an existing directory alone -- so Save
+// has to tighten it itself.
+func TestSaveTightensExistingLooseDir(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("TF_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	dir := filepath.Join(xdg, "thinkingface")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Mkdir applies the umask, so set the mode explicitly to be sure the
+	// starting point really is world-readable.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	f := &File{}
+	f.Set(Credential{Endpoint: "https://tf.example.com", Token: "secret-token"})
+	if err := f.Save(); err != nil {
+		t.Fatalf("Save(): %v", err)
+	}
+
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat config dir: %v", err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm != 0o700 {
+		t.Errorf("config dir mode = %o, want 0700", perm)
+	}
+	info, err := os.Stat(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("stat saved config: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("config file mode = %o, want 0600", perm)
+	}
+}
+
+// The counterpart: a directory named by TF_CONFIG belongs to the user, not to
+// us, so Save must not narrow it even when it is world-readable.
+func TestSaveLeavesTFConfigDirAlone(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TF_CONFIG", filepath.Join(dir, "config.json"))
+
+	f := &File{}
+	f.Set(Credential{Endpoint: "https://tf.example.com", Token: "secret-token"})
+	if err := f.Save(); err != nil {
+		t.Fatalf("Save(): %v", err)
+	}
+
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat config dir: %v", err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm != 0o755 {
+		t.Errorf("config dir mode = %o, want it left at 0755", perm)
+	}
+	info, err := os.Stat(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("stat saved config: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("config file mode = %o, want 0600", perm)
+	}
+}
+
 func TestRemoveDefaultReassignment(t *testing.T) {
 	f := &File{}
 	f.Set(Credential{Endpoint: "https://a.example.com", Token: "a"})
