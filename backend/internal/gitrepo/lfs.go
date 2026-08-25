@@ -36,7 +36,7 @@ func ParseLFSPointer(data []byte) (LFSPointer, bool) {
 		}
 	}
 	var p LFSPointer
-	seenVersion := false
+	seenVersion, seenSize := false, false
 	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
 		key, value, found := strings.Cut(line, " ")
 		if !found {
@@ -60,9 +60,16 @@ func ParseLFSPointer(data []byte) (LFSPointer, bool) {
 				return LFSPointer{}, false
 			}
 			p.Size = n
+			seenSize = true
 		}
 	}
-	if !seenVersion || p.OID == "" {
+	// All three fields are required by the spec and git-lfs always writes
+	// them; a blob missing one is not a pointer. Accepting a sizeless one and
+	// calling it zero bytes is worse than treating it as ordinary content,
+	// because the zero travels: it becomes the file's advertised size, the
+	// X-Linked-Size header, and finally a Content-Length of 0 in front of a
+	// body that is not empty, which net/http truncates.
+	if !seenVersion || p.OID == "" || !seenSize {
 		return LFSPointer{}, false
 	}
 	return p, true

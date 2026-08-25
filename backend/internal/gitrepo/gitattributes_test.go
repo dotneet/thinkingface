@@ -1,6 +1,10 @@
 package gitrepo
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestShouldUseLFS_PatternMatch(t *testing.T) {
 	rules := ParseGitAttributes([]byte(DefaultGitAttributes("model")))
@@ -175,5 +179,114 @@ func TestShouldUseLFS_AnchoredPatternDoesNotCrossSeparators(t *testing.T) {
 	}
 	if rules.ShouldUseLFS("data/a/x.bin", 10) {
 		t.Errorf("data/*.bin must not match across a separator")
+	}
+}
+
+// TestMatchSegments_DoubleStarSemantics pins the meaning of "**" down before
+// anything touches how it is computed. Every case here held under the plain
+// backtracking version too: making the matcher fast must not make it answer
+// anything differently.
+func TestMatchSegments_DoubleStarSemantics(t *testing.T) {
+	tests := []struct {
+		pattern string
+		path    string
+		want    bool
+	}{
+		{"saved_model/**/*", "saved_model/1/variables.pb", true},
+		{"saved_model/**/*", "saved_model/x.pb", true},
+		{"saved_model/**/*", "saved_model", false},
+		{"data/**/*.bin", "data/a/b/c/model.bin", true},
+		{"data/**/*.bin", "data/model.bin", true},
+		{"data/**/*.bin", "data/model.txt", false},
+		{"data/**/*.bin", "other/model.bin", false},
+		{"**/logs/*.txt", "a/b/logs/run.txt", true},
+		{"**/logs/*.txt", "logs/run.txt", true},
+		{"**/logs/*.txt", "logs/nested/run.txt", false},
+		{"a/**", "a/b", true},
+		{"a/**", "a/b/c", true},
+		{"a/**", "a", false},
+		// Consecutive stars are folded into one; zero-or-more twice over is
+		// still zero-or-more.
+		{"a/**/**/b", "a/b", true},
+		{"a/**/**/b", "a/x/y/b", true},
+		{"a/**/**/b", "a/x/y", false},
+		{"**/**", "a", true},
+		{"a/**/b/**/c", "a/x/b/y/c", true},
+		{"a/**/b/**/c", "a/b/c", true},
+		{"a/**/b/**/c", "a/x/c", false},
+	}
+	for _, tt := range tests {
+		if got := matchAttrPattern(tt.pattern, tt.path); got != tt.want {
+			t.Errorf("matchAttrPattern(%q, %q) = %v, want %v", tt.pattern, tt.path, got, tt.want)
+		}
+	}
+}
+
+// TestShouldUseLFS_PathologicalDoubleStarIsNotExponential is the regression
+// test for a denial of service. Both halves of the input are attacker-chosen
+// -- the pattern is the repository's own .gitattributes, the path comes
+// straight out of a preupload request body, and one request may carry many
+// paths -- and the matcher that backtracked over each "**" independently took
+// seconds per path on the input below. There is no timeout anywhere on that
+// path, so "slow" means the request handler is simply gone.
+func TestShouldUseLFS_PathologicalDoubleStarIsNotExponential(t *testing.T) {
+	// Eight stars over a forty-segment path: 8.24s before the fix, well under
+	// a millisecond after it.
+	pattern := "a/" + strings.Repeat("**/", 8) + "z.bin"
+	path := "a/" + strings.Repeat("x/", 40) + "y.txt" // deliberately does not match
+	rules := ParseGitAttributes([]byte(pattern + " filter=lfs\n"))
+
+	done := make(chan bool, 1)
+	go func() { done <- rules.ShouldUseLFS(path, 1) }()
+
+	select {
+	case got := <-done:
+		if got {
+			t.Fatalf("ShouldUseLFS(%q) = true, want false", path)
+		}
+	case <-time.After(5 * time.Second):
+		// Failing rather than hanging: a regression here is exponential, so
+		// waiting for the answer is not an option.
+		t.Fatalf("matching %q against a pathological pattern did not finish in 5s", path)
+	}
+}
+
+// TestShouldUseLFS_PathologicalDoubleStarStaysLinear states the complexity
+// claim as something a test can check: the table is O(pattern * path), so
+// doubling the path length roughly doubles the work rather than squaring it.
+// The measurement runs behind a deadline for the same reason the test above
+// does -- a regression here does not get slower, it stops returning.
+func TestShouldUseLFS_PathologicalDoubleStarStaysLinear(t *testing.T) {
+	pattern := "a/" + strings.Repeat("**/", 8) + "z.bin"
+	rules := ParseGitAttributes([]byte(pattern + " filter=lfs\n"))
+
+	// Enough repetitions that the two measurements are milliseconds rather
+	// than scheduler noise.
+	const reps = 2000
+	elapsed := func(segments int) time.Duration {
+		p := "a/" + strings.Repeat("x/", segments) + "y.txt"
+		start := time.Now()
+		for i := 0; i < reps; i++ {
+			rules.ShouldUseLFS(p, 1)
+		}
+		return time.Since(start)
+	}
+
+	type result struct{ small, large time.Duration }
+	done := make(chan result, 1)
+	go func() {
+		elapsed(8) // warm up, so the first call's cost does not land on a measurement
+		done <- result{small: elapsed(20), large: elapsed(40)}
+	}()
+
+	select {
+	case got := <-done:
+		// A generous bound: twice the path should be about twice the time,
+		// and anything exponential blows past 8x on this one step.
+		if got.large > 8*got.small+time.Millisecond {
+			t.Fatalf("doubling the path length took %v vs %v, which is not linear growth", got.large, got.small)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("matching a pathological pattern %d times did not finish in 10s", 3*reps)
 	}
 }

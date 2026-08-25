@@ -77,6 +77,13 @@ func TestParseLFSPointer_RejectsMissingFields(t *testing.T) {
 	}{
 		{"no version line", "oid sha256:" + validOID() + "\nsize 1\n"},
 		{"no oid line", "version https://git-lfs.github.com/spec/v1\nsize 1\n"},
+		// A pointer without a size used to parse as Size=0, and the zero
+		// travelled: it became the file's listed size, the X-Linked-Size
+		// header, and finally a Content-Length of 0 in front of a body that
+		// was not empty, which net/http truncates. size is required by the
+		// spec and git-lfs always writes it, so a blob missing it is content.
+		{"no size line", "version https://git-lfs.github.com/spec/v1\noid sha256:" + validOID() + "\n"},
+		{"only version", "version https://git-lfs.github.com/spec/v1\n"},
 		{"empty", ""},
 		{"line without space", "version https://git-lfs.github.com/spec/v1\nnotakeyvalueline\n"},
 	}
