@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -40,9 +41,12 @@ func TestIntegrationOrgCRUD(t *testing.T) {
 		}
 
 		// The founder is an admin member, and nothing else.
-		members, err := s.ListOrgMembers(ctx, org.ID)
+		members, total, err := s.ListOrgMembers(ctx, org.ID, 0, 0)
 		if err != nil || len(members) != 1 || members[0].Username != "alice" || members[0].Role != "admin" {
 			t.Fatalf("members = %+v, %v", members, err)
+		}
+		if total != 1 {
+			t.Fatalf("total = %d, want 1", total)
 		}
 		if members[0].AddedBy == nil || *members[0].AddedBy != f.alice.ID {
 			t.Fatalf("added_by = %v, want alice", members[0].AddedBy)
@@ -128,7 +132,7 @@ func TestIntegrationOrgMembers(t *testing.T) {
 		if _, err := s.AddOrgMember(ctx, org.ID, f.admin.ID, "read", f.alice.ID); err != nil {
 			t.Fatalf("add read member: %v", err)
 		}
-		members, err := s.ListOrgMembers(ctx, org.ID)
+		members, _, err := s.ListOrgMembers(ctx, org.ID, 0, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -387,7 +391,7 @@ func TestIntegrationOrgFounderBackfill(t *testing.T) {
 			t.Fatalf("replay backfill: %v", err)
 		}
 
-		members, err := s.ListOrgMembers(ctx, org.ID)
+		members, _, err := s.ListOrgMembers(ctx, org.ID, 0, 0)
 		if err != nil || len(members) != 1 || members[0].Username != "alice" || members[0].Role != "admin" {
 			t.Fatalf("backfilled members = %+v, %v", members, err)
 		}
@@ -433,4 +437,101 @@ func orgFounderBackfillSQL(t *testing.T, engine string) string {
 		t.Fatalf("could not locate the backfill block in %s", name)
 	}
 	return string(raw)[start:end]
+}
+
+// TestIntegrationOrgMemberPaging pins the page window of the roster. The
+// listing used to have none at all: every caller read every membership row,
+// so a large organisation cost more to look at simply for being large.
+//
+// The clamp is the part worth a test of its own. A caller that asks for more
+// than MaxOrgPageSize gets MaxOrgPageSize, and `total` keeps counting the
+// whole membership, which is what lets the caller tell "a full page with more
+// behind it" from "the end of the roster". Deriving that from the number it
+// asked for instead is the bug the audit log had.
+func TestIntegrationOrgMemberPaging(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+		org := mustOrg(t, s, "acme", f.alice, OrgUpdate{})
+
+		// Enough members that a clamped page leaves some behind. The names are
+		// zero-padded so alphabetical order is also numerical order, which is
+		// what makes the walk below able to name the row it expects.
+		const extra = MaxOrgPageSize + 24
+		for i := 0; i < extra; i++ {
+			name := fmt.Sprintf("member%04d", i)
+			u, err := s.CreateUser(ctx, name, name+"@example.com", "hash", false)
+			if err != nil {
+				t.Fatalf("create %s: %v", name, err)
+			}
+			if _, err := s.AddOrgMember(ctx, org.ID, u.ID, "read", f.alice.ID); err != nil {
+				t.Fatalf("add %s: %v", name, err)
+			}
+		}
+		wantTotal := int64(extra + 1) // the founder is a member too
+
+		// No limit is the default page, not the whole roster.
+		page, total, err := s.ListOrgMembers(ctx, org.ID, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) != defaultOrgPageSize || total != wantTotal {
+			t.Fatalf("default page = %d rows, total %d; want %d rows, total %d",
+				len(page), total, defaultOrgPageSize, wantTotal)
+		}
+		if page[0].Username != "alice" || page[0].Role != "admin" {
+			t.Fatalf("first row = %+v, want the admin first", page[0])
+		}
+
+		// An oversized limit is clamped, and the total still describes the
+		// whole roster -- so `offset + len(page) < total` still finds the rest.
+		page, total, err = s.ListOrgMembers(ctx, org.ID, 500, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) != MaxOrgPageSize {
+			t.Fatalf("clamped page = %d rows, want %d", len(page), MaxOrgPageSize)
+		}
+		if total != wantTotal {
+			t.Fatalf("total = %d, want %d", total, wantTotal)
+		}
+		if int64(len(page)) >= total {
+			t.Fatalf("a clamped page of %d looks like the whole roster of %d", len(page), total)
+		}
+
+		// A negative offset is the first page rather than a database error.
+		if first, _, err := s.ListOrgMembers(ctx, org.ID, 10, -5); err != nil || len(first) != 10 ||
+			first[0].Username != "alice" {
+			t.Fatalf("negative offset = %+v, %v", first, err)
+		}
+
+		// Walking the pages visits every member exactly once, in one order.
+		seen := map[string]bool{}
+		var order []string
+		for offset := 0; ; offset += MaxOrgPageSize {
+			p, tot, err := s.ListOrgMembers(ctx, org.ID, MaxOrgPageSize, offset)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, m := range p {
+				if seen[m.Username] {
+					t.Fatalf("%s appeared on two pages", m.Username)
+				}
+				seen[m.Username] = true
+				order = append(order, m.Username)
+			}
+			if int64(len(seen)) >= tot {
+				break
+			}
+			if len(p) == 0 {
+				t.Fatalf("paging stalled after %d of %d members", len(seen), tot)
+			}
+		}
+		if int64(len(seen)) != wantTotal {
+			t.Fatalf("walked %d members, want %d", len(seen), wantTotal)
+		}
+		if order[0] != "alice" || order[1] != "member0000" || order[len(order)-1] != fmt.Sprintf("member%04d", extra-1) {
+			t.Fatalf("page order broke at the seams: %v ... %v", order[:2], order[len(order)-1])
+		}
+	})
 }

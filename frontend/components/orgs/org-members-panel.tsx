@@ -5,6 +5,7 @@ import { buttonClass } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { errorMessage } from "@/lib/api-error-message";
+import { formatNumber } from "@/lib/format";
 import { getT } from "@/lib/i18n/server";
 import { namespaceHref } from "@/lib/namespace";
 import { listMembers, orgSettingsHref } from "@/lib/orgs";
@@ -18,9 +19,16 @@ import { authHeaders } from "@/lib/server-auth";
  * failure here is a *state* — "private" — not an error to shout about. Only a
  * successful 200 renders a list.
  */
+// How many members the namespace page shows. This is a summary next to the
+// repositories, not the roster: the full, paged list lives at the
+// organisation's members settings screen. Asking for a bounded page rather
+// than everything is also what keeps a large organisation from turning this
+// panel into the page's slowest part.
+const PANEL_MEMBERS = 24;
+
 export async function OrgMembersPanel({ ns, canAdmin }: { ns: string; canAdmin: boolean }) {
   const [t, headers] = await Promise.all([getT(), authHeaders()]);
-  const result = await listMembers(ns, { headers });
+  const result = await listMembers(ns, { limit: PANEL_MEMBERS }, { headers });
 
   if (!result.ok) {
     // 401/403 is the documented "you may not see this" answer; anything else
@@ -47,6 +55,7 @@ export async function OrgMembersPanel({ ns, canAdmin }: { ns: string; canAdmin: 
   }
 
   const members = result.data.items;
+  const hidden = result.data.total - members.length;
 
   return (
     <section className="flex flex-col gap-3">
@@ -83,6 +92,11 @@ export async function OrgMembersPanel({ ns, canAdmin }: { ns: string; canAdmin: 
               <OrgRoleBadge role={member.role} label={t(orgRoleLabelKey(member.role))} />
             </li>
           ))}
+          {hidden > 0 && (
+            <li className="flex items-center px-2.5 py-1.5 text-sm text-fg-subtle">
+              {t("org.page.membersMore", { count: formatNumber(hidden) })}
+            </li>
+          )}
         </ul>
       )}
     </section>

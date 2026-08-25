@@ -316,7 +316,10 @@ func (s *Server) orgResponse(w http.ResponseWriter, r *http.Request, org *store.
 		internalError(w, "check organisation role", err)
 		return apitypes.OrgResponse{}, false
 	}
-	members, err := s.store.ListOrgMembers(ctx, org.ID)
+	// Only the headcount is wanted here, so it is counted rather than read:
+	// this used to list every membership row and take its length, which made
+	// the organisation page cost one row per member to render a number.
+	members, err := s.store.CountOrgMembers(ctx, org.ID)
 	if err != nil {
 		internalError(w, "count organisation members", err)
 		return apitypes.OrgResponse{}, false
@@ -326,7 +329,7 @@ func (s *Server) orgResponse(w http.ResponseWriter, r *http.Request, org *store.
 		internalError(w, "count organisation repositories", err)
 		return apitypes.OrgResponse{}, false
 	}
-	return apitypes.OrgResponse{Org: toOrgAPI(org, role, int64(len(members)), repos)}, true
+	return apitypes.OrgResponse{Org: toOrgAPI(org, role, members, repos)}, true
 }
 
 func (s *Server) handleUpdateOrg(w http.ResponseWriter, r *http.Request) {
@@ -389,6 +392,11 @@ func (s *Server) handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
 // handleListOrgMembers answers GET /api/v1/orgs/{org}/members. Members
 // always see the roster; everyone else only when members_visibility is
 // "public", and then without email addresses.
+//
+// The roster is paged like the other listings (`limit` / `offset`, `total`
+// counting the whole membership), because it used to be the one that was
+// not: every caller got every member, so the response and the read behind it
+// grew without bound as an organisation filled up.
 func (s *Server) handleListOrgMembers(w http.ResponseWriter, r *http.Request) {
 	org, ok := s.loadOrg(w, r, chi.URLParam(r, "org"))
 	if !ok {
@@ -404,7 +412,19 @@ func (s *Server) handleListOrgMembers(w http.ResponseWriter, r *http.Request) {
 		forbidden(w, "the member list of "+org.Name+" is visible to its members only")
 		return
 	}
-	members, err := s.store.ListOrgMembers(ctx, org.ID)
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	// Clamped here as well as in the store, so the handler's idea of the page
+	// window is the one that was actually applied. Working from the number
+	// the client asked for instead is what broke the audit log's "is there
+	// another page?" test: with ?limit=500 a full page could never equal it,
+	// so a listing that had more behind it reported its own end
+	// (docs/dev/api-contract.md §1.1).
+	if limit > store.MaxOrgPageSize {
+		limit = store.MaxOrgPageSize
+	}
+	members, total, err := s.store.ListOrgMembers(ctx, org.ID, limit, offset)
 	if err != nil {
 		internalError(w, "list organisation members", err)
 		return
@@ -413,7 +433,7 @@ func (s *Server) handleListOrgMembers(w http.ResponseWriter, r *http.Request) {
 	for i := range members {
 		items = append(items, toOrgMemberAPI(&members[i], role >= RoleRead))
 	}
-	writeJSON(w, http.StatusOK, apitypes.OrgMembersResponse{Items: items})
+	writeJSON(w, http.StatusOK, apitypes.OrgMembersResponse{Items: items, Total: total})
 }
 
 func (s *Server) handleAddOrgMember(w http.ResponseWriter, r *http.Request) {
@@ -624,6 +644,34 @@ func (s *Server) handleOrgAuditLog(w http.ResponseWriter, r *http.Request) {
 
 // ------------------------------------------------------------ HF-compatible
 
+// allOrgMembers reads the whole roster, one clamped page at a time.
+//
+// It exists for the HF-compatible endpoint below, whose wire shape is a bare
+// JSON array with no cursor and no total: huggingface_hub's
+// list_organization_members() reads whatever comes back as the complete list,
+// so returning a truncated one would not be a smaller answer but a wrong one,
+// and the external protocol is the source of truth here (CLAUDE.md invariant
+// 5). What paging buys is the other half of the problem -- no single query
+// materialises more than store.MaxOrgPageSize rows, however large the
+// organisation is. Paging for the *client* belongs on the UI endpoint, which
+// is free to grow a `total` because it is ours to define.
+//
+// The loop terminates on a short page, and again on the total the store
+// reports, so a membership added between two pages cannot spin it.
+func (s *Server) allOrgMembers(ctx context.Context, orgID int64) ([]store.OrgMember, error) {
+	var out []store.OrgMember
+	for offset := 0; ; offset += store.MaxOrgPageSize {
+		page, total, err := s.store.ListOrgMembers(ctx, orgID, store.MaxOrgPageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, page...)
+		if len(page) < store.MaxOrgPageSize || int64(len(out)) >= total {
+			return out, nil
+		}
+	}
+}
+
 // handleHFOrgMembers answers GET /api/organizations/{org}/members, which is
 // what huggingface_hub's HfApi.list_organization_members() calls. HF returns
 // a bare list of accounts with no roles; the authorization is the same as
@@ -643,7 +691,7 @@ func (s *Server) handleHFOrgMembers(w http.ResponseWriter, r *http.Request) {
 		forbidden(w, "the member list of "+org.Name+" is visible to its members only")
 		return
 	}
-	members, err := s.store.ListOrgMembers(ctx, org.ID)
+	members, err := s.allOrgMembers(ctx, org.ID)
 	if err != nil {
 		internalError(w, "list organisation members", err)
 		return

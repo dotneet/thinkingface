@@ -385,16 +385,47 @@ func scanOrgMember(row rowScanner) (*OrgMember, error) {
 	return m, nil
 }
 
-// ListOrgMembers returns the members, admins first and alphabetical inside
-// each role.
-func (s *Store) ListOrgMembers(ctx context.Context, id int64) ([]OrgMember, error) {
+// CountOrgMembers is the organisation's headcount on its own. The
+// organisation page shows the number without showing the roster, and reading
+// every membership row only to take its length made that page cost more the
+// larger the organisation got.
+func (s *Store) CountOrgMembers(ctx context.Context, id int64) (int64, error) {
+	var n int64
+	err := s.db.QueryRow(ctx,
+		`SELECT `+orgMemberCount+` FROM namespaces n WHERE n.id = $1`, id).Scan(&n)
+	return n, norm(err)
+}
+
+// ListOrgMembers returns one page of the members, admins first and
+// alphabetical inside each role, plus the total headcount -- which ignores
+// the page window, so a caller can tell whether anything follows the page it
+// asked for. The window is clamped like every other org-scoped listing: an
+// unbounded roster query means both the response and the rows the driver
+// materialises grow with the organisation, and there is no size at which that
+// becomes anybody's intention.
+//
+// The ordering is total (usernames are unique), so a row cannot appear on two
+// consecutive pages or be skipped between them.
+func (s *Store) ListOrgMembers(ctx context.Context, id int64, limit, offset int) ([]OrgMember, int64, error) {
+	limit, offset = pageWindow(limit, offset, defaultOrgPageSize, MaxOrgPageSize)
+
+	total, err := s.CountOrgMembers(ctx, id)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	args := []any{id}
+	bind := binder(&args)
+	limitP, offsetP := bind(limit), bind(offset)
+
 	rows, err := s.db.Query(ctx,
 		`SELECT `+orgMemberColumns+`
 		 FROM org_members m JOIN users u ON u.id = m.user_id
 		 WHERE m.namespace_id = $1
-		 ORDER BY CASE m.role WHEN 'admin' THEN 0 WHEN 'write' THEN 1 ELSE 2 END, u.username`, id)
+		 ORDER BY CASE m.role WHEN 'admin' THEN 0 WHEN 'write' THEN 1 ELSE 2 END, u.username
+		 LIMIT `+limitP+` OFFSET `+offsetP, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -402,11 +433,11 @@ func (s *Store) ListOrgMembers(ctx context.Context, id int64) ([]OrgMember, erro
 	for rows.Next() {
 		m, err := scanOrgMember(rows)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, *m)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // GetOrgMember reads one membership row. ErrNotFound when the user is not a
