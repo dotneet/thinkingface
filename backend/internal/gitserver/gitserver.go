@@ -209,6 +209,15 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, storagePath stri
 	// holding the body open would pin this handler for as long as it liked.
 	// WaitDelay cannot rescue that case: it closes the pipe git reads from,
 	// which does nothing for a copy that is blocked reading the body.
+	//
+	// The mirror image is still open, and is not this transport's to close.
+	// A client that opens git-receive-pack and then sends nothing leaves git
+	// waiting on stdin, so the copy never returns, cmd.Wait is never reached,
+	// and neither serveWaitDelay nor the grace below has anything to act on.
+	// Nothing here can tell that apart from a push whose first bytes are
+	// simply slow, which is why the server carries no ReadTimeout to begin
+	// with -- bounding it needs an idle watchdog ("no progress at all for N
+	// seconds"), at the server rather than in one handler.
 	var stdinErr error
 	stdinDone := make(chan struct{})
 	go func() {

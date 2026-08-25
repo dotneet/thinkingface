@@ -2125,5 +2125,19 @@ func TestIntegrationLinkLFSObjectsRequiresTheDeclaredSize(t *testing.T) {
 		if has, err := s.RepoHasLFSObject(f.ctx, claimant.ID, oid); err != nil || !has {
 			t.Fatalf("the real size did not link the object: has = %v, err = %v", has, err)
 		}
+
+		// One revision can name an object from two paths. A pointer that is
+		// wrong about the size must not decide for one that is right, whatever
+		// order they arrive in -- deduplicating by oid alone made the first
+		// declaration speak for the rest.
+		second := f.repo(t, "bob", "two-paths", "model", nil)
+		if err := s.LinkLFSObjects(f.ctx, second.ID, []LFSObjectRef{
+			{OID: oid, Size: 1}, {OID: oid, Size: 4096},
+		}); err != nil {
+			t.Fatalf("LinkLFSObjects with a wrong declaration first: %v", err)
+		}
+		if has, err := s.RepoHasLFSObject(f.ctx, second.ID, oid); err != nil || !has {
+			t.Fatalf("a wrong declaration suppressed a correct one: has = %v, err = %v", has, err)
+		}
 	})
 }

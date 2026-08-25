@@ -178,8 +178,9 @@ own compose stack: it is full of E2E leftovers, and the UI must be in English.
 5. **Compatibility with `huggingface_hub` / `datasets` / `git` / `gcloud storage` is the top
    priority.** When changing the behavior of an HF-compatible endpoint (whoami / create_repo
    / preupload / commit / resolve / tree / LFS batch), always run `make test-e2e` to confirm
-   there is no regression. CI now runs the same suite on any PR that touches `backend/`,
-   `e2e/` or a compose file, so a regression is caught before merge rather than after — but
+   there is no regression. CI now runs the same suite on any PR whose diff can affect it (the
+   `changes` job in `.github/workflows/ci.yml` holds the path list), so a regression is caught
+   before merge rather than after — but
    the local run is still the faster loop, and it is the only one that sees your change
    before you push. Remember `docker compose up -d --build api` first: `make up` reuses the
    image it already has, so without a rebuild the suite passes against your *previous* code.

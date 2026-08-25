@@ -221,11 +221,11 @@ bring the image up to date first:
 docker compose up -d --build api
 ```
 
-CI runs the same suite, against both `DATABASE_URL` schemes, on every pull request that touches
-`backend/`, `e2e/`, a compose file or `ci.yml` (the `changes` job in `.github/workflows/ci.yml`
-decides from the diff), as well as on every push to `main` and on manual dispatch. It is skipped
-for pull requests that cannot affect it — a docs or frontend-only change — because it brings up
-the whole stack twice. Running it locally before pushing is still worthwhile: the CI run is the
+CI runs the same suite, against both `DATABASE_URL` schemes, on every push to `main`, on manual
+dispatch, and on any pull request whose diff touches something the suite can exercise — the
+`changes` job in `.github/workflows/ci.yml` holds the list, and is the one place it is written
+down. A pull request that cannot affect it (docs, frontend) skips it, because it brings the
+whole stack up twice. Running it locally before pushing is still worthwhile: the CI run is the
 backstop, not the first place you should find out.
 
 Two parts of it need something beyond a running API. The git-over-SSH cases talk to the

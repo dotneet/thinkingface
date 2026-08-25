@@ -246,14 +246,24 @@ func (s *Store) RecordLFSObject(ctx context.Context, repoID int64, oid string, s
 // is linked rather than only what this repository uploaded. It errs towards
 // keeping bytes somebody may still be able to name.
 func (s *Store) LinkLFSObjects(ctx context.Context, repoID int64, objects []LFSObjectRef) error {
-	declared := make(map[string]int64, len(objects))
+	// Keyed by the whole (oid, size) pair, not by oid. One revision can name
+	// the same object from two paths, and if one of those pointers is wrong
+	// about the size, keeping only the first declaration would let it decide
+	// for the other -- a bad pointer arriving earlier in tree order would
+	// suppress the link a good one has earned, which is the 404-plus-gc state
+	// this whole path exists to avoid. Entitlement is "some pointer got it
+	// right", so every declaration gets to be checked.
+	declared := make(map[string]map[int64]bool, len(objects))
 	oids := make([]string, 0, len(objects))
 	for _, o := range objects {
-		if _, seen := declared[o.OID]; seen {
-			continue
+		sizes, seen := declared[o.OID]
+		if !seen {
+			sizes = map[int64]bool{}
+			declared[o.OID] = sizes
+			// One row to lock per object, however many paths name it.
+			oids = append(oids, o.OID)
 		}
-		declared[o.OID] = o.Size
-		oids = append(oids, o.OID)
+		sizes[o.Size] = true
 	}
 	if len(oids) == 0 {
 		return nil
@@ -294,7 +304,7 @@ func (s *Store) LinkLFSObjects(ctx context.Context, repoID int64, objects []LFSO
 			rows.Close()
 			return err
 		}
-		if declared[oid] == size {
+		if declared[oid][size] {
 			entitled = append(entitled, oid)
 		}
 	}
