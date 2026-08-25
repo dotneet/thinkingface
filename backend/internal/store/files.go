@@ -217,6 +217,18 @@ func (s *Store) RecordLFSObject(ctx context.Context, repoID int64, oid string, s
 	return tx.Commit(ctx)
 }
 
+// LinkLFSObjects entitles a repository to objects it did not upload itself:
+// the HF-compatible commit handler calls it for the pointers one commit
+// introduces, and the syncer's post-push pipeline calls it for the whole
+// revision, which is what covers a pointer pushed as an ordinary blob by a
+// client that never spoke the LFS protocol.
+//
+// Only oids lfs_objects already knows are linked. Pointer text is just text --
+// a writer can commit one naming anything -- so an oid nobody ever uploaded
+// silently links to nothing rather than producing a row promising bytes that
+// are not there. Unlike RecordLFSObject there is no confirmPresent round trip:
+// the caller is not the one putting the bytes in the bucket, and the row lock
+// below is what keeps a concurrent collector from taking them away.
 func (s *Store) LinkLFSObjects(ctx context.Context, repoID int64, oids []string) error {
 	if len(oids) == 0 {
 		return nil
@@ -229,9 +241,20 @@ func (s *Store) LinkLFSObjects(ctx context.Context, repoID int64, oids []string)
 
 	// Lock parent rows before inserting the reference so GC cannot treat
 	// them as orphaned and delete storage while this transaction is open.
+	//
+	// ORDER BY oid so two callers holding overlapping sets take the rows in
+	// the same sequence. That matters more than it used to: the syncer links
+	// a whole revision's oids on every push (syncer.runPushPipeline), so two
+	// pushes to different repositories that share content now routinely lock
+	// the same rows. PostgreSQL locks in the order the scan returns, which an
+	// ordered index scan makes deterministic -- it is not a guarantee the
+	// planner owes us, so this narrows the window rather than closing it, and
+	// a deadlock that does happen costs one aborted sync job that the queue
+	// retries. SQLite runs every write alone on its single writer, so the
+	// question does not arise there.
 	oidArg := s.d.stringArrayArg(oids)
 	if _, err := tx.Exec(ctx,
-		`SELECT oid FROM lfs_objects WHERE oid `+s.d.inArray("$1")+s.d.forUpdate(""), oidArg); err != nil {
+		`SELECT oid FROM lfs_objects WHERE oid `+s.d.inArray("$1")+` ORDER BY oid`+s.d.forUpdate(""), oidArg); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, s.d.queries().linkLFSObjectsInsert, repoID, oidArg); err != nil {

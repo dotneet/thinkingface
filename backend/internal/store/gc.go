@@ -38,6 +38,17 @@ func (s *Store) ListLFSObjects(ctx context.Context) ([]LFSObjectRef, error) {
 
 // ListReferencedLFSOIDs returns the set of oids that at least one repository
 // still links to, via repo_lfs_objects.
+//
+// That table, not repo_files.lfs_oid, is the reference count -- which only
+// works because every path that puts an oid into repo_files links it first.
+// The syncer's post-push pipeline is the one that closes that: it calls
+// LinkLFSObjects for the whole revision *before* ReplaceRepoFiles, so a
+// pointer committed as a plain blob (a client with no git-lfs, which the LFS
+// batch API therefore never hears about) cannot leave a file naming bytes this
+// query would then report as unreferenced. Reading repo_files here instead
+// would look equivalent and is not: nothing about writing a repo_files row
+// takes the lfs_objects lock DeleteOrphanedLFSObject waits on, so a push
+// racing the collector would still lose the bytes.
 func (s *Store) ListReferencedLFSOIDs(ctx context.Context) (map[string]bool, error) {
 	rows, err := s.db.Query(ctx, `SELECT DISTINCT oid FROM repo_lfs_objects`)
 	if err != nil {

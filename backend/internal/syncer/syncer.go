@@ -375,12 +375,37 @@ func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *sto
 	// not just the default branch -- a blobs/ key is the content's hash, so
 	// publishing a branch or a tag adds nothing a reader of another ref could
 	// be confused by, and costs nothing for content already there.
+	//
+	// The LFS half of the same promise is LinkLFSObjects, and it comes before
+	// the index write for the same reason: "repo_files names this oid" has to
+	// imply "repo_lfs_objects links it". Nothing else on this path establishes
+	// that. A pointer file is just text, and a client without git-lfs -- or one
+	// that cloned with GIT_LFS_SKIP_SMUDGE=1 and pushed the pointers back out --
+	// commits it as an ordinary blob, so the batch API never sees the object and
+	// never records the link. The tree read above still recognises the pointer
+	// by sniffing the blob, which used to leave the pair disagreeing: the file
+	// was indexed with an oid the repository did not own, so every download path
+	// (resolve, the batch's download branch, the transfer proxy) answered 404 --
+	// and, worse, `thinkingface gc` counts references through repo_lfs_objects
+	// alone, so the bytes behind a live pointer looked collectable the moment
+	// the repository that uploaded them went away.
+	//
+	// Doing it here grants nothing a writer did not already have. Linking an
+	// oid needs the oid and its size, which is exactly what a pointer carries
+	// and exactly what the batch API's upload dedup accepts as evidence of
+	// holding the content (lfs.storedAt) -- and pointers are public text in
+	// every readable repository. LinkLFSObjects only links oids lfs_objects
+	// already knows, so a pointer for content nobody ever uploaded still buys
+	// no claim on anything.
 	indexed, err := s.store.ListIndexedBlobSHAs(ctx, repo.ID, job.Ref)
 	if err != nil {
 		return nil, fmt.Errorf("list indexed blobs: %w", err)
 	}
 	if err := s.publishBlobs(ctx, gitRepo, entries, indexed); err != nil {
 		return nil, fmt.Errorf("publish blobs: %w", err)
+	}
+	if err := s.store.LinkLFSObjects(ctx, repo.ID, lfsOIDs(files)); err != nil {
+		return nil, fmt.Errorf("link lfs objects: %w", err)
 	}
 	if err := s.store.ReplaceRepoFiles(ctx, repo.ID, job.Ref, files); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -432,6 +457,25 @@ func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *sto
 	}
 
 	return &pushOutcome{repo: repo, numChangedFiles: len(s.changedPaths(gitRepo, job, entries))}, nil
+}
+
+// lfsOIDs is the revision's distinct LFS oids, in tree order. The whole tree
+// rather than the push's own diff, for the reason publishBlobs works off the
+// index rather than the diff: a job that died, or two jobs racing on one ref,
+// must not be able to leave a file the link pass skipped. Duplicates are
+// dropped because one oid appearing under several paths is one row either way,
+// and the statement locks a parent row per element.
+func lfsOIDs(files []store.RepoFile) []string {
+	seen := make(map[string]bool)
+	out := make([]string, 0)
+	for _, f := range files {
+		if f.LFSOID == nil || seen[*f.LFSOID] {
+			continue
+		}
+		seen[*f.LFSOID] = true
+		out = append(out, *f.LFSOID)
+	}
+	return out
 }
 
 // looksLikeExperiment recognises a trackio export even when the card carries no
