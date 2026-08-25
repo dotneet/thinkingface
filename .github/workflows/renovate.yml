@@ -1,0 +1,128 @@
+name: renovate
+
+# Self-hosted Renovate: the bot that keeps every pin in this repository current
+# (docs/dev/supply-chain.md) runs here, as a job, instead of on Mend's hosted
+# app. That puts its version, its schedule and its credentials in the same
+# place as everything else it updates -- the image is pinned by digest like any
+# other image here, and a run is something you can read the log of.
+#
+# The division of labour: renovate.json says *what* may be updated and when a
+# pull request is allowed to appear; this file only decides how often Renovate
+# looks and whose credentials it looks with. A run that falls outside
+# renovate.json's `schedule` ("before 9am on monday", Asia/Tokyo) finds nothing
+# to do and exits -- which is why running every few hours is not wasteful. It
+# is what makes `vulnerabilityAlerts` (scheduled "at any time") and the
+# checkboxes on the Dependency Dashboard take effect within hours instead of
+# waiting for the weekly window.
+#
+# It authenticates with the job's own GITHUB_TOKEN, so there is no secret to
+# create and no personal access token to keep alive. GitHub charges two things
+# for that, and both are worked around rather than hidden:
+#
+#   1. GITHUB_TOKEN cannot write to .github/workflows/ -- the `workflows`
+#      permission does not exist for it, and a push touching a workflow file is
+#      refused outright. So renovate.json holds everything under that directory
+#      behind Dependency Dashboard approval, this file's own pins included:
+#      Renovate still says what has gone stale, and a human moves it.
+#   2. Nothing GITHUB_TOKEN does starts another workflow, so CI does not run on
+#      Renovate's pull requests by itself. Each one carries an "Approve and
+#      run" button; press it, and treat a dependency PR without a green CI run
+#      as unreviewed.
+#
+# Moving to a personal access token (`repo` + `workflow`) or a GitHub App token
+# removes both, and is a change to this file plus one packageRule -- see
+# "Running Renovate" in docs/dev/supply-chain.md.
+
+on:
+  schedule:
+    # Every three hours, at :23. Off the hour on purpose: GitHub's scheduler
+    # queues heavily at :00 and delays or drops those runs.
+    - cron: "23 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      logLevel:
+        description: "Log level"
+        type: choice
+        default: info
+        options:
+          - info
+          - debug
+      dryRun:
+        description: "Dry run: report what would happen, change nothing"
+        type: boolean
+        default: false
+
+# Queue, never cancel. Renovate pushes a branch and then opens its pull
+# request; a run killed between the two leaves a branch with nothing attached
+# to it.
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  renovate:
+    name: renovate
+    # A fork inherits the schedule but not the intent: its runs would open
+    # dependency pull requests against the fork.
+    if: github.repository == 'dotneet/thinkingface'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Push update branches.
+      contents: write
+      # Open and update the pull requests themselves.
+      pull-requests: write
+      # The Dependency Dashboard is an issue.
+      issues: write
+      # Read the state of a branch's checks, which is how Renovate decides
+      # whether an open pull request needs rebasing or is stuck.
+      checks: read
+      statuses: read
+    steps:
+      # No checkout step: Renovate clones the repository itself and reads
+      # renovate.json from the default branch over the API. Nothing in this job
+      # touches the workspace.
+      - uses: renovatebot/github-action@5402b206248e5a8c8427a15102702eb9c1793efc # v46.2.4
+        with:
+          # Tag *and* digest, like the base images in the compose files
+          # (CLAUDE.md invariant 6): the tag is what a human reads, the digest
+          # is what actually runs. The action passes this straight through to
+          # `docker run ghcr.io/renovatebot/renovate:<this>`. The
+          # customManagers entry in renovate.json is what notices the pair has
+          # gone stale -- the github-actions manager reads `uses:` lines only.
+          renovate-version: 44.43.1@sha256:74d1c2c2cb72a0d14f800db3ee1a556db077f7545647bff02d43cc67e9fbf5b0
+          token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          # Without this Renovate has no idea which repository to look at: it
+          # neither auto-discovers nor infers the repository from the runner.
+          RENOVATE_REPOSITORIES: ${{ github.repository }}
+
+          # renovate.json already exists, so there is nothing to onboard. This
+          # only removes the possibility of an onboarding pull request being
+          # opened if that file is ever moved or renamed.
+          RENOVATE_ONBOARDING: "false"
+
+          # The default image carries Node and nothing else; Renovate fetches
+          # the toolchains it needs for a given update (Go, bun, uv, Terraform)
+          # at run time, checksum-verified, and only for managers with
+          # something to do. The -full image bundles them instead but weighs
+          # several gigabytes, pulled fresh on every run.
+          RENOVATE_BINARY_SOURCE: install
+
+          # Not cosmetic, and not free to change: GITHUB_TOKEN pushes as
+          # github-actions[bot], Renovate cannot ask the API who it is when the
+          # token is an installation token, and it compares commit authors to
+          # decide whether someone else has edited one of its branches. Anything
+          # other than the identity the pushes actually carry makes Renovate
+          # treat its own commits as a stranger's and stop updating the branch.
+          RENOVATE_GIT_AUTHOR: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+
+          # Both come from the dispatch form and are absent on a scheduled
+          # run. Renovate skips an empty RENOVATE_* variable rather than
+          # reading it as a value, so dry run simply stays off -- but
+          # LOG_LEVEL is read by the logger before any of that and an empty
+          # one is not a level, hence the explicit fallback.
+          RENOVATE_DRY_RUN: ${{ inputs.dryRun && 'full' || '' }}
+          LOG_LEVEL: ${{ inputs.logLevel || 'info' }}

@@ -168,6 +168,25 @@ Optionally install [lefthook](https://github.com/evilmartians/lefthook) for pre-
 feedback (`lefthook install`; `lefthook.yml` is at the root). It is not required — `make check`
 and CI are authoritative — and `git commit --no-verify` skips it for one commit.
 
+### Dependency updates
+
+Renovate opens the dependency PRs, and it runs from this repository rather than as an
+installed app: `.github/workflows/renovate.yml` decides how often it looks and with which
+token, `renovate.json` decides what it may update, how updates are grouped, and how old a
+release has to be before it is allowed in. It runs on the job's `GITHUB_TOKEN`, so there are
+two things to know when one of its PRs shows up:
+
+- **It has no CI runs on it.** Nothing done with `GITHUB_TOKEN` starts a workflow. Press
+  **Approve and run** on the PR; an unchecked dependency PR is an unreviewed one.
+- **Nothing under `.github/workflows/` becomes a PR.** `GITHUB_TOKEN` cannot write there, so
+  those updates — action SHAs, and Renovate's own pinned image — are listed on the Dependency
+  Dashboard issue under "Pending Approval" and applied by hand, moving each SHA together with
+  its trailing `# vX.Y.Z` comment.
+
+[`supply-chain.md`](supply-chain.md) covers the rest: the one repository setting Renovate
+needs, how to force a run from the Actions tab, and the lockfiles it deliberately leaves
+alone.
+
 ### Automated PR review
 
 `.github/workflows/claude-review.yml` runs [Claude Code
@@ -177,9 +196,11 @@ because `ci.yml` already covers the mechanical checks above.
 
 - **Triggers**: when a PR opens (or leaves draft, or reopens), and on demand by adding the
   `claude-review` label — remove and re-add it to ask for another pass. Deliberately *not*
-  on every push. The automatic path skips drafts and Renovate/Dependabot PRs; the label
-  overrides both. Fork PRs are never reviewed — `pull_request` from a fork has no secrets,
-  and giving it any would be a pwn-request.
+  on every push. The automatic path skips drafts and dependency PRs — recognised either by
+  author (`renovate[bot]`, `dependabot[bot]`) or by the `dependencies` label, since Renovate
+  is self-hosted here and its PRs come from `github-actions[bot]`; the label overrides both.
+  Fork PRs are never reviewed — `pull_request` from a fork has no secrets, and giving it any
+  would be a pwn-request.
 - **Auth is a Claude subscription**, not the Anthropic API. Generate a token with
   `claude setup-token` while logged in, and store it as the repository secret
   `CLAUDE_CODE_OAUTH_TOKEN`. It expires — a job failing at the auth step usually just needs

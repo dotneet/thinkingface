@@ -100,6 +100,15 @@ databases over the network, so its verdict changes without the code changing.
 `.github/workflows/security.yml` runs exactly that command weekly and on any PR touching a
 dependency manifest. See `docs/dev/supply-chain.md`.
 
+Renovate is self-hosted rather than installed as an app: `.github/workflows/renovate.yml`
+runs `renovatebot/github-action` every three hours (and on demand, with a dry-run option),
+while `renovate.json` decides what it may update and when a PR may appear. It authenticates
+with the job's own `GITHUB_TOKEN`, which costs two things worth knowing: its PRs do not start
+CI on their own (press **Approve and run**), and it cannot write to `.github/workflows/`, so
+updates to anything in there -- action SHAs, and Renovate's own pinned image -- are listed on
+the Dependency Dashboard for a human to apply instead. "Running Renovate" in
+`docs/dev/supply-chain.md` has the details.
+
 You can optionally install lefthook (`lefthook.yml`) for early feedback before committing:
 `lefthook install` (to remove it, `lefthook uninstall`; to skip it just this once,
 `git commit --no-verify`). The authoritative verification is still `make check` and CI.

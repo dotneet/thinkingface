@@ -68,6 +68,12 @@ jobs:
     # them back) and Renovate / Dependabot PRs, which are a lockfile diff and a
     # version bump that security.yml already audits. Both of those are what the
     # label overrides.
+    #
+    # Dependency PRs are recognised two ways because the author name is not
+    # dependable: Renovate is self-hosted here (.github/workflows/renovate.yml)
+    # and its pull requests arrive from github-actions[bot], never from
+    # renovate[bot]. The `dependencies` label comes from renovate.json and is
+    # on every one of them.
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository
       && (
@@ -76,6 +82,7 @@ jobs:
           github.event.action != 'labeled'
           && github.event.pull_request.draft == false
           && !contains(fromJSON('["renovate[bot]", "dependabot[bot]"]'), github.event.pull_request.user.login)
+          && !contains(github.event.pull_request.labels.*.name, 'dependencies')
         )
       )
     permissions:
