@@ -69,7 +69,8 @@ jobs:
       # Actions are pinned to a commit SHA, not a tag: a tag is a mutable
       # pointer the action's owner (or anyone who takes over the account) can
       # move to arbitrary code. The trailing comment is the human-readable
-      # version, and Renovate keeps SHA and comment in step.
+      # version; Renovate reports when the pair goes stale but cannot bump it
+      # itself (see the header of ci.yml and docs/dev/supply-chain.md).
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Nothing here pushes, and every step below runs third-party tooling.

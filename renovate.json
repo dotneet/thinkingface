@@ -24,14 +24,28 @@
     "enabled": true,
     "minimumReleaseAge": null,
     "schedule": ["at any time"],
-    "labels": ["dependencies", "security"],
-    "prPriority": 10
+    "labels": ["dependencies", "security"]
   },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "The self-hosted Renovate image is pinned as tag@digest in .github/workflows/renovate.yml. The github-actions manager only reads `uses:` lines, so without this the bot would never update itself.",
+      "managerFilePatterns": ["/^\\.github/workflows/renovate\\.yml$/"],
+      "matchStrings": ["renovate-version:\\s*(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]+)"],
+      "depNameTemplate": "ghcr.io/renovatebot/renovate",
+      "datasourceTemplate": "docker"
+    }
+  ],
   "packageRules": [
     {
       "description": "Docker base images are referenced as tag + digest; keep the digest updated alongside the tag.",
       "matchManagers": ["dockerfile", "docker-compose"],
       "pinDigests": true
+    },
+    {
+      "description": "Anything inside .github/workflows/ stops at the Dependency Dashboard instead of becoming a pull request: the action SHAs, and the Renovate image pinned in renovate.yml itself. Renovate runs with the job's GITHUB_TOKEN (.github/workflows/renovate.yml), and GitHub refuses every write to a workflow file from that token -- an automatic PR here could only fail on push, every run, forever. Listing them keeps the staleness visible; apply them by hand, moving the SHA and its trailing version comment together. Ticking the checkbox will fail, so delete this rule if the workflow ever moves to a token carrying the `workflow` scope.",
+      "matchFileNames": [".github/workflows/**"],
+      "dependencyDashboardApproval": true
     },
     {
       "description": "Go module updates travel as one PR per week unless they are major.",

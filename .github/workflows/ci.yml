@@ -4,9 +4,12 @@ name: CI
 # mutable pointer: whoever controls the action's repository -- its owner, or
 # whoever takes the account over -- can move `v4` onto different code, and it
 # would run here with the workflow's token and the checked-out source. The
-# trailing `# vX.Y.Z` comment is the human-readable version, and Renovate
-# (renovate.json) keeps the SHA and the comment in step. Base images are
-# pinned the same way, by digest. See docs/dev/supply-chain.md.
+# trailing `# vX.Y.Z` comment is the human-readable version. Renovate lists
+# these on the Dependency Dashboard but cannot open a pull request for them --
+# it runs on GITHUB_TOKEN, which GitHub does not let write to
+# .github/workflows/ -- so both halves are moved by hand, together. Base images
+# are pinned the same way, by digest, and those Renovate does update. See
+# docs/dev/supply-chain.md.
 
 on:
   push:
