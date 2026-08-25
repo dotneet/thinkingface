@@ -80,6 +80,10 @@ func inspectSafetensors(ctx context.Context, size int64, fetch Fetcher) (*Info, 
 	}
 	var placedTensors []placed
 	overEntries := 0
+	// dataSize bounds data_offsets: they are byte offsets into the region that
+	// follows the header, so a well-formed entry can never name a span past
+	// the end of the file it came from.
+	dataSize := size - 8 - int64(headerLen)
 
 	for dec.More() {
 		key, err := dec.Token()
@@ -108,6 +112,15 @@ func inspectSafetensors(ctx context.Context, size int64, fetch Fetcher) (*Info, 
 				return nil, fmt.Errorf("modelmeta: safetensors header is not valid JSON: %w", err)
 			}
 			warn(info, "tensor %q has an unreadable header entry: %v", name, err)
+			continue
+		}
+		// A reversed or out-of-range span would otherwise turn into a negative
+		// SizeBytes (the subtraction below never checks its sign) or silently
+		// inflate the file's reported tensor bytes past its own size, so it is
+		// rejected the same way an unreadable entry is: skip the one tensor
+		// and keep reading the rest of the header.
+		if entry.DataOffsets[0] < 0 || entry.DataOffsets[1] < entry.DataOffsets[0] || entry.DataOffsets[1] > dataSize {
+			warn(info, "tensor %q has invalid data_offsets %v for a %d byte data section", name, entry.DataOffsets, dataSize)
 			continue
 		}
 		placedTensors = append(placedTensors, placed{
