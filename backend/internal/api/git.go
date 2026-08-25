@@ -46,8 +46,17 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, kind str
 		internalError(w, "materialize repository", err)
 		return
 	}
-	if err := s.gitHTTP.AdvertiseRefs(w, repo.StoragePath, service); err != nil {
-		slog.Error("advertise refs", "repo", repo.FullName(), "error", err)
+	if err := s.gitHTTP.AdvertiseRefs(r.Context(), w, repo.StoragePath, service); err != nil {
+		if errors.Is(err, gitserver.ErrResponseStarted) {
+			// The advertisement was already going out, so there is no status
+			// left to change; a log line is all this can still add.
+			slog.Error("advertise refs", "repo", repo.FullName(), "error", err)
+			return
+		}
+		// Without this the client got an empty 200 and read it as a
+		// repository with no refs, which git reports as an empty clone rather
+		// than as the server-side failure it is.
+		internalError(w, "advertise refs", err)
 	}
 }
 
