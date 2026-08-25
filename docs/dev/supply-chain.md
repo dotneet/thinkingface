@@ -179,8 +179,12 @@ its version moves when we move it.
 
 The two files split the job cleanly:
 
-- **`renovate.json`** — *what* may be updated, grouped how, and inside which
-  window (`schedule`, `minimumReleaseAge`, `packageRules`).
+- **`renovate.json`** — *what* may be updated, grouped how, inside which
+  window (`schedule`, `minimumReleaseAge`, `packageRules`), and what happens to
+  the pull request afterwards (`automerge`, with `platformAutomerge` off:
+  Renovate does the merging itself, as a merge commit, rather than handing the
+  decision to GitHub's auto-merge — which is switched off on this repository
+  and would need branch protection to mean anything).
 - **`.github/workflows/renovate.yml`** — *how often* Renovate looks, and *as
   whom*. It runs every three hours; a run outside the window `renovate.json`
   allows simply finds nothing to do. That is the point: `vulnerabilityAlerts`
@@ -228,6 +232,19 @@ fix:
    triggers another workflow, so a Renovate PR arrives with no checks. Each one
    carries an **Approve and run** button; press it. A dependency PR without a
    green CI run has not been verified, whatever its diff looks like.
+
+   This is also the whole of the human step, because `renovate.json` sets
+   `automerge`. Approve the run and walk away: if CI comes back green, Renovate
+   merges the PR itself on one of its next runs, within three hours. If it
+   comes back red, nothing happens and the PR waits for you. Nothing merges
+   without checks having actually run — a branch with no check runs reports as
+   *pending*, not as passing, which is the behaviour this depends on.
+
+   The same rule applies on the way out: the merge is a `GITHUB_TOKEN` push to
+   `main`, so it does not start `main`'s push-triggered workflows either. A
+   dependency update that should redeploy the docs site or re-run the audit
+   needs those dispatched by hand (Actions → *docs* / *security* → *Run
+   workflow*).
 
 Both disappear the moment Renovate is given a credential of its own — a classic
 personal access token with `repo` + `workflow`, or a GitHub App token minted by
