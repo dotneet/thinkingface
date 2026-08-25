@@ -67,6 +67,34 @@ func New(st *store.Store, opts Options) *Dispatcher {
 		client: &http.Client{
 			Timeout:   deliveryTimeout,
 			Transport: newDeliveryTransport(opts.AllowPrivateTargets, deliveryTimeout),
+			// Deliveries never follow redirects.
+			//
+			// http.Client drops Authorization and friends when a redirect
+			// crosses to another host, but it has no way of knowing that
+			// X-Thinkingface-Signature is just as sensitive, so it forwards it
+			// verbatim. That signature is a MAC over this payload keyed with
+			// this endpoint's secret: handing it to whatever host a Location
+			// header names breaks the one property it has, that a signature
+			// belongs to the endpoint it was computed for. A redirect target is
+			// also a URL no one ever ran ValidateTargetURL against, so
+			// following one would route around the write-time half of the SSRF
+			// guard as well (the connect-time re-check in newDeliveryTransport
+			// still fires, which is exactly why the two layers exist).
+			//
+			// Not following them costs nothing worth having: a webhook target
+			// is a URL an operator typed into the configuration, not a link
+			// that was discovered, so there is no reason for it to be a
+			// redirect in the first place.
+			//
+			// ErrUseLastResponse rather than an error so the 3xx itself is
+			// still the response: deliver records its status and body, and the
+			// operator sees "endpoint returned 302" in the delivery history --
+			// which tells them to fix the configured URL. An endpoint that used
+			// to redirect therefore starts failing visibly instead of quietly
+			// succeeding somewhere else, and that is the intended change.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 		wake: make(chan struct{}, 1),
 	}

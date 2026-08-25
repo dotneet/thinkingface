@@ -41,9 +41,10 @@ func TestRepoHasLFSObject(t *testing.T) {
 				t.Errorf("a repository that never uploaded the object claims to have it")
 			}
 
-			// LinkLFSObjects (the post-push indexer's route) is the other way
-			// a link is created and must be visible here too.
-			if err := s.LinkLFSObjects(ctx, theirs.ID, []string{oid}); err != nil {
+			// LinkLFSObjects (the route the HF commit handler and the
+			// syncer's post-push pipeline take) is the other way a link is
+			// created and must be visible here too.
+			if err := s.LinkLFSObjects(ctx, theirs.ID, []LFSObjectRef{{OID: oid, Size: 4}}); err != nil {
 				t.Fatalf("LinkLFSObjects: %v", err)
 			}
 			has, err = s.RepoHasLFSObject(ctx, theirs.ID, oid)

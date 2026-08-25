@@ -283,8 +283,10 @@ func (h *Handler) Batch(ctx context.Context, repoID int64, req *BatchRequest, au
 			// download URL for bytes that live in a repository it was not
 			// given. Every legitimate route into this repository records
 			// the link before a commit can reference the object (upload dedup
-			// and Verify below, the emulator proxy upload, and the post-push
-			// indexer's LinkLFSObjects).
+			// and Verify below, the emulator proxy upload, and LinkLFSObjects
+			// from both the HF-compatible commit handler and the syncer's
+			// post-push pipeline -- the latter being what covers a pointer
+			// pushed as a plain blob, which never reaches this API at all).
 			owned, err := h.store.RepoHasLFSObject(ctx, repoID, obj.OID)
 			if err != nil {
 				return nil, fmt.Errorf("check lfs object ownership: %w", err)

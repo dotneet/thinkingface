@@ -113,3 +113,100 @@ func TestDeliveryTransportAllowsPrivateWhenOptedIn(t *testing.T) {
 	}
 	_ = conn.Close()
 }
+
+// TestIsBlockedIPCoversReservedRanges is the regression test for the ranges
+// net.IP's own classifiers do not know about. Every address here reaches
+// something on the operator's side of the network (or is not a destination at
+// all) while looking like an ordinary public address to IsLoopback / IsPrivate
+// / IsLinkLocalUnicast / IsUnspecified, which is all the check used to be.
+func TestIsBlockedIPCoversReservedRanges(t *testing.T) {
+	blocked := map[string]string{
+		"0.1.2.3":           `"this network" (RFC 1122): Linux routes the whole 0/8 to the local host`,
+		"100.64.0.1":        "carrier-grade NAT shared address space (RFC 6598)",
+		"100.127.255.254":   "the far end of the CGNAT range",
+		"192.0.0.170":       "IETF protocol assignments (RFC 6890), here the NAT64 address",
+		"198.18.0.1":        "benchmarking (RFC 2544), routed to local test equipment",
+		"198.19.255.255":    "the far end of the benchmarking range",
+		"240.0.0.1":         "reserved for future use (RFC 1112)",
+		"255.255.255.255":   "the limited broadcast address",
+		"224.0.0.1":         "link-local multicast",
+		"239.255.255.250":   "administratively scoped multicast (SSDP), which IsLinkLocalMulticast misses",
+		"ff05::1":           "site-local IPv6 multicast, likewise",
+		"::ffff:127.0.0.1":  "loopback written as an IPv4-mapped IPv6 address",
+		"::ffff:10.0.0.1":   "an RFC 1918 address written the same way",
+		"::ffff:100.64.0.1": "a CGNAT address written the same way",
+		"::7f00:1":          "loopback as a deprecated IPv4-compatible IPv6 address (RFC 4291)",
+		"64:ff9b::7f00:1":   "loopback reached through the NAT64 well-known prefix (RFC 6052)",
+		"64:ff9b::c0a8:1":   "192.168.0.1 reached through the same prefix",
+		"fc00::1":           "IPv6 unique-local",
+		"fe80::1":           "IPv6 link-local",
+	}
+	for s, why := range blocked {
+		ip := net.ParseIP(s)
+		if ip == nil {
+			t.Fatalf("test address %q does not parse", s)
+		}
+		if !isBlockedIP(ip) {
+			t.Errorf("isBlockedIP(%s) = false, want true: %s", s, why)
+		}
+	}
+
+	// The other half of the check: hardening the list must not start refusing
+	// ordinary public destinations. The NAT64 prefix in particular is only
+	// blocked for what it carries, since an IPv6-only network reaches public
+	// IPv4 hosts through it.
+	allowed := []string{
+		"8.8.8.8",
+		"99.255.255.255", // immediately below the CGNAT range
+		"100.128.0.1",    // immediately above it
+		"192.0.1.1",      // immediately above the protocol-assignment /24
+		"198.17.255.255", // immediately below the benchmarking range
+		"198.20.0.1",     // immediately above it
+		"2001:4860:4860::8888",
+		"64:ff9b::8.8.8.8",
+		"::ffff:8.8.8.8",
+	}
+	for _, s := range allowed {
+		ip := net.ParseIP(s)
+		if ip == nil {
+			t.Fatalf("test address %q does not parse", s)
+		}
+		if isBlockedIP(ip) {
+			t.Errorf("isBlockedIP(%s) = true, want false", s)
+		}
+	}
+
+	// An address that cannot be interpreted at all is refused rather than
+	// waved through: the transport hands whatever the connection reports to
+	// this function, and "I don't know" must not mean "allow".
+	if !isBlockedIP(nil) {
+		t.Error("isBlockedIP(nil) = false, want true")
+	}
+}
+
+// TestValidateTargetURLBlocksLocalhostSubdomains covers RFC 6761's rule that
+// the whole .localhost tree resolves to loopback, which internal/config's
+// isLoopbackURL already assumes.
+func TestValidateTargetURLBlocksLocalhostSubdomains(t *testing.T) {
+	for _, u := range []string{"http://hook.localhost/x", "http://Deep.Nested.LOCALHOST:9000/x"} {
+		if err := ValidateTargetURL(u, false); !errors.Is(err, ErrDisallowedTarget) {
+			t.Errorf("ValidateTargetURL(%q, false) = %v, want ErrDisallowedTarget", u, err)
+		}
+	}
+}
+
+// TestDeliveryTransportUsesTheSameVerdictAsValidateTargetURL pins the property
+// the two-layer guard depends on: the connect-time re-check and the write-time
+// URL check must agree, because a range only one of them knows about is a hole
+// rather than a difference of opinion.
+func TestDeliveryTransportUsesTheSameVerdictAsValidateTargetURL(t *testing.T) {
+	for _, s := range []string{"100.64.0.1", "192.0.0.170", "198.18.0.1", "240.0.0.1", "0.1.2.3"} {
+		urlErr := ValidateTargetURL("http://"+s+"/hook", false)
+		if !errors.Is(urlErr, ErrDisallowedTarget) {
+			t.Errorf("ValidateTargetURL rejects %s? got %v", s, urlErr)
+		}
+		if !isBlockedIP(net.ParseIP(s)) {
+			t.Errorf("the transport's dial-time check would accept %s that ValidateTargetURL refuses", s)
+		}
+	}
+}

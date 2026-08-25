@@ -375,12 +375,37 @@ func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *sto
 	// not just the default branch -- a blobs/ key is the content's hash, so
 	// publishing a branch or a tag adds nothing a reader of another ref could
 	// be confused by, and costs nothing for content already there.
+	//
+	// The LFS half of the same promise is LinkLFSObjects, and it comes before
+	// the index write for the same reason: "repo_files names this oid" has to
+	// imply "repo_lfs_objects links it". Nothing else on this path establishes
+	// that. A pointer file is just text, and a client without git-lfs -- or one
+	// that cloned with GIT_LFS_SKIP_SMUDGE=1 and pushed the pointers back out --
+	// commits it as an ordinary blob, so the batch API never sees the object and
+	// never records the link. The tree read above still recognises the pointer
+	// by sniffing the blob, which used to leave the pair disagreeing: the file
+	// was indexed with an oid the repository did not own, so every download path
+	// (resolve, the batch's download branch, the transfer proxy) answered 404 --
+	// and, worse, `thinkingface gc` counts references through repo_lfs_objects
+	// alone, so the bytes behind a live pointer looked collectable the moment
+	// the repository that uploaded them went away.
+	//
+	// Doing it here grants nothing a writer did not already have. A link is
+	// issued only when the size the pointer declares matches the recorded one
+	// (LinkLFSObjects), which is the same evidence the batch API's upload
+	// dedup demands (lfs.storedAt) -- an oid on its own is public, every
+	// pointer in every readable repository is one, so naming it proves
+	// nothing. A pointer for content nobody ever uploaded, or one declaring a
+	// size it cannot know, buys no claim on anything.
 	indexed, err := s.store.ListIndexedBlobSHAs(ctx, repo.ID, job.Ref)
 	if err != nil {
 		return nil, fmt.Errorf("list indexed blobs: %w", err)
 	}
 	if err := s.publishBlobs(ctx, gitRepo, entries, indexed); err != nil {
 		return nil, fmt.Errorf("publish blobs: %w", err)
+	}
+	if err := s.store.LinkLFSObjects(ctx, repo.ID, lfsObjectRefs(files)); err != nil {
+		return nil, fmt.Errorf("link lfs objects: %w", err)
 	}
 	if err := s.store.ReplaceRepoFiles(ctx, repo.ID, job.Ref, files); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -432,6 +457,41 @@ func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *sto
 	}
 
 	return &pushOutcome{repo: repo, numChangedFiles: len(s.changedPaths(gitRepo, job, entries))}, nil
+}
+
+// lfsObjectRefs is the revision's distinct LFS objects, each with the size its
+// pointer declares -- LinkLFSObjects checks that against the recorded one, and
+// that check is the entitlement, so the size has to travel with the oid rather
+// than be dropped here.
+//
+// The whole tree rather than the push's own diff, for the reason publishBlobs
+// works off the index rather than the diff: a job that died, or two jobs
+// racing on one ref, must not be able to leave a file the link pass skipped.
+//
+// Deduplication is by the whole pair, not by oid. Two paths can name one
+// object with different declared sizes -- one pointer written by git-lfs and
+// one hand-made -- and dropping all but the first would let a wrong
+// declaration stand in for a right one, which costs the correct file its link
+// and takes the object out of gc's reference set. LinkLFSObjects treats "some
+// declaration matched" as the entitlement and locks one row per object either
+// way, so there is nothing to save by deciding here which one it gets to see.
+func lfsObjectRefs(files []store.RepoFile) []store.LFSObjectRef {
+	seen := make(map[store.LFSObjectRef]bool)
+	out := make([]store.LFSObjectRef, 0)
+	for _, f := range files {
+		if f.LFSOID == nil {
+			continue
+		}
+		// RepoFile.Size is Entry.TargetSize(), which for an LFS entry is the
+		// size the pointer declares -- exactly what has to be proven.
+		ref := store.LFSObjectRef{OID: *f.LFSOID, Size: f.Size}
+		if seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		out = append(out, ref)
+	}
+	return out
 }
 
 // looksLikeExperiment recognises a trackio export even when the card carries no

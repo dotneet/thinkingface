@@ -621,8 +621,12 @@ func TestIntegrationFilesLFSParquet(t *testing.T) {
 		if err := s.RecordLFSObject(ctx, r.ID, "oid-2", 5, func(string) (bool, error) { return true, nil }); err != nil {
 			t.Fatal(err)
 		}
-		// LinkLFSObjects links only oids that exist and ignores duplicates.
-		if err := s.LinkLFSObjects(ctx, other.ID, []string{"oid-1", "oid-2", "oid-missing", "oid-1"}); err != nil {
+		// LinkLFSObjects links only oids that exist, whose declared size
+		// matches the recorded one, and ignores duplicates.
+		if err := s.LinkLFSObjects(ctx, other.ID, []LFSObjectRef{
+			{OID: "oid-1", Size: 123}, {OID: "oid-2", Size: 5},
+			{OID: "oid-missing", Size: 1}, {OID: "oid-1", Size: 123},
+		}); err != nil {
 			t.Fatalf("LinkLFSObjects: %v", err)
 		}
 		if err := s.LinkLFSObjects(ctx, other.ID, nil); err != nil {
@@ -2075,6 +2079,65 @@ func TestIntegrationRepoTransferStalePending(t *testing.T) {
 		moved, err := s.AcceptRepoTransfer(ctx, pend3.ID, f.bob.ID)
 		if err != nil || moved.Namespace != "bob" || moved.Name != "bar" {
 			t.Fatalf("Accept = %+v, %v", moved, err)
+		}
+	})
+}
+
+// TestIntegrationLinkLFSObjectsRequiresTheDeclaredSize pins what a link costs.
+// An oid is public -- every LFS pointer in every readable repository is one --
+// so naming one proves nothing; the evidence a holder of the content can also
+// produce is its length. The LFS batch's dedup has enforced that since
+// lfs.storedAt stopped accepting a declared zero, and the push path reaches
+// LinkLFSObjects with nothing but pointer text, so it has to be enforced here
+// or `git push` becomes the way around it.
+func TestIntegrationLinkLFSObjectsRequiresTheDeclaredSize(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		owner := f.repo(t, "alice", "weights", "model", nil)
+		claimant := f.repo(t, "bob", "borrowed", "model", nil)
+
+		const oid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		if err := s.RecordLFSObject(f.ctx, owner.ID, oid, 4096, func(string) (bool, error) { return true, nil }); err != nil {
+			t.Fatalf("RecordLFSObject: %v", err)
+		}
+
+		// A pointer that names the oid and guesses at the size.
+		if err := s.LinkLFSObjects(f.ctx, claimant.ID, []LFSObjectRef{{OID: oid, Size: 1}}); err != nil {
+			t.Fatalf("LinkLFSObjects with a wrong size: %v", err)
+		}
+		if has, err := s.RepoHasLFSObject(f.ctx, claimant.ID, oid); err != nil || has {
+			t.Fatalf("a guessed size linked somebody else's object: has = %v, err = %v", has, err)
+		}
+
+		// Zero is a guess like any other, and used to be the specific one that
+		// worked (see lfs.storedAt).
+		if err := s.LinkLFSObjects(f.ctx, claimant.ID, []LFSObjectRef{{OID: oid, Size: 0}}); err != nil {
+			t.Fatalf("LinkLFSObjects declaring zero: %v", err)
+		}
+		if has, err := s.RepoHasLFSObject(f.ctx, claimant.ID, oid); err != nil || has {
+			t.Fatalf("declaring zero linked somebody else's object: has = %v, err = %v", has, err)
+		}
+
+		// The real size is the evidence, and it works.
+		if err := s.LinkLFSObjects(f.ctx, claimant.ID, []LFSObjectRef{{OID: oid, Size: 4096}}); err != nil {
+			t.Fatalf("LinkLFSObjects with the real size: %v", err)
+		}
+		if has, err := s.RepoHasLFSObject(f.ctx, claimant.ID, oid); err != nil || !has {
+			t.Fatalf("the real size did not link the object: has = %v, err = %v", has, err)
+		}
+
+		// One revision can name an object from two paths. A pointer that is
+		// wrong about the size must not decide for one that is right, whatever
+		// order they arrive in -- deduplicating by oid alone made the first
+		// declaration speak for the rest.
+		second := f.repo(t, "bob", "two-paths", "model", nil)
+		if err := s.LinkLFSObjects(f.ctx, second.ID, []LFSObjectRef{
+			{OID: oid, Size: 1}, {OID: oid, Size: 4096},
+		}); err != nil {
+			t.Fatalf("LinkLFSObjects with a wrong declaration first: %v", err)
+		}
+		if has, err := s.RepoHasLFSObject(f.ctx, second.ID, oid); err != nil || !has {
+			t.Fatalf("a wrong declaration suppressed a correct one: has = %v, err = %v", has, err)
 		}
 	})
 }

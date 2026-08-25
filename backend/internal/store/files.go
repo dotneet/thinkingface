@@ -217,10 +217,58 @@ func (s *Store) RecordLFSObject(ctx context.Context, repoID int64, oid string, s
 	return tx.Commit(ctx)
 }
 
-func (s *Store) LinkLFSObjects(ctx context.Context, repoID int64, oids []string) error {
+// LinkLFSObjects entitles a repository to objects it did not upload itself:
+// the HF-compatible commit handler calls it for the pointers one commit
+// introduces, and the syncer's post-push pipeline calls it for the whole
+// revision, which is what covers a pointer pushed as an ordinary blob by a
+// client that never spoke the LFS protocol.
+//
+// **The declared size is the entitlement, and it is checked here.** An oid is
+// public -- every LFS pointer in every readable repository is one -- so naming
+// it proves nothing; what a holder of the content can also say is how many
+// bytes it is. That is the same rule the LFS batch's dedup enforces
+// (lfs.storedAt) and the same one the commit handler leans on, and it has to
+// be enforced on this path too: a pointer is just text, so without the check a
+// writer could push `size 1` against somebody else's oid and have resolve hand
+// the bytes over through their own repository. A pointer written by git-lfs
+// always carries the real size, so nothing legitimate is turned away.
+//
+// An oid lfs_objects has never heard of links to nothing at all, rather than
+// producing a row promising bytes that are not there. Unlike RecordLFSObject
+// there is no confirmPresent round trip: the caller is not the one putting the
+// bytes in the bucket, and the row lock below is what keeps a concurrent
+// collector from taking them away.
+//
+// Nothing removes a link again. A later commit that drops the last pointer to
+// an object leaves the row, so the object stays out of gc's reach until the
+// repository itself is deleted -- the same property links made by
+// RecordLFSObject have always had, over a wider set now that a whole revision
+// is linked rather than only what this repository uploaded. It errs towards
+// keeping bytes somebody may still be able to name.
+func (s *Store) LinkLFSObjects(ctx context.Context, repoID int64, objects []LFSObjectRef) error {
+	// Keyed by the whole (oid, size) pair, not by oid. One revision can name
+	// the same object from two paths, and if one of those pointers is wrong
+	// about the size, keeping only the first declaration would let it decide
+	// for the other -- a bad pointer arriving earlier in tree order would
+	// suppress the link a good one has earned, which is the 404-plus-gc state
+	// this whole path exists to avoid. Entitlement is "some pointer got it
+	// right", so every declaration gets to be checked.
+	declared := make(map[string]map[int64]bool, len(objects))
+	oids := make([]string, 0, len(objects))
+	for _, o := range objects {
+		sizes, seen := declared[o.OID]
+		if !seen {
+			sizes = map[int64]bool{}
+			declared[o.OID] = sizes
+			// One row to lock per object, however many paths name it.
+			oids = append(oids, o.OID)
+		}
+		sizes[o.Size] = true
+	}
 	if len(oids) == 0 {
 		return nil
 	}
+
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -229,12 +277,46 @@ func (s *Store) LinkLFSObjects(ctx context.Context, repoID int64, oids []string)
 
 	// Lock parent rows before inserting the reference so GC cannot treat
 	// them as orphaned and delete storage while this transaction is open.
-	oidArg := s.d.stringArrayArg(oids)
-	if _, err := tx.Exec(ctx,
-		`SELECT oid FROM lfs_objects WHERE oid `+s.d.inArray("$1")+s.d.forUpdate(""), oidArg); err != nil {
+	// Reading the size under the same lock is what makes the check above
+	// meaningful rather than advisory.
+	//
+	// ORDER BY oid so two callers holding overlapping sets take the rows in
+	// the same sequence. That matters more than it used to: the syncer links
+	// a whole revision's oids on every push (syncer.runPushPipeline), so two
+	// pushes to different repositories that share content now routinely lock
+	// the same rows. PostgreSQL locks in the order the scan returns, which an
+	// ordered index scan makes deterministic -- it is not a guarantee the
+	// planner owes us, so this narrows the window rather than closing it, and
+	// a deadlock that does happen costs one aborted sync job that the queue
+	// retries. SQLite runs every write alone on its single writer, so the
+	// question does not arise there.
+	rows, err := tx.Query(ctx,
+		`SELECT oid, size FROM lfs_objects WHERE oid `+s.d.inArray("$1")+` ORDER BY oid`+s.d.forUpdate(""),
+		s.d.stringArrayArg(oids))
+	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, s.d.queries().linkLFSObjectsInsert, repoID, oidArg); err != nil {
+	entitled := make([]string, 0, len(oids))
+	for rows.Next() {
+		var oid string
+		var size int64
+		if err := rows.Scan(&oid, &size); err != nil {
+			rows.Close()
+			return err
+		}
+		if declared[oid][size] {
+			entitled = append(entitled, oid)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(entitled) == 0 {
+		return tx.Commit(ctx)
+	}
+
+	if _, err := tx.Exec(ctx, s.d.queries().linkLFSObjectsInsert, repoID, s.d.stringArrayArg(entitled)); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
