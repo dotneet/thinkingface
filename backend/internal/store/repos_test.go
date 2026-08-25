@@ -25,7 +25,7 @@ func TestBuildRepoWhereKindAuthorAndLegacyQuery(t *testing.T) {
 	for _, want := range []string{
 		`r.kind = $1`,
 		`LOWER(n.name) = LOWER($2)`,
-		`(r.name ILIKE $3 OR n.name ILIKE $3 OR r.description ILIKE $3)`,
+		`(r.name ILIKE $3 ESCAPE '\' OR n.name ILIKE $3 ESCAPE '\' OR r.description ILIKE $3 ESCAPE '\')`,
 	} {
 		if !strings.Contains(clause, want) {
 			t.Errorf("clause %q does not contain %q", clause, want)

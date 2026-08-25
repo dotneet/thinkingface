@@ -512,6 +512,20 @@ type PendingFlush struct {
 // ListPendingFlushProjects groups the unflushed points by project. Archived
 // repositories are excluded: every other write path refuses them, and a
 // machine-generated commit must not be the one exception.
+//
+// The order is oldest-unflushed-point first, not project id first, and the
+// difference is starvation. exp_points holds only what has not been written to
+// parquet yet, so ordering by the project's own id ranks projects by when they
+// were *created*: the hundred lowest ids that are still ingesting fill the
+// window on every poll, and a project created after them never comes up at
+// all. Its buffer then grows without bound -- nothing else drains exp_points
+// -- and experiments.Series reads every live point to draw the chart, so the
+// dashboard degrades along with it. MIN(pt.id) instead ranks by how long the
+// project has been waiting, which a project that is flushed resets (its points
+// are deleted) and a project that is skipped only improves. Point ids are
+// unique across projects, so the order is total on both engines without a
+// tiebreaker; p.id is appended anyway to keep the plan's sort deterministic if
+// that ever stops being true.
 func (s *Store) ListPendingFlushProjects(ctx context.Context, limit int) ([]PendingFlush, error) {
 	if limit <= 0 {
 		limit = 100
@@ -525,7 +539,7 @@ func (s *Store) ListPendingFlushProjects(ctx context.Context, limit int) ([]Pend
 		 JOIN repositories repo ON repo.id = p.repo_id
 		 WHERE repo.archived_at IS NULL
 		 GROUP BY p.repo_id, p.id, p.name
-		 ORDER BY p.id
+		 ORDER BY MIN(pt.id), p.id
 		 LIMIT $1`, limit)
 	if err != nil {
 		return nil, err

@@ -144,9 +144,38 @@ func (s *Store) HasLFSObject(ctx context.Context, oid string) (int64, bool, erro
 // already Stat'ed a hit would return no upload action -- the client never
 // re-uploads and the content is gone. If confirmPresent reports missing, the
 // transaction rolls back and ErrLFSObjectGone is returned.
+//
+// That call is a round trip to object storage made with a write transaction
+// open, which on SQLite means holding the process's single writer connection
+// (sqlite.go): every other write queues behind it, and another process gets
+// SQLITE_BUSY once sqliteBusyTimeout runs out. It cannot simply move out of
+// the transaction -- what makes it worth anything is that it runs after the
+// row is locked, so a GC deleting the bytes has either already finished (and
+// the re-check sees the hole) or has to wait (and then finds the link).
+// Checking first and inserting afterwards would only answer about a moment
+// that has passed. What the fast path below does instead is skip the whole
+// transaction for the calls that never needed it.
 func (s *Store) RecordLFSObject(ctx context.Context, repoID int64, oid string, size int64, confirmPresent func(key string) (bool, error)) error {
 	if confirmPresent == nil {
 		return errors.New("confirmPresent is required")
+	}
+
+	// An object this repository already links to is not a candidate for
+	// either collector: DeleteOrphanedLFSObject requires that no
+	// repo_lfs_objects row names the oid, and DeleteUntrackedLFSObject only
+	// claims an oid with no lfs_objects row at all -- which the foreign key
+	// under the link guarantees it has. So there is no race to hold a lock
+	// against, both statements below would be no-ops, and the storage round
+	// trip would establish nothing the caller has not established already
+	// (every one of them stats or writes the bytes before it gets here).
+	// Answering this from the read pool keeps the repeated case -- a re-push
+	// of objects this repository already holds -- off the writer entirely.
+	linked, err := s.RepoHasLFSObject(ctx, repoID, oid)
+	if err != nil {
+		return err
+	}
+	if linked {
+		return nil
 	}
 
 	tx, err := s.db.Begin(ctx)
