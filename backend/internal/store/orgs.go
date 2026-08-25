@@ -121,7 +121,12 @@ const orgMemberCount = `(SELECT count(*) FROM org_members m WHERE m.namespace_id
 
 const (
 	defaultOrgPageSize = 50
-	maxOrgPageSize     = 200
+	// MaxOrgPageSize is the ceiling every org-scoped listing is clamped to.
+	// It is exported because an API handler that pages over one of these
+	// listings has to derive its own "is there another page?" decision from
+	// the same number: comparing a returned page against an unclamped limit
+	// makes a full page look short and reports the end of the list early.
+	MaxOrgPageSize = 200
 )
 
 // binder hands out $N placeholders while collecting the values they bind.
@@ -303,14 +308,16 @@ func (s *Store) ListOrgsForUser(ctx context.Context, userID int64) ([]OrgSummary
 // the viewer's own membership where they have one, so a directory page can
 // badge the organisations they belong to without a query per row.
 func (s *Store) ListOrgs(ctx context.Context, search string, viewerID *int64, limit, offset int) ([]OrgSummary, int64, error) {
-	limit, offset = pageWindow(limit, offset, defaultOrgPageSize, maxOrgPageSize)
+	limit, offset = pageWindow(limit, offset, defaultOrgPageSize, MaxOrgPageSize)
 
 	where := `WHERE n.kind = 'org'`
 	var countArgs []any
 	countBind := binder(&countArgs)
 	if search != "" {
-		p := countBind("%" + search + "%")
-		where += ` AND (n.name ILIKE ` + p + ` OR n.display_name ILIKE ` + p + `)`
+		// Escaped to a literal substring rather than interpolated as a
+		// pattern, so the directory answers what was typed (see like.go).
+		p := countBind(likeContains(search))
+		where += ` AND ` + likeAnyOf(p, "n.name", "n.display_name")
 	}
 
 	var total int64
@@ -330,8 +337,8 @@ func (s *Store) ListOrgs(ctx context.Context, search string, viewerID *int64, li
 	}
 	listWhere := `WHERE n.kind = 'org'`
 	if search != "" {
-		p := bind("%" + search + "%")
-		listWhere += ` AND (n.name ILIKE ` + p + ` OR n.display_name ILIKE ` + p + `)`
+		p := bind(likeContains(search))
+		listWhere += ` AND ` + likeAnyOf(p, "n.name", "n.display_name")
 	}
 	limitP, offsetP := bind(limit), bind(offset)
 
@@ -543,7 +550,7 @@ func (s *Store) AppendOrgAudit(ctx context.Context, id int64, e AuditEntry) erro
 // ListOrgAudit returns one page of the log, newest first. beforeID > 0
 // continues after a previous page's last id.
 func (s *Store) ListOrgAudit(ctx context.Context, id int64, beforeID int64, limit int) ([]AuditEntry, error) {
-	limit = pageLimit(limit, defaultOrgPageSize, maxOrgPageSize)
+	limit = pageLimit(limit, defaultOrgPageSize, MaxOrgPageSize)
 	args := []any{id}
 	bind := binder(&args)
 	where := `WHERE namespace_id = $1`

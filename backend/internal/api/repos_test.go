@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/dotneet/thinkingface/backend/internal/config"
@@ -127,5 +129,147 @@ func TestSSHCloneURL(t *testing.T) {
 				t.Fatalf("sshCloneURL = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCreateRepoForeignNamespaceIsForbidden pins the status of the one
+// createRepo failure that is not about the request body. Naming a namespace
+// you may not write to used to be folded into inputError and answered 400
+// bad_request, which reads as "fix your request" for something no request can
+// fix; every other permission failure in this package (loadRepoForDelete,
+// requireOrgRole, loadRepoForWriteAllowArchived) says 403, and
+// docs/dev/api-contract.md distinguishes the two.
+func TestCreateRepoForeignNamespaceIsForbidden(t *testing.T) {
+	f := newTransferFixture(t)
+	tok := f.token(f.alice, "write")
+
+	for _, c := range []struct {
+		what, path string
+		body       any
+	}{
+		{"UI", "/api/v1/repos", map[string]any{"kind": "model", "namespace": "bob", "name": "x"}},
+		{"HF", "/api/repos/create", map[string]any{"type": "model", "name": "bob/x"}},
+	} {
+		resp := f.do("POST", c.path, tok, c.body)
+		if resp.status() != 403 {
+			t.Fatalf("%s create in bob's namespace: status = %d, want 403, body = %s",
+				c.what, resp.status(), resp.rec.Body.String())
+		}
+	}
+
+	// A namespace that is not there at all stays a 400: its absence is a
+	// fault in the request, and existence is public information anyway
+	// (GET /api/v1/namespaces/{ns} answers it unauthenticated).
+	resp := f.do("POST", "/api/v1/repos", tok, map[string]any{
+		"kind": "model", "namespace": "nobody", "name": "x",
+	})
+	if resp.status() != 400 {
+		t.Fatalf("create in a namespace that does not exist: status = %d, want 400, body = %s",
+			resp.status(), resp.rec.Body.String())
+	}
+}
+
+// failEnqueuer stands in for a syncer whose queue cannot be written to --
+// the database is down, or the jobs table is locked.
+type failEnqueuer struct {
+	st          *store.Store
+	storagePath string
+	calls       int
+}
+
+func (e *failEnqueuer) Enqueue(ctx context.Context, repoID int64, _, _, _ string) error {
+	e.calls++
+	// Read the path while the row is still there, so the test can check the
+	// bare repository was cleaned up too.
+	if r, err := e.st.GetRepoByID(ctx, repoID); err == nil {
+		e.storagePath = r.StoragePath
+	}
+	return errors.New("sync queue unavailable")
+}
+
+// TestCreateRepoRollsBackWhenTheIndexJobCannotBeQueued covers the third way
+// createRepo can fail after it has started writing. `git init` and the initial
+// commit both roll back; queuing the first index job did not, so a 500 left a
+// repositories row, a bare directory and a commit behind -- and the client's
+// retry then collided with the name it had just failed to create. The job is
+// also the only one that will ever cover the initial commit: the next push
+// enqueues a diff rooted at it (syncer.changedPaths), so the seeded README.md
+// and .gitattributes would never be indexed.
+func TestCreateRepoRollsBackWhenTheIndexJobCannotBeQueued(t *testing.T) {
+	f := newTransferFixture(t)
+	enq := &failEnqueuer{st: f.st}
+	f.s.sync = enq
+	tok := f.token(f.alice, "write")
+
+	resp := f.do("POST", "/api/v1/repos", tok, map[string]any{
+		"kind": "model", "namespace": "alice", "name": "half-made",
+	})
+	if resp.status() != 500 {
+		t.Fatalf("create with a broken queue: status = %d, want 500, body = %s",
+			resp.status(), resp.rec.Body.String())
+	}
+	if enq.calls != 1 {
+		t.Fatalf("enqueue called %d times, want 1", enq.calls)
+	}
+
+	ctx := context.Background()
+	if _, err := f.st.GetRepo(ctx, "model", "alice", "half-made"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("repository row survived the failed create: err = %v", err)
+	}
+	if enq.storagePath == "" {
+		t.Fatal("test could not observe the storage path")
+	}
+	if f.git.Exists(enq.storagePath) {
+		t.Fatalf("bare repository %s survived the failed create", enq.storagePath)
+	}
+
+	// And the name is free again, so the obvious retry works.
+	f.s.sync = noopEnqueuer{}
+	if retry := f.do("POST", "/api/v1/repos", tok, map[string]any{
+		"kind": "model", "namespace": "alice", "name": "half-made",
+	}); retry.status() != 200 {
+		t.Fatalf("retry after a failed create: status = %d, want 200, body = %s",
+			retry.status(), retry.rec.Body.String())
+	}
+}
+
+// cancellingEnqueuer fails the way a client hanging up mid-request does: the
+// context is cancelled, and the queue call fails because of it.
+type cancellingEnqueuer struct{ cancel context.CancelFunc }
+
+func (e *cancellingEnqueuer) Enqueue(ctx context.Context, _ int64, _, _, _ string) error {
+	e.cancel()
+	return ctx.Err()
+}
+
+// TestCreateRepoRollsBackOnACancelledRequest is the other half of the rollback
+// above. The most likely reason the queue call fails is that the request's
+// context died, and a rollback running on that same context deletes nothing --
+// while git.Remove, which takes no context, still succeeds. That combination
+// is worse than no rollback at all: the name stays taken by a row whose bare
+// repository is gone, so the retry gets the 409 the rollback exists to avoid
+// and the repository it names can never be opened.
+func TestCreateRepoRollsBackOnACancelledRequest(t *testing.T) {
+	f := newTransferFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.s.sync = &cancellingEnqueuer{cancel: cancel}
+
+	repo, err := f.s.createRepo(ctx, f.alice, "model", "alice", "cut-off", "")
+	if err == nil {
+		t.Fatalf("createRepo on a cancelled request returned %+v, want an error", repo)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("createRepo error = %v, want it to wrap context.Canceled", err)
+	}
+
+	if _, err := f.st.GetRepo(context.Background(), "model", "alice", "cut-off"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("repository row survived a cancelled create: err = %v", err)
+	}
+
+	// The name is free again, which is the whole point.
+	f.s.sync = noopEnqueuer{}
+	if _, err := f.s.createRepo(context.Background(), f.alice, "model", "alice", "cut-off", ""); err != nil {
+		t.Fatalf("re-creating the rolled-back repository: %v", err)
 	}
 }

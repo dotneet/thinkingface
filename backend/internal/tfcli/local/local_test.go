@@ -73,6 +73,46 @@ func TestScanDirectory(t *testing.T) {
 	}
 }
 
+func TestScanRootIsSymlinkToDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require elevated privileges on windows")
+	}
+
+	realDir := t.TempDir()
+	writeFile(t, filepath.Join(realDir, "README.md"), "hello")
+	writeFile(t, filepath.Join(realDir, "data", "train.parquet"), "parquet-bytes")
+
+	linkParent := t.TempDir()
+	root := filepath.Join(linkParent, "root-link")
+	if err := os.Symlink(realDir, root); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	files, allPaths, err := Scan(root, Options{})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	var got []string
+	for _, f := range files {
+		got = append(got, f.RepoPath)
+		if f.AbsPath == "" {
+			t.Errorf("file %s has empty AbsPath", f.RepoPath)
+		}
+	}
+	sort.Strings(got)
+
+	want := []string{"README.md", "data/train.parquet"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Scan RepoPaths = %v, want %v", got, want)
+	}
+
+	sort.Strings(allPaths)
+	if !reflect.DeepEqual(allPaths, want) {
+		t.Fatalf("Scan allPaths = %v, want %v", allPaths, want)
+	}
+}
+
 func TestScanSingleFile(t *testing.T) {
 	root := t.TempDir()
 	p := filepath.Join(root, "model.safetensors")

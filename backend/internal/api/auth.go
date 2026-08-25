@@ -207,9 +207,37 @@ func (s *Server) userForToken(ctx context.Context, token string) (*store.User, s
 	}
 	go func() {
 		// Detached from the request so a slow write never delays the response.
-		_ = s.store.TouchToken(context.WithoutCancel(ctx), tok.ID)
+		writeCtx, cancel := detachedWrite(ctx)
+		defer cancel()
+		_ = s.store.TouchToken(writeCtx, tok.ID)
 	}()
 	return user, tok.Scope
+}
+
+// detachedWriteTimeout bounds a database write that has been cut loose from
+// the request it belongs to. Those writes are fire-and-forget, so nothing
+// upstream is waiting on them and nothing applies back pressure: without a
+// deadline a database that has stopped answering -- a stalled SQLite writer,
+// an exhausted connection pool -- leaves every one of them parked forever
+// while new requests keep starting more. Ten seconds is far longer than any
+// of these statements should take and short enough that a stall drains
+// instead of accumulating.
+const detachedWriteTimeout = 10 * time.Second
+
+// detachedWrite is the context for such a write: the request's values (the
+// request id the store logs with, among them) without its cancellation, and a
+// deadline of its own. Compensating work uses it for the same reason from the
+// other direction -- a rollback whose whole job is to undo a step the client's
+// disconnect just broke cannot run on the context that disconnect cancelled
+// (rollbackCreateRepo).
+//
+// A bounded lifetime is all this does; it does not bound how many of these
+// goroutines exist at one instant, which stays proportional to the request
+// rate. A shared worker pool would, but it would also have to decide what to
+// do when its queue fills -- dropping download counts is a product decision,
+// not a refactor -- so that is left for when the numbers call for it.
+func detachedWrite(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), detachedWriteTimeout)
 }
 
 func currentUser(ctx context.Context) *store.User {

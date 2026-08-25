@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -209,4 +210,90 @@ func (h *flushHarness) bufferedPoints(projectID int64) int {
 		h.t.Fatalf("list points: %v", err)
 	}
 	return len(points)
+}
+
+// TestFlushProject_DefersBeforeCommittingWhenTheRefIsBusy pins where the ref
+// lock is taken. Giving up is fine -- the points stay buffered and the next
+// poll retries -- but giving up *after* committing the parquet is not: the
+// file would be in git while repo_files, which is where Series looks for the
+// layout, still described the tree without it, and the sync job that owns the
+// ref right now would rewrite that same stale listing. Taking the lock before
+// step 1 means a busy ref costs nothing at all.
+func TestFlushProject_DefersBeforeCommittingWhenTheRefIsBusy(t *testing.T) {
+	h := newFlushHarness(t)
+	projectID := h.ingest("demo", "run-1", "finished", []int64{1, 2, 3})
+
+	gitRepo, err := h.git.Open(h.repo.StoragePath)
+	if err != nil {
+		t.Fatalf("open git repo: %v", err)
+	}
+	before, err := gitRepo.Resolve("main")
+	if err != nil {
+		t.Fatalf("resolve main: %v", err)
+	}
+
+	// Stand in for the sync worker that is mid-pipeline on this ref.
+	held, ok := h.syn.refLocks.tryLock(h.repo.ID, h.repo.DefaultBranch)
+	if !ok {
+		t.Fatal("could not take the ref lock the test needs to hold")
+	}
+
+	err = h.syn.FlushProject(h.ctx, h.repo.ID, projectID, "demo")
+	if !errors.Is(err, errRefBusy) {
+		t.Fatalf("FlushProject on a busy ref = %v, want errRefBusy", err)
+	}
+
+	after, err := gitRepo.Resolve("main")
+	if err != nil {
+		t.Fatalf("resolve main after the deferral: %v", err)
+	}
+	if after != before {
+		t.Errorf("the deferred flush committed anyway: main moved %s -> %s", before, after)
+	}
+
+	pending, err := h.st.ListPendingFlushProjects(h.ctx, 10)
+	if err != nil {
+		t.Fatalf("list pending flush projects: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ProjectID != projectID {
+		t.Fatalf("pending after the deferral = %+v, want the project still buffered", pending)
+	}
+
+	// And once the ref frees up the very next attempt does the whole thing.
+	held.unlock()
+	if err := h.syn.FlushProject(h.ctx, h.repo.ID, projectID, "demo"); err != nil {
+		t.Fatalf("FlushProject after the ref freed up: %v", err)
+	}
+	if moved, err := gitRepo.Resolve("main"); err != nil {
+		t.Fatalf("resolve main after the retry: %v", err)
+	} else if moved == before {
+		t.Error("the retry did not commit the parquet")
+	}
+}
+
+// TestFlushProject_EmptyDefaultBranchStillDrains pins that the syncer and the
+// flusher agree on the ref. They have to: the lock is taken before the commit,
+// so a syncer that derived "" where the flusher derived "main" would lock one
+// key and commit under another -- the serialisation this file relies on would
+// be silently off, and the ref check after Flush would then fail every time,
+// leaving the project's points buffered forever. Sharing FlushRef is what
+// makes that impossible; this is the test that would notice a second copy.
+func TestFlushProject_EmptyDefaultBranchStillDrains(t *testing.T) {
+	h := newFlushHarness(t)
+	if _, err := h.st.SetRepoDefaultBranch(h.ctx, h.repo.ID, ""); err != nil {
+		t.Skipf("the store refuses an empty default_branch, so the fallback is unreachable: %v", err)
+	}
+	projectID := h.ingest("demo", "run-1", "finished", []int64{1, 2, 3})
+
+	if err := h.syn.FlushProject(h.ctx, h.repo.ID, projectID, "demo"); err != nil {
+		t.Fatalf("FlushProject with an empty default_branch: %v", err)
+	}
+
+	pending, err := h.st.ListPendingFlushProjects(h.ctx, 10)
+	if err != nil {
+		t.Fatalf("list pending flush projects: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("points still buffered after the flush: %+v", pending)
+	}
 }

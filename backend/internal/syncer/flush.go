@@ -10,6 +10,7 @@ package syncer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -28,6 +29,11 @@ const flushPollInterval = 10 * time.Second
 // large number of live projects still makes steady progress instead of
 // building an enormous batch.
 const maxFlushProjects = 100
+
+// errRefBusy says a sync worker holds the ref this flush would have indexed.
+// It is a deferral, not a failure: the commit is already in place and the
+// points are still buffered, so the only thing to do is come back next poll.
+var errRefBusy = errors.New("syncer: the ref is being indexed by a sync job")
 
 // EnableFlush turns on the periodic metrics flush. interval is the maximum
 // time a still-running project's points stay database-only; a run that has
@@ -100,11 +106,17 @@ func (s *Syncer) flushDue(ctx context.Context) error {
 
 	for _, p := range due {
 		if err := s.FlushProject(ctx, p.RepoID, p.ProjectID, p.Project); err != nil {
-			// One project's failure (a stale precondition, a schema this
-			// package cannot rewrite) must not stop the others. The points
-			// stay buffered and the next poll tries again.
-			slog.Warn("flush experiment project", "repo_id", p.RepoID,
-				"project", p.Project, "points", p.NumPoints, "error", err)
+			// A ref a sync job is holding is the ordinary outcome of pushing
+			// to a project while it flushes, not something an operator has to
+			// see. Leaving the project unstamped is what brings it back on the
+			// next poll.
+			if !errors.Is(err, errRefBusy) {
+				// One project's failure (a stale precondition, a schema this
+				// package cannot rewrite) must not stop the others. The points
+				// stay buffered and the next poll tries again.
+				slog.Warn("flush experiment project", "repo_id", p.RepoID,
+					"project", p.Project, "points", p.NumPoints, "error", err)
+			}
 			continue
 		}
 		if p.NumPoints > experiments.MaxFlushPoints {
@@ -133,6 +145,14 @@ func (s *Syncer) flushDue(ctx context.Context) error {
 // the retry recognises what it already wrote through the ingest-id column and
 // appends nothing twice. A crash between 2 and 3 leaves rows that are already
 // in the parquet, which the same check removes on the retry.
+//
+// All three run under the ref's lock (reflock.go), taken before step 1 rather
+// than around step 2 alone. The lock is what stops a sync worker that read the
+// tree first from writing its older index over this one -- and taking it early
+// is what keeps step 1 from happening at all when the ref is busy. Committing
+// the parquet and then giving up would leave the file in git but out of
+// repo_files until the next poll, which is the very gap Series reads
+// repo_files to close.
 func (s *Syncer) FlushProject(ctx context.Context, repoID, projectID int64, project string) error {
 	if s.flusher == nil {
 		return nil
@@ -148,6 +168,23 @@ func (s *Syncer) FlushProject(ctx context.Context, repoID, projectID int64, proj
 		return nil
 	}
 
+	// Taken without waiting: flushDue walks its candidates one at a time, so
+	// blocking here would stall every other project behind whichever
+	// repository is mid-publish. Nothing is lost by giving up before the
+	// commit -- the points are untouched and the next poll, ten seconds
+	// later, tries the whole thing again.
+	//
+	// The ref is the one the flusher will commit to, asked of the flusher
+	// rather than re-derived here: a second copy that drifted would take the
+	// lock under one key and commit under another. The check after Flush is
+	// the belt to that braces.
+	ref := experiments.FlushRef(repo)
+	held, ok := s.refLocks.tryLock(repo.ID, ref)
+	if !ok {
+		return errRefBusy
+	}
+	defer held.unlock()
+
 	result, err := s.flusher.Flush(ctx, repo, projectID, project)
 	if err != nil {
 		if errors.Is(err, gitrepo.ErrRepoNotFound) {
@@ -161,9 +198,13 @@ func (s *Syncer) FlushProject(ctx context.Context, repoID, projectID int64, proj
 		return nil
 	}
 
+	if result.Ref != ref {
+		return fmt.Errorf("syncer: flush committed to %q but the ref lock is held for %q", result.Ref, ref)
+	}
+
 	if _, err := s.runPushPipeline(ctx, repo, &store.SyncJob{
 		RepoID: repo.ID, Ref: result.Ref, OldSHA: result.OldSHA, NewSHA: result.NewSHA,
-	}); err != nil {
+	}, held); err != nil {
 		return err
 	}
 	if err := s.store.DeletePoints(ctx, result.PointIDs); err != nil {

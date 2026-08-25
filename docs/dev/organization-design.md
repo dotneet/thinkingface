@@ -433,6 +433,14 @@ Error codes (`{"error": {"type": ...}}`): `org_creation_disabled` (403), `reserv
   HF's return shape `[{"user": "alice", "fullname": "alice", "avatarUrl": "", "type": "user",
   "isPro": false}]` (HF doesn't return role either). Authorization is the same as the UI's
   `GET /orgs/{org}/members`
+- `GET /api/users/{username}/overview` — supports `HfApi.get_user_overview()` and carries an
+  `orgs` array of the same shape. It is a **membership disclosure by another route**, so it obeys
+  the rule of the member list above rather than `whoami-v2`'s: an organization appears in it only
+  when `members_visibility = 'public'`, or when the caller is a member of that organization
+  (§4 *1). Organizations that fail the test are omitted from the array; the endpoint itself stays
+  public and never answers 403. Without this, the members-only roster the two member-list
+  endpoints protect could simply be reassembled username by username.
+  `whoami-v2` describes the caller's own account and is not filtered
 - Other HF organization APIs such as `GET /api/organizations/{org}/overview` are **not
   implemented** (no public method in `huggingface_hub` calls them). Unimplemented endpoints keep
   returning a JSON 404, as today

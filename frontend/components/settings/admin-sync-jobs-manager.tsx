@@ -2,7 +2,7 @@
 
 import { CheckCircle2, RefreshCw, RotateCw } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -52,10 +52,19 @@ export function AdminSyncJobsManager() {
     [t],
   );
 
+  // Every fetch, whoever started it, is only allowed to write state if it is
+  // still the newest one. The `cancelled` closure below covers the effect's
+  // own supersession, but an action handler that reloads the list after
+  // succeeding calls refresh directly and has no closure to be cancelled by --
+  // so a slow reload could still land on top of a page the user has since
+  // moved to. Comparing against the latest ticket covers both.
+  const latestRequest = useRef(0);
+
   const refresh = useCallback(
     async (isStale: () => boolean = () => false) => {
+      const ticket = ++latestRequest.current;
       const result = await listFailedSyncJobs({ limit: PAGE_SIZE, offset });
-      if (isStale()) return;
+      if (isStale() || ticket !== latestRequest.current) return;
       if (!result.ok) {
         setLoadError(describe(result));
         setJobs(null);

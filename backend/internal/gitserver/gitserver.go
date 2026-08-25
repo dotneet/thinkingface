@@ -6,6 +6,8 @@ package gitserver
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -57,12 +59,25 @@ func ParseService(raw string) (Service, bool) {
 	}
 }
 
+// ErrResponseStarted marks a failure that happened after the status line was
+// already on the wire. The caller cannot turn such a request into a 500 -- the
+// client has its 200 -- so it is worth telling the two cases apart rather than
+// letting an error from either one produce a superfluous WriteHeader.
+var ErrResponseStarted = errors.New("response already started")
+
 // AdvertiseRefs answers GET /info/refs?service=…, the first half of the
 // negotiation.
-func (h *Handler) AdvertiseRefs(w http.ResponseWriter, storagePath string, service Service) error {
+//
+// The advertisement is buffered rather than streamed on purpose: it is small
+// (a pkt-line per ref), and holding it back until the command has exited is
+// what lets a failure surface as a 500 instead of an empty 200 that a git
+// client reads as "this repository has no refs".
+func (h *Handler) AdvertiseRefs(ctx context.Context, w http.ResponseWriter, storagePath string, service Service) error {
 	dir := h.git.Dir(storagePath)
 
-	cmd := exec.Command("git", string(service)[len("git-"):], "--stateless-rpc", "--advertise-refs", dir)
+	// CommandContext, like Serve: a client that hangs up mid-negotiation must
+	// not leave upload-pack walking the object database on its behalf.
+	cmd := exec.CommandContext(ctx, "git", string(service)[len("git-"):], "--stateless-rpc", "--advertise-refs", dir)
 	cmd.Env = gitEnv()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -71,19 +86,20 @@ func (h *Handler) AdvertiseRefs(w http.ResponseWriter, storagePath string, servi
 		return fmt.Errorf("%s --advertise-refs: %w: %s", service, err, stderr.String())
 	}
 
+	// The advertisement is prefixed with a service pkt-line and a flush packet.
+	var body bytes.Buffer
+	body.Write(pktLine("# service=" + string(service) + "\n"))
+	body.WriteString("0000")
+	body.Write(stdout.Bytes())
+
 	w.Header().Set("Content-Type", fmt.Sprintf("application/x-%s-advertisement", service))
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 
-	// The advertisement is prefixed with a service pkt-line and a flush packet.
-	if _, err := w.Write(pktLine("# service=" + string(service) + "\n")); err != nil {
-		return err
+	if _, err := w.Write(body.Bytes()); err != nil {
+		return fmt.Errorf("write %s advertisement: %w: %w", service, ErrResponseStarted, err)
 	}
-	if _, err := w.Write([]byte("0000")); err != nil {
-		return err
-	}
-	_, err := w.Write(stdout.Bytes())
-	return err
+	return nil
 }
 
 // Serve runs the second half: the client's request body is piped into the

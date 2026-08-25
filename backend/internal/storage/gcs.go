@@ -125,12 +125,33 @@ func (g *GCS) SignedPutURL(ctx context.Context, key string, ttl time.Duration) (
 	})
 }
 
+// Put writes the whole of r under key. A failure part-way through the transfer
+// must leave *no* object behind: keys like blobs/{sha} are trusted by readers
+// to hold exactly the content their name claims, and a truncated object there
+// would be indistinguishable from a good one and never repaired (PublishBlob
+// skips a key that already exists).
+//
+// That is why the writer gets its own cancellable context. storage.Writer.Close
+// is not an abort — it is "finalise what has been written so far", and on a
+// writer that was never opened (the reader failed before the first flush) it
+// opens one inside Close and commits an empty object. Cancelling the context
+// first is the documented way to abort: the upload goroutine's request is bound
+// to that context, and Writer.openWriter short-circuits on ctx.Err(), so
+// neither the truncated body nor an empty stand-in is ever committed.
+// CloseWithError is not a substitute — it is deprecated in favour of exactly
+// this, and it returns nil without doing anything when the writer is unopened.
 func (g *GCS) Put(ctx context.Context, key string, r io.Reader, contentType string) error {
-	w := g.obj(key).NewWriter(ctx)
+	// Cancelled on every return; after a successful Close the upload has
+	// already been observed complete, so the late cancel is a no-op.
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	w := g.obj(key).NewWriter(wctx)
 	if contentType != "" {
 		w.ContentType = contentType
 	}
 	if _, err := io.Copy(w, r); err != nil {
+		cancel()
 		_ = w.Close()
 		return fmt.Errorf("write %s: %w", key, err)
 	}
@@ -172,11 +193,18 @@ func (g *GCS) PutIfGeneration(ctx context.Context, key string, generation int64,
 		conds = storage.Conditions{DoesNotExist: true}
 	}
 
-	w := g.obj(key).If(conds).NewWriter(ctx)
+	// Same abort-by-cancellation contract as Put: a transfer that dies part-way
+	// must not consume the generation it was writing against, which is exactly
+	// what finalising a truncated object would do.
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	w := g.obj(key).If(conds).NewWriter(wctx)
 	if contentType != "" {
 		w.ContentType = contentType
 	}
 	if _, err := io.Copy(w, r); err != nil {
+		cancel()
 		_ = w.Close()
 		if isPreconditionFailed(err) {
 			return 0, ErrPreconditionFailed

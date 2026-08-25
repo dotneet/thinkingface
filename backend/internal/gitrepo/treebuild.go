@@ -45,9 +45,28 @@ func (d *dirNode) ensureLoaded(s storer.EncodedObjectStorer) error {
 	for _, te := range t.Entries {
 		if te.Mode == filemode.Dir {
 			d.subs[te.Name] = &dirNode{hash: te.Hash}
-		} else {
-			d.blobs[te.Name] = te
+			// A tree written before this package refused to build one can
+			// carry the same name as both a file and a directory -- the
+			// duplicateEntries shape git fsck rejects. Resolving it here, the
+			// way a checkout does (the directory wins, since that is what
+			// clients already see on disk), is what lets the next commit
+			// repair such a repository instead of failing on it forever:
+			// write() below treats the collision as unrecoverable, and it has
+			// to, or a genuine bug in walk/setBlob would go out as a corrupt
+			// tree again.
+			if _, dup := d.blobs[te.Name]; dup {
+				delete(d.blobs, te.Name)
+				// The loaded hash no longer describes what this node holds,
+				// so it must be rewritten rather than reused as clean.
+				d.dirty = true
+			}
+			continue
 		}
+		if _, dup := d.subs[te.Name]; dup {
+			d.dirty = true
+			continue
+		}
+		d.blobs[te.Name] = te
 	}
 	return nil
 }
@@ -68,6 +87,30 @@ func (d *dirNode) walk(s storer.EncodedObjectStorer, p string, create bool) (*di
 			}
 			next = newDirNode()
 			cur.subs[seg] = next
+		}
+		if create {
+			// Descending through a name that is currently a *file* turns it
+			// into a directory, so the file has to go. git does the same
+			// thing -- `git add foo/bar` when `foo` is a tracked file
+			// replaces `foo` rather than refusing -- and setBlob already
+			// implements the mirror image of this rule for the other
+			// direction, so an implicit replacement is the only choice that
+			// makes the two directions agree.
+			//
+			// Erroring out instead was the alternative, and it would arguably
+			// be friendlier to a client that got its paths wrong. It loses to
+			// two things: HF clients (and git itself) treat this as an
+			// ordinary rename-shaped edit, and a commit is applied op by op,
+			// so a batch that legitimately deletes `foo` and adds `foo/bar`
+			// would have to be rejected on op ordering alone.
+			//
+			// Whichever way this went, the entry could not be left in both
+			// maps: write() emits one tree entry per name in each, and a tree
+			// carrying the same name twice is what `git fsck --strict` calls
+			// duplicateEntries -- a repository that ordinary clients clone
+			// while silently losing the file, and that a fsck-ing client
+			// refuses outright.
+			delete(cur.blobs, seg)
 		}
 		cur.dirty = true
 		cur = next
@@ -122,6 +165,14 @@ func (d *dirNode) write(s storer.EncodedObjectStorer) (plumbing.Hash, error) {
 
 	entries := make([]object.TreeEntry, 0, len(d.blobs)+len(d.subs))
 	for name, te := range d.blobs {
+		// A name held in both maps would be written as two entries of the
+		// same name, which is a corrupt tree. walk and setBlob keep that from
+		// happening; this is the assertion that says so out loud, because the
+		// failure it guards against is silent at write time and permanent
+		// once it reaches the WAL.
+		if _, dup := d.subs[name]; dup {
+			return plumbing.ZeroHash, fmt.Errorf("tree entry %q is both a file and a directory", name)
+		}
 		te.Name = name
 		entries = append(entries, te)
 	}

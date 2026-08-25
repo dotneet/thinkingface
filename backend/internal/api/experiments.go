@@ -128,6 +128,15 @@ func (s *Server) handleExperimentMetrics(w http.ResponseWriter, r *http.Request)
 	}
 	q := r.URL.Query()
 	maxPoints, _ := strconv.Atoi(q.Get("max_points"))
+	// Clamped, like every other caller-supplied limit here. Downsampling
+	// (experiments.downsample) is the only thing keeping a long run's series
+	// out of the response body, and this endpoint is readable without
+	// authentication, so an unbounded max_points turns one request into
+	// "serialise every point you have". Zero or less still means "unset" and
+	// is left to the package default of 1000.
+	if maxPoints > maxMetricPoints {
+		maxPoints = maxMetricPoints
+	}
 
 	series, err := s.experiments().Series(r.Context(), repo, experiments.SeriesRequest{
 		Project: chi.URLParam(r, "project"),
@@ -144,6 +153,12 @@ func (s *Server) handleExperimentMetrics(w http.ResponseWriter, r *http.Request)
 }
 
 const (
+	// maxMetricPoints is the ceiling on `max_points` for the metrics
+	// endpoint. It is well above the default of 1000
+	// (experiments.SeriesRequest) so no chart the UI draws ever meets it,
+	// and far below the point count a long training run accumulates, which
+	// is what it exists to keep out of a single response.
+	maxMetricPoints = 5000
 	// maxRunTags bounds how many labels one run may carry. The column is an
 	// unconstrained text[], so the ceiling lives here.
 	maxRunTags = 32

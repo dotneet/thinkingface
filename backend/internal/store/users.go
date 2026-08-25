@@ -134,13 +134,14 @@ func (s *Store) ListUsers(ctx context.Context, search string, limit, offset int)
 
 	// ILIKE is rewritten to LIKE for SQLite (dialect.go), whose LIKE is
 	// already case-insensitive for ASCII -- the same compromise the
-	// repository and organisation listings make.
+	// repository and organisation listings make. The search text is a
+	// substring, not a pattern, so it goes through like.go's pair.
 	where := ""
 	var countArgs []any
 	countBind := binder(&countArgs)
 	if search != "" {
-		p := countBind("%" + search + "%")
-		where = ` WHERE (username ILIKE ` + p + ` OR email ILIKE ` + p + `)`
+		p := countBind(likeContains(search))
+		where = ` WHERE ` + likeAnyOf(p, "username", "email")
 	}
 
 	var total int64
@@ -152,8 +153,8 @@ func (s *Store) ListUsers(ctx context.Context, search string, limit, offset int)
 	bind := binder(&args)
 	listWhere := ""
 	if search != "" {
-		p := bind("%" + search + "%")
-		listWhere = ` WHERE (username ILIKE ` + p + ` OR email ILIKE ` + p + `)`
+		p := bind(likeContains(search))
+		listWhere = ` WHERE ` + likeAnyOf(p, "username", "email")
 	}
 	limitP, offsetP := bind(limit), bind(offset)
 

@@ -70,6 +70,34 @@ type picklePersID struct{ Value any }
 // maxPickleStack stops a malformed stream from growing the stack forever.
 const maxPickleStack = 1 << 20
 
+// maxPickleMemoEntries bounds the memo table the same way push() bounds the
+// stack. MEMOIZE (opcode 0x94) is a single byte that peeks the stack's top
+// without popping it, so a stream can push one value and then repeat MEMOIZE
+// forever without ever tripping the stack limit above -- every repetition
+// only grows the memo. A map[uint64]any entry costs around 45 bytes, so an
+// unbounded memo let a file well within maxPickleFile's 64 MiB limit force
+// gigabytes of live heap out of a stream of single-byte opcodes that
+// compress to almost nothing, the same trick a zip bomb uses.
+//
+// The ceiling is a quarter of maxPickleStack rather than a mirror of it,
+// because the two are not paid for the same way. Cache.Inspect's singleflight
+// only collapses callers asking for the *same* object, so N distinct crafted
+// files are N concurrent parses; at 40 requests per instance
+// (max_instance_request_concurrency in infra/main.tf) a mirrored limit still
+// reserved ~45 MB of memo each, which is a real fraction of an 8 GiB instance
+// that is also holding a tmpfs GIT_ROOT. A quarter of a million entries is
+// still an order of magnitude more than any real checkpoint needs -- the
+// largest published models carry ~10^4 tensors and a handful of memo entries
+// each -- while costing ~12 MB at the ceiling.
+const maxPickleMemoEntries = 1 << 18
+
+// maxPickleMarks bounds the mark stack for the same reason: MARK ('(') is
+// also a single byte that never touches the value stack, so it needs a limit
+// of its own rather than inheriting the one on u.stack. An int apiece makes
+// it far cheaper than the memo, but a mark is only ever useful with a value
+// stack under it, so it is held to the same ceiling.
+const maxPickleMarks = maxPickleMemoEntries
+
 // reducer turns a REDUCE/NEWOBJ of a known callable into a value. Returning
 // false leaves the unpickler to build a generic pickleObject.
 type reducer func(class pickleGlobal, args []any) (any, bool)
@@ -101,6 +129,21 @@ func (u *unpickler) pop() (any, error) {
 	v := u.stack[len(u.stack)-1]
 	u.stack = u.stack[:len(u.stack)-1]
 	return v, nil
+}
+
+// memoPut records a memo table entry for BINPUT / LONG_BINPUT / MEMOIZE /
+// PUT, enforcing maxPickleMemoEntries so none of them can grow the map
+// without bound (see the constant's comment for why they need their own
+// limit rather than sharing the stack's). Protocol 0 pickles legitimately
+// reuse memo slot numbers within a stream, so only entries that actually
+// grow the table count against the limit -- an overwrite of an existing key
+// is always allowed.
+func (u *unpickler) memoPut(key uint64, value any) error {
+	if _, exists := u.memo[key]; !exists && len(u.memo) >= maxPickleMemoEntries {
+		return fmt.Errorf("pickle: memo table exceeds %d entries", maxPickleMemoEntries)
+	}
+	u.memo[key] = value
+	return nil
 }
 
 // popMark returns everything pushed since the most recent MARK.
@@ -189,6 +232,9 @@ func (u *unpickler) step(op byte) (bool, error) {
 		return false, err
 
 	case '(': // MARK
+		if len(u.marks) >= maxPickleMarks {
+			return false, fmt.Errorf("pickle: more than %d MARK opcodes", maxPickleMarks)
+		}
 		u.marks = append(u.marks, len(u.stack))
 		return false, nil
 	case '1': // POP_MARK
@@ -463,8 +509,7 @@ func (u *unpickler) step(op byte) (bool, error) {
 		default:
 			key = uint64(len(u.memo))
 		}
-		u.memo[key] = value
-		return false, nil
+		return false, u.memoPut(key, value)
 	case 'p': // PUT (text)
 		line, err := u.readLine()
 		if err != nil {
@@ -477,8 +522,7 @@ func (u *unpickler) step(op byte) (bool, error) {
 		if len(u.stack) == 0 {
 			return false, fmt.Errorf("pickle: PUT with an empty stack")
 		}
-		u.memo[key] = u.stack[len(u.stack)-1]
-		return false, nil
+		return false, u.memoPut(key, u.stack[len(u.stack)-1])
 	case 'h', 'j': // BINGET, LONG_BINGET
 		size := 1
 		if op == 'j' {

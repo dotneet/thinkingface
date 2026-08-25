@@ -395,8 +395,10 @@ func buildRepoWhere(d dialect, f RepoFilter, scope repoFilterScope) (string, []a
 		where = append(where, `LOWER(n.name) = LOWER(`+bind(f.Author)+`)`)
 	}
 	if f.Query != "" {
-		q := bind("%" + f.Query + "%")
-		where = append(where, `(r.name ILIKE `+q+` OR n.name ILIKE `+q+` OR r.description ILIKE `+q+`)`)
+		// A plain substring, escaped to a literal so a "%" or "_" a user
+		// typed narrows the listing instead of widening it (see like.go).
+		q := bind(likeContains(f.Query))
+		where = append(where, likeAnyOf(q, "r.name", "n.name", "r.description"))
 	}
 	if f.Search != "" {
 		if pred := d.searchPredicate(bind, f.Search); pred != "" {

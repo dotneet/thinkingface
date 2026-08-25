@@ -229,6 +229,64 @@ func TestInspectSafetensorsCapsHeaderEntries(t *testing.T) {
 	}
 }
 
+func TestInspectSafetensorsRejectsInvalidDataOffsets(t *testing.T) {
+	// Regression: SizeBytes was computed as offsets[1] - offsets[0] with no
+	// check on the sign or ordering, so a header with reversed or negative
+	// offsets silently produced a negative tensor size instead of being
+	// rejected.
+	tests := map[string][2]int64{
+		"reversed":       {64, 0},
+		"negative start": {-8, 8},
+	}
+	for name, offsets := range tests {
+		t.Run(name, func(t *testing.T) {
+			data := buildSafetensors(t, map[string]any{
+				"weight": tensorEntry("F32", []int64{2}, offsets[0], offsets[1]),
+			})
+			size, fetch := fetcherFor(data)
+			info, err := Inspect(context.Background(), FormatSafetensors, size, fetch)
+			if err != nil {
+				t.Fatalf("Inspect: %v", err)
+			}
+			if info.NumTensors != 0 {
+				t.Errorf("num tensors = %d, want 0 (the malformed entry must be dropped, not kept with a negative size)", info.NumTensors)
+			}
+			if !hasWarning(info, "invalid data_offsets") {
+				t.Errorf("warnings = %v, want one reporting invalid data_offsets", info.Warnings)
+			}
+		})
+	}
+}
+
+func TestInspectSafetensorsRejectsDataOffsetsPastEndOfFile(t *testing.T) {
+	// A well-ordered, non-negative span can still lie about the size of the
+	// data section that follows the header; that must be caught the same way
+	// as a reversed span, rather than reported as a huge tensor.
+	header := map[string]any{
+		"weight": tensorEntry("F32", []int64{4}, 0, 1<<40),
+	}
+	raw, err := json.Marshal(header)
+	if err != nil {
+		t.Fatalf("marshal header: %v", err)
+	}
+	var buf bytes.Buffer
+	_ = binary.Write(&buf, binary.LittleEndian, uint64(len(raw)))
+	buf.Write(raw)
+	buf.Write(make([]byte, 16)) // the actual file is tiny; the header's claim is not
+
+	size, fetch := fetcherFor(buf.Bytes())
+	info, err := Inspect(context.Background(), FormatSafetensors, size, fetch)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if info.NumTensors != 0 {
+		t.Errorf("num tensors = %d, want 0", info.NumTensors)
+	}
+	if !hasWarning(info, "invalid data_offsets") {
+		t.Errorf("warnings = %v, want one reporting invalid data_offsets", info.Warnings)
+	}
+}
+
 // ------------------------------------------------------------- torch fixtures
 
 // pickleWriter emits the opcode sequence `torch.save` produces, so the tests
@@ -269,6 +327,11 @@ func (p *pickleWriter) int1(n int) { p.buf.Write([]byte{'K', byte(n)}) }
 // value it has already written and so how it can point a value at itself.
 func (p *pickleWriter) put(slot byte) { p.buf.Write([]byte{'q', slot}) }
 func (p *pickleWriter) get(slot byte) { p.buf.Write([]byte{'h', slot}) }
+
+// memoize is MEMOIZE (opcode 0x94): a single byte that memos the stack's top
+// without popping it, so it can be repeated indefinitely against one pushed
+// value.
+func (p *pickleWriter) memoize() { p.buf.WriteByte(0x94) }
 
 func (p *pickleWriter) ints(values ...int) {
 	p.mark()
@@ -509,6 +572,72 @@ func TestCollectorWalkVisitsAreBudgeted(t *testing.T) {
 	}
 	if c.visits > maxWalkVisits+1 {
 		t.Errorf("walk made %d visits, want at most %d", c.visits, maxWalkVisits+1)
+	}
+}
+
+func TestUnpicklerMemoTableIsBounded(t *testing.T) {
+	// Regression: MEMOIZE (opcode 0x94) is a single byte that memos the
+	// stack's top without popping it, so a stream that pushes one value and
+	// then repeats MEMOIZE has nothing else to trip -- push()'s stack limit
+	// never sees it, and every repetition only grows the memo map. A run of
+	// one-byte opcodes like that also compresses to almost nothing, so a
+	// small uploaded file could force gigabytes of live heap. The memo table
+	// must now refuse to grow past maxPickleMemoEntries.
+	p := &pickleWriter{}
+	p.proto()
+	p.int1(1)
+	for i := 0; i < maxPickleMemoEntries+10; i++ {
+		p.memoize()
+	}
+	p.stop()
+
+	_, err := newUnpickler(bytes.NewReader(p.buf.Bytes()), torchReduce).load()
+	if err == nil {
+		t.Fatal("load: want an error once the memo table exceeds its limit, got none")
+	}
+	if !strings.Contains(err.Error(), "memo table exceeds") {
+		t.Errorf("load error = %v, want it to mention the memo table limit", err)
+	}
+}
+
+func TestUnpicklerMemoOverwriteDoesNotCountAgainstLimit(t *testing.T) {
+	// BINPUT can legitimately reuse a memo slot within one stream (protocol 0
+	// pickles do this routinely), so an overwrite of an existing key must not
+	// be treated as growth -- only writes that add a new key count against
+	// maxPickleMemoEntries.
+	p := &pickleWriter{}
+	p.proto()
+	p.int1(1)
+	p.put(0)
+	p.put(0) // same slot again; the table must still have exactly one entry
+	p.stop()
+
+	u := newUnpickler(bytes.NewReader(p.buf.Bytes()), torchReduce)
+	if _, err := u.load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(u.memo) != 1 {
+		t.Errorf("memo has %d entries, want 1 (an overwrite must not grow the table)", len(u.memo))
+	}
+}
+
+func TestUnpicklerMarkStackIsBounded(t *testing.T) {
+	// Regression: MARK ('(') is also a single byte, and unlike PUSH it never
+	// touches the value stack -- so a stream that repeats MARK alone grew
+	// u.marks without ever tripping push()'s stack limit.
+	p := &pickleWriter{}
+	p.proto()
+	for i := 0; i < maxPickleMarks+10; i++ {
+		p.mark()
+	}
+	p.stop()
+
+	_, err := newUnpickler(bytes.NewReader(p.buf.Bytes()), torchReduce).load()
+	if err == nil {
+		t.Fatal("load: want an error once MARK opcodes exceed the limit, got none")
+	}
+	if !strings.Contains(err.Error(), "MARK") {
+		t.Errorf("load error = %v, want it to mention MARK", err)
 	}
 }
 

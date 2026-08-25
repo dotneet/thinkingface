@@ -187,29 +187,77 @@ func matchAttrPattern(pattern, filePath string) bool {
 // it matters more for hand-written rules -- a user's `data/**/*.bin` is
 // honoured by their git-lfs on push but was ignored by this server on upload,
 // so the same file took different routes depending on the client.
+//
+// The matching itself is a table rather than the obvious recursion. Both the
+// pattern and the path come from untrusted input -- the pattern from the
+// repository's own .gitattributes, the path from the request body -- and every
+// preupload weighs each of a request's files against every rule. Backtracking
+// over each "**" independently makes that O(n^k) for k stars over an n-segment
+// path, and a hand-written file with eight "**" against a deep path took
+// seconds per path to answer "no". Filling a table instead visits each
+// (pattern, name) pair once, so the same input is linear in their product.
 func matchSegments(pattern, name []string) bool {
-	for len(pattern) > 0 {
-		if pattern[0] == "**" {
-			if len(pattern) == 1 {
-				// A trailing "/**" matches everything *inside*, so there has
-				// to be something left to be inside of.
-				return len(name) > 0
+	pattern = collapseDoubleStars(pattern)
+	m, n := len(pattern), len(name)
+
+	// row[j] answers "does pattern[i:] match name[j:]?" for the i currently
+	// being filled. Rows are computed from the end backwards, and each one
+	// only ever reads the row after it and its own cell to the right, so two
+	// rows are enough -- the full m*n table would be sized by two untrusted
+	// inputs at once.
+	next := make([]bool, n+1) // the row for pattern[m:], i.e. the empty pattern
+	cur := make([]bool, n+1)
+	next[n] = true // both exhausted together: a match
+
+	for i := m - 1; i >= 0; i-- {
+		switch {
+		case pattern[i] == "**" && i == m-1:
+			// A trailing "/**" matches everything *inside*, so there has to
+			// be something left to be inside of.
+			for j := 0; j < n; j++ {
+				cur[j] = true
 			}
-			for i := 0; i <= len(name); i++ {
-				if matchSegments(pattern[1:], name[i:]) {
-					return true
+			cur[n] = false
+		case pattern[i] == "**":
+			// "**" stands for zero or more segments: either it consumes
+			// nothing here, or it swallows name[j] and asks the same question
+			// one segment along. Written this way the whole star costs one
+			// row instead of a fan-out over every split point.
+			cur[n] = next[n]
+			for j := n - 1; j >= 0; j-- {
+				cur[j] = next[j] || cur[j+1]
+			}
+		default:
+			cur[n] = false
+			for j := n - 1; j >= 0; j-- {
+				if !next[j+1] {
+					cur[j] = false
+					continue
 				}
+				// A malformed pattern segment counts as "does not match"
+				// rather than aborting: the recursion this replaced reached
+				// the same answer, since a segment that can never match fails
+				// at every alignment anyway.
+				ok, err := path.Match(pattern[i], name[j])
+				cur[j] = err == nil && ok
 			}
-			return false
 		}
-		if len(name) == 0 {
-			return false
-		}
-		ok, err := path.Match(pattern[0], name[0])
-		if err != nil || !ok {
-			return false
-		}
-		pattern, name = pattern[1:], name[1:]
+		cur, next = next, cur
 	}
-	return len(name) == 0
+	return next[0]
+}
+
+// collapseDoubleStars folds runs of "**" into one. Consecutive stars mean
+// exactly what a single one means -- zero or more segments -- so dropping the
+// extras costs nothing semantically and keeps a pattern of nothing but stars
+// from widening the table for no reason.
+func collapseDoubleStars(pattern []string) []string {
+	out := make([]string, 0, len(pattern))
+	for _, seg := range pattern {
+		if seg == "**" && len(out) > 0 && out[len(out)-1] == "**" {
+			continue
+		}
+		out = append(out, seg)
+	}
+	return out
 }
