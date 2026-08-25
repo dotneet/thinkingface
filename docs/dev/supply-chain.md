@@ -241,10 +241,19 @@ fix:
    *pending*, not as passing, which is the behaviour this depends on.
 
    The same rule applies on the way out: the merge is a `GITHUB_TOKEN` push to
-   `main`, so it does not start `main`'s push-triggered workflows either. A
-   dependency update that should redeploy the docs site or re-run the audit
-   needs those dispatched by hand (Actions → *docs* / *security* → *Run
-   workflow*).
+   `main`, so it starts none of `main`'s push-triggered workflows — **`ci`
+   included**, not just the `docs` deploy and the `security` audit. An
+   automerged update is verified on its own branch and never on `main`. When
+   that matters for a particular update, dispatch the run by hand (Actions →
+   *CI* / *docs* / *security* → *Run workflow*).
+
+   What keeps that from being a stale-branch problem: `rebaseWhen` defaults to
+   `auto`, which Renovate resolves to `behind-base-branch` *because* automerge
+   is on, so a branch that falls behind `main` is rebased instead of merged as
+   it stands. The rebase is itself a `GITHUB_TOKEN` push, and it moves the head
+   commit — which discards the checks that were approved on the old one. A
+   branch that goes stale needs its **Approve and run** pressed again before it
+   can merge.
 
 Both disappear the moment Renovate is given a credential of its own — a classic
 personal access token with `repo` + `workflow`, or a GitHub App token minted by
