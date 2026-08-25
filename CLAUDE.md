@@ -60,7 +60,7 @@ make check         # ★always run after code changes (full backend + frontend +
 make test          # backend go test + frontend unit tests + clients/python unit tests
 make test-clients-python # just the clients/python unit tests (trackio resume contract, grouping, artifacts)
 make test-store-pg # also run backend/internal/store integration tests against PostgreSQL (requires make up)
-make test-e2e      # huggingface_hub-compatible E2E (requires make up first)
+make test-e2e      # huggingface_hub-compatible E2E (needs `make up`, and `docker compose up -d --build api` after backend changes)
 make fmt / lint    # format / static analysis
 make gen-types     # regenerate frontend/types/api.gen.ts from Go wire types
 make audit         # scan Go / frontend / Python dependencies for known vulnerabilities
@@ -178,7 +178,11 @@ own compose stack: it is full of E2E leftovers, and the UI must be in English.
 5. **Compatibility with `huggingface_hub` / `datasets` / `git` / `gcloud storage` is the top
    priority.** When changing the behavior of an HF-compatible endpoint (whoami / create_repo
    / preupload / commit / resolve / tree / LFS batch), always run `make test-e2e` to confirm
-   there is no regression.
+   there is no regression. CI now runs the same suite on any PR that touches `backend/`,
+   `e2e/` or a compose file, so a regression is caught before merge rather than after — but
+   the local run is still the faster loop, and it is the only one that sees your change
+   before you push. Remember `docker compose up -d --build api` first: `make up` reuses the
+   image it already has, so without a rebuild the suite passes against your *previous* code.
 6. **Every dependency install resolves from a lockfile, a digest, or a commit SHA.**
    `bun install --frozen-lockfile`, `uv run --locked`, `pip install --require-hashes`,
    `image:tag@sha256:...`, `uses: owner/action@<sha>`. Never add an install step that lets a

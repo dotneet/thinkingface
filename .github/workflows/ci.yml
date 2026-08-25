@@ -22,6 +22,51 @@ permissions:
   contents: read
 
 jobs:
+  # Which of the heavy jobs below this pull request actually needs. Done with
+  # `git diff` rather than a paths-filter action so the workflow keeps its
+  # dependency surface at zero third-party actions beyond checkout itself
+  # (docs/dev/supply-chain.md), and job-level rather than workflow-level `on:
+  # paths:` because that would gate *every* job, not just this one.
+  changes:
+    name: changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Only a pull request has two commits to compare. Every other event
+    # decides from the event itself (see the e2e job's `if`).
+    if: github.event_name == 'pull_request'
+    outputs:
+      e2e: ${{ steps.filter.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The whole history: the diff is taken against the merge base, which
+          # a shallow clone would not have.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: filter
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Against the merge base, not the base branch tip: main moving ahead
+          # while the pull request is open must not make its own commits look
+          # like part of this diff.
+          base=$(git merge-base "$BASE" "$HEAD")
+          changed=$(git diff --name-only "$base" "$HEAD")
+          echo "changed files:"
+          echo "$changed"
+          # Anything the compatibility suite actually exercises: the server
+          # itself, the suite, and the compose files it is run against. A
+          # false positive here costs one job; a false negative lets an
+          # HF-compatibility regression through (CLAUDE.md invariant 5).
+          if echo "$changed" | grep -qE '^(backend/|e2e/|docker-compose[^/]*\.yml$|\.github/workflows/ci\.yml$)'; then
+            echo "e2e=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "e2e=false" >> "$GITHUB_OUTPUT"
+          fi
+
   backend:
     name: backend (Go)
     runs-on: ubuntu-latest
@@ -291,9 +336,29 @@ jobs:
 
   e2e:
     name: e2e (huggingface_hub compat, ${{ matrix.backend }})
-    # A heavy job that brings up the whole stack via docker compose, so only
-    # run it on push to main or manual dispatch.
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    # The compatibility suite is the only thing that checks CLAUDE.md's
+    # invariant 5 -- that whoami / create_repo / preupload / commit / resolve /
+    # tree / LFS batch still behave the way huggingface_hub, datasets, git and
+    # gcloud expect. It used to run only after a merge, which meant a pull
+    # request that broke compatibility went green and failed on main
+    # afterwards, with the invariant resting entirely on the author
+    # remembering to run `make test-e2e` locally.
+    #
+    # It is a heavy job, so it is still not run for every pull request: the
+    # `changes` job above decides, from the diff, whether this one can be
+    # skipped. The two matrix legs run concurrently and take about as long as
+    # the backend job, so a pull request that does need them is barely slower
+    # end to end.
+    needs: changes
+    # !cancelled() rather than always(): the `changes` job is skipped outright
+    # on push and dispatch, and a skipped dependency would otherwise skip this
+    # job too -- but a cancelled workflow should still cancel it.
+    if: >-
+      !cancelled() && (
+        github.event_name == 'workflow_dispatch'
+        || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        || (github.event_name == 'pull_request' && needs.changes.outputs.e2e == 'true')
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:

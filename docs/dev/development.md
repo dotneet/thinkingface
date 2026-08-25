@@ -201,7 +201,7 @@ because `ci.yml` already covers the mechanical checks above.
 | `make test` | Go unit tests + frontend unit tests + the `clients/python` unit tests | nothing |
 | `make test-clients-python` | `clients/python/tests/` — the trackio shim's resume contract, run grouping, artifact upload and system metrics (`docs/dev/thinkingface-design.md` §8) | nothing |
 | `make test-store-pg` | `backend/internal/store` integration tests against PostgreSQL (the SQLite path always runs as part of `go test`) | `make up` |
-| `make test-e2e` | `e2e/` — `huggingface_hub` / `datasets` / git / GCS compatibility against a running server | `make up` |
+| `make test-e2e` | `e2e/` — `huggingface_hub` / `datasets` / git / GCS compatibility against a running server | `make up`, plus a rebuilt api image (below) |
 
 The E2E suite talks to an already-running server: it logs in as the admin user from `.env`,
 issues a write token, and revokes it at the end of the session (`e2e/conftest.py`). It resolves
@@ -211,6 +211,22 @@ required for it. **Run it
 whenever you change an HF-compatible endpoint** (whoami / create_repo / preupload / commit /
 resolve / tree / LFS batch) — compatibility with the upstream client libraries is the project's
 top priority. What the suite covers is listed in [`e2e/README.md`](../../e2e/README.md).
+
+**`make up` does not rebuild the api image.** It is `docker compose up -d` with no `--build`,
+so a container that is already running keeps serving whatever was built last time — and the
+suite then reports a confident pass against code you did not change. After touching `backend/`,
+bring the image up to date first:
+
+```bash
+docker compose up -d --build api
+```
+
+CI runs the same suite, against both `DATABASE_URL` schemes, on every pull request that touches
+`backend/`, `e2e/`, a compose file or `ci.yml` (the `changes` job in `.github/workflows/ci.yml`
+decides from the diff), as well as on every push to `main` and on manual dispatch. It is skipped
+for pull requests that cannot affect it — a docs or frontend-only change — because it brings up
+the whole stack twice. Running it locally before pushing is still worthwhile: the CI run is the
+backstop, not the first place you should find out.
 
 Two parts of it need something beyond a running API. The git-over-SSH cases talk to the
 separate SSH listener (`TF_SSH_ENABLED`, port 2222 in Compose) and **skip themselves** when
