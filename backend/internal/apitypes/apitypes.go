@@ -793,7 +793,14 @@ type ExpArtifactListResponse struct {
 // ExpRunAnnotationRequest is a partial update of a run's annotations: an
 // omitted field is left as it is, so a client can toggle one flag without
 // having to send the rest.
+//
+// For the two list fields, Tags and Models, "omitted" and "empty" are
+// different requests and JSON spells them differently: a missing key or an
+// explicit null leaves the list unchanged, while [] replaces it with nothing
+// -- which is the only way to clear one. Sending null to clear a list is the
+// mistake this note exists to prevent.
 type ExpRunAnnotationRequest struct {
+	// Tags replaces the run's tag list wholesale; an empty array clears it.
 	Tags       *[]string `json:"tags,omitempty" tstype:"string[]"`
 	Archived   *bool     `json:"archived,omitempty" tstype:"boolean"`
 	IsBaseline *bool     `json:"is_baseline,omitempty" tstype:"boolean"`
@@ -1133,9 +1140,12 @@ type OrgListResponse struct {
 	Total int64 `json:"total"`
 }
 
-// OrgMembersResponse is the body of GET /api/v1/orgs/{org}/members.
+// OrgMembersResponse is one page of GET /api/v1/orgs/{org}/members. Total is
+// the organisation's whole membership, ignoring the page window, so a client
+// can tell a full page with more behind it from the end of the roster.
 type OrgMembersResponse struct {
 	Items []OrgMember `json:"items"`
+	Total int64       `json:"total"`
 }
 
 // OrgMemberResponse wraps one membership row.

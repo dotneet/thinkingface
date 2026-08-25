@@ -250,6 +250,19 @@ class _Run:
         self._timer.start()
 
     def _on_timer(self) -> None:
+        # The read of _finished below races finish(), and is left that way on
+        # purpose: locking here would mean holding _lock across flush()'s HTTP
+        # call, which is the thing log() must never wait behind.
+        #
+        # The race arms one extra timer at worst. finish() can set the flag and
+        # cancel the current timer in the window between this check and
+        # _schedule_flush, leaving a timer running that finish() has already
+        # said goodbye to. What that timer then does is nothing:
+        # _maybe_collect_system_metrics returns on the flag, flush() finds the
+        # buffer empty -- finish() drains it before setting the flag, and log()
+        # refuses to add to it afterwards -- and this check, now reading True,
+        # does not schedule another. One wakeup of a daemon thread, no request,
+        # no duplicated point.
         self._maybe_collect_system_metrics()
         self.flush()
         if not self._finished:

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -316,9 +317,17 @@ func (s *Server) orgResponse(w http.ResponseWriter, r *http.Request, org *store.
 		internalError(w, "check organisation role", err)
 		return apitypes.OrgResponse{}, false
 	}
-	members, err := s.store.ListOrgMembers(ctx, org.ID)
+	// Only the headcount is wanted here, so it is counted rather than read:
+	// this used to list every membership row and take its length, which made
+	// the organisation page cost one row per member to render a number.
+	members, err := s.store.CountOrgMembers(ctx, org.ID)
 	if err != nil {
-		internalError(w, "count organisation members", err)
+		// The count reads the namespace row, so an organisation deleted
+		// between loadOrg and here answers ErrNotFound rather than zero.
+		// That is a 404 -- the organisation this response would describe is
+		// gone -- and handleStoreError is what says so; reporting it as a
+		// server fault would be describing the race as a bug in us.
+		handleStoreError(w, "count organisation members", err)
 		return apitypes.OrgResponse{}, false
 	}
 	repos, err := s.store.CountOrgRepos(ctx, org.ID)
@@ -326,7 +335,7 @@ func (s *Server) orgResponse(w http.ResponseWriter, r *http.Request, org *store.
 		internalError(w, "count organisation repositories", err)
 		return apitypes.OrgResponse{}, false
 	}
-	return apitypes.OrgResponse{Org: toOrgAPI(org, role, int64(len(members)), repos)}, true
+	return apitypes.OrgResponse{Org: toOrgAPI(org, role, members, repos)}, true
 }
 
 func (s *Server) handleUpdateOrg(w http.ResponseWriter, r *http.Request) {
@@ -389,6 +398,11 @@ func (s *Server) handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
 // handleListOrgMembers answers GET /api/v1/orgs/{org}/members. Members
 // always see the roster; everyone else only when members_visibility is
 // "public", and then without email addresses.
+//
+// The roster is paged like the other listings (`limit` / `offset`, `total`
+// counting the whole membership), because it used to be the one that was
+// not: every caller got every member, so the response and the read behind it
+// grew without bound as an organisation filled up.
 func (s *Server) handleListOrgMembers(w http.ResponseWriter, r *http.Request) {
 	org, ok := s.loadOrg(w, r, chi.URLParam(r, "org"))
 	if !ok {
@@ -404,16 +418,30 @@ func (s *Server) handleListOrgMembers(w http.ResponseWriter, r *http.Request) {
 		forbidden(w, "the member list of "+org.Name+" is visible to its members only")
 		return
 	}
-	members, err := s.store.ListOrgMembers(ctx, org.ID)
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	// Clamped here as well as in the store, so the handler's idea of the page
+	// window is the one that was actually applied. Working from the number
+	// the client asked for instead is what broke the audit log's "is there
+	// another page?" test: with ?limit=500 a full page could never equal it,
+	// so a listing that had more behind it reported its own end
+	// (docs/dev/api-contract.md §1.1).
+	if limit > store.MaxOrgPageSize {
+		limit = store.MaxOrgPageSize
+	}
+	members, total, err := s.store.ListOrgMembers(ctx, org.ID, limit, offset)
 	if err != nil {
-		internalError(w, "list organisation members", err)
+		// Same race as orgResponse: the headcount this reads first is taken
+		// from the namespace row, so a deletion in flight is a 404, not a 500.
+		handleStoreError(w, "list organisation members", err)
 		return
 	}
 	items := make([]apitypes.OrgMember, 0, len(members))
 	for i := range members {
 		items = append(items, toOrgMemberAPI(&members[i], role >= RoleRead))
 	}
-	writeJSON(w, http.StatusOK, apitypes.OrgMembersResponse{Items: items})
+	writeJSON(w, http.StatusOK, apitypes.OrgMembersResponse{Items: items, Total: total})
 }
 
 func (s *Server) handleAddOrgMember(w http.ResponseWriter, r *http.Request) {
@@ -624,6 +652,78 @@ func (s *Server) handleOrgAuditLog(w http.ResponseWriter, r *http.Request) {
 
 // ------------------------------------------------------------ HF-compatible
 
+// allOrgMembers reads the whole roster, one clamped page at a time.
+//
+// It exists for the HF-compatible endpoint below, whose wire shape is a bare
+// JSON array with no cursor and no total: huggingface_hub's
+// list_organization_members() reads whatever comes back as the complete list,
+// so returning a truncated one would not be a smaller answer but a wrong one,
+// and the external protocol is the source of truth here (CLAUDE.md invariant
+// 5). What paging buys is the other half of the problem -- no single query
+// materialises more than store.MaxOrgPageSize rows, however large the
+// organisation is. Paging for the *client* belongs on the UI endpoint, which
+// is free to grow a `total` because it is ours to define.
+//
+// The walk is keyed on the username rather than counted with OFFSET. The
+// roster is not frozen while this runs, and OFFSET means "skip the first N
+// rows" of whatever the set is at that moment -- so one membership removed
+// ahead of the cursor makes the next page repeat a row, and one added makes it
+// step over one. Either way the array is wrong, and a caller reading it as the
+// complete list has no way to tell. A username cursor cannot do that: each
+// page asks for what sorts after a specific name, so a member present
+// throughout appears exactly once no matter what happens to the others.
+//
+// The pages therefore arrive in username order, and the roster is sorted into
+// the display order (admins first, alphabetical within a role) once it is all
+// here. Alphabetical by Go's comparison, which is bytes -- close to but not
+// always the same arrangement ListOrgMembers gets from the database, whose
+// ORDER BY follows its own collation (docs/dev/thinkingface-design.md §10).
+// The two agree on SQLite and on a C-collated PostgreSQL and can differ on a
+// glibc one; nothing here depends on which, since huggingface_hub reads this
+// response as a set.
+func (s *Server) allOrgMembers(ctx context.Context, orgID int64) ([]store.OrgMember, error) {
+	out := []store.OrgMember{}
+	after := ""
+	for {
+		page, err := s.store.ListOrgMembersAfter(ctx, orgID, after, store.MaxOrgPageSize)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, page...)
+		if len(page) < store.MaxOrgPageSize {
+			break
+		}
+		after = page[len(page)-1].Username
+	}
+	sortOrgMembers(out)
+	return out, nil
+}
+
+// sortOrgMembers puts the roster in the order the paged listing returns:
+// admins first, then write, then read, alphabetical inside each.
+func sortOrgMembers(members []store.OrgMember) {
+	sort.SliceStable(members, func(i, j int) bool {
+		ri, rj := orgRoleRank(members[i].Role), orgRoleRank(members[j].Role)
+		if ri != rj {
+			return ri < rj
+		}
+		return members[i].Username < members[j].Username
+	})
+}
+
+// orgRoleRank mirrors the CASE in ListOrgMembers' ORDER BY. An unknown role
+// sorts last rather than being dropped: the listing shows what the row says.
+func orgRoleRank(role string) int {
+	switch role {
+	case "admin":
+		return 0
+	case "write":
+		return 1
+	default:
+		return 2
+	}
+}
+
 // handleHFOrgMembers answers GET /api/organizations/{org}/members, which is
 // what huggingface_hub's HfApi.list_organization_members() calls. HF returns
 // a bare list of accounts with no roles; the authorization is the same as
@@ -643,7 +743,7 @@ func (s *Server) handleHFOrgMembers(w http.ResponseWriter, r *http.Request) {
 		forbidden(w, "the member list of "+org.Name+" is visible to its members only")
 		return
 	}
-	members, err := s.store.ListOrgMembers(ctx, org.ID)
+	members, err := s.allOrgMembers(ctx, org.ID)
 	if err != nil {
 		internalError(w, "list organisation members", err)
 		return
