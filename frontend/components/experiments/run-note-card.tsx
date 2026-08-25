@@ -31,7 +31,15 @@ export function RunNoteCard({
   saving: boolean;
   /** Message from the last failed save, if any. */
   error?: string;
-  onSave: (note: string) => void;
+  /**
+   * Resolves once the save attempt has finished, to `true` on success. The
+   * editor only leaves edit mode on `true` — mirrors `RunTagsDialog`, which
+   * closes only from the mutation's `onSuccess` rather than the instant the
+   * request is fired, so a failed save leaves the draft exactly as typed
+   * (the same "keep the in-progress edit on failure" rule `file-editor.tsx`
+   * follows for commits).
+   */
+  onSave: (note: string) => Promise<boolean>;
 }) {
   const t = useT();
   const [editing, setEditing] = useState(false);
@@ -42,9 +50,9 @@ export function RunNoteCard({
     setEditing(true);
   }
 
-  function save() {
-    onSave(draft);
-    setEditing(false);
+  async function save() {
+    const ok = await onSave(draft);
+    if (ok) setEditing(false);
   }
 
   if (editing) {
@@ -53,14 +61,14 @@ export function RunNoteCard({
         className="flex flex-col gap-3"
         onSubmit={(e) => {
           e.preventDefault();
-          save();
+          void save();
         }}
       >
         <MarkdownEditor
           value={draft}
           onChange={setDraft}
           onSubmit={() => {
-            if (!saving) save();
+            if (!saving) void save();
           }}
           // The card is opened specifically to write, so focus starts here.
           autoFocus
@@ -81,6 +89,10 @@ export function RunNoteCard({
             {t("experiments.note.save")}
           </Button>
         </div>
+        {/* Below the Save/Cancel row, not above it — a failed save must never
+            push either control down (DESIGN.md §8). The draft above stays
+            untouched, so a failure never costs what was typed. */}
+        {error && <Alert tone="negative">{error}</Alert>}
       </form>
     );
   }

@@ -1,7 +1,7 @@
 "use client";
 
 import { FileText, Inbox, RotateCw } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -41,65 +41,91 @@ const PAGE_SIZE = 20;
 export function WebhookDeliveriesPanel({ webhookId }: { webhookId: number }) {
   const t = useT();
   const [deliveries, setDeliveries] = useState<WebhookDelivery[] | null>(null);
-  const [total, setTotal] = useState(0);
+  const [total, setTotal] = useState<number | null>(null);
   const [offset, setOffset] = useState(0);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [loadingPage, setLoadingPage] = useState(false);
   const [redeliveringId, setRedeliveringId] = useState<number | null>(null);
   // The delivery whose response is open in the detail dialog. The row itself
   // is held (not just its id) so a background refresh that drops the row from
   // the current page cannot blank out a dialog the user is reading.
   const [detail, setDetail] = useState<WebhookDelivery | null>(null);
 
-  async function refresh(atOffset: number, isStale: () => boolean = () => false) {
-    const result = await listWebhookDeliveries(webhookId, { limit: PAGE_SIZE, offset: atOffset });
-    if (isStale()) return;
-    if (!result.ok) {
-      setError(errorMessage(t, result));
-      return;
-    }
-    setError(null);
-    setDeliveries(result.data.items);
-    setTotal(result.data.total);
-    setOffset(atOffset);
-  }
+  const refresh = useCallback(
+    async (isStale: () => boolean = () => false) => {
+      setLoadingPage(true);
+      const result = await listWebhookDeliveries(webhookId, { limit: PAGE_SIZE, offset });
+      if (isStale()) return;
+      setLoadingPage(false);
+      if (!result.ok) {
+        setLoadError(errorMessage(t, result));
+        setDeliveries(null);
+        // Never carry a count or a stale page over from a failed read: rows
+        // from the old offset next to a mismatched range would state
+        // something the page does not know (DESIGN.md §9).
+        setTotal(null);
+        return;
+      }
+      setLoadError(null);
+      setDeliveries(result.data.items);
+      setTotal(result.data.total);
+    },
+    [webhookId, offset, t],
+  );
 
+  // A different webhook starts back on its first page rather than wherever
+  // this one happened to be paged to.
+  useEffect(() => {
+    setOffset(0);
+  }, [webhookId]);
+
+  // Guards against a fast Prev/Next click letting an older, slower response
+  // land after the newer one and overwrite it, silently rewinding the page
+  // (mirrors admin-users-manager.tsx / admin-sync-jobs-manager.tsx). Buttons
+  // only ever move `offset`; this effect is the one place that fetches.
   useEffect(() => {
     let cancelled = false;
-    refresh(0, () => cancelled);
+    refresh(() => cancelled);
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [webhookId]);
+  }, [refresh]);
 
   async function handleRedeliver(deliveryId: number) {
     if (redeliveringId !== null) return;
     setRedeliveringId(deliveryId);
+    setActionError(null);
     const result = await redeliverWebhook(webhookId, deliveryId);
     setRedeliveringId(null);
     if (!result.ok) {
-      setError(errorMessage(t, result));
+      setActionError(errorMessage(t, result));
       return;
     }
-    await refresh(0);
+    // Jump back to the first page so the just-redelivered attempt is visible.
+    // If we're already there, offset won't change (and so won't re-trigger
+    // the effect above), so fetch directly.
+    if (offset === 0) {
+      await refresh();
+    } else {
+      setOffset(0);
+    }
   }
 
-  if (deliveries === null && !error) {
-    return <SkeletonLines lines={3} />;
-  }
-  if (deliveries === null) {
-    return (
-      <ErrorState
-        title={t("settings.errorTitle")}
-        message={error ?? t("settings.deliveries.loadFailed")}
-      />
-    );
-  }
+  const hasPrev = offset > 0;
+  const hasNext = total !== null && offset + PAGE_SIZE < total;
 
   return (
     <div className="flex flex-col gap-3">
-      {error && <p className="text-xs text-negative">{error}</p>}
-      {deliveries.length === 0 ? (
+      {actionError && <Alert tone="negative">{actionError}</Alert>}
+      {deliveries === null && !loadError ? (
+        <SkeletonLines lines={3} />
+      ) : deliveries === null ? (
+        <ErrorState
+          title={t("settings.errorTitle")}
+          message={loadError ?? t("settings.deliveries.loadFailed")}
+        />
+      ) : deliveries.length === 0 ? (
         <EmptyState
           icon={Inbox}
           title={t("settings.deliveries.emptyTitle")}
@@ -175,27 +201,34 @@ export function WebhookDeliveriesPanel({ webhookId }: { webhookId: number }) {
           </table>
         </div>
       )}
-      {total > PAGE_SIZE && (
+      {(hasPrev || hasNext) && (
         <div className="flex items-center justify-between text-xs font-medium text-fg-subtle">
+          {/* A failed page load leaves total null. Rendering it as 0 would
+              put "21–0 of 0" directly under the error state, which reads as
+              "there are no deliveries" rather than "we could not ask"
+              (DESIGN.md §9). The buttons stay, because paging back is how
+              you recover. */}
           <span>
-            {t("settings.deliveries.pageInfo", {
-              from: offset + 1,
-              to: Math.min(offset + PAGE_SIZE, total),
-              total,
-            })}
+            {total === null
+              ? "—"
+              : t("settings.deliveries.pageInfo", {
+                  from: offset + 1,
+                  to: Math.min(offset + PAGE_SIZE, total),
+                  total,
+                })}
           </span>
           <div className="flex gap-2">
             <Button
               size="sm"
-              disabled={offset === 0}
-              onClick={() => refresh(Math.max(0, offset - PAGE_SIZE))}
+              disabled={!hasPrev || loadingPage}
+              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
             >
               {t("settings.deliveries.prev")}
             </Button>
             <Button
               size="sm"
-              disabled={offset + PAGE_SIZE >= total}
-              onClick={() => refresh(offset + PAGE_SIZE)}
+              disabled={!hasNext || loadingPage}
+              onClick={() => setOffset(offset + PAGE_SIZE)}
             >
               {t("settings.deliveries.next")}
             </Button>

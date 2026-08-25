@@ -416,7 +416,18 @@ export function RunDetail({
           canWrite={canWrite}
           saving={annotate.isPending}
           error={annotateError}
-          onSave={(note) => annotate.mutate({ note })}
+          onSave={async (note) => {
+            // mutateAsync rather than mutate: the note card needs to know
+            // whether the save landed before it leaves edit mode, or a
+            // failed save would silently drop the draft (the bug this
+            // fixes) — see the contract on RunNoteCard's onSave prop.
+            try {
+              await annotate.mutateAsync({ note });
+              return true;
+            } catch {
+              return false;
+            }
+          }}
         />
       </Section>
 

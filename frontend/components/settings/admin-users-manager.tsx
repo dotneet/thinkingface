@@ -409,12 +409,18 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
 
       {(hasPrev || hasNext) && (
         <div className="flex items-center justify-between text-sm text-fg-subtle">
+          {/* A failed reload leaves total null. Rendering it as 0 would put
+              "51–0 of 0" directly under the error state, which reads as "the
+              directory is empty" rather than "we could not ask" (DESIGN.md
+              §9). The buttons stay, because paging back is how you recover. */}
           <span className="tabular-nums">
-            {t("ui.pagination.range", {
-              from: offset + 1,
-              to: Math.min(offset + PAGE_SIZE, total ?? 0),
-              total: formatNumber(total ?? 0),
-            })}
+            {total === null
+              ? "—"
+              : t("ui.pagination.range", {
+                  from: offset + 1,
+                  to: Math.min(offset + PAGE_SIZE, total),
+                  total: formatNumber(total),
+                })}
           </span>
           <div className="flex gap-2">
             <Button
