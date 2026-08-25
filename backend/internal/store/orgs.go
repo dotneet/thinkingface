@@ -389,6 +389,51 @@ func scanOrgMember(row rowScanner) (*OrgMember, error) {
 // organisation page shows the number without showing the roster, and reading
 // every membership row only to take its length made that page cost more the
 // larger the organisation got.
+// ListOrgMembersAfter returns the members whose username sorts after the given
+// one, alphabetically, at most limit of them. An empty username starts at the
+// beginning.
+//
+// It exists for reading a roster whole (api.allOrgMembers). Paging that with
+// LIMIT/OFFSET means asking "skip the first N rows" of a set that another
+// request may be changing underneath, which double-counts a row when someone
+// ahead of it is removed and steps over one when someone is added. Keying on
+// the username instead makes each page ask for rows after a specific point, so
+// a row that exists for the whole walk is returned exactly once however much
+// the rest of the roster moves.
+//
+// The order is username alone -- not the role-first order the paged listing
+// returns -- because the cursor has to be something that cannot change while
+// the walk is in progress, and a member's role can. Callers that want the
+// display order sort what they collected.
+func (s *Store) ListOrgMembersAfter(ctx context.Context, id int64, afterUsername string, limit int) ([]OrgMember, error) {
+	limit = pageLimit(limit, defaultOrgPageSize, MaxOrgPageSize)
+
+	args := []any{id, afterUsername}
+	bind := binder(&args)
+	limitP := bind(limit)
+
+	rows, err := s.db.Query(ctx,
+		`SELECT `+orgMemberColumns+`
+		 FROM org_members m JOIN users u ON u.id = m.user_id
+		 WHERE m.namespace_id = $1 AND u.username > $2
+		 ORDER BY u.username
+		 LIMIT `+limitP, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []OrgMember{}
+	for rows.Next() {
+		m, err := scanOrgMember(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *m)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) CountOrgMembers(ctx context.Context, id int64) (int64, error) {
 	var n int64
 	err := s.db.QueryRow(ctx,
@@ -404,8 +449,13 @@ func (s *Store) CountOrgMembers(ctx context.Context, id int64) (int64, error) {
 // materialises grow with the organisation, and there is no size at which that
 // becomes anybody's intention.
 //
-// The ordering is total (usernames are unique), so a row cannot appear on two
-// consecutive pages or be skipped between them.
+// The ordering is total (usernames are unique), so within one unchanging
+// roster a row cannot appear on two consecutive pages or be skipped between
+// them. That is a statement about a fixed set, not a guarantee across a walk:
+// OFFSET counts rows at the moment each query runs, so a membership added or
+// removed between two pages shifts everything after it and the walk can then
+// repeat a row or step over one. Reading a whole roster wants
+// ListOrgMembersAfter, which does not count.
 func (s *Store) ListOrgMembers(ctx context.Context, id int64, limit, offset int) ([]OrgMember, int64, error) {
 	limit, offset = pageWindow(limit, offset, defaultOrgPageSize, MaxOrgPageSize)
 

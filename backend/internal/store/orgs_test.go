@@ -535,3 +535,166 @@ func TestIntegrationOrgMemberPaging(t *testing.T) {
 		}
 	})
 }
+
+// TestIntegrationListOrgMembersAfterSurvivesAConcurrentRemoval is why the
+// whole-roster walk is keyed on the username rather than counted with OFFSET.
+//
+// OFFSET means "skip the first N rows" of the set as it stands when the query
+// runs, so a membership removed ahead of the cursor between two pages shifts
+// everything after it back by one and the next page starts past a row that was
+// there the entire time. Nothing about the result says so: the caller ends up
+// with a list that is simply missing somebody. A username cursor asks for what
+// sorts after a specific name instead, which no amount of churn elsewhere can
+// move.
+func TestIntegrationListOrgMembersAfterSurvivesAConcurrentRemoval(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+		org := mustOrg(t, s, "acme", f.alice, OrgUpdate{})
+
+		// Zero-padded so alphabetical order is numerical order.
+		const members = 10
+		for i := range members {
+			name := fmt.Sprintf("member%04d", i)
+			u, err := s.CreateUser(ctx, name, name+"@example.com", "hash", false)
+			if err != nil {
+				t.Fatalf("create %s: %v", name, err)
+			}
+			if _, err := s.AddOrgMember(ctx, org.ID, u.ID, "read", f.alice.ID); err != nil {
+				t.Fatalf("add %s: %v", name, err)
+			}
+		}
+
+		// Read the first page of a walk, then remove somebody inside it --
+		// the shape that makes an OFFSET walk skip a row.
+		const pageSize = 4
+		first, err := s.ListOrgMembersAfter(ctx, org.ID, "", pageSize)
+		if err != nil {
+			t.Fatalf("first page: %v", err)
+		}
+		if len(first) != pageSize {
+			t.Fatalf("first page = %d rows, want %d", len(first), pageSize)
+		}
+		// Not first[0]: usernames sort "alice" before "member0000", and the
+		// founder is the only admin, which the store refuses to remove.
+		victim := first[1].Username
+		removed, err := s.GetUserByUsername(ctx, victim)
+		if err != nil {
+			t.Fatalf("look up %s: %v", victim, err)
+		}
+		if err := s.RemoveOrgMember(ctx, org.ID, removed.ID); err != nil {
+			t.Fatalf("remove %s: %v", victim, err)
+		}
+
+		// Finish the walk from where it was. Everything the first page
+		// returned counts as seen -- those rows were members when it ran.
+		seen := map[string]int{}
+		for _, m := range first {
+			seen[m.Username]++
+		}
+		after := first[len(first)-1].Username
+		for {
+			page, err := s.ListOrgMembersAfter(ctx, org.ID, after, pageSize)
+			if err != nil {
+				t.Fatalf("page after %q: %v", after, err)
+			}
+			for _, m := range page {
+				seen[m.Username]++
+			}
+			if len(page) < pageSize {
+				break
+			}
+			after = page[len(page)-1].Username
+		}
+
+		// Everyone who was a member throughout appears exactly once. With an
+		// OFFSET walk the row just past the first page is the one that goes
+		// missing, because the removal pulled it into the window already read.
+		for i := range members {
+			name := fmt.Sprintf("member%04d", i)
+			if name == victim {
+				continue // legitimately removed mid-walk
+			}
+			if seen[name] != 1 {
+				t.Errorf("%s appeared %d times in the walk, want exactly 1", name, seen[name])
+			}
+		}
+		if seen["alice"] != 1 {
+			t.Errorf("the founder appeared %d times, want exactly 1", seen["alice"])
+		}
+	})
+}
+
+// TestIntegrationOffsetWalkSkipsARowAfterARemoval is the contrast that makes
+// the test above mean something. Reading a roster with LIMIT/OFFSET, which is
+// the obvious way and what api.allOrgMembers used to do, loses a row when a
+// membership ahead of the cursor goes away between two pages -- and the result
+// looks exactly like a roster that never had it.
+//
+// Pinning the shortcoming here rather than only asserting the fix keeps the
+// keyset walk from being quietly replaced with the simpler thing later.
+func TestIntegrationOffsetWalkSkipsARowAfterARemoval(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+		org := mustOrg(t, s, "acme", f.alice, OrgUpdate{})
+
+		const members = 10
+		for i := range members {
+			name := fmt.Sprintf("member%04d", i)
+			u, err := s.CreateUser(ctx, name, name+"@example.com", "hash", false)
+			if err != nil {
+				t.Fatalf("create %s: %v", name, err)
+			}
+			if _, err := s.AddOrgMember(ctx, org.ID, u.ID, "read", f.alice.ID); err != nil {
+				t.Fatalf("add %s: %v", name, err)
+			}
+		}
+
+		const pageSize = 4
+		seen := map[string]int{}
+		first, _, err := s.ListOrgMembers(ctx, org.ID, pageSize, 0)
+		if err != nil {
+			t.Fatalf("first page: %v", err)
+		}
+		for _, m := range first {
+			seen[m.Username]++
+		}
+
+		// Remove somebody the first page already returned. Every later row
+		// now sits one place earlier than the offsets below assume.
+		victim := first[1].Username
+		removed, err := s.GetUserByUsername(ctx, victim)
+		if err != nil {
+			t.Fatalf("look up %s: %v", victim, err)
+		}
+		if err := s.RemoveOrgMember(ctx, org.ID, removed.ID); err != nil {
+			t.Fatalf("remove %s: %v", victim, err)
+		}
+
+		for offset := pageSize; ; offset += pageSize {
+			page, _, err := s.ListOrgMembers(ctx, org.ID, pageSize, offset)
+			if err != nil {
+				t.Fatalf("page at offset %d: %v", offset, err)
+			}
+			for _, m := range page {
+				seen[m.Username]++
+			}
+			if len(page) < pageSize {
+				break
+			}
+		}
+
+		var missing []string
+		for i := range members {
+			name := fmt.Sprintf("member%04d", i)
+			if name != victim && seen[name] == 0 {
+				missing = append(missing, name)
+			}
+		}
+		if len(missing) == 0 {
+			t.Fatal("the offset walk lost nobody, so this test no longer demonstrates " +
+				"what ListOrgMembersAfter is for -- check whether the paging changed")
+		}
+	})
+}

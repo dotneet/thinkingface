@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -321,7 +322,12 @@ func (s *Server) orgResponse(w http.ResponseWriter, r *http.Request, org *store.
 	// the organisation page cost one row per member to render a number.
 	members, err := s.store.CountOrgMembers(ctx, org.ID)
 	if err != nil {
-		internalError(w, "count organisation members", err)
+		// The count reads the namespace row, so an organisation deleted
+		// between loadOrg and here answers ErrNotFound rather than zero.
+		// That is a 404 -- the organisation this response would describe is
+		// gone -- and handleStoreError is what says so; reporting it as a
+		// server fault would be describing the race as a bug in us.
+		handleStoreError(w, "count organisation members", err)
 		return apitypes.OrgResponse{}, false
 	}
 	repos, err := s.store.CountOrgRepos(ctx, org.ID)
@@ -426,7 +432,9 @@ func (s *Server) handleListOrgMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	members, total, err := s.store.ListOrgMembers(ctx, org.ID, limit, offset)
 	if err != nil {
-		internalError(w, "list organisation members", err)
+		// Same race as orgResponse: the headcount this reads first is taken
+		// from the namespace row, so a deletion in flight is a 404, not a 500.
+		handleStoreError(w, "list organisation members", err)
 		return
 	}
 	items := make([]apitypes.OrgMember, 0, len(members))
@@ -656,19 +664,58 @@ func (s *Server) handleOrgAuditLog(w http.ResponseWriter, r *http.Request) {
 // organisation is. Paging for the *client* belongs on the UI endpoint, which
 // is free to grow a `total` because it is ours to define.
 //
-// The loop terminates on a short page, and again on the total the store
-// reports, so a membership added between two pages cannot spin it.
+// The walk is keyed on the username rather than counted with OFFSET. The
+// roster is not frozen while this runs, and OFFSET means "skip the first N
+// rows" of whatever the set is at that moment -- so one membership removed
+// ahead of the cursor makes the next page repeat a row, and one added makes it
+// step over one. Either way the array is wrong, and a caller reading it as the
+// complete list has no way to tell. A username cursor cannot do that: each
+// page asks for what sorts after a specific name, so a member present
+// throughout appears exactly once no matter what happens to the others.
+//
+// The pages therefore arrive in username order, and the roster is sorted into
+// the display order (admins first, alphabetical within a role) once it is all
+// here -- the same order ListOrgMembers returns.
 func (s *Server) allOrgMembers(ctx context.Context, orgID int64) ([]store.OrgMember, error) {
-	var out []store.OrgMember
-	for offset := 0; ; offset += store.MaxOrgPageSize {
-		page, total, err := s.store.ListOrgMembers(ctx, orgID, store.MaxOrgPageSize, offset)
+	out := []store.OrgMember{}
+	after := ""
+	for {
+		page, err := s.store.ListOrgMembersAfter(ctx, orgID, after, store.MaxOrgPageSize)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, page...)
-		if len(page) < store.MaxOrgPageSize || int64(len(out)) >= total {
-			return out, nil
+		if len(page) < store.MaxOrgPageSize {
+			break
 		}
+		after = page[len(page)-1].Username
+	}
+	sortOrgMembers(out)
+	return out, nil
+}
+
+// sortOrgMembers puts the roster in the order the paged listing returns:
+// admins first, then write, then read, alphabetical inside each.
+func sortOrgMembers(members []store.OrgMember) {
+	sort.SliceStable(members, func(i, j int) bool {
+		ri, rj := orgRoleRank(members[i].Role), orgRoleRank(members[j].Role)
+		if ri != rj {
+			return ri < rj
+		}
+		return members[i].Username < members[j].Username
+	})
+}
+
+// orgRoleRank mirrors the CASE in ListOrgMembers' ORDER BY. An unknown role
+// sorts last rather than being dropped: the listing shows what the row says.
+func orgRoleRank(role string) int {
+	switch role {
+	case "admin":
+		return 0
+	case "write":
+		return 1
+	default:
+		return 2
 	}
 }
 

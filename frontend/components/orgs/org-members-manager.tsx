@@ -1,6 +1,6 @@
 "use client";
 
-import { UserPlus, Users } from "lucide-react";
+import { Inbox, UserPlus, Users } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { orgRoleLabelKey } from "@/components/orgs/org-role-badge";
 import { Alert } from "@/components/ui/alert";
@@ -142,6 +142,14 @@ export function OrgMembersManager({
     await refresh();
   }
 
+  // "This page is empty" and "there is nothing here" are different answers,
+  // and paging is what makes the difference reachable: deleting the last row
+  // of the last page leaves the window past the end of a list that is not
+  // empty at all (DESIGN.md §9). The dedicated empty state says which one it
+  // is, and the range line below is skipped because `to` would be smaller
+  // than `from`.
+  const outOfRange = total !== null && total > 0 && offset >= total;
+
   const hasPrev = offset > 0;
   const hasNext = total !== null && offset + PAGE_SIZE < total;
 
@@ -211,11 +219,24 @@ export function OrgMembersManager({
           hint={t("org.settings.members.loadFailedHint")}
         />
       ) : members.length === 0 ? (
-        <EmptyState
-          icon={Users}
-          title={t("org.settings.members.emptyTitle")}
-          description={t("org.settings.members.emptyDescription")}
-        />
+        outOfRange ? (
+          <EmptyState
+            icon={Inbox}
+            title={t("ui.pagination.outOfRangeTitle")}
+            description={t("ui.pagination.outOfRangeDescription")}
+            action={
+              <Button size="sm" onClick={() => setOffset(0)}>
+                {t("ui.pagination.backToFirstPage")}
+              </Button>
+            }
+          />
+        ) : (
+          <EmptyState
+            icon={Users}
+            title={t("org.settings.members.emptyTitle")}
+            description={t("org.settings.members.emptyDescription")}
+          />
+        )
       ) : (
         <div className="scroll-x rounded-lg border border-border">
           <table className="w-full min-w-[520px] border-collapse text-sm">
@@ -282,7 +303,7 @@ export function OrgMembersManager({
         </div>
       )}
 
-      {(hasPrev || hasNext) && (
+      {!outOfRange && (hasPrev || hasNext) && (
         <div className="flex items-center justify-between text-sm text-fg-subtle">
           {/* A failed reload leaves total null, and a count rendered as 0
               under the error state would read as "this organisation has no
