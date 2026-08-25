@@ -285,6 +285,8 @@ export const repo = {
       tooLarge: "Too large to diff — the patch was skipped, so its lines were not counted.",
       noTextChange: "No lines to show — the file is empty on both sides, or only its mode changed.",
       unsupported: "Not a regular file — a submodule or a special entry has no text diff.",
+      budgetSpent:
+        "Not shown — this commit changed more text than one page renders. Open the file to see its contents.",
       linesNotCounted: "lines not counted",
     },
     sizeAdded: "{size} added",

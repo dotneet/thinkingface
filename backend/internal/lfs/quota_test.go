@@ -20,7 +20,7 @@ type fakeQuota struct {
 	calls int
 }
 
-func (f *fakeQuota) NamespaceQuotaForRepo(context.Context, int64) (store.NamespaceQuota, error) {
+func (f *fakeQuota) NamespaceQuotaForRepo(context.Context, int64, int64) (store.NamespaceQuota, error) {
 	f.calls++
 	return f.q, f.err
 }

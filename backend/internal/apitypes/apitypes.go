@@ -404,11 +404,16 @@ type UsageNamespace struct {
 	LFSSize   int64  `json:"lfs_size"`
 	NumFiles  int64  `json:"num_files"`
 	NumRepos  int64  `json:"num_repos"`
-	// QuotaBytes is the storage limit actually enforced for this namespace
-	// (its own override, or the instance default). Null means unlimited.
-	// Only a site administrator can change it -- an organisation admin
-	// raising their own cap would not be a cap.
-	QuotaBytes *int64 `json:"quota_bytes" tstype:"number | null,required"`
+	// EffectiveQuotaBytes is the storage limit actually enforced for this
+	// namespace (its own override, or the instance default). Null means
+	// unlimited. Only a site administrator can change it -- an organisation
+	// admin raising their own cap would not be a cap.
+	//
+	// It is spelled the same as AdminNamespaceUsage.EffectiveQuotaBytes on
+	// purpose: `quota_bytes` there means the *override*, and one name that
+	// means the resolved limit in one response and the raw override in
+	// another is a field whose null is read backwards half the time.
+	EffectiveQuotaBytes *int64 `json:"effective_quota_bytes" tstype:"number | null,required"`
 }
 
 // UsageRepo is one repository's contribution to storage usage.
@@ -562,6 +567,12 @@ const (
 	// DiffNoPatchUnsupported is a path that is not a regular file on either
 	// side, such as a submodule.
 	DiffNoPatchUnsupported DiffNoPatchReason = "unsupported"
+	// DiffNoPatchBudgetSpent is a file the response's overall patch budget
+	// ran out before. The per-file ceilings alone do not bound a response --
+	// enough large-but-allowed patches add up -- so the sum is capped too,
+	// and a file past the cap is listed without one. Nothing is wrong with
+	// the file: the commit changed more text than one response renders.
+	DiffNoPatchBudgetSpent DiffNoPatchReason = "budget_spent"
 )
 
 // DiffFile is one path's change in a commit. Additions/Deletions are line

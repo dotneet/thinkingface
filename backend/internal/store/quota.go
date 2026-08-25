@@ -67,7 +67,7 @@ func EffectiveQuota(override *int64, defaultBytes int64) *int64 {
 // request already resolved rather than a name.
 //
 // ErrNotFound when there is no such repository.
-func (s *Store) NamespaceQuotaForRepo(ctx context.Context, repoID int64) (NamespaceQuota, error) {
+func (s *Store) NamespaceQuotaForRepo(ctx context.Context, repoID int64, defaultBytes int64) (NamespaceQuota, error) {
 	var q NamespaceQuota
 	err := s.db.QueryRow(ctx,
 		`SELECT n.id, n.name, n.kind, n.storage_quota_bytes
@@ -76,6 +76,15 @@ func (s *Store) NamespaceQuotaForRepo(ctx context.Context, repoID int64) (Namesp
 	).Scan(&q.NamespaceID, &q.Namespace, &q.Kind, &q.QuotaBytes)
 	if err != nil {
 		return NamespaceQuota{}, norm(err)
+	}
+	// Usage is only worth computing once there is something to compare it
+	// against. It aggregates every repository in the namespace, and this runs
+	// on the upload path of every push, so an instance that has configured no
+	// quota at all must not pay for an answer nothing reads. UsedBytes stays
+	// 0 in that case, which is why the caller has to resolve the limit before
+	// looking at it -- and does.
+	if EffectiveQuota(q.QuotaBytes, defaultBytes) == nil {
+		return q, nil
 	}
 	if err := s.fillNamespaceUsage(ctx, []*NamespaceQuota{&q}); err != nil {
 		return NamespaceQuota{}, err

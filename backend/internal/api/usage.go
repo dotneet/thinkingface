@@ -58,7 +58,7 @@ func (s *Server) toUsageNamespaces(rows []store.NamespaceUsage, overrides map[st
 		}
 		out = append(out, apitypes.UsageNamespace{
 			Namespace: r.Namespace, LFSSize: r.LFSSize, NumFiles: r.NumFiles, NumRepos: r.NumRepos,
-			QuotaBytes: store.EffectiveQuota(override, s.cfg.DefaultStorageQuotaBytes),
+			EffectiveQuotaBytes: store.EffectiveQuota(override, s.cfg.DefaultStorageQuotaBytes),
 		})
 	}
 	return out

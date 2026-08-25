@@ -138,12 +138,12 @@ export function StorageUsage({
                     from a quota of zero -- printing 0 B for it would be a
                     lie in the alarming direction. */}
                 <span className="tabular-nums text-fg">
-                  {ns.quota_bytes === null
+                  {ns.effective_quota_bytes === null
                     ? t("settings.storage.quotaUnlimited")
-                    : formatBytes(ns.quota_bytes)}
+                    : formatBytes(ns.effective_quota_bytes)}
                 </span>
               </div>
-              {ns.quota_bytes !== null && ns.lfs_size > ns.quota_bytes ? (
+              {ns.effective_quota_bytes !== null && ns.lfs_size > ns.effective_quota_bytes ? (
                 <p className="text-xs font-medium text-negative-strong">
                   {t("settings.storage.quotaExceeded")}
                 </p>

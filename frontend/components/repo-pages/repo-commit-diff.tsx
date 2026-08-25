@@ -47,6 +47,7 @@ const NO_PATCH_KEYS = {
   tooLarge: "repo.diff.noPatch.tooLarge",
   noTextChange: "repo.diff.noPatch.noTextChange",
   unsupported: "repo.diff.noPatch.unsupported",
+  budgetSpent: "repo.diff.noPatch.budgetSpent",
 } as const satisfies Record<string, MessageKey>;
 
 /**

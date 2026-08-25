@@ -106,7 +106,13 @@ export function parseUnifiedDiff(patch: string): DiffLine[] {
 }
 
 /** Why a file in a commit diff carries no patch. */
-export type NoPatchReason = "binary" | "lfs" | "tooLarge" | "noTextChange" | "unsupported";
+export type NoPatchReason =
+  | "binary"
+  | "lfs"
+  | "tooLarge"
+  | "noTextChange"
+  | "unsupported"
+  | "budgetSpent";
 
 /**
  * The reason `file` has no unified diff, or null when it has one.
@@ -131,6 +137,8 @@ export function noPatchReason(file: DiffFile): NoPatchReason | null {
       return "tooLarge";
     case "unsupported":
       return "unsupported";
+    case "budget_spent":
+      return "budgetSpent";
     default:
       return "noTextChange";
   }

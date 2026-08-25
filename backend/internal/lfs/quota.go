@@ -29,8 +29,12 @@ import (
 // implements it; tests substitute a fake.
 type QuotaSource interface {
 	// NamespaceQuotaForRepo answers what the namespace owning this
-	// repository may store, and what it is already storing.
-	NamespaceQuotaForRepo(ctx context.Context, repoID int64) (store.NamespaceQuota, error)
+	// repository may store, and what it is already storing. defaultBytes is
+	// passed in so the store can skip aggregating usage entirely when the
+	// namespace turns out to have no effective limit -- the common case on
+	// an instance that configures no quotas, and one that would otherwise
+	// scan the namespace on every single push.
+	NamespaceQuotaForRepo(ctx context.Context, repoID int64, defaultBytes int64) (store.NamespaceQuota, error)
 }
 
 var _ QuotaSource = (*store.Store)(nil)
@@ -65,7 +69,7 @@ func (h *Handler) withinQuota(ctx context.Context, repoID int64, resp *BatchResp
 	if h.quota == nil || len(pending) == 0 {
 		return pending, nil
 	}
-	q, err := h.quota.NamespaceQuotaForRepo(ctx, repoID)
+	q, err := h.quota.NamespaceQuotaForRepo(ctx, repoID, h.defaultQuota)
 	if err != nil {
 		return nil, fmt.Errorf("read namespace storage quota: %w", err)
 	}

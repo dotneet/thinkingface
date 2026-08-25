@@ -58,14 +58,44 @@ def test_auth_check_raises_for_a_missing_repo(hf_api: HfApi, namespace: str) -> 
         hf_api.auth_check(f"{namespace}/definitely-not-a-repo", repo_type="model")
 
 
-def test_get_model_and_dataset_tags(hf_api: HfApi) -> None:
-    """`get_model_tags()` indexes a fixed set of group names on older
-    huggingface_hub releases, so every group has to be present even when the
-    instance has nothing to put in it."""
-    model_tags = hf_api.get_model_tags()
-    assert model_tags is not None
-    dataset_tags = hf_api.get_dataset_tags()
-    assert dataset_tags is not None
+# huggingface_hub up to 0.17 unpacked this response through `GeneralTags`,
+# which indexes a *fixed* list of keys and raises KeyError on a missing one.
+# Asserting the group names -- not merely that something came back -- is the
+# point: dropping a key the client indexes is exactly the regression that
+# would go unnoticed otherwise.
+MODEL_TAG_GROUPS = {"library", "language", "license", "dataset", "pipeline_tag", "other"}
+DATASET_TAG_GROUPS = {
+    "language",
+    "multilinguality",
+    "language_creators",
+    "task_categories",
+    "size_categories",
+    "benchmark",
+    "task_ids",
+    "license",
+    "other",
+}
+
+
+def tag_group_names(catalogue: object) -> set[str]:
+    """The group names in a tag catalogue, whichever shape the installed
+    huggingface_hub returns: 1.x hands back the raw dict, older releases wrap
+    it in a `GeneralTags` object carrying the same keys as attributes."""
+    if isinstance(catalogue, dict):
+        return set(catalogue)
+    return {name for name in vars(catalogue) if not name.startswith("_")}
+
+
+def test_get_model_tags_answers_every_group_the_client_indexes(hf_api: HfApi) -> None:
+    groups = tag_group_names(hf_api.get_model_tags())
+    assert MODEL_TAG_GROUPS <= groups, f"missing model tag groups: {MODEL_TAG_GROUPS - groups}"
+
+
+def test_get_dataset_tags_answers_every_group_the_client_indexes(hf_api: HfApi) -> None:
+    groups = tag_group_names(hf_api.get_dataset_tags())
+    assert DATASET_TAG_GROUPS <= groups, (
+        f"missing dataset tag groups: {DATASET_TAG_GROUPS - groups}"
+    )
 
 
 def test_resolve_honours_if_none_match(hf_endpoint: str, hf_token: str, seeded_model: str) -> None:

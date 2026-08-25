@@ -452,12 +452,16 @@ export interface UsageNamespace {
   num_files: number /* int64 */;
   num_repos: number /* int64 */;
   /**
-   * QuotaBytes is the storage limit actually enforced for this namespace
-   * (its own override, or the instance default). Null means unlimited.
-   * Only a site administrator can change it -- an organisation admin
-   * raising their own cap would not be a cap.
+   * EffectiveQuotaBytes is the storage limit actually enforced for this
+   * namespace (its own override, or the instance default). Null means
+   * unlimited. Only a site administrator can change it -- an organisation
+   * admin raising their own cap would not be a cap.
+   * It is spelled the same as AdminNamespaceUsage.EffectiveQuotaBytes on
+   * purpose: `quota_bytes` there means the *override*, and one name that
+   * means the resolved limit in one response and the raw override in
+   * another is a field whose null is read backwards half the time.
    */
-  quota_bytes: number | null;
+  effective_quota_bytes: number | null;
 }
 /**
  * UsageRepo is one repository's contribution to storage usage.
@@ -650,6 +654,14 @@ export const DiffNoPatchNoTextChange: DiffNoPatchReason = "no_text_change";
  * side, such as a submodule.
  */
 export const DiffNoPatchUnsupported: DiffNoPatchReason = "unsupported";
+/**
+ * DiffNoPatchBudgetSpent is a file the response's overall patch budget
+ * ran out before. The per-file ceilings alone do not bound a response --
+ * enough large-but-allowed patches add up -- so the sum is capped too,
+ * and a file past the cap is listed without one. Nothing is wrong with
+ * the file: the commit changed more text than one response renders.
+ */
+export const DiffNoPatchBudgetSpent: DiffNoPatchReason = "budget_spent";
 /**
  * DiffFile is one path's change in a commit. Additions/Deletions are line
  * counts and are 0 for a file with no textual diff (binary, LFS, or one whose

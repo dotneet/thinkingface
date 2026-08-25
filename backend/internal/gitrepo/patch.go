@@ -57,6 +57,21 @@ const (
 	// than a wrong one.
 	CommitDiffMaxFiles = 200
 
+	// CommitDiffPatchBudgetBytes is the ceiling on the *sum* of the rendered
+	// patches in one commit diff, and the reason it exists is that the
+	// per-file ceilings do not bound the response or the work behind it:
+	// CommitDiffMaxFiles files each just under DiffPatchMaxBytes is a ~50 MiB
+	// JSON document, and each of those patches is a Myers diff that
+	// diffmatchpatch will spend up to its own one-second deadline on. Since
+	// this endpoint is readable without credentials (there is no repository
+	// visibility here -- docs/dev/thinkingface-design.md §11), that product
+	// is reachable by anyone who can find a large text commit.
+	//
+	// The budget is checked *before* each patch is computed, so it bounds the
+	// CPU as well as the bytes. Files past it are still listed, with their
+	// status and sizes, and say why they carry no patch.
+	CommitDiffPatchBudgetBytes = 1 << 20
+
 	// diffContextLines is the number of unchanged lines kept around each
 	// hunk -- git's own default, and what every diff viewer expects.
 	diffContextLines = fdiff.DefaultContextLines
@@ -73,6 +88,10 @@ const (
 	NoPatchTooLarge     NoPatchReason = "too_large"
 	NoPatchNoTextChange NoPatchReason = "no_text_change"
 	NoPatchUnsupported  NoPatchReason = "unsupported"
+	// NoPatchBudgetSpent is a file the response-wide patch budget ran out
+	// before. Nothing is wrong with the file; the commit simply changed more
+	// text than one response renders.
+	NoPatchBudgetSpent NoPatchReason = "budget_spent"
 )
 
 // FileDiff is what one commit did to one path.
@@ -178,11 +197,13 @@ func (r *Repo) CommitDiff(hash plumbing.Hash) (*CommitDiff, error) {
 		sortable = sortable[:CommitDiffMaxFiles]
 	}
 
+	budget := CommitDiffPatchBudgetBytes
 	for _, ch := range sortable {
-		fd, err := r.fileDiff(ch)
+		fd, err := r.fileDiff(ch, budget)
 		if err != nil {
 			return nil, err
 		}
+		budget -= len(fd.Patch)
 		out.Files = append(out.Files, fd)
 		out.Additions += fd.Additions
 		out.Deletions += fd.Deletions
@@ -200,8 +221,10 @@ func changePath(ch *object.Change) string {
 }
 
 // fileDiff builds one path's entry, reading only as much of either side as the
-// size ceilings allow.
-func (r *Repo) fileDiff(ch *object.Change) (FileDiff, error) {
+// size ceilings allow. budget is what is left of the response-wide patch
+// allowance; at or below zero the path is listed without a patch and without
+// the diff being computed at all.
+func (r *Repo) fileDiff(ch *object.Change, budget int) (FileDiff, error) {
 	action, err := ch.Action()
 	if err != nil {
 		return FileDiff{}, fmt.Errorf("classify change: %w", err)
@@ -224,7 +247,14 @@ func (r *Repo) fileDiff(ch *object.Change) (FileDiff, error) {
 	if err != nil {
 		return FileDiff{}, err
 	}
-	fd.OldSize, fd.Size = from.Size, to.Size
+	// TargetSize, not the blob size: for an LFS pointer the blob is the ~130
+	// bytes of the pointer file, so reporting it turned a 5 GB checkpoint
+	// being replaced into "132 B -> 133 B". These sizes are the only measure
+	// of how much changed on a row that carries no patch, which is exactly
+	// the row LFS produces. The ceilings below deliberately keep using Size:
+	// what they bound is how much is *read*, and only a non-LFS path gets
+	// that far, where the two are equal anyway.
+	fd.OldSize, fd.Size = from.TargetSize(), to.TargetSize()
 	fd.LFS = from.LFS != nil || to.LFS != nil
 
 	switch {
@@ -240,6 +270,11 @@ func (r *Repo) fileDiff(ch *object.Change) (FileDiff, error) {
 		return fd, nil
 	case from.Size > DiffPatchMaxBlobBytes || to.Size > DiffPatchMaxBlobBytes:
 		fd.NoPatchReason = NoPatchTooLarge
+		return fd, nil
+	case budget <= 0:
+		// Checked before the blobs are read and the diff is run, which is
+		// the point: the budget bounds the work, not just the output.
+		fd.NoPatchReason = NoPatchBudgetSpent
 		return fd, nil
 	}
 
@@ -272,7 +307,11 @@ func (r *Repo) fileDiff(ch *object.Change) (FileDiff, error) {
 		fd.NoPatchReason = NoPatchNoTextChange
 		return fd, nil
 	}
-	fd.Patch, fd.PatchTruncated = truncatePatch(body)
+	// The limit is the smaller of this file's own ceiling and what is left
+	// of the response budget, so the sum really is bounded: checking the
+	// budget only before each file would let the last one start just inside
+	// it and still render a full DiffPatchMaxBytes past it.
+	fd.Patch, fd.PatchTruncated = truncatePatch(body, budget)
 	fd.HasPatch = true
 	return fd, nil
 }
@@ -393,11 +432,17 @@ func renderUnifiedPatch(ch *object.Change, fromOK, toOK bool, chunks []fdiff.Chu
 
 // truncatePatch cuts an over-long patch at a line boundary, so a client never
 // has to render half a line.
-func truncatePatch(body string) (string, bool) {
-	if len(body) <= DiffPatchMaxBytes {
+func truncatePatch(body string, limit int) (string, bool) {
+	if limit > DiffPatchMaxBytes {
+		limit = DiffPatchMaxBytes
+	}
+	if len(body) <= limit {
 		return body, false
 	}
-	cut := body[:DiffPatchMaxBytes]
+	if limit < 0 {
+		limit = 0
+	}
+	cut := body[:limit]
 	if i := strings.LastIndexByte(cut, '\n'); i >= 0 {
 		cut = cut[:i+1]
 	}

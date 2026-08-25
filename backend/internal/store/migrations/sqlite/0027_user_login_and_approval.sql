@@ -1,4 +1,5 @@
--- See the postgres migration (0027_user_login_and_approval.sql) for the
+-- See the postgres migration (0033_user_login_and_approval.sql -- the two
+-- dialect directories number independently) for the
 -- reasoning, in particular why the approval column records the *pending*
 -- instant rather than an approved one: NULL has to mean approved, or this
 -- migration locks every existing account out of the instance.

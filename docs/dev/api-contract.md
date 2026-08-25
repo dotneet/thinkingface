@@ -762,7 +762,13 @@ namespace could fill the bucket, and `GET /api/v1/usage` only reported that afte
 
 The allowance is per **namespace** — both an account's own and an organisation's — held in
 `namespaces.storage_quota_bytes`, and what it counts is the LFS footprint `GET /api/v1/usage`
-reports (plain git blobs never leave the repository and cost nothing in object storage).
+reports.
+
+**It counts LFS objects only.** Whether a file goes to LFS is decided by the repository's
+`.gitattributes`, which the pusher controls, and a plain git blob is still published to
+`blobs/` by the sync worker — so a repository that routes nothing through LFS can put bytes in
+the bucket that this quota neither counts nor refuses. The cap is a guard against the ordinary
+way large files arrive here, not a hard ceiling on what a namespace can cost.
 
 Three states, and they are deliberately distinct:
 
@@ -850,7 +856,7 @@ Every change is recorded as a structured `slog.Info` line naming the actor, the 
 new quota (`cleared` when it is null, so the log keeps the same distinction the wire does) and
 the namespace's usage at that moment.
 
-`GET /api/v1/usage` carries the same figure per namespace as `quota_bytes` — already resolved
+`GET /api/v1/usage` carries the same figure per namespace as `effective_quota_bytes` — already resolved
 against the instance default, `null` for unlimited — so a namespace's own members can see the
 ceiling their uploads are checked against without any administrative access.
 
@@ -2717,7 +2723,7 @@ after.
 ```ts
 type UsageNamespace = {
   namespace: string; lfs_size: number; num_files: number; num_repos: number
-  quota_bytes: number | null   // Effective limit; null = unlimited
+  effective_quota_bytes: number | null  // Already resolved; null = unlimited
 }
 type UsageRepo = {
   namespace: string; name: string; kind: "dataset" | "model"; full_name: string

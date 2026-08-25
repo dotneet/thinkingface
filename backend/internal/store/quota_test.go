@@ -140,7 +140,13 @@ func TestIntegrationNamespaceQuotaForRepoSumsTheWholeNamespace(t *testing.T) {
 		// The check the upload path makes is against the namespace, not the
 		// repository it happens to be pushing to: filling one repository
 		// after another is the obvious way around a per-repository limit.
-		q, err := s.NamespaceQuotaForRepo(ctx, one.ID)
+		// someLimit stands for "this instance has a quota configured", which
+		// is what makes usage worth aggregating at all -- with no limit
+		// anywhere the call deliberately skips the aggregation and leaves
+		// UsedBytes at 0 (see the dedicated test below).
+		const someLimit = int64(1)
+
+		q, err := s.NamespaceQuotaForRepo(ctx, one.ID, someLimit)
 		if err != nil {
 			t.Fatalf("NamespaceQuotaForRepo: %v", err)
 		}
@@ -148,19 +154,64 @@ func TestIntegrationNamespaceQuotaForRepoSumsTheWholeNamespace(t *testing.T) {
 			t.Fatalf("NamespaceQuotaForRepo(one) = %+v, want alice using 130 bytes over 2 repos", q)
 		}
 		// ... and another namespace's bytes are not in it.
-		if q, err = s.NamespaceQuotaForRepo(ctx, theirs.ID); err != nil || q.UsedBytes != 7000 {
+		if q, err = s.NamespaceQuotaForRepo(ctx, theirs.ID, someLimit); err != nil || q.UsedBytes != 7000 {
 			t.Fatalf("NamespaceQuotaForRepo(theirs) = %+v, %v, want 7000", q, err)
 		}
 
 		if err := s.SetNamespaceQuota(ctx, "alice", ptr(int64(200))); err != nil {
 			t.Fatalf("SetNamespaceQuota: %v", err)
 		}
-		if q, err = s.NamespaceQuotaForRepo(ctx, one.ID); err != nil || q.QuotaBytes == nil || *q.QuotaBytes != 200 {
+		if q, err = s.NamespaceQuotaForRepo(ctx, one.ID, 0); err != nil || q.QuotaBytes == nil || *q.QuotaBytes != 200 {
 			t.Fatalf("NamespaceQuotaForRepo after set = %+v, %v", q, err)
 		}
 
-		if _, err := s.NamespaceQuotaForRepo(ctx, 999999); !errors.Is(err, ErrNotFound) {
+		if _, err := s.NamespaceQuotaForRepo(ctx, 999999, someLimit); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("NamespaceQuotaForRepo(missing) = %v, want ErrNotFound", err)
+		}
+	})
+}
+
+// With no override and no instance default there is no limit to compare
+// against, and the usage aggregation -- which scans every repository in the
+// namespace -- is skipped. This runs on the upload path of every push, so an
+// instance that has never configured a quota must not pay for an answer
+// nothing reads.
+func TestIntegrationNamespaceQuotaForRepoSkipsUsageWhenUnlimited(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+
+		one := f.repo(t, "alice", "one", "model", nil)
+		linkObject(t, s, one.ID, "aaaa", 100)
+
+		q, err := s.NamespaceQuotaForRepo(ctx, one.ID, 0)
+		if err != nil {
+			t.Fatalf("NamespaceQuotaForRepo: %v", err)
+		}
+		if q.Namespace != "alice" || q.QuotaBytes != nil {
+			t.Fatalf("NamespaceQuotaForRepo = %+v, want alice with no override", q)
+		}
+		if q.UsedBytes != 0 {
+			t.Errorf("UsedBytes = %d, want 0: usage must not be aggregated when nothing limits it", q.UsedBytes)
+		}
+
+		// An instance default is a limit, so the same call now does the work.
+		if q, err = s.NamespaceQuotaForRepo(ctx, one.ID, 1000); err != nil {
+			t.Fatalf("NamespaceQuotaForRepo with a default: %v", err)
+		}
+		if q.UsedBytes != 100 {
+			t.Errorf("UsedBytes = %d, want 100 once a default applies", q.UsedBytes)
+		}
+
+		// So is an override of zero, which is a real quota and not "unset".
+		if err := s.SetNamespaceQuota(ctx, "alice", ptr(int64(0))); err != nil {
+			t.Fatalf("SetNamespaceQuota: %v", err)
+		}
+		if q, err = s.NamespaceQuotaForRepo(ctx, one.ID, 0); err != nil {
+			t.Fatalf("NamespaceQuotaForRepo with a zero override: %v", err)
+		}
+		if q.UsedBytes != 100 {
+			t.Errorf("UsedBytes = %d, want 100: an override of zero still limits", q.UsedBytes)
 		}
 	})
 }

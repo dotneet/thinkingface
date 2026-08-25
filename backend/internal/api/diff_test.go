@@ -14,6 +14,7 @@
 package api
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -269,6 +270,66 @@ func TestRepoDiff_NoPatchReasonIsSetWheneverThereIsNoPatch(t *testing.T) {
 	}
 }
 
+// The per-file ceilings do not bound the response: CommitDiffMaxFiles files
+// each just under DiffPatchMaxBytes is a ~50 MiB JSON document, and every one
+// of those patches costs a Myers diff. This endpoint needs no credentials, so
+// the sum is capped too -- and the cap is applied before the diff runs, which
+// is what makes it bound the work rather than only the output.
+func TestRepoDiff_PatchBudgetBoundsTheWholeResponse(t *testing.T) {
+	f := newRevisionFixture(t)
+	repo := f.emptyRepo("alice", "foo")
+	f.commitOps(repo, "main", "seed", addOp("readme.txt", "text\n"))
+
+	// Six files of ~256 KiB of distinct text: each is individually allowed
+	// (well under DiffPatchMaxBlobBytes), and together they are past the
+	// response budget.
+	perFile := gitrepo.DiffPatchMaxBytes
+	ops := make([]gitrepo.Op, 0, 6)
+	for i := range 6 {
+		var b strings.Builder
+		for b.Len() < perFile {
+			fmt.Fprintf(&b, "file %d line %d\n", i, b.Len())
+		}
+		ops = append(ops, addOp(fmt.Sprintf("big-%d.txt", i), b.String()))
+	}
+	f.commitOps(repo, "main", "a large text commit", ops...)
+
+	got := f.diff(t, "main")
+
+	total := 0
+	withPatch, budgetSpent := 0, 0
+	for _, file := range got.Files {
+		total += len(file.Patch)
+		if file.HasPatch {
+			withPatch++
+		}
+		if file.NoPatchReason == "budget_spent" {
+			budgetSpent++
+		}
+	}
+	if total > gitrepo.CommitDiffPatchBudgetBytes {
+		t.Errorf("rendered patches total %d bytes, over the %d budget",
+			total, gitrepo.CommitDiffPatchBudgetBytes)
+	}
+	if withPatch == 0 {
+		t.Error("no file carried a patch; the budget must spend before it refuses")
+	}
+	if budgetSpent == 0 {
+		t.Error("no file reported budget_spent; this commit is supposed to exceed the budget")
+	}
+	// Every file is still listed and still says what happened to it.
+	if len(got.Files) != 6 || got.FilesTruncated {
+		t.Errorf("listed %d files (truncated=%v), want all 6 listed",
+			len(got.Files), got.FilesTruncated)
+	}
+	for _, file := range got.Files {
+		if file.HasPatch == (file.NoPatchReason != "") {
+			t.Errorf("%s: has_patch %v and no_patch_reason %q disagree",
+				file.Path, file.HasPatch, file.NoPatchReason)
+		}
+	}
+}
+
 // ---------------------------------------------------------------- binary and LFS
 
 // A binary file is flagged rather than diffed, and its line counts stay 0
@@ -331,10 +392,13 @@ func TestRepoDiff_LFSPointerIsFlaggedInsteadOfDiffed(t *testing.T) {
 	if file.Additions != 0 || file.Deletions != 0 {
 		t.Fatalf("model.safetensors +%d/-%d, want the counts left at 0", file.Additions, file.Deletions)
 	}
-	// The pointer's own size, not the 4 GiB it points at: that is what
-	// old_size/size mean everywhere else in this response.
-	if file.Size != int64(len(gitrepo.FormatLFSPointer(oid, 4<<30))) {
-		t.Fatalf("model.safetensors size = %d, want the pointer's size", file.Size)
+	// The size the pointer *points at*, not the ~130 bytes of the pointer
+	// file. An LFS row carries no patch, so this number is the only measure
+	// of how much changed on it -- reporting the pointer turned replacing a
+	// 4 GiB checkpoint into "132 B -> 133 B", which is the tree listing's
+	// convention (Entry.TargetSize), not this response's.
+	if file.Size != 4<<30 {
+		t.Fatalf("model.safetensors size = %d, want the LFS target size %d", file.Size, int64(4)<<30)
 	}
 }
 
