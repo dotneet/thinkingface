@@ -3,8 +3,9 @@
 import { ExternalLink, Lock } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { LoginRequiredState } from "@/components/settings/login-required-state";
 import { Alert } from "@/components/ui/alert";
-import { Button, buttonClass } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { ErrorState } from "@/components/ui/error-state";
 import { Field, Input, Textarea } from "@/components/ui/field";
 import { SkeletonLines } from "@/components/ui/skeleton";
@@ -89,20 +90,7 @@ export function ProfileSettings() {
   if (profile === null && !error) return <SkeletonLines lines={6} />;
 
   if (needsLogin) {
-    return (
-      <ErrorState
-        title={t("settings.profile.loginRequiredTitle")}
-        message={t("settings.profile.loginRequiredMessage")}
-        action={
-          <Link
-            href="/login?next=/settings/profile"
-            className={buttonClass({ variant: "primary" })}
-          >
-            {t("settings.profile.login")}
-          </Link>
-        }
-      />
-    );
+    return <LoginRequiredState next="/settings/profile" />;
   }
 
   if (profile === null) {

@@ -28,7 +28,7 @@ export default async function AdminUsersPage() {
       <ErrorState
         title={
           isUnauthorized(me)
-            ? t("settings.account.loginRequiredTitle")
+            ? t("settings.loginRequiredTitle")
             : t("settings.adminUsers.loadFailed")
         }
         message={
@@ -42,7 +42,7 @@ export default async function AdminUsersPage() {
               href="/login?next=/settings/admin/users"
               className={buttonClass({ variant: "primary" })}
             >
-              {t("settings.account.login")}
+              {t("settings.login")}
             </Link>
           ) : undefined
         }

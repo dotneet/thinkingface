@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 
 	"github.com/go-git/go-git/v5/plumbing"
 
@@ -114,6 +115,72 @@ func (s *Server) commitThroughWAL(ctx context.Context, repo *store.Repo, req git
 		}
 	}
 	return newHash, oldHash, errWALConflict
+}
+
+// writeCommitError answers the failures every commitThroughWAL caller shares,
+// and reports whether it wrote a response. err == nil is the only false.
+//
+// The four outcomes:
+//
+//   - gitrepo.StaleParentError -> 412. The request carried a precondition of
+//     its own (huggingface_hub's `parent_commit`, an If-Match by another
+//     name) and the branch is not where the caller believed it was. Retrying
+//     the identical request can only fail again -- they have to look at what
+//     landed in between and decide whether their change still applies. 409 is
+//     wrong for exactly that reason: it means "retryable contention"
+//     everywhere else in this API. huggingface_hub raises HfHubHTTPError for
+//     both and reads the sentence out of X-Error-Message either way, so
+//     nothing is lost on the client.
+//   - gitrepo.StalePathError -> 409. The web editor's base_oid check,
+//     repeated inside Commit under the mutex that picks the parent. The
+//     caller re-reads the file and retries with the oid it now holds.
+//   - errWALConflict -> 409. Another writer won a race this request could
+//     still win: retry as sent.
+//   - anything else -> 500.
+//
+// Only two of the four can reach any one caller, and which two follows from
+// what that caller sent rather than from a policy: a commit with no
+// Preconditions can never produce StalePathError, and one with no
+// ParentCommit can never produce StaleParentError. Answering all four in one
+// place is what keeps that a property of the request instead of a per-handler
+// decision -- which is what the five hand-written copies of this had drifted
+// into, where the HF commit endpoint answered the parent case, the three web
+// endpoints answered the path case, and the upload endpoint answered neither,
+// with nothing in the code saying whether that was intended.
+//
+// The message is rebuilt from the error rather than from the handler's own
+// variables, so the branch and path it names are the ones Commit actually
+// refused on.
+//
+// what names the operation in the retry sentence ("edit", "deletion",
+// "rename", "upload", "commit").
+func writeCommitError(w http.ResponseWriter, err error, what string) bool {
+	if err == nil {
+		return false
+	}
+	var staleParent *gitrepo.StaleParentError
+	if errors.As(err, &staleParent) {
+		at := staleParent.Actual
+		if at == "" {
+			at = "no commits"
+		}
+		writeError(w, http.StatusPreconditionFailed, "stale_parent",
+			"parentCommit "+staleParent.Expected+" is not the head of "+staleParent.Branch+
+				" (now at "+at+"); fetch the branch and rebuild the commit on top of it")
+		return true
+	}
+	var stalePath *gitrepo.StalePathError
+	if errors.As(err, &stalePath) {
+		writeError(w, http.StatusConflict, "conflict",
+			stalePath.Path+" changed concurrently; re-read the file and retry with its current oid")
+		return true
+	}
+	if errors.Is(err, errWALConflict) {
+		writeError(w, http.StatusConflict, "conflict", "branch changed concurrently; retry the "+what)
+		return true
+	}
+	internalError(w, "create commit", err)
+	return true
 }
 
 // createRefThroughWAL creates refName pointing at target, obeying the same

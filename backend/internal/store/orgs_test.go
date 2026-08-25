@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 )
 
@@ -53,6 +52,25 @@ func TestIntegrationOrgCRUD(t *testing.T) {
 		}
 		if members[0].CreatedAt.IsZero() {
 			t.Fatalf("member created_at is zero")
+		}
+
+		// An organisation must not depend on its founder
+		// (docs/dev/organization-design.md §6.1): owner_user_id stays NULL and
+		// the founder's authority comes from the admin membership above, so
+		// removing them from the roster really removes their power and
+		// deleting their account no longer cascades the organisation away.
+		var owner *int64
+		if err := s.db.QueryRow(ctx,
+			`SELECT owner_user_id FROM namespaces WHERE id = $1`, org.ID,
+		).Scan(&owner); err != nil {
+			t.Fatalf("read namespace: %v", err)
+		}
+		if owner != nil {
+			t.Fatalf("owner_user_id = %v, want NULL", *owner)
+		}
+		// Personal namespaces keep their owner: the rule is org-only.
+		if alice := f.ns(t, "alice"); alice.OwnerUserID == nil || *alice.OwnerUserID != f.alice.ID {
+			t.Fatalf("alice's namespace lost its owner: %+v", alice)
 		}
 
 		// GetOrg only answers for organisations, never personal namespaces.
@@ -289,10 +307,6 @@ func TestIntegrationNamespaceRoleFor(t *testing.T) {
 				t.Fatalf("NamespaceRoleFor(%s, %s) = %+v, want kind %q role %q",
 					c.user.Username, c.ns, got, c.wantKind, c.wantRole)
 			}
-			role, err := s.RoleInNamespace(ctx, c.user.ID, c.ns)
-			if err != nil || role != c.wantRole {
-				t.Fatalf("RoleInNamespace(%s, %s) = %q, %v", c.user.Username, c.ns, role, err)
-			}
 		}
 		if _, err := s.NamespaceRoleFor(ctx, f.alice.ID, "nope"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("missing namespace err = %v", err)
@@ -361,82 +375,6 @@ func TestIntegrationOrgAuditLog(t *testing.T) {
 			t.Fatalf("audit log after delete = %+v, %v", rest, err)
 		}
 	})
-}
-
-// TestIntegrationOrgFounderBackfill exercises the part of the organisations
-// migration that detaches an organisation from its founder: a legacy row
-// carrying owner_user_id and no org_members entry must come out with an
-// admin membership and a NULL owner (docs/dev/organization-design.md §6.1).
-//
-// The legacy shape is recreated by hand and the migration's own backfill
-// statements are replayed from the embedded file, so the assertions are
-// against the SQL that actually ships rather than a copy of it.
-func TestIntegrationOrgFounderBackfill(t *testing.T) {
-	forEachBackend(t, func(t *testing.T, s *Store) {
-		f := newFixture(t, s)
-		ctx := f.ctx
-		org := mustOrg(t, s, "acme", f.alice, OrgUpdate{})
-
-		// Wind the row back to how 0009/0003 left it.
-		if _, err := s.db.Exec(ctx, `DELETE FROM org_members WHERE namespace_id = $1`, org.ID); err != nil {
-			t.Fatalf("clear members: %v", err)
-		}
-		if _, err := s.db.Exec(ctx,
-			`UPDATE namespaces SET owner_user_id = $2, created_by = NULL WHERE id = $1`,
-			org.ID, f.alice.ID); err != nil {
-			t.Fatalf("restore owner: %v", err)
-		}
-
-		if _, err := s.db.Exec(ctx, orgFounderBackfillSQL(t, s.d.name())); err != nil {
-			t.Fatalf("replay backfill: %v", err)
-		}
-
-		members, _, err := s.ListOrgMembers(ctx, org.ID, 0, 0)
-		if err != nil || len(members) != 1 || members[0].Username != "alice" || members[0].Role != "admin" {
-			t.Fatalf("backfilled members = %+v, %v", members, err)
-		}
-		var owner *int64
-		var createdBy *int64
-		if err := s.db.QueryRow(ctx,
-			`SELECT owner_user_id, created_by FROM namespaces WHERE id = $1`, org.ID,
-		).Scan(&owner, &createdBy); err != nil {
-			t.Fatalf("read namespace: %v", err)
-		}
-		if owner != nil {
-			t.Fatalf("owner_user_id = %v, want NULL", *owner)
-		}
-		if createdBy == nil || *createdBy != f.alice.ID {
-			t.Fatalf("created_by = %v, want alice", createdBy)
-		}
-		// Personal namespaces keep their owner: the rewrite is org-only.
-		alice := f.ns(t, "alice")
-		if alice.OwnerUserID == nil || *alice.OwnerUserID != f.alice.ID {
-			t.Fatalf("alice's namespace lost its owner: %+v", alice)
-		}
-	})
-}
-
-// orgFounderBackfillSQL slices the founder-detaching statements out of the
-// organisations migration for the given engine. The markers are the comment
-// that introduces the block and the statement that follows it.
-func orgFounderBackfillSQL(t *testing.T, engine string) string {
-	t.Helper()
-	name := "migrations/postgres/0010_organizations.sql"
-	if engine == "sqlite" {
-		name = "migrations/sqlite/0004_organizations.sql"
-	}
-	raw, err := migrationsFS.ReadFile(name)
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	const startMarker = "-- An organisation must not depend on its founder"
-	const endMarker = "CREATE TABLE IF NOT EXISTS org_audit_log"
-	start := strings.Index(string(raw), startMarker)
-	end := strings.Index(string(raw), endMarker)
-	if start < 0 || end < 0 || end <= start {
-		t.Fatalf("could not locate the backfill block in %s", name)
-	}
-	return string(raw)[start:end]
 }
 
 // TestIntegrationOrgMemberPaging pins the page window of the roster. The

@@ -121,7 +121,20 @@ func TestSplitRepoRef(t *testing.T) {
 		{"alice/", "", "", false},
 		{"a/b/c", "", "", false},
 		{"", "", "", false},
+		// A leading "@" is not a separator: there is no namespace/name in
+		// front of it, so this is not a reference at all.
 		{"@v1", "", "", false},
+		// The last "@" is the revision separator, so the name keeps the
+		// first one. What matters is not which half wins but that the
+		// syncer, which wrote the row, cut it in exactly the same place --
+		// this used to split at the *first* "@" here and the *last* one
+		// there, and the repository dropped out of its own lineage listing.
+		{"a/b@x@y", "a", "b@x", true},
+		// A hand-copied URL path: surrounding slashes and spaces are
+		// tolerated, blank segments are not (splitSegments).
+		{"/alice/bert/", "alice", "bert", true},
+		{" alice / bert ", "alice", "bert", true},
+		{"alice//bert", "", "", false},
 	}
 	for _, tt := range tests {
 		ns, name, ok := splitRepoRef(tt.in)

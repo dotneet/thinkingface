@@ -66,14 +66,17 @@ func filePaths(files []store.RepoFile) []string {
 // repoEdge parses "namespace/name" with an optional "@revision" suffix, where
 // the revision is a branch, a tag or a commit SHA. relation is carried on
 // base_model edges only and is "" for everything else.
+// The parsing itself is repocard.SplitRepoRef / SplitRunRef: the store splits
+// the same text on the read side to resolve a `?base_model=` filter, and the
+// two have to agree or an edge is indexed under a name the filter never asks
+// for.
 func repoEdge(kind, raw string, ordinal int, relation string) store.LineageEdge {
 	e := store.LineageEdge{Kind: kind, Raw: strings.TrimSpace(raw), Relation: relation, Ordinal: ordinal}
-	ref, rev := splitRev(e.Raw)
-	parts := splitRef(ref)
-	if len(parts) != 2 {
+	ns, name, rev, ok := repocard.SplitRepoRef(e.Raw)
+	if !ok {
 		return e
 	}
-	e.Namespace, e.Name, e.Rev = parts[0], parts[1], rev
+	e.Namespace, e.Name, e.Rev = ns, name, rev
 	return e
 }
 
@@ -81,42 +84,10 @@ func repoEdge(kind, raw string, ordinal int, relation string) store.LineageEdge 
 // holds the metrics, the project inside it, and the run itself.
 func runEdge(raw string, ordinal int) store.LineageEdge {
 	e := store.LineageEdge{Kind: store.LineageKindRun, Raw: strings.TrimSpace(raw), Ordinal: ordinal}
-	// A run has no revision of its own; a trailing "@..." would be a mistake,
-	// and dropping it here would resolve to the wrong run rather than to none.
-	parts := splitRef(e.Raw)
-	if len(parts) != 4 {
+	ns, name, project, run, ok := repocard.SplitRunRef(e.Raw)
+	if !ok {
 		return e
 	}
-	e.Namespace, e.Name, e.Project, e.Run = parts[0], parts[1], parts[2], parts[3]
+	e.Namespace, e.Name, e.Project, e.Run = ns, name, project, run
 	return e
-}
-
-// splitRev cuts a trailing "@revision" off a reference. The last "@" wins, so a
-// revision may not contain one -- git refs cannot anyway.
-func splitRev(raw string) (ref, rev string) {
-	if i := strings.LastIndex(raw, "@"); i > 0 {
-		return strings.TrimSpace(raw[:i]), strings.TrimSpace(raw[i+1:])
-	}
-	return raw, ""
-}
-
-// splitRef splits a slash-separated reference, tolerating the surrounding
-// slashes a copied URL path leaves behind. It returns nil when any segment is
-// blank, which is what makes "team//name" resolve to nothing instead of to a
-// namespace with an empty name.
-func splitRef(ref string) []string {
-	ref = strings.Trim(strings.TrimSpace(ref), "/")
-	if ref == "" {
-		return nil
-	}
-	parts := strings.Split(ref, "/")
-	for _, p := range parts {
-		if strings.TrimSpace(p) == "" {
-			return nil
-		}
-	}
-	for i, p := range parts {
-		parts[i] = strings.TrimSpace(p)
-	}
-	return parts
 }

@@ -95,15 +95,15 @@ location and the id if the DB is restored and ids are reassigned — so we use a
 
 ## 4. Data model
 
-Migration `0008_repo_transfer.sql` (both `migrations/postgres/` and `migrations/sqlite/`).
+Landed as a migration at the time (both `migrations/postgres/` and `migrations/sqlite/`); the
+migration history has since been squashed, so today this is simply part of the current schema
+in `0001_init.sql` — `repositories.storage_path` is a normal `NOT NULL` column set at creation
+time rather than backfilled by an `UPDATE`, and `repo_redirects` / `repo_transfers` are created
+directly rather than added by `ALTER TABLE` / `CREATE TABLE` statements layered on afterward:
 
 ```sql
--- (1) Separate out the physical location
-ALTER TABLE repositories ADD COLUMN storage_path TEXT NOT NULL DEFAULT '';
-UPDATE repositories r SET storage_path =
-    (CASE r.kind WHEN 'model' THEN 'models/' ELSE 'datasets/' END)
-    || (SELECT n.name FROM namespaces n WHERE n.id = r.namespace_id) || '/' || r.name
-  WHERE storage_path = '';
+-- (1) The physical location, separated out from the logical name
+storage_path TEXT NOT NULL DEFAULT ''  -- on repositories; see the design rationale above
 CREATE UNIQUE INDEX idx_repositories_storage_path ON repositories (storage_path);
 
 -- (2) Redirects from old names to a repository
@@ -171,8 +171,8 @@ Add `StoragePath string` to `store.Repo`, always SELECTed via `repoColumns`. Als
 
 | Operation | Condition |
 |---|---|
-| Start a transfer | **Write** access on the source repository (`CanWriteNamespace(actor, from_ns)`: for a user namespace, that user; for an organization, an `admin` / `write` member). Transfers from an organization are restricted to `admin` only (so a `write` member can't walk off with a repository) |
-| Complete immediately | In addition, the actor must also be able to create a repository at the **destination** (`CanWriteNamespace(actor, to_ns)`). This covers your own other namespace, an organization where you're an admin/write member, or a server admin (`is_admin`) |
+| Start a transfer | **Write** access on the source repository: for a user namespace, that user; for an organization, an `admin` / `write` member. Transfers from an organization are restricted to `admin` only (so a `write` member can't walk off with a repository) |
+| Complete immediately | In addition, the actor must also be able to create a repository at the **destination** (the same write-access rule, evaluated against the destination namespace). This covers your own other namespace, an organization where you're an admin/write member, or a server admin (`is_admin`) |
 | Becomes pending approval | The destination is a user namespace or organization outside the actor's permissions. The destination's owner (the user themself, or an org admin) approves it to complete |
 | Approve / reject | A user with write permission on the destination namespace |
 | Cancel | A user with write permission on the source (i.e. whoever could start it) |
@@ -351,7 +351,7 @@ is deleted while pending, the transfer row is removed via CASCADE.
 | `syncer` | `gitrepo.Open(repo.StoragePath)`. The publish target under `blobs/` is determined by the sha, so it doesn't depend on `repo.Kind/Namespace/Name` |
 | `cmd/thinkingface/walops.go` (gc) | Include `StoragePath` in `AllRepoRefs`; the WAL-orphan scan lists all of `wal/` and cross-references it against the set of `storage_path` values in the DB (`models/…`, `datasets/…`, `repos/…` are all treated uniformly) |
 | `api/git.go` `routeGit` etc. | Pass the resolved `repo.StoragePath` to gitserver |
-| `store` | `Repo.StoragePath`, `RepoRef.StoragePath`, `CreateRepo(..., storagePath)`, `TransferRepo`, CRUD for `repo_redirects` / `repo_transfers`, `ResolveRepoRedirect(kind, ns, name)`, `DeleteRepoRedirect` |
+| `store` | `Repo.StoragePath`, `RepoRef.StoragePath`, `CreateRepo(..., storagePath)`, `TransferRepo`, insert/delete of `repo_redirects` / `repo_transfers` rows, `ResolveRepoRedirect(kind, ns, name)` |
 | `docs/dev/thinkingface-design.md` §4-5 / `continuity-design.md` §3 | Update the key layout to `wal/{storage_path}/`, and add a note explaining the legacy form |
 
 Existing `_test.go` files follow the signature changes. The WAL-related tests in
@@ -419,7 +419,10 @@ assumed; kept here as a decision record):
 
 - `thinkingface repo-info {kind}/{ns}/{name}`: displays `repo_id` / `storage_path` / the WAL
   index's generation / the list of redirect sources. Also accepts `--storage-path repos/01J…` to
-  reverse-lookup "which repository does this WAL prefix belong to" after a transfer
+  reverse-lookup "which repository does this WAL prefix belong to" after a transfer.
+  Still unimplemented (§15), and the store helper that would list a repository's redirect
+  sources was removed as dead code in the meantime — it comes back with the command that needs
+  it rather than sitting unused until then
 - The existing `thinkingface gc` gets `storage_path` support as described in §8 (the reference-
   counted GC of `lfs/` / `blobs/` itself is unrelated to `storage_path`; see
   `docs/dev/content-addressed-storage-design.md`)

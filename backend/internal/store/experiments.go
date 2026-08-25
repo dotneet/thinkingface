@@ -174,8 +174,10 @@ type ExpRunUpsert struct {
 // summary, or metricKeys leaves the stored value alone, so an incremental
 // ingest never wipes information a batch index already found.
 //
-// It is the positional form of UpsertExpRunWith, kept for the callers that do
-// not carry a sweep grouping.
+// It is the positional form of UpsertExpRunWith. The ingest path now builds
+// an ExpRunUpsert directly -- a call site that wants three of ten parameters
+// reads better naming them than counting nils -- so this remains only for the
+// tests that predate the struct form.
 func (s *Store) UpsertExpRun(ctx context.Context, projectID int64, name, status string,
 	config, summary map[string]any, metricKeys []string, lastStep, numPoints int64, startedAt *time.Time) (int64, error) {
 
@@ -461,29 +463,6 @@ func (s *Store) InsertPoints(ctx context.Context, runID int64, points []MetricPo
 		return err
 	}
 	return tx.Commit(ctx)
-}
-
-// ListPoints returns the live points for a run in step order.
-func (s *Store) ListPoints(ctx context.Context, runID int64) ([]MetricPoint, error) {
-	rows, err := s.db.Query(ctx,
-		`SELECT step, ts, metrics FROM exp_points WHERE run_id = $1 ORDER BY step, id`, runID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := []MetricPoint{}
-	for rows.Next() {
-		var p MetricPoint
-		var raw []byte
-		if err := rows.Scan(&p.Step, &p.TS, &raw); err != nil {
-			return nil, err
-		}
-		p.Metrics = map[string]float64{}
-		_ = json.Unmarshal(raw, &p.Metrics)
-		out = append(out, p)
-	}
-	return out, rows.Err()
 }
 
 func (s *Store) CountPoints(ctx context.Context, runID int64) (int64, error) {

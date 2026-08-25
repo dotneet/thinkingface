@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -125,10 +124,34 @@ func (s *Server) requireNamespaceAdmin(w http.ResponseWriter, r *http.Request, n
 
 // loadWebhookForAdmin loads the webhook named in the URL and checks the
 // caller may administer it (same bar as its owning namespace).
+//
+// Webhook ids are instance-wide serials rather than namespace-scoped names,
+// so every answer this returns has to be the same for an id that exists and
+// one that does not -- otherwise the id space can be walked to learn which
+// namespaces hold webhooks. That takes two things, and only together:
+//
+//   - The credential check comes before the lookup, so a caller with no
+//     write-scoped credential learns the same thing for every id: 401. With
+//     the lookup first, an existing id answered 401 from the namespace check
+//     while a missing one answered 404.
+//   - A caller who *is* authenticated but may not administer the owning
+//     namespace gets 404 rather than 403. A 403 would confirm the row is
+//     there, and name its namespace in the message; the caller is not
+//     supposed to know either. Only somebody who could already administer
+//     the webhook can tell "no such webhook" from "not yours", and for them
+//     the two are the same statement.
+//
+// requireWrite rather than plain authentication, because that is already the
+// bar administering a webhook applies: an admin holding a read-only token may
+// not reach one either way, and refusing them here keeps that answer from
+// depending on whether the id happened to exist.
 func (s *Server) loadWebhookForAdmin(w http.ResponseWriter, r *http.Request) (*store.Webhook, bool) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		badRequest(w, "webhook id must be a number")
+	id, ok := int64Param(w, r, "id", "webhook")
+	if !ok {
+		return nil, false
+	}
+	user, ok := s.requireWrite(w, r)
+	if !ok {
 		return nil, false
 	}
 	hook, err := s.store.GetWebhook(r.Context(), id)
@@ -136,7 +159,16 @@ func (s *Server) loadWebhookForAdmin(w http.ResponseWriter, r *http.Request) (*s
 		handleStoreError(w, "load webhook", err)
 		return nil, false
 	}
-	if _, ok := s.requireNamespaceAdmin(w, r, hook.Namespace); !ok {
+	role, err := s.roleIn(r.Context(), user, hook.Namespace)
+	if err != nil {
+		internalError(w, "check namespace access", err)
+		return nil, false
+	}
+	if role < RoleAdmin {
+		// Deliberately the same call the miss above makes, rather than a
+		// notFound of its own: two 404s that differ in their message are
+		// still two answers, and the point is that there is only one.
+		handleStoreError(w, "load webhook", store.ErrNotFound)
 		return nil, false
 	}
 	return hook, true
@@ -315,9 +347,9 @@ func (s *Server) handleListWebhookDeliveries(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	offset, _ := strconv.Atoi(q.Get("offset"))
+	// Default 30, max 100, as docs/dev/api-contract.md documents the delivery
+	// history and store.ListWebhookDeliveries clamps it again.
+	limit, offset := pageParams(r.URL.Query(), 30, 100)
 	rows, total, err := s.store.ListWebhookDeliveries(r.Context(), hook.ID, limit, offset)
 	if err != nil {
 		internalError(w, "list webhook deliveries", err)
@@ -335,9 +367,8 @@ func (s *Server) handleRedeliverWebhook(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	deliveryID, err := strconv.ParseInt(chi.URLParam(r, "deliveryId"), 10, 64)
-	if err != nil {
-		badRequest(w, "delivery id must be a number")
+	deliveryID, ok := int64Param(w, r, "deliveryId", "delivery")
+	if !ok {
 		return
 	}
 	existing, err := s.store.GetWebhookDelivery(r.Context(), deliveryID)

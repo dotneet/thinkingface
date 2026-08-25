@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dotneet/thinkingface/backend/internal/repocard"
 	"github.com/dotneet/thinkingface/backend/internal/ulid"
 )
 
@@ -89,6 +90,16 @@ const repoColumns = `r.id, r.namespace_id, n.name, n.kind, r.name, r.kind, r.def
 	r.created_at, r.updated_at, r.archived_at,
 	(SELECT count(*) FROM repo_files f WHERE f.repo_id = r.id AND f.ref = r.default_branch)`
 
+// repoCountFrom and repoSelect are the two shapes every query that
+// materialises a Repo starts with. The join is not optional -- repoColumns
+// reads n.name and n.kind through it -- so writing it out beside each SELECT
+// list was six chances to alias the namespace differently, and the copy in
+// transfers.go was in another file entirely. A listing's count and its page
+// have to agree about the FROM as much as about the WHERE (see ListRepos).
+const repoCountFrom = `SELECT count(*) FROM repositories r JOIN namespaces n ON n.id = r.namespace_id`
+
+const repoSelect = `SELECT ` + repoColumns + ` FROM repositories r JOIN namespaces n ON n.id = r.namespace_id`
+
 func scanRepo(row rowScanner) (*Repo, error) {
 	return scanRepoWith(row)
 }
@@ -159,7 +170,7 @@ func (s *Store) CreateRepo(ctx context.Context, nsID int64, name, kind, descript
 	}
 
 	repo, err := scanRepo(tx.QueryRow(ctx,
-		`SELECT `+repoColumns+` FROM repositories r JOIN namespaces n ON n.id = r.namespace_id WHERE r.id = $1`, id))
+		repoSelect+` WHERE r.id = $1`, id))
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +183,7 @@ func (s *Store) CreateRepo(ctx context.Context, nsID int64, name, kind, descript
 
 func (s *Store) GetRepoByID(ctx context.Context, id int64) (*Repo, error) {
 	return scanRepo(s.db.QueryRow(ctx,
-		`SELECT `+repoColumns+` FROM repositories r JOIN namespaces n ON n.id = r.namespace_id WHERE r.id = $1`, id))
+		repoSelect+` WHERE r.id = $1`, id))
 }
 
 // GetRepo resolves kind/ns/name. ns is matched case-insensitively (see
@@ -180,7 +191,7 @@ func (s *Store) GetRepoByID(ctx context.Context, id int64) (*Repo, error) {
 // that scope is unaffected by this change.
 func (s *Store) GetRepo(ctx context.Context, kind, ns, name string) (*Repo, error) {
 	return scanRepo(s.db.QueryRow(ctx,
-		`SELECT `+repoColumns+` FROM repositories r JOIN namespaces n ON n.id = r.namespace_id
+		repoSelect+`
 		 WHERE r.kind = $1 AND LOWER(n.name) = LOWER($2) AND r.name = $3`, kind, ns, name))
 }
 
@@ -189,7 +200,7 @@ func (s *Store) GetRepo(ctx context.Context, kind, ns, name string) (*Repo, erro
 // case-insensitively (see GetNamespace).
 func (s *Store) GetRepoAnyKind(ctx context.Context, ns, name string) (*Repo, error) {
 	return scanRepo(s.db.QueryRow(ctx,
-		`SELECT `+repoColumns+` FROM repositories r JOIN namespaces n ON n.id = r.namespace_id
+		repoSelect+`
 		 WHERE LOWER(n.name) = LOWER($1) AND r.name = $2 ORDER BY r.kind LIMIT 1`, ns, name))
 }
 
@@ -332,15 +343,14 @@ const neverMatches = "1 = 0"
 // splitRepoRef parses a "ns/name" lineage filter, dropping any "@rev" suffix.
 // An edge pinned to a revision still belongs to its repository, and lineage
 // filters match at repository granularity.
+//
+// It is repocard.SplitRepoRef and nothing else on purpose: the rows this
+// filter searches were written by the syncer splitting the card's text with
+// that same function, so any spelling of its own here is a way for a
+// reference to be indexed under one name and looked up under another.
 func splitRepoRef(ref string) (ns, name string, ok bool) {
-	if at := strings.IndexByte(ref, '@'); at >= 0 {
-		ref = ref[:at]
-	}
-	ns, name, ok = strings.Cut(ref, "/")
-	if !ok || ns == "" || name == "" || strings.Contains(name, "/") {
-		return "", "", false
-	}
-	return ns, name, true
+	ns, name, _, ok = repocard.SplitRepoRef(ref)
+	return ns, name, ok
 }
 
 // lineageEdgeExists renders "repository r declares an edge of edgeKind", with
@@ -545,7 +555,7 @@ func (s *Store) ListRepos(ctx context.Context, f RepoFilter) ([]Repo, int64, Rep
 
 	var total int64
 	if err := s.db.QueryRow(ctx,
-		`SELECT count(*) FROM repositories r JOIN namespaces n ON n.id = r.namespace_id`+clause,
+		repoCountFrom+clause,
 		args...).Scan(&total); err != nil {
 		return nil, 0, RepoFacets{}, fmt.Errorf("count repositories: %w", err)
 	}
@@ -555,7 +565,7 @@ func (s *Store) ListRepos(ctx context.Context, f RepoFilter) ([]Repo, int64, Rep
 
 	listArgs := append(append([]any{}, args...), limit, offset)
 	rows, err := s.db.Query(ctx,
-		`SELECT `+repoColumns+` FROM repositories r JOIN namespaces n ON n.id = r.namespace_id`+clause+
+		repoSelect+clause+
 			` ORDER BY `+order+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(listArgs)-1, len(listArgs)), listArgs...)
 	if err != nil {
 		return nil, 0, RepoFacets{}, fmt.Errorf("list repositories: %w", err)
@@ -745,12 +755,6 @@ func (s *Store) SetRepoDescription(ctx context.Context, repoID int64, descriptio
 		return nil, err
 	}
 	return s.GetRepoByID(ctx, repoID)
-}
-
-func (s *Store) SetRepoHead(ctx context.Context, repoID int64, headSHA string) error {
-	_, err := s.db.Exec(ctx,
-		`UPDATE repositories SET head_sha = $2, updated_at = now() WHERE id = $1`, repoID, headSHA)
-	return err
 }
 
 // SetRepoDefaultBranch switches which branch clone, tree listings, the

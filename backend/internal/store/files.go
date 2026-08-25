@@ -372,8 +372,12 @@ func (s *Store) DeleteParquetFiles(ctx context.Context, repoID int64, ref string
 
 func (s *Store) ListParquetFiles(ctx context.Context, repoID int64, ref string) ([]ParquetFile, error) {
 	rows, err := s.db.Query(ctx,
+		// repo_files is joined for f.lfs_oid (and for f.size as the fallback
+		// inside the COALESCE), not for a column of its own: the file's size
+		// is the LFS object's where there is one, and the indexed size
+		// otherwise.
 		`SELECT p.path, p.num_rows, p.num_row_groups, p.schema,
-		        COALESCE(f.size, 0), COALESCE(l.size, f.size, 0)
+		        COALESCE(l.size, f.size, 0)
 		 FROM parquet_files p
 		 LEFT JOIN repo_files f ON f.repo_id = p.repo_id AND f.ref = p.ref AND f.path = p.path
 		 LEFT JOIN lfs_objects l ON l.oid = f.lfs_oid
@@ -386,13 +390,11 @@ func (s *Store) ListParquetFiles(ctx context.Context, repoID int64, ref string) 
 	out := []ParquetFile{}
 	for rows.Next() {
 		var p ParquetFile
-		var blobSize, realSize int64
 		var schemaRaw []byte
-		if err := rows.Scan(&p.Path, &p.NumRows, &p.NumRowGroups, &schemaRaw, &blobSize, &realSize); err != nil {
+		if err := rows.Scan(&p.Path, &p.NumRows, &p.NumRowGroups, &schemaRaw, &p.Size); err != nil {
 			return nil, err
 		}
 		p.Schema = json.RawMessage(schemaRaw)
-		p.Size = realSize
 		var cols []any
 		if json.Unmarshal(schemaRaw, &cols) == nil {
 			p.NumColumns = len(cols)

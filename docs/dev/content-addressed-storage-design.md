@@ -97,25 +97,22 @@ any set of "multiple candidates" that would need pointing to in the first place.
 resolution layer built around it — `store.LFSStorageKey` / `LFSStorageKeys` /
 `PreferredLFSHome` / `SetLFSStorageKey` — becomes unnecessary as well.
 
-In the migration (`internal/store/migrations/postgres/0027_content_addressed_storage.sql`,
-`migrations/sqlite/0021_content_addressed_storage.sql`):
+Reflecting that, the current schema (`internal/store/migrations/postgres/0001_init.sql`,
+`migrations/sqlite/0001_init.sql`) simply does not have these:
 
-```sql
--- lfs_objects.storage_key existed only to track whether the real copy had moved
--- between lfs/ and exports/. Now that the real copy's address is fixed by the oid
--- alone, this column is dead.
-DROP INDEX IF EXISTS idx_lfs_objects_storage_key;
-ALTER TABLE lfs_objects DROP COLUMN IF EXISTS storage_key;
+```
+-- lfs_objects has no storage_key column (and no idx_lfs_objects_storage_key index).
+-- That column used to track whether the real copy had moved between lfs/ and
+-- exports/; now that the real copy's address is fixed by the oid alone, tracking
+-- it is unnecessary.
 
--- storage_reclaim_jobs was a queue for asynchronously deleting the exports/ tree
--- after a repository was deleted. Deletion no longer touches GCS at all, so it's
--- unnecessary (folded into thinkingface gc).
-DROP TABLE IF EXISTS storage_reclaim_jobs;
+-- storage_reclaim_jobs does not exist. It used to be a queue for asynchronously
+-- deleting the exports/ tree after a repository was deleted. Deletion no longer
+-- touches GCS at all, so it's unnecessary (folded into thinkingface gc).
 
--- relocate_exports was the job that relocated exports/ to a new prefix on
--- transfer. Even if rows remain queued, the corresponding pipeline no longer
--- exists, so delete them.
-DELETE FROM sync_jobs WHERE kind = 'relocate_exports';
+-- sync_jobs never carries a kind = 'relocate_exports' row. That job used to
+-- relocate exports/ to a new prefix on transfer; the corresponding pipeline no
+-- longer exists.
 ```
 
 `lfs_objects` becomes just `(oid PRIMARY KEY, size, created_at)`.
@@ -347,9 +344,11 @@ to exist** now that the concept of `exports/` itself is gone.
 **Because this targets production readiness, there is no consideration for backward
 compatibility with existing data.**
 
-- DB migrations are added as new sequentially numbered files
-  (`0027_content_addressed_storage.sql` / `0021_content_addressed_storage.sql`) (§3). The
-  existing `0001_init.sql` is left untouched and only the diff is applied
+- At the time this design landed, the change was a new sequentially numbered migration file
+  applied as a diff on top of the existing schema (§3). The migration history has since been
+  squashed into a single `0001_init.sql` per dialect (see `CLAUDE.md`), which now simply never
+  creates `lfs_objects.storage_key` or `storage_reclaim_jobs` in the first place, rather than
+  creating and then dropping them
 - Objects remaining under `exports/` and `cache/blobs/` in an existing GCS bucket are
   **not** automatically deleted by this migration. **The operator deletes them manually**
   (`gcloud storage rm -r gs://bucket/exports/` /

@@ -2,6 +2,13 @@
 // NOTE: the en dictionary is the source of truth for shape, so it must not be `as const`.
 export const settings = {
   errorTitle: "Couldn't load this",
+  // The signed-out state every settings screen shares
+  // (components/settings/login-required-state.tsx). One sentence rather than
+  // eight near-identical ones: the screen the visitor is looking at already
+  // says which settings these are.
+  loginRequiredTitle: "Login required",
+  loginRequiredMessage: "You need to be logged in to view or manage these settings.",
+  login: "Log in",
   nav: {
     profile: "Profile",
     tokens: "Access tokens",
@@ -15,9 +22,6 @@ export const settings = {
   profile: {
     title: "Profile",
     description: "How you're presented across thinkingface.",
-    loginRequiredTitle: "Login required",
-    loginRequiredMessage: "You need to be logged in to view or edit your profile.",
-    login: "Log in",
     loadFailed: "Failed to load your profile",
     loadFailedHint: "The backend API may be unreachable. Try reloading the page.",
     usernameLabel: "Username",
@@ -56,9 +60,6 @@ export const settings = {
     sessionExpiredDelete: "Your session expired. Log in again to delete this token.",
     confirmDeleteTitle: "Delete access token?",
     confirmDelete: "Delete this access token? Anything using it will stop working.",
-    loginRequiredTitle: "Login required",
-    loginRequiredMessage: "You need to be logged in to view or manage access tokens.",
-    login: "Log in",
     loadFailed: "Failed to load tokens",
     loadFailedHint: "The backend API may be unreachable. Try reloading the page.",
     emptyTitle: "No access tokens",
@@ -101,9 +102,6 @@ export const settings = {
     sessionExpiredDelete: "Your session expired. Log in again to delete this key.",
     confirmDeleteTitle: "Delete SSH key?",
     confirmDelete: "Delete this SSH key? Anything using it will stop working.",
-    loginRequiredTitle: "Login required",
-    loginRequiredMessage: "You need to be logged in to view or manage SSH keys.",
-    login: "Log in",
     loadFailed: "Failed to load SSH keys",
     loadFailedHint: "The backend API may be unreachable. Try reloading the page.",
     emptyTitle: "No SSH keys",
@@ -121,9 +119,6 @@ export const settings = {
     title: "Storage usage",
     description:
       "GCS-billed storage across the namespaces you can access: LFS object bytes, by namespace and by repository.",
-    loginRequiredTitle: "Login required",
-    loginRequiredMessage: "You need to be logged in to view storage usage.",
-    login: "Log in",
     loadFailed: "Failed to load storage usage",
     loadFailedHint: "The backend API may be unreachable. Try reloading the page.",
     emptyTitle: "No storage usage yet",
@@ -149,9 +144,6 @@ export const settings = {
       "Get notified at a URL you control when a repository is pushed to, created, or deleted, or when a tracked experiment run finishes or fails. Every delivery is signed with",
     // The `X-Thinkingface-Signature` header name is rendered between description and this suffix.
     descriptionSuffix: "so you can verify it came from this server.",
-    loginRequiredTitle: "Login required",
-    loginRequiredMessage: "You need to be logged in to manage webhooks.",
-    login: "Log in",
     accountLoadFailed: "Failed to load your account",
     accountLoadFailedHint: "The backend API may be unreachable.",
     noNamespaceTitle: "No namespace to manage",
@@ -223,9 +215,6 @@ export const settings = {
   transfers: {
     title: "Repository transfers",
     description: "Repositories other people want to transfer to you, and transfers you've started.",
-    loginRequiredTitle: "Login required",
-    loginRequiredMessage: "You need to be logged in to view repository transfers.",
-    login: "Log in",
     loadFailed: "Failed to load transfers",
     loadFailedHint: "The backend API may be unreachable. Try reloading the page.",
     incomingTitle: "Incoming",
@@ -248,9 +237,6 @@ export const settings = {
   organizations: {
     title: "Organizations",
     description: "Organizations you belong to, and the role you hold in each.",
-    loginRequiredTitle: "Login required",
-    loginRequiredMessage: "You need to be logged in to see your organizations.",
-    login: "Log in",
     loadFailed: "Failed to load your organizations",
     loadFailedHint: "The backend API may be unreachable. Try reloading the page.",
     emptyTitle: "You're not in any organization",
@@ -281,9 +267,6 @@ export const settings = {
     statusFailed: "failed",
     redeliver: "Redeliver",
     redelivering: "Redelivering…",
-    pageInfo: "{from}–{to} of {total}",
-    prev: "Prev",
-    next: "Next",
   },
   // Account (password change) and the site administrator's user directory.
   // Deliberately their own top-level groups rather than additions to `nav` /
@@ -307,9 +290,6 @@ export const settings = {
     tooShort: "Use at least 8 characters.",
     sameAsCurrent: "The new password must be different from the current one.",
     wrongCurrentPassword: "That's not your current password.",
-    loginRequiredTitle: "Login required",
-    loginRequiredMessage: "You need to be logged in to change your password.",
-    login: "Log in",
     loadFailed: "Failed to load your account",
     loadFailedHint: "The backend API may be unreachable. Try reloading the page.",
   },

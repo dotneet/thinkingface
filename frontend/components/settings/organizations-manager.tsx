@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { NamespaceAvatar } from "@/components/namespace/namespace-avatar";
 import { OrgRoleBadge, orgRoleLabelKey } from "@/components/orgs/org-role-badge";
+import { LoginRequiredState } from "@/components/settings/login-required-state";
 import { Alert } from "@/components/ui/alert";
 import { Button, buttonClass } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -74,20 +75,7 @@ export function OrganizationsManager() {
   if (orgs === null && !error) return <SkeletonLines lines={4} />;
 
   if (needsLogin) {
-    return (
-      <ErrorState
-        title={t("settings.organizations.loginRequiredTitle")}
-        message={t("settings.organizations.loginRequiredMessage")}
-        action={
-          <Link
-            href="/login?next=/settings/organizations"
-            className={buttonClass({ variant: "primary" })}
-          >
-            {t("settings.organizations.login")}
-          </Link>
-        }
-      />
-    );
+    return <LoginRequiredState next="/settings/organizations" />;
   }
 
   if (orgs === null) {

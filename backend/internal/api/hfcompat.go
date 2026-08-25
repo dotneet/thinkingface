@@ -19,6 +19,66 @@ import (
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
 
+// ---------------------------------------------- repository target resolution
+//
+// Every HuggingFace-compatible route names its repository the same way -- a
+// plural {repoType} segment, {ns}, and a {name} that git clients may have
+// suffixed with ".git" -- or, for the three that take it in the body,
+// a "type" field and a name that is either "name" or "ns/name". The four
+// helpers below are the only places that reading happens, so the mapping
+// cannot drift between endpoints: the URL shape and the body shape are the
+// external protocol (docs/dev/api-contract.md), not ours to vary per handler.
+
+// loadHFRepoForRead resolves the {repoType}/{ns}/{name} of an HF-compatible
+// read and enforces read access, returning the stored kind alongside the
+// repository because several handlers echo it back.
+func (s *Server) loadHFRepoForRead(w http.ResponseWriter, r *http.Request) (*store.Repo, string, bool) {
+	kind := kindFromURL(chi.URLParam(r, "repoType"))
+	repo, ok := s.loadRepoForRead(w, r, kind, chi.URLParam(r, "ns"),
+		repoName(chi.URLParam(r, "name")), redirectHF)
+	return repo, kind, ok
+}
+
+// loadHFRepoForWrite is loadHFRepoForRead with the write gate: a write-scoped
+// token, at least `write` in the namespace, and a repository that is not
+// archived (see loadRepoForWrite).
+func (s *Server) loadHFRepoForWrite(w http.ResponseWriter, r *http.Request) (*store.Repo, string, bool) {
+	kind := kindFromURL(chi.URLParam(r, "repoType"))
+	repo, ok := s.loadRepoForWrite(w, r, kind, chi.URLParam(r, "ns"),
+		repoName(chi.URLParam(r, "name")), redirectHF)
+	return repo, kind, ok
+}
+
+// hfRepoType maps the `type` field of an HF request body onto the stored
+// kind. Absent means "model", which is huggingface_hub's own default
+// (HfApi.create_repo's repo_type=None), and the plural it sends elsewhere is
+// accepted for the same reason kindFromURL accepts it: "datasets" and
+// "dataset" both reach this server in the wild.
+func hfRepoType(raw string) string {
+	if raw == "" {
+		return "model"
+	}
+	return strings.TrimSuffix(raw, "s")
+}
+
+// hfRepoTarget resolves the (kind, namespace, name) an HF request body names.
+//
+// huggingface_hub sends the repository either as "name" with a separate
+// "organization", or as "ns/name" with no organization at all -- and with
+// neither, meaning the caller's own namespace. All three spellings are in
+// current use, so all three are read here rather than in each handler.
+func hfRepoTarget(user *store.User, rawType, rawName, org string) (kind, ns, name string) {
+	kind = hfRepoType(rawType)
+	ns, name = org, rawName
+	if before, after, found := strings.Cut(rawName, "/"); found {
+		ns, name = before, after
+	}
+	if ns == "" {
+		ns = user.Username
+	}
+	return kind, ns, name
+}
+
 // handleValidateYAML checks a README's front matter before a commit. Only
 // genuinely unparseable YAML is an error here: thinkingface does not enforce
 // the HuggingFace card taxonomy, so a card with unfamiliar fields is fine.
@@ -89,8 +149,7 @@ func (s *Server) handleXetUnsupported(w http.ResponseWriter, _ *http.Request) {
 // about its access to a perfectly readable repository was told the repository
 // was gone.
 func (s *Server) handleHFAuthCheck(w http.ResponseWriter, r *http.Request) {
-	kind := kindFromURL(chi.URLParam(r, "repoType"))
-	repo, ok := s.loadRepoForRead(w, r, kind, chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectHF)
+	repo, kind, ok := s.loadHFRepoForRead(w, r)
 	if !ok {
 		return
 	}

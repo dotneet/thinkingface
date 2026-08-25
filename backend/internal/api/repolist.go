@@ -54,8 +54,8 @@ func queryFlag(v string) bool { return v == "true" || v == "1" }
 // tested without a database (repolist_test.go); the viewer scope is layered on
 // by the handler, since only it knows who is asking.
 func repoFilterFromQuery(q url.Values) store.RepoFilter {
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	offset, _ := strconv.Atoi(q.Get("offset"))
+	// Default 30, max 100 -- the window store.ListRepos clamps a RepoFilter to.
+	limit, offset := pageParams(q, 30, 100)
 
 	filter := store.RepoFilter{
 		Kind:      q.Get("kind"),

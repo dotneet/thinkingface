@@ -52,7 +52,7 @@ export type TabularParseResult =
 export const MAX_ROWS = 50_000;
 
 /** Wider than this and the horizontal scroll is useless anyway. */
-export const MAX_COLUMNS = 512;
+const MAX_COLUMNS = 512;
 
 /**
  * Above this a CSV stops being something to preview in a DOM table: the whole

@@ -19,21 +19,12 @@ type LFSObjectRef struct {
 // ListLFSObjects returns every LFS object recorded in the content-addressed
 // store, regardless of whether any repository still references it.
 func (s *Store) ListLFSObjects(ctx context.Context) ([]LFSObjectRef, error) {
-	rows, err := s.db.Query(ctx, `SELECT oid, size FROM lfs_objects`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := []LFSObjectRef{}
-	for rows.Next() {
-		var o LFSObjectRef
-		if err := rows.Scan(&o.OID, &o.Size); err != nil {
-			return nil, err
-		}
-		out = append(out, o)
-	}
-	return out, rows.Err()
+	return collect(ctx, s.db, `SELECT oid, size FROM lfs_objects`, nil,
+		func(row rowScanner) (LFSObjectRef, error) {
+			var o LFSObjectRef
+			err := row.Scan(&o.OID, &o.Size)
+			return o, err
+		})
 }
 
 // ListReferencedLFSOIDs returns the set of oids that at least one repository
@@ -50,21 +41,7 @@ func (s *Store) ListLFSObjects(ctx context.Context) ([]LFSObjectRef, error) {
 // takes the lfs_objects lock DeleteOrphanedLFSObject waits on, so a push
 // racing the collector would still lose the bytes.
 func (s *Store) ListReferencedLFSOIDs(ctx context.Context) (map[string]bool, error) {
-	rows, err := s.db.Query(ctx, `SELECT DISTINCT oid FROM repo_lfs_objects`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := map[string]bool{}
-	for rows.Next() {
-		var oid string
-		if err := rows.Scan(&oid); err != nil {
-			return nil, err
-		}
-		out[oid] = true
-	}
-	return out, rows.Err()
+	return collectSet(ctx, s.db, `SELECT DISTINCT oid FROM repo_lfs_objects`)
 }
 
 // ListReferencedBlobSHAs returns the set of non-LFS git blob hashes that some
@@ -72,21 +49,7 @@ func (s *Store) ListReferencedLFSOIDs(ctx context.Context) (map[string]bool, err
 // layer, the way ListReferencedLFSOIDs is for lfs/: `thinkingface gc` deletes
 // a blobs/ object only when no repo_files row names its sha any more.
 func (s *Store) ListReferencedBlobSHAs(ctx context.Context) (map[string]bool, error) {
-	rows, err := s.db.Query(ctx, `SELECT DISTINCT blob_sha FROM repo_files WHERE lfs_oid IS NULL`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := map[string]bool{}
-	for rows.Next() {
-		var sha string
-		if err := rows.Scan(&sha); err != nil {
-			return nil, err
-		}
-		out[sha] = true
-	}
-	return out, rows.Err()
+	return collectSet(ctx, s.db, `SELECT DISTINCT blob_sha FROM repo_files WHERE lfs_oid IS NULL`)
 }
 
 // OrphanedBlobs is the blob pass's decision, the counterpart of
@@ -156,6 +119,51 @@ func OrphanedLFSObjects(all []LFSObjectRef, referenced map[string]bool) []LFSObj
 	return out
 }
 
+// deleteLFSObjectUnderClaim is the transaction both LFS collectors run. They
+// differ only in how they claim the oid -- the orphan pass locks the existing
+// row, the untracked pass inserts one to take ownership of a row that is not
+// there -- so claim is the only thing passed in. It reports whether the
+// caller now holds the oid; false means somebody else does, which is a normal
+// outcome and not a fault.
+//
+// The ordering after the claim is the part worth having in one place. Storage
+// goes first, and it goes *inside* the transaction: once the lfs_objects row
+// is gone nothing would ever notice bytes left behind in the bucket, and a
+// storage failure has to roll the claim back so the object is simply
+// re-considered on the next run. That means a network round trip while
+// holding a row lock, deliberately -- the alternative is losing track of
+// bytes that are still being charged for.
+func (s *Store) deleteLFSObjectUnderClaim(ctx context.Context, oid string, removeStorage func() error, claim func(context.Context, tx) (bool, error)) (bool, error) {
+	if oid == "" {
+		return false, nil
+	}
+	if removeStorage == nil {
+		return false, errors.New("removeStorage is required")
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	held, err := claim(ctx, tx)
+	if err != nil || !held {
+		return false, err
+	}
+
+	if err := removeStorage(); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM lfs_objects WHERE oid = $1`, oid); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // DeleteOrphanedLFSObject deletes one LFS object from storage and the
 // database, but only if it is still unreferenced at delete time.
 //
@@ -189,42 +197,21 @@ func OrphanedLFSObjects(all []LFSObjectRef, referenced map[string]bool) []LFSObj
 // Returns deleted=false with a nil error when the oid is gone or has gained
 // a repository reference; the caller must not treat that as a storage fault.
 func (s *Store) DeleteOrphanedLFSObject(ctx context.Context, oid string, removeStorage func() error) (deleted bool, err error) {
-	if oid == "" {
-		return false, nil
-	}
-	if removeStorage == nil {
-		return false, errors.New("removeStorage is required")
-	}
-
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-
-	var locked string
-	err = tx.QueryRow(ctx, `
-		SELECT oid FROM lfs_objects
-		WHERE oid = $1
-		  AND NOT EXISTS (SELECT 1 FROM repo_lfs_objects WHERE oid = $1)`+
-		s.d.forUpdate(" OF lfs_objects"), oid).Scan(&locked)
-	if isNoRows(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-
-	if err := removeStorage(); err != nil {
-		return false, err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM lfs_objects WHERE oid = $1`, oid); err != nil {
-		return false, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, err
-	}
-	return true, nil
+	return s.deleteLFSObjectUnderClaim(ctx, oid, removeStorage, func(ctx context.Context, t tx) (bool, error) {
+		var locked string
+		err := t.QueryRow(ctx, `
+			SELECT oid FROM lfs_objects
+			WHERE oid = $1
+			  AND NOT EXISTS (SELECT 1 FROM repo_lfs_objects WHERE oid = $1)`+
+			s.d.forUpdate(" OF lfs_objects"), oid).Scan(&locked)
+		if isNoRows(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	})
 }
 
 // DeleteUntrackedLFSObject removes an lfs/ object that has no lfs_objects row,
@@ -273,39 +260,18 @@ func (s *Store) DeleteOrphanedLFSObject(ctx context.Context, oid string, removeS
 // Returns deleted=false with a nil error when the oid turned out to be
 // tracked; that is a normal outcome, not a fault.
 func (s *Store) DeleteUntrackedLFSObject(ctx context.Context, oid string, removeStorage func() error) (deleted bool, err error) {
-	if oid == "" {
-		return false, nil
-	}
-	if removeStorage == nil {
-		return false, errors.New("removeStorage is required")
-	}
-
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-
-	var claimed string
-	err = tx.QueryRow(ctx,
-		`INSERT INTO lfs_objects (oid, size) VALUES ($1, 0)
-		 ON CONFLICT (oid) DO NOTHING
-		 RETURNING oid`, oid).Scan(&claimed)
-	if isNoRows(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-
-	if err := removeStorage(); err != nil {
-		return false, err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM lfs_objects WHERE oid = $1`, oid); err != nil {
-		return false, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, err
-	}
-	return true, nil
+	return s.deleteLFSObjectUnderClaim(ctx, oid, removeStorage, func(ctx context.Context, t tx) (bool, error) {
+		var claimed string
+		err := t.QueryRow(ctx,
+			`INSERT INTO lfs_objects (oid, size) VALUES ($1, 0)
+			 ON CONFLICT (oid) DO NOTHING
+			 RETURNING oid`, oid).Scan(&claimed)
+		if isNoRows(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	})
 }

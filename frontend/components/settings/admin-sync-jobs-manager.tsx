@@ -1,14 +1,17 @@
 "use client";
 
-import { CheckCircle2, Inbox, RefreshCw, RotateCw } from "lucide-react";
+import { CheckCircle2, RefreshCw, RotateCw } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
+import { OutOfRangeEmptyState, PaginationControls } from "@/components/ui/pagination-controls";
 import { SkeletonLines } from "@/components/ui/skeleton";
+import { Table, TBody, Td, THead, Th, Tr } from "@/components/ui/table";
 import { TimeText } from "@/components/ui/time-text";
+import { usePagedList } from "@/hooks/use-paged-list";
 import type { SyncJob } from "@/lib/admin";
 import { listFailedSyncJobs, retrySyncJob, syncJobErrorKey } from "@/lib/admin";
 import type { FailedApiResult } from "@/lib/api-error-message";
@@ -34,11 +37,6 @@ const PAGE_SIZE = 50;
  */
 export function AdminSyncJobsManager() {
   const t = useT();
-  const [jobs, setJobs] = useState<SyncJob[] | null>(null);
-  const [total, setTotal] = useState<number | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [offset, setOffset] = useState(0);
-
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
@@ -52,43 +50,21 @@ export function AdminSyncJobsManager() {
     [t],
   );
 
-  // Every fetch, whoever started it, is only allowed to write state if it is
-  // still the newest one. The `cancelled` closure below covers the effect's
-  // own supersession, but an action handler that reloads the list after
-  // succeeding calls refresh directly and has no closure to be cancelled by --
-  // so a slow reload could still land on top of a page the user has since
-  // moved to. Comparing against the latest ticket covers both.
-  const latestRequest = useRef(0);
-
-  const refresh = useCallback(
-    async (isStale: () => boolean = () => false) => {
-      const ticket = ++latestRequest.current;
-      const result = await listFailedSyncJobs({ limit: PAGE_SIZE, offset });
-      if (isStale() || ticket !== latestRequest.current) return;
-      if (!result.ok) {
-        setLoadError(describe(result));
-        setJobs(null);
-        // Never carry a count over from a failed read: an empty table next to
-        // a stale total states something the page does not know (DESIGN.md §9).
-        setTotal(null);
-        return;
-      }
-      setLoadError(null);
-      setJobs(result.data.items);
-      setTotal(result.data.total);
-    },
-    [offset, describe],
-  );
-
-  // Guards against a fast page change letting an older, slower response land
-  // after the newer one and overwrite it.
-  useEffect(() => {
-    let cancelled = false;
-    refresh(() => cancelled);
-    return () => {
-      cancelled = true;
-    };
-  }, [refresh]);
+  const {
+    items: jobs,
+    total,
+    offset,
+    setOffset,
+    loadError,
+    reload: refresh,
+    outOfRange,
+    pager,
+  } = usePagedList({
+    pageSize: PAGE_SIZE,
+    deps: [],
+    fetchPage: ({ limit, offset }) => listFailedSyncJobs({ limit, offset }),
+    describe,
+  });
 
   async function handleReload() {
     setReloading(true);
@@ -115,17 +91,6 @@ export function AdminSyncJobsManager() {
     setNotice(t("settings.adminSyncJobs.retryDone", { repo: job.repo }));
     await refresh();
   }
-
-  // "This page is empty" and "there is nothing here" are different answers,
-  // and paging is what makes the difference reachable: retrying the last
-  // failed job on the last page leaves the window past the end of a list that
-  // is not empty at all (DESIGN.md §9). The dedicated empty state says which
-  // one it is, and the range line below is skipped because `to` would be
-  // smaller than `from`.
-  const outOfRange = total !== null && total > 0 && offset >= total;
-
-  const hasPrev = offset > 0;
-  const hasNext = total !== null && offset + PAGE_SIZE < total;
 
   return (
     <div className="flex flex-col gap-4">
@@ -167,16 +132,7 @@ export function AdminSyncJobsManager() {
         />
       ) : jobs.length === 0 ? (
         outOfRange ? (
-          <EmptyState
-            icon={Inbox}
-            title={t("ui.pagination.outOfRangeTitle")}
-            description={t("ui.pagination.outOfRangeDescription")}
-            action={
-              <Button size="sm" onClick={() => setOffset(0)}>
-                {t("ui.pagination.backToFirstPage")}
-              </Button>
-            }
-          />
+          <OutOfRangeEmptyState onBackToFirstPage={() => setOffset(0)} />
         ) : (
           <EmptyState
             icon={CheckCircle2}
@@ -185,100 +141,58 @@ export function AdminSyncJobsManager() {
           />
         )
       ) : (
-        <div className="scroll-x rounded-lg border border-border">
-          <table className="w-full min-w-[720px] border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-xs font-medium text-fg-subtle">
-                <th className="px-3 py-2 font-medium">{t("settings.adminSyncJobs.colRepo")}</th>
-                <th className="px-3 py-2 font-medium">{t("settings.adminSyncJobs.colRef")}</th>
-                <th className="px-3 py-2 text-right font-medium">
-                  {t("settings.adminSyncJobs.colAttempts")}
-                </th>
-                <th className="px-3 py-2 font-medium">
-                  {t("settings.adminSyncJobs.colLastError")}
-                </th>
-                <th className="px-3 py-2 font-medium">{t("settings.adminSyncJobs.colUpdated")}</th>
-                <th className="px-3 py-2 text-right font-medium">
-                  {t("settings.adminSyncJobs.colActions")}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {jobs.map((job) => (
-                <tr key={job.id} className="border-b border-border align-top last:border-0">
-                  <td className="px-3 py-2">
-                    <RepoLink repo={job.repo} />
-                  </td>
-                  <td className="px-3 py-2 font-mono text-xs text-fg-muted">{job.ref}</td>
-                  <td className="px-3 py-2 text-right tabular-nums text-fg-muted">
-                    {job.attempts}
-                  </td>
-                  <td className="px-3 py-2">
-                    {/* An error can be arbitrarily long, so it scrolls inside
-                        its own cell instead of widening the table until the
-                        page itself scrolls sideways (DESIGN.md §9). */}
-                    <pre className="scroll-x max-w-[28rem] whitespace-pre font-mono text-xs leading-relaxed text-fg-muted">
-                      {job.last_error}
-                    </pre>
-                  </td>
-                  <td className="px-3 py-2 text-xs font-medium text-fg-subtle">
-                    <TimeText iso={job.updated_at} style="dateTime" />
-                  </td>
-                  <td className="px-3 py-2">
-                    <div className="flex justify-end">
-                      <Button
-                        size="sm"
-                        variant="primary"
-                        disabled={busy !== null}
-                        onClick={() => void handleRetry(job)}
-                      >
-                        <RotateCw size={13} />
-                        {busy === job.id
-                          ? t("settings.adminSyncJobs.retrying")
-                          : t("settings.adminSyncJobs.retry")}
-                      </Button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Table minWidth={720}>
+          <THead>
+            <Th>{t("settings.adminSyncJobs.colRepo")}</Th>
+            <Th>{t("settings.adminSyncJobs.colRef")}</Th>
+            <Th align="right">{t("settings.adminSyncJobs.colAttempts")}</Th>
+            <Th>{t("settings.adminSyncJobs.colLastError")}</Th>
+            <Th>{t("settings.adminSyncJobs.colUpdated")}</Th>
+            <Th align="right">{t("settings.adminSyncJobs.colActions")}</Th>
+          </THead>
+          <TBody>
+            {jobs.map((job) => (
+              <Tr key={job.id} className="align-top">
+                <Td>
+                  <RepoLink repo={job.repo} />
+                </Td>
+                <Td className="font-mono text-xs text-fg-muted">{job.ref}</Td>
+                <Td align="right" className="tabular-nums text-fg-muted">
+                  {job.attempts}
+                </Td>
+                <Td>
+                  {/* An error can be arbitrarily long, so it scrolls inside
+                      its own cell instead of widening the table until the
+                      page itself scrolls sideways (DESIGN.md §9). */}
+                  <pre className="scroll-x max-w-[28rem] whitespace-pre font-mono text-xs leading-relaxed text-fg-muted">
+                    {job.last_error}
+                  </pre>
+                </Td>
+                <Td className="text-xs font-medium text-fg-subtle">
+                  <TimeText iso={job.updated_at} style="dateTime" />
+                </Td>
+                <Td>
+                  <div className="flex justify-end">
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={busy !== null}
+                      onClick={() => void handleRetry(job)}
+                    >
+                      <RotateCw size={13} />
+                      {busy === job.id
+                        ? t("settings.adminSyncJobs.retrying")
+                        : t("settings.adminSyncJobs.retry")}
+                    </Button>
+                  </div>
+                </Td>
+              </Tr>
+            ))}
+          </TBody>
+        </Table>
       )}
 
-      {!outOfRange && (hasPrev || hasNext) && (
-        <div className="flex items-center justify-between text-sm text-fg-subtle">
-          {/* A failed reload leaves total null. Rendering it as 0 would put
-              "51–0 of 0" directly under the error state, which reads as "the
-              queue is empty" rather than "we could not ask" (DESIGN.md §9).
-              The buttons stay, because paging back is how you recover. */}
-          <span className="tabular-nums">
-            {total === null || jobs === null
-              ? "—"
-              : t("ui.pagination.range", {
-                  from: formatNumber(offset + 1),
-                  // From what actually arrived, not from the window's width:
-                  // the count and the page are separate reads, so a short last
-                  // page or a roster that changed between them would otherwise
-                  // be described by a number no row backs up.
-                  to: formatNumber(offset + jobs.length),
-                  total: formatNumber(total),
-                })}
-          </span>
-          <div className="flex gap-2">
-            <Button
-              size="sm"
-              disabled={!hasPrev}
-              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-            >
-              {t("ui.pagination.prev")}
-            </Button>
-            <Button size="sm" disabled={!hasNext} onClick={() => setOffset(offset + PAGE_SIZE)}>
-              {t("ui.pagination.next")}
-            </Button>
-          </div>
-        </div>
-      )}
+      <PaginationControls pager={pager} />
     </div>
   );
 }

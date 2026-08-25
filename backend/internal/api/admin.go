@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strconv"
 
 	"github.com/go-chi/chi/v5"
 
@@ -94,8 +93,8 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	offset, _ := strconv.Atoi(q.Get("offset"))
+	// Default 50, max 200, the window store.ListUsers clamps to as well.
+	limit, offset := pageParams(q, 50, 200)
 
 	users, total, err := s.store.ListUsers(r.Context(), q.Get("search"), limit, offset)
 	if err != nil {
@@ -209,13 +208,8 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, `approval must be "approved" or "pending"`)
 		return
 	}
-	target, err := s.store.GetUserByUsername(r.Context(), username)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			notFound(w, "no user named "+username)
-			return
-		}
-		internalError(w, "load user", err)
+	target, ok := s.loadUserByName(w, r, username, "no user named "+username)
+	if !ok {
 		return
 	}
 	// Refused before anything is written: an administrator who demoted
@@ -408,13 +402,8 @@ func (s *Server) handleAdminRevokeCredentials(w http.ResponseWriter, r *http.Req
 		return
 	}
 	username := chi.URLParam(r, "username")
-	target, err := s.store.GetUserByUsername(r.Context(), username)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			notFound(w, "no user named "+username)
-			return
-		}
-		internalError(w, "load user", err)
+	target, ok := s.loadUserByName(w, r, username, "no user named "+username)
+	if !ok {
 		return
 	}
 	// Refused on your own account, like self_demote and self_disable: the
@@ -482,9 +471,8 @@ func (s *Server) handleAdminListSyncJobs(w http.ResponseWriter, r *http.Request)
 	if _, ok := s.requireSiteAdmin(w, r, false); !ok {
 		return
 	}
-	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	offset, _ := strconv.Atoi(q.Get("offset"))
+	// Default 50, max 200, the window store.ListFailedSyncJobs clamps to too.
+	limit, offset := pageParams(r.URL.Query(), 50, 200)
 
 	jobs, total, err := s.store.ListFailedSyncJobs(r.Context(), limit, offset)
 	if err != nil {
@@ -519,9 +507,8 @@ func (s *Server) handleAdminRetrySyncJob(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		badRequest(w, "sync job id must be an integer")
+	id, ok := int64Param(w, r, "id", "sync job")
+	if !ok {
 		return
 	}
 	requeued, err := s.store.RetrySyncJob(r.Context(), id)

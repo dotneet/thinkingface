@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
@@ -40,8 +39,7 @@ type hfLFSInfo struct {
 }
 
 func (s *Server) handleHFRepoInfo(w http.ResponseWriter, r *http.Request) {
-	kind := kindFromURL(chi.URLParam(r, "repoType"))
-	repo, ok := s.loadRepoForRead(w, r, kind, chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectHF)
+	repo, _, ok := s.loadHFRepoForRead(w, r)
 	if !ok {
 		return
 	}
@@ -50,9 +48,8 @@ func (s *Server) handleHFRepoInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
+	gitRepo, ok := s.openGit(w, repo)
+	if !ok {
 		return
 	}
 	// Resolved before the tree read so an unknown revision is a 404 rather
@@ -65,6 +62,7 @@ func (s *Server) handleHFRepoInfo(w http.ResponseWriter, r *http.Request) {
 	var entries []gitrepo.Entry
 	if !empty {
 		// The resolved hash, not rev: one resolution per request.
+		var err error
 		entries, _, err = gitRepo.Tree(commit.String(), "", true)
 		if err != nil {
 			handleStoreError(w, "read tree", err)
@@ -118,14 +116,12 @@ func (s *Server) handleHFRepoInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHFRefs(w http.ResponseWriter, r *http.Request) {
-	kind := kindFromURL(chi.URLParam(r, "repoType"))
-	repo, ok := s.loadRepoForRead(w, r, kind, chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectHF)
+	repo, _, ok := s.loadHFRepoForRead(w, r)
 	if !ok {
 		return
 	}
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
+	gitRepo, ok := s.openGit(w, repo)
+	if !ok {
 		return
 	}
 
@@ -167,14 +163,12 @@ type hfTreeEntry struct {
 }
 
 func (s *Server) handleHFTree(w http.ResponseWriter, r *http.Request) {
-	kind := kindFromURL(chi.URLParam(r, "repoType"))
-	repo, ok := s.loadRepoForRead(w, r, kind, chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectHF)
+	repo, _, ok := s.loadHFRepoForRead(w, r)
 	if !ok {
 		return
 	}
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
+	gitRepo, ok := s.openGit(w, repo)
+	if !ok {
 		return
 	}
 	recursive := r.URL.Query().Get("recursive") == "true" || r.URL.Query().Get("recursive") == "1"
@@ -191,6 +185,7 @@ func (s *Server) handleHFTree(w http.ResponseWriter, r *http.Request) {
 	}
 	var entries []gitrepo.Entry
 	if !empty {
+		var err error
 		entries, _, err = gitRepo.Tree(commit.String(), wildcardPath(r), recursive)
 		if err != nil {
 			if errors.Is(err, gitrepo.ErrPathNotFound) {
@@ -301,8 +296,7 @@ func decodePathsInfoPaths(w http.ResponseWriter, r *http.Request) (paths []strin
 // handleHFPathsInfo answers the batch metadata lookup snapshot_download uses to
 // plan a download without walking the whole tree.
 func (s *Server) handleHFPathsInfo(w http.ResponseWriter, r *http.Request) {
-	kind := kindFromURL(chi.URLParam(r, "repoType"))
-	repo, ok := s.loadRepoForRead(w, r, kind, chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectHF)
+	repo, _, ok := s.loadHFRepoForRead(w, r)
 	if !ok {
 		return
 	}
@@ -325,9 +319,8 @@ func (s *Server) handleHFPathsInfo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
+	gitRepo, ok := s.openGit(w, repo)
+	if !ok {
 		return
 	}
 	// Resolved once, ahead of the loop: a path that is simply absent is
@@ -423,20 +416,14 @@ func isTextPreviewName(base string) bool {
 }
 
 func (s *Server) handleUITree(w http.ResponseWriter, r *http.Request) {
-	repo, ok := s.loadRepoForRead(w, r, chi.URLParam(r, "kind"), chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectUI)
+	repo, rev, dir, ok := s.uiFileTarget(w, r)
 	if !ok {
 		return
 	}
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
-		return
-	}
-	rev, ok := revParam(w, r, "rev", repo)
+	gitRepo, ok := s.openGit(w, repo)
 	if !ok {
 		return
 	}
-	dir := wildcardPath(r)
 
 	// Resolved before the tree read, the same way the HF-compatible handlers
 	// do it. gitrepo.Tree answers an unknown revision with an empty listing
@@ -460,6 +447,7 @@ func (s *Server) handleUITree(w http.ResponseWriter, r *http.Request) {
 		latest       *gitrepo.CommitMeta
 	)
 	if !empty {
+		var err error
 		entries, _, err = gitRepo.Tree(treeRev, dir, false)
 		if err != nil {
 			handleStoreError(w, "read tree", err)
@@ -555,13 +543,10 @@ func commitInfoUI(m gitrepo.CommitMeta) apitypes.CommitInfoUI {
 
 // handleUIRefs feeds the file browser's revision picker.
 func (s *Server) handleUIRefs(w http.ResponseWriter, r *http.Request) {
-	repo, ok := s.loadRepoForRead(w, r, chi.URLParam(r, "kind"), chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectUI)
+	// This route carries no {rev}, so the revision uiRepoTarget resolves is
+	// the repository's default branch and nothing here reads it.
+	repo, gitRepo, _, ok := s.uiRepoTarget(w, r)
 	if !ok {
-		return
-	}
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
 		return
 	}
 
@@ -591,38 +576,12 @@ const (
 
 // handleUICommits pages through a revision's first-parent history.
 func (s *Server) handleUICommits(w http.ResponseWriter, r *http.Request) {
-	repo, ok := s.loadRepoForRead(w, r, chi.URLParam(r, "kind"), chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectUI)
+	repo, gitRepo, rev, ok := s.uiRepoTarget(w, r)
 	if !ok {
 		return
 	}
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
-		return
-	}
 
-	limit := defaultCommitPage
-	if v := r.URL.Query().Get("limit"); v != "" {
-		n, convErr := strconv.Atoi(v)
-		if convErr != nil || n < 1 {
-			badRequest(w, "limit must be a positive integer")
-			return
-		}
-		limit = min(n, maxCommitPage)
-	}
-	after := plumbing.ZeroHash
-	if v := r.URL.Query().Get("after"); v != "" {
-		// The cursor names an object, so it has to be a full hex hash; a
-		// branch name here would silently restart the walk.
-		parsed := plumbing.NewHash(v)
-		if parsed.IsZero() || parsed.String() != strings.ToLower(v) {
-			badRequest(w, "after must be a full commit hash")
-			return
-		}
-		after = parsed
-	}
-
-	rev, ok := revParam(w, r, "rev", repo)
+	limit, after, ok := commitPageParams(w, r)
 	if !ok {
 		return
 	}
@@ -639,6 +598,7 @@ func (s *Server) handleUICommits(w http.ResponseWriter, r *http.Request) {
 		next  plumbing.Hash
 	)
 	if !empty {
+		var err error
 		// The resolved hash, not rev. A non-zero after names a commit outright
 		// and ListCommits ignores the revision entirely then; resolving it all
 		// the same keeps every page of one walk answering the way its first

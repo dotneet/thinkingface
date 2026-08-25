@@ -3,11 +3,12 @@
 import { HardDrive } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { buttonClass } from "@/components/ui/button";
+import { LoginRequiredState } from "@/components/settings/login-required-state";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { SkeletonLines } from "@/components/ui/skeleton";
+import { Table, TBody, Td, THead, Th, Tr } from "@/components/ui/table";
 import { isUnauthorized } from "@/lib/api";
 import { errorMessage, type FailedApiResult } from "@/lib/api-error-message";
 import { formatBytes, formatNumber } from "@/lib/format";
@@ -74,20 +75,7 @@ export function StorageUsage({
   }
 
   if (usage === null && needsLogin) {
-    return (
-      <ErrorState
-        title={t("settings.storage.loginRequiredTitle")}
-        message={t("settings.storage.loginRequiredMessage")}
-        action={
-          <Link
-            href={`/login?next=${encodeURIComponent(loginNext)}`}
-            className={buttonClass({ variant: "primary" })}
-          >
-            {t("settings.storage.login")}
-          </Link>
-        }
-      />
-    );
+    return <LoginRequiredState next={loginNext} />;
   }
 
   if (usage === null) {
@@ -160,39 +148,33 @@ export function StorageUsage({
           description={t("settings.storage.reposEmptyDescription")}
         />
       ) : (
-        <div className="scroll-x rounded-lg border border-border">
-          <table className="w-full min-w-[560px] border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-xs font-medium text-fg-subtle">
-                <th className="px-3 py-2 font-medium">{t("settings.storage.colRepository")}</th>
-                <th className="px-3 py-2 font-medium">{t("settings.storage.colKind")}</th>
-                <th className="px-3 py-2 font-medium">{t("settings.storage.colFiles")}</th>
-                <th className="px-3 py-2 text-right font-medium">
-                  {t("settings.storage.colLfsSize")}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {usage.repos.map((repo) => (
-                <tr key={repo.full_name} className="border-b border-border last:border-0">
-                  <td className="px-3 py-2">
-                    <Link
-                      href={repoBase(repo.kind, repo.namespace, repo.name)}
-                      className="font-medium text-accent hover:underline"
-                    >
-                      {repo.full_name}
-                    </Link>
-                  </td>
-                  <td className="px-3 py-2 capitalize text-fg-muted">{repo.kind}</td>
-                  <td className="px-3 py-2 text-fg-subtle">{formatNumber(repo.num_files)}</td>
-                  <td className="px-3 py-2 text-right tabular-nums text-fg">
-                    {formatBytes(repo.lfs_size)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Table minWidth={560}>
+          <THead>
+            <Th>{t("settings.storage.colRepository")}</Th>
+            <Th>{t("settings.storage.colKind")}</Th>
+            <Th>{t("settings.storage.colFiles")}</Th>
+            <Th align="right">{t("settings.storage.colLfsSize")}</Th>
+          </THead>
+          <TBody>
+            {usage.repos.map((repo) => (
+              <Tr key={repo.full_name}>
+                <Td>
+                  <Link
+                    href={repoBase(repo.kind, repo.namespace, repo.name)}
+                    className="font-medium text-accent hover:underline"
+                  >
+                    {repo.full_name}
+                  </Link>
+                </Td>
+                <Td className="capitalize text-fg-muted">{repo.kind}</Td>
+                <Td className="text-fg-subtle">{formatNumber(repo.num_files)}</Td>
+                <Td align="right" className="tabular-nums text-fg">
+                  {formatBytes(repo.lfs_size)}
+                </Td>
+              </Tr>
+            ))}
+          </TBody>
+        </Table>
       )}
     </div>
   );

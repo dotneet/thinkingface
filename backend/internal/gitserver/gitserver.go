@@ -174,17 +174,8 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, storagePath stri
 		return err
 	}
 
-	args := []string{}
-	env := gitEnv()
-	if service == ReceivePack && h.hooksPath != "" {
-		// -c rather than repository config: the hook is part of the image,
-		// never part of the repository's mutable state.
-		args = append(args, "-c", "core.hooksPath="+h.hooksPath)
-		if h.hookEnv != nil {
-			env = append(env, h.hookEnv(storagePath)...)
-		}
-	}
-	args = append(args, string(service)[len("git-"):], "--stateless-rpc", dir)
+	args, env := h.serviceArgs(service, storagePath, gitEnv())
+	args = append(args, "--stateless-rpc", dir)
 	// CommandContext, like AdvertiseRefs: a client that hangs up mid-transfer
 	// must not leave the service running on its behalf.
 	cmd := exec.CommandContext(r.Context(), "git", args...)
@@ -392,6 +383,33 @@ func (l *ratioLimitedReader) Read(p []byte) (int, error) {
 		return n, fmt.Errorf("%w: %d bytes from %d", errGzipRatio, l.out, l.compressed.n)
 	}
 	return n, err
+}
+
+// serviceArgs builds the `git` arguments up to and including the service name
+// ("upload-pack" / "receive-pack"), and the environment to run it with, for
+// both transports. baseEnv is the transport's own environment: gitEnv() over
+// HTTP, sshEnv(gitProtocol) over SSH. The caller appends what is left --
+// `--stateless-rpc` and the directory for HTTP, the directory alone for SSH,
+// where the service owns the connection for its whole lifetime.
+//
+// The receive-pack branch is the reason this is one function. Without
+// `-c core.hooksPath` the push runs whatever hooks the repository itself
+// carries, which for a bare repository this server created is none: the WAL
+// hook never fires and the push is recorded nowhere, while the client is told
+// it succeeded. Both transports need it, and a copy per transport is a way
+// for SSH to silently bypass what HTTP records.
+//
+// -c rather than repository config: the hook is part of the image, never part
+// of the repository's mutable state.
+func (h *Handler) serviceArgs(service Service, storagePath string, baseEnv []string) (args, env []string) {
+	args, env = []string{}, baseEnv
+	if service == ReceivePack && h.hooksPath != "" {
+		args = append(args, "-c", "core.hooksPath="+h.hooksPath)
+		if h.hookEnv != nil {
+			env = append(env, h.hookEnv(storagePath)...)
+		}
+	}
+	return append(args, string(service)[len("git-"):]), env
 }
 
 // gitEnv is the shared git environment (internal/gitexec) plus the protocol

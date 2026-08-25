@@ -1,7 +1,7 @@
 "use client";
 
 import { FileText, Inbox, RotateCw } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -9,8 +9,11 @@ import { CopyButton } from "@/components/ui/copy-button";
 import { Dialog } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
+import { OutOfRangeEmptyState, PaginationControls } from "@/components/ui/pagination-controls";
 import { SkeletonLines } from "@/components/ui/skeleton";
 import { TimeText } from "@/components/ui/time-text";
+import { usePagedList } from "@/hooks/use-paged-list";
+import type { FailedApiResult } from "@/lib/api-error-message";
 import { errorMessage } from "@/lib/api-error-message";
 import type { MessageKey, Translator } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
@@ -40,46 +43,29 @@ const PAGE_SIZE = 20;
 
 export function WebhookDeliveriesPanel({ webhookId }: { webhookId: number }) {
   const t = useT();
-  const [deliveries, setDeliveries] = useState<WebhookDelivery[] | null>(null);
-  const [total, setTotal] = useState<number | null>(null);
-  const [offset, setOffset] = useState(0);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [loadingPage, setLoadingPage] = useState(false);
   const [redeliveringId, setRedeliveringId] = useState<number | null>(null);
   // The delivery whose response is open in the detail dialog. The row itself
   // is held (not just its id) so a background refresh that drops the row from
   // the current page cannot blank out a dialog the user is reading.
   const [detail, setDetail] = useState<WebhookDelivery | null>(null);
 
-  // Every fetch, whoever started it, is only allowed to write state if it is
-  // still the newest one. The `cancelled` closure below covers the effect's
-  // own supersession, but an action handler that reloads the list after
-  // succeeding calls refresh directly and has no closure to be cancelled by --
-  // so a slow reload could still land on top of a page the user has since
-  // moved to. Comparing against the latest ticket covers both.
-  const latestRequest = useRef(0);
+  const describe = useCallback((result: FailedApiResult) => errorMessage(t, result), [t]);
 
-  const refresh = useCallback(
-    async (isStale: () => boolean = () => false) => {
-      const ticket = ++latestRequest.current;
-      const result = await listWebhookDeliveries(webhookId, { limit: PAGE_SIZE, offset });
-      if (isStale() || ticket !== latestRequest.current) return;
-      if (!result.ok) {
-        setLoadError(errorMessage(t, result));
-        setDeliveries(null);
-        // Never carry a count or a stale page over from a failed read: rows
-        // from the old offset next to a mismatched range would state
-        // something the page does not know (DESIGN.md §9).
-        setTotal(null);
-        return;
-      }
-      setLoadError(null);
-      setDeliveries(result.data.items);
-      setTotal(result.data.total);
-    },
-    [webhookId, offset, t],
-  );
+  const {
+    items: deliveries,
+    offset,
+    setOffset,
+    loadError,
+    reload: refresh,
+    outOfRange,
+    pager,
+  } = usePagedList({
+    pageSize: PAGE_SIZE,
+    deps: [webhookId],
+    fetchPage: ({ limit, offset }) => listWebhookDeliveries(webhookId, { limit, offset }),
+    describe,
+  });
 
   // A different webhook starts back on its first page rather than wherever
   // this one happened to be paged to. Adjusted during render rather than in an
@@ -91,25 +77,6 @@ export function WebhookDeliveriesPanel({ webhookId }: { webhookId: number }) {
     setShownWebhookId(webhookId);
     setOffset(0);
   }
-
-  // Guards against a fast Prev/Next click letting an older, slower response
-  // land after the newer one and overwrite it, silently rewinding the page
-  // (mirrors admin-users-manager.tsx / admin-sync-jobs-manager.tsx). Buttons
-  // only ever move `offset`; this effect is the one place that fetches.
-  //
-  // The in-flight flag lives here rather than inside refresh so that a
-  // superseded fetch cannot leave it stuck on: whichever effect is current
-  // sets it, and only that same effect clears it.
-  useEffect(() => {
-    let cancelled = false;
-    setLoadingPage(true);
-    refresh(() => cancelled).finally(() => {
-      if (!cancelled) setLoadingPage(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [refresh]);
 
   async function handleRedeliver(deliveryId: number) {
     if (redeliveringId !== null) return;
@@ -131,9 +98,6 @@ export function WebhookDeliveriesPanel({ webhookId }: { webhookId: number }) {
     }
   }
 
-  const hasPrev = offset > 0;
-  const hasNext = total !== null && offset + PAGE_SIZE < total;
-
   return (
     <div className="flex flex-col gap-3">
       {actionError && <Alert tone="negative">{actionError}</Alert>}
@@ -145,11 +109,15 @@ export function WebhookDeliveriesPanel({ webhookId }: { webhookId: number }) {
           message={loadError ?? t("settings.deliveries.loadFailed")}
         />
       ) : deliveries.length === 0 ? (
-        <EmptyState
-          icon={Inbox}
-          title={t("settings.deliveries.emptyTitle")}
-          description={t("settings.deliveries.emptyDescription")}
-        />
+        outOfRange ? (
+          <OutOfRangeEmptyState onBackToFirstPage={() => setOffset(0)} />
+        ) : (
+          <EmptyState
+            icon={Inbox}
+            title={t("settings.deliveries.emptyTitle")}
+            description={t("settings.deliveries.emptyDescription")}
+          />
+        )
       ) : (
         <div className="scroll-x rounded-md border border-border">
           <table className="w-full min-w-[620px] border-collapse text-xs">
@@ -220,40 +188,7 @@ export function WebhookDeliveriesPanel({ webhookId }: { webhookId: number }) {
           </table>
         </div>
       )}
-      {(hasPrev || hasNext) && (
-        <div className="flex items-center justify-between text-xs font-medium text-fg-subtle">
-          {/* A failed page load leaves total null. Rendering it as 0 would
-              put "21–0 of 0" directly under the error state, which reads as
-              "there are no deliveries" rather than "we could not ask"
-              (DESIGN.md §9). The buttons stay, because paging back is how
-              you recover. */}
-          <span>
-            {total === null
-              ? "—"
-              : t("settings.deliveries.pageInfo", {
-                  from: offset + 1,
-                  to: Math.min(offset + PAGE_SIZE, total),
-                  total,
-                })}
-          </span>
-          <div className="flex gap-2">
-            <Button
-              size="sm"
-              disabled={!hasPrev || loadingPage}
-              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-            >
-              {t("settings.deliveries.prev")}
-            </Button>
-            <Button
-              size="sm"
-              disabled={!hasNext || loadingPage}
-              onClick={() => setOffset(offset + PAGE_SIZE)}
-            >
-              {t("settings.deliveries.next")}
-            </Button>
-          </div>
-        </div>
-      )}
+      <PaginationControls pager={pager} />
 
       <Dialog
         open={detail !== null}

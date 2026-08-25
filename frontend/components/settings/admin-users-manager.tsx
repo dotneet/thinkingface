@@ -1,46 +1,40 @@
 "use client";
 
+import { UserPlus, Users } from "lucide-react";
+import { useCallback, useState } from "react";
 import {
-  Clock,
-  Inbox,
-  KeyRound,
-  ShieldCheck,
-  ShieldOff,
-  UserCheck,
-  UserPlus,
-  Users,
-  UserX,
-} from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+  AdminUserConfirms,
+  type AdminUserConfirmTarget,
+} from "@/components/settings/admin-user-confirms";
+import { AdminUserCreateDialog } from "@/components/settings/admin-user-create-dialog";
+import { AdminUserResetDialog } from "@/components/settings/admin-user-reset-dialog";
+import { type AdminUserActions, AdminUserRow } from "@/components/settings/admin-user-row";
 import { Alert } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { Dialog } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
-import { Checkbox, Field, Input } from "@/components/ui/field";
+import { OutOfRangeEmptyState, PaginationControls } from "@/components/ui/pagination-controls";
 import { SearchInput } from "@/components/ui/search-input";
 import { SkeletonLines } from "@/components/ui/skeleton";
-import { TimeText } from "@/components/ui/time-text";
+import { Table, TBody, THead, Th } from "@/components/ui/table";
+import { usePagedList } from "@/hooks/use-paged-list";
 import {
   adminUserErrorKey,
-  createAdminUser,
   listAdminUsers,
   revokeAdminUserCredentials,
   setAdminUserApproval,
   setAdminUserDisabled,
   updateAdminUser,
 } from "@/lib/admin";
+import type { ApiResult } from "@/lib/api";
 import type { FailedApiResult } from "@/lib/api-error-message";
 import { errorMessage } from "@/lib/api-error-message";
 import { formatNumber } from "@/lib/format";
+import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
 import type { AdminUser } from "@/types/api";
 import { UserApprovalApproved, UserApprovalPending } from "@/types/api";
 
-/** Mirrors the backend's validatePassword (backend/internal/api/auth.go). */
-const MIN_PASSWORD_LENGTH = 8;
 /** The store's own default page size, restated so the two agree. */
 const PAGE_SIZE = 50;
 
@@ -61,50 +55,23 @@ const PAGE_SIZE = 50;
  * would make the reversible one look irreversible and the irreversible one
  * look undoable.
  *
- * The viewer's own row never offers "Revoke admin", "Suspend" or "Revoke
- * credentials". The backend refuses all three on your own account with a 400,
- * and an affordance whose only outcome is an error is worse than no
- * affordance at all.
+ * What lives here is the listing and the writes. The row, the two forms and
+ * the four confirmations are siblings of this file — see `admin-user-row.tsx`,
+ * `admin-user-create-dialog.tsx`, `admin-user-reset-dialog.tsx` and
+ * `admin-user-confirms.tsx` — so adding an operation costs a case in
+ * `handleConfirm` rather than another dialog and another `…Target` state.
  */
 export function AdminUsersManager({ viewer }: { viewer: string }) {
   const t = useT();
-  const [users, setUsers] = useState<AdminUser[] | null>(null);
-  const [total, setTotal] = useState<number | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [offset, setOffset] = useState(0);
 
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
-  // The account whose password is being reset, and the account whose admin
-  // flag is pending confirmation. Separate dialogs, separate state.
-  const [resetTarget, setResetTarget] = useState<AdminUser | null>(null);
-  const [resetPassword, setResetPassword] = useState("");
-  const [resetConfirm, setResetConfirm] = useState("");
-  const [resetError, setResetError] = useState<string | null>(null);
-  const [adminTarget, setAdminTarget] = useState<AdminUser | null>(null);
-  // Suspension and credential revocation each get their own confirmation, and
-  // their own piece of state: the two are independent actions on the same row.
-  const [disableTarget, setDisableTarget] = useState<AdminUser | null>(null);
-  const [revokeTarget, setRevokeTarget] = useState<AdminUser | null>(null);
-  // Sending an account back to the waiting room revokes its sessions, so it
-  // gets a confirmation like suspension does. Approving does not: it only
-  // grants, and a dialog in front of the one action an administrator came to
-  // this screen to perform is friction with nothing to protect.
-  const [holdTarget, setHoldTarget] = useState<AdminUser | null>(null);
-
-  // The "add user" dialog. Its own fields rather than a shared form object:
-  // the create and reset dialogs can never be open at once, but sharing state
-  // between them would let one leave a value behind in the other.
   const [addOpen, setAddOpen] = useState(false);
-  const [addUsername, setAddUsername] = useState("");
-  const [addEmail, setAddEmail] = useState("");
-  const [addPassword, setAddPassword] = useState("");
-  const [addIsAdmin, setAddIsAdmin] = useState(false);
-  const [addError, setAddError] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
+  const [resetTarget, setResetTarget] = useState<AdminUser | null>(null);
+  const [confirmTarget, setConfirmTarget] = useState<AdminUserConfirmTarget | null>(null);
 
   // Localizes a failure through the endpoint-specific keys first, falling
   // back to the shared `error.type` mapping.
@@ -116,204 +83,100 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
     [t],
   );
 
-  // Every fetch, whoever started it, is only allowed to write state if it is
-  // still the newest one. The `cancelled` closure below covers the effect's
-  // own supersession, but an action handler that reloads the list after
-  // succeeding calls refresh directly and has no closure to be cancelled by --
-  // so a slow reload could still land on top of a page the user has since
-  // moved to. Comparing against the latest ticket covers both.
-  const latestRequest = useRef(0);
-
-  const refresh = useCallback(
-    async (isStale: () => boolean = () => false) => {
-      const ticket = ++latestRequest.current;
-      const result = await listAdminUsers({ search, limit: PAGE_SIZE, offset });
-      if (isStale() || ticket !== latestRequest.current) return;
-      if (!result.ok) {
-        setLoadError(describe(result));
-        setUsers(null);
-        // Never carry a count over from a failed read: an empty list next to a
-        // stale total states something the page does not know (DESIGN.md §9).
-        setTotal(null);
-        return;
-      }
-      setLoadError(null);
-      setUsers(result.data.items);
-      setTotal(result.data.total);
-    },
-    [search, offset, describe],
-  );
-
-  // Guards against a fast search/page change letting an older, slower
-  // response land after the newer one and overwrite it (e.g. typing "alice"
-  // then quickly clearing the box could show alice's single result after the
-  // full list already rendered).
-  useEffect(() => {
-    let cancelled = false;
-    refresh(() => cancelled);
-    return () => {
-      cancelled = true;
-    };
-  }, [refresh]);
+  const {
+    items: users,
+    total,
+    offset,
+    setOffset,
+    loadError,
+    reload: refresh,
+    outOfRange,
+    pager,
+  } = usePagedList({
+    pageSize: PAGE_SIZE,
+    deps: [search],
+    fetchPage: ({ limit, offset }) => listAdminUsers({ search, limit, offset }),
+    describe,
+  });
 
   function runSearch(query: string) {
     setSearch(query);
     setOffset(0);
   }
 
-  async function handleReset(e: React.FormEvent) {
-    e.preventDefault();
-    if (!resetTarget) return;
-    if (resetPassword !== resetConfirm) {
-      setResetError(t("settings.account.mismatch"));
-      return;
-    }
-    if (resetPassword.length < MIN_PASSWORD_LENGTH) {
-      setResetError(t("settings.account.tooShort"));
-      return;
-    }
-    const target = resetTarget;
-    setBusy(target.username);
-    setResetError(null);
-    const result = await updateAdminUser(target.username, { password: resetPassword });
-    setBusy(null);
-    if (!result.ok) {
-      setResetError(describe(result));
-      return;
-    }
-    closeReset();
-    setActionError(null);
-    setNotice(t("settings.adminUsers.resetDone", { username: target.username }));
-    await refresh();
-  }
-
-  function openAdd() {
-    setAddUsername("");
-    setAddEmail("");
-    setAddPassword("");
-    setAddIsAdmin(false);
-    setAddError(null);
-    setAddOpen(true);
-  }
-
-  async function handleAdd(e: React.FormEvent) {
-    e.preventDefault();
-    if (addPassword.length < MIN_PASSWORD_LENGTH) {
-      setAddError(t("settings.account.tooShort"));
-      return;
-    }
-    const username = addUsername.trim();
-    setAdding(true);
-    setAddError(null);
-    const result = await createAdminUser({
-      username,
-      email: addEmail.trim(),
-      password: addPassword,
-      is_admin: addIsAdmin,
-    });
-    setAdding(false);
-    if (!result.ok) {
-      setAddError(describe(result));
-      return;
-    }
-    setAddOpen(false);
-    setActionError(null);
-    setNotice(t("settings.adminUsers.addDone", { username: result.data.user.username }));
-    await refresh();
-  }
-
-  function closeReset() {
-    setResetTarget(null);
-    setResetPassword("");
-    setResetConfirm("");
-    setResetError(null);
-  }
-
-  async function handleAdminToggle(target: AdminUser) {
-    setAdminTarget(null);
-    setBusy(target.username);
+  /**
+   * Every write on this screen has the same shape: mark the row busy, run it,
+   * either surface the failure or announce the success and re-read. The
+   * listing is always re-read rather than patched in place — the row's state
+   * afterwards belongs to the server, not to the copy this page took before
+   * somebody else touched the account.
+   */
+  async function run(
+    username: string,
+    write: () => Promise<ApiResult<unknown>>,
+    successKey: MessageKey,
+  ) {
+    setBusy(username);
     setActionError(null);
     setNotice(null);
-    const result = await updateAdminUser(target.username, { is_admin: !target.is_admin });
+    const result = await write();
     setBusy(null);
     if (!result.ok) {
       setActionError(describe(result));
       return;
     }
-    setNotice(t("settings.adminUsers.adminChanged", { username: target.username }));
+    setNotice(t(successKey, { username }));
     await refresh();
   }
 
-  async function handleDisableToggle(target: AdminUser) {
-    const disabled = !target.disabled;
-    setDisableTarget(null);
-    setBusy(target.username);
-    setActionError(null);
-    setNotice(null);
-    const result = await setAdminUserDisabled(target.username, disabled);
-    setBusy(null);
-    if (!result.ok) {
-      setActionError(describe(result));
-      return;
+  function handleConfirm(target: AdminUserConfirmTarget) {
+    const { kind, user } = target;
+    setConfirmTarget(null);
+    switch (kind) {
+      case "admin":
+        return void run(
+          user.username,
+          () => updateAdminUser(user.username, { is_admin: !user.is_admin }),
+          "settings.adminUsers.adminChanged",
+        );
+      case "disable":
+        return void run(
+          user.username,
+          () => setAdminUserDisabled(user.username, !user.disabled),
+          user.disabled ? "settings.adminUsers.restoreDone" : "settings.adminUsers.suspendDone",
+        );
+      case "hold":
+        return void run(
+          user.username,
+          () => setAdminUserApproval(user.username, UserApprovalPending),
+          "settings.adminUsers.holdDone",
+        );
+      case "revoke":
+        // The listing does not change — nothing on the wire type counts tokens
+        // or keys — but `run` reloads anyway so the row cannot be acted on
+        // again from a copy taken before somebody else touched the account.
+        return void run(
+          user.username,
+          () => revokeAdminUserCredentials(user.username),
+          "settings.adminUsers.revokeDone",
+        );
     }
-    setNotice(
-      t(disabled ? "settings.adminUsers.suspendDone" : "settings.adminUsers.restoreDone", {
-        username: target.username,
-      }),
-    );
-    await refresh();
   }
 
-  async function handleApproval(target: AdminUser, approve: boolean) {
-    setHoldTarget(null);
-    setBusy(target.username);
-    setActionError(null);
-    setNotice(null);
-    const result = await setAdminUserApproval(
-      target.username,
-      approve ? UserApprovalApproved : UserApprovalPending,
-    );
-    setBusy(null);
-    if (!result.ok) {
-      setActionError(describe(result));
-      return;
-    }
-    setNotice(
-      t(approve ? "settings.adminUsers.approveDone" : "settings.adminUsers.holdDone", {
-        username: target.username,
-      }),
-    );
-    await refresh();
-  }
+  const actions: AdminUserActions = {
+    resetPassword: setResetTarget,
+    approve: (user) =>
+      void run(
+        user.username,
+        () => setAdminUserApproval(user.username, UserApprovalApproved),
+        "settings.adminUsers.approveDone",
+      ),
+    hold: (user) => setConfirmTarget({ kind: "hold", user }),
+    toggleDisabled: (user) => setConfirmTarget({ kind: "disable", user }),
+    revokeCredentials: (user) => setConfirmTarget({ kind: "revoke", user }),
+    toggleAdmin: (user) => setConfirmTarget({ kind: "admin", user }),
+  };
 
-  async function handleRevoke(target: AdminUser) {
-    setRevokeTarget(null);
-    setBusy(target.username);
-    setActionError(null);
-    setNotice(null);
-    const result = await revokeAdminUserCredentials(target.username);
-    setBusy(null);
-    if (!result.ok) {
-      setActionError(describe(result));
-      return;
-    }
-    // The listing does not change — nothing on the wire type counts tokens or
-    // keys — but it is reloaded anyway so the row cannot be acted on again
-    // from a copy taken before somebody else touched the account.
-    setNotice(t("settings.adminUsers.revokeDone", { username: target.username }));
-    await refresh();
-  }
-
-  // "This page is empty" and "there is nothing here" are different answers,
-  // and paging is what makes the difference reachable: deleting the last row
-  // of the last page leaves the window past the end of a list that is not
-  // empty at all (DESIGN.md §9). The dedicated empty state says which one it
-  // is, and the range line below is skipped because `to` would be smaller
-  // than `from`.
-  const outOfRange = total !== null && total > 0 && offset >= total;
-
-  const hasPrev = offset > 0;
-  const hasNext = total !== null && offset + PAGE_SIZE < total;
   // A failed read leaves `users` null, and the banner below is simply not
   // rendered then: "nobody is waiting" is a different statement from "we
   // could not ask", and the error state already says the second (DESIGN.md §9).
@@ -337,7 +200,7 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
             })}
           </span>
         )}
-        <Button variant="primary" onClick={openAdd} className="px-3 py-1.5">
+        <Button variant="primary" onClick={() => setAddOpen(true)} className="px-3 py-1.5">
           <UserPlus size={15} />
           {t("settings.adminUsers.addUser")}
         </Button>
@@ -374,16 +237,7 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
         />
       ) : users.length === 0 ? (
         outOfRange ? (
-          <EmptyState
-            icon={Inbox}
-            title={t("ui.pagination.outOfRangeTitle")}
-            description={t("ui.pagination.outOfRangeDescription")}
-            action={
-              <Button size="sm" onClick={() => setOffset(0)}>
-                {t("ui.pagination.backToFirstPage")}
-              </Button>
-            }
-          />
+          <OutOfRangeEmptyState onBackToFirstPage={() => setOffset(0)} />
         ) : (
           <EmptyState
             icon={Users}
@@ -392,443 +246,58 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
           />
         )
       ) : (
-        <div className="scroll-x rounded-lg border border-border">
-          <table className="w-full min-w-[640px] border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-xs font-medium text-fg-subtle">
-                <th className="px-3 py-2 font-medium">{t("settings.adminUsers.colUsername")}</th>
-                <th className="px-3 py-2 font-medium">{t("settings.adminUsers.colEmail")}</th>
-                <th className="px-3 py-2 font-medium">{t("settings.adminUsers.colCreated")}</th>
-                <th className="px-3 py-2 font-medium">{t("settings.adminUsers.colLastLogin")}</th>
-                <th className="px-3 py-2 text-right font-medium">
-                  {t("settings.adminUsers.colActions")}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {users.map((user) => {
-                const isSelf = user.username === viewer;
-                return (
-                  <tr key={user.id} className="border-b border-border last:border-0">
-                    <td className="px-3 py-2">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium text-fg">{user.username}</span>
-                        {user.is_admin && (
-                          <Badge tone="accent">{t("settings.adminUsers.adminBadge")}</Badge>
-                        )}
-                        {/* A suspended account looks exactly like an active
-                            one everywhere else on this row, so the badge is
-                            the only thing that tells them apart. */}
-                        {user.disabled && (
-                          <Badge tone="negative">{t("settings.adminUsers.disabledBadge")}</Badge>
-                        )}
-                        {/* The waiting room is invisible everywhere else on
-                            this row: a pending account looks exactly like an
-                            active one, and answers even the correct password
-                            with a refusal. */}
-                        {user.approval === UserApprovalPending && (
-                          <Badge tone="warning">{t("settings.adminUsers.pendingBadge")}</Badge>
-                        )}
-                        {isSelf && (
-                          <span className="text-xs font-medium text-fg-subtle">
-                            ({t("settings.adminUsers.you")})
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-3 py-2 text-fg-muted">{user.email}</td>
-                    <td className="px-3 py-2 text-fg-subtle">
-                      <TimeText iso={user.created_at} style="date" />
-                    </td>
-                    {/* "Never" is spelled out rather than left blank: an empty
-                        cell reads as missing data, and the whole point of this
-                        column is telling a dormant account from a live one. */}
-                    <td className="px-3 py-2 text-fg-subtle">
-                      {user.last_login_at ? (
-                        <TimeText iso={user.last_login_at} style="date" />
-                      ) : (
-                        t("settings.adminUsers.neverLoggedIn")
-                      )}
-                    </td>
-                    <td className="px-3 py-2">
-                      <div className="flex justify-end gap-2">
-                        <Button
-                          size="sm"
-                          disabled={busy === user.username}
-                          onClick={() => {
-                            setResetTarget(user);
-                            setResetPassword("");
-                            setResetConfirm("");
-                            setResetError(null);
-                          }}
-                        >
-                          {t("settings.adminUsers.resetPassword")}
-                        </Button>
-                        {/* Approving is the one action that lets somebody in
-                            at all, so it leads. Putting an account *back* is
-                            offered only for an approved one, and never on your
-                            own row: the write revokes the session this page is
-                            running on, which the backend refuses with a 400. */}
-                        {user.approval === UserApprovalPending ? (
-                          <Button
-                            size="sm"
-                            variant="primary"
-                            disabled={busy === user.username}
-                            onClick={() => void handleApproval(user, true)}
-                          >
-                            <UserCheck size={13} />
-                            {t("settings.adminUsers.approve")}
-                          </Button>
-                        ) : (
-                          !isSelf && (
-                            <Button
-                              size="sm"
-                              disabled={busy === user.username}
-                              onClick={() => setHoldTarget(user)}
-                            >
-                              <Clock size={13} />
-                              {t("settings.adminUsers.hold")}
-                            </Button>
-                          )
-                        )}
-                        {/* Suspending or revoking your own account is a 400
-                            by design, so neither control appears on your own
-                            row (the same rule as the admin toggle below). */}
-                        {!isSelf && (
-                          <Button
-                            size="sm"
-                            variant={user.disabled ? "secondary" : "danger"}
-                            disabled={busy === user.username}
-                            onClick={() => setDisableTarget(user)}
-                          >
-                            {user.disabled ? <UserCheck size={13} /> : <UserX size={13} />}
-                            {user.disabled
-                              ? t("settings.adminUsers.restore")
-                              : t("settings.adminUsers.suspend")}
-                          </Button>
-                        )}
-                        {!isSelf && (
-                          <Button
-                            size="sm"
-                            disabled={busy === user.username}
-                            onClick={() => setRevokeTarget(user)}
-                          >
-                            <KeyRound size={13} />
-                            {t("settings.adminUsers.revokeCredentials")}
-                          </Button>
-                        )}
-                        {/* Self-demotion is a 400 by design, so the control
-                            is simply absent on your own row. */}
-                        {!(isSelf && user.is_admin) && (
-                          <Button
-                            size="sm"
-                            variant={user.is_admin ? "danger" : "secondary"}
-                            disabled={busy === user.username}
-                            onClick={() => setAdminTarget(user)}
-                          >
-                            {user.is_admin ? <ShieldOff size={13} /> : <ShieldCheck size={13} />}
-                            {busy === user.username
-                              ? t("settings.adminUsers.working")
-                              : user.is_admin
-                                ? t("settings.adminUsers.demote")
-                                : t("settings.adminUsers.promote")}
-                          </Button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <Table minWidth={640}>
+          <THead>
+            <Th>{t("settings.adminUsers.colUsername")}</Th>
+            <Th>{t("settings.adminUsers.colEmail")}</Th>
+            <Th>{t("settings.adminUsers.colCreated")}</Th>
+            <Th>{t("settings.adminUsers.colLastLogin")}</Th>
+            <Th align="right">{t("settings.adminUsers.colActions")}</Th>
+          </THead>
+          <TBody>
+            {users.map((user) => (
+              <AdminUserRow
+                key={user.id}
+                user={user}
+                isSelf={user.username === viewer}
+                busy={busy === user.username}
+                actions={actions}
+              />
+            ))}
+          </TBody>
+        </Table>
       )}
 
-      {!outOfRange && (hasPrev || hasNext) && (
-        <div className="flex items-center justify-between text-sm text-fg-subtle">
-          {/* A failed reload leaves total null. Rendering it as 0 would put
-              "51–0 of 0" directly under the error state, which reads as "the
-              directory is empty" rather than "we could not ask" (DESIGN.md
-              §9). The buttons stay, because paging back is how you recover. */}
-          <span className="tabular-nums">
-            {total === null || users === null
-              ? "—"
-              : t("ui.pagination.range", {
-                  from: formatNumber(offset + 1),
-                  // From what actually arrived, not from the window's width:
-                  // the count and the page are separate reads, so a short last
-                  // page or a roster that changed between them would otherwise
-                  // be described by a number no row backs up.
-                  to: formatNumber(offset + users.length),
-                  total: formatNumber(total),
-                })}
-          </span>
-          <div className="flex gap-2">
-            <Button
-              size="sm"
-              disabled={!hasPrev}
-              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-            >
-              {t("ui.pagination.prev")}
-            </Button>
-            <Button size="sm" disabled={!hasNext} onClick={() => setOffset(offset + PAGE_SIZE)}>
-              {t("ui.pagination.next")}
-            </Button>
-          </div>
-        </div>
-      )}
+      <PaginationControls pager={pager} />
 
-      <Dialog
+      <AdminUserCreateDialog
         open={addOpen}
         onClose={() => setAddOpen(false)}
-        title={t("settings.adminUsers.addTitle")}
-        footer={
-          <>
-            <Button type="button" onClick={() => setAddOpen(false)} disabled={adding}>
-              {t("ui.confirmDialog.defaultCancel")}
-            </Button>
-            <Button
-              type="submit"
-              form="admin-create-user"
-              variant="primary"
-              disabled={adding || !addUsername.trim() || !addEmail.trim() || !addPassword}
-            >
-              {adding ? t("settings.adminUsers.addSubmitting") : t("settings.adminUsers.addSubmit")}
-            </Button>
-          </>
-        }
-        footerNote={addError ? <Alert tone="negative">{addError}</Alert> : undefined}
-      >
-        <form id="admin-create-user" onSubmit={handleAdd} className="flex flex-col gap-4 px-4 py-4">
-          <p className="text-sm text-fg-muted">{t("settings.adminUsers.addDescription")}</p>
-          <Field
-            label={t("settings.adminUsers.addUsernameLabel")}
-            hint={t("settings.adminUsers.addUsernameHint")}
-          >
-            <Input
-              value={addUsername}
-              onChange={(e) => {
-                setAddUsername(e.target.value);
-                setAddError(null);
-              }}
-              placeholder={t("settings.adminUsers.addUsernamePlaceholder")}
-              autoComplete="off"
-              required
-            />
-          </Field>
-          <Field label={t("settings.adminUsers.addEmailLabel")}>
-            <Input
-              type="email"
-              value={addEmail}
-              onChange={(e) => {
-                setAddEmail(e.target.value);
-                setAddError(null);
-              }}
-              autoComplete="off"
-              required
-            />
-          </Field>
-          <Field
-            label={t("settings.adminUsers.addPasswordLabel")}
-            hint={t("settings.account.newPasswordHint")}
-          >
-            <Input
-              type="password"
-              value={addPassword}
-              onChange={(e) => {
-                setAddPassword(e.target.value);
-                setAddError(null);
-              }}
-              autoComplete="new-password"
-              required
-            />
-          </Field>
-          <label className="flex items-start gap-2 text-sm">
-            <Checkbox
-              checked={addIsAdmin}
-              onChange={(e) => setAddIsAdmin(e.target.checked)}
-              className="mt-1"
-            />
-            <span className="flex flex-col gap-0.5">
-              <span className="font-medium text-fg-muted">
-                {t("settings.adminUsers.addIsAdminLabel")}
-              </span>
-              <span className="text-xs font-medium text-fg-subtle">
-                {t("settings.adminUsers.addIsAdminHint")}
-              </span>
-            </span>
-          </label>
-        </form>
-      </Dialog>
-
-      <Dialog
-        open={resetTarget !== null}
-        onClose={closeReset}
-        title={t("settings.adminUsers.resetTitle", { username: resetTarget?.username ?? "" })}
-        footer={
-          <>
-            <Button type="button" onClick={closeReset} disabled={busy !== null}>
-              {t("ui.confirmDialog.defaultCancel")}
-            </Button>
-            <Button
-              type="submit"
-              form="admin-reset-password"
-              variant="primary"
-              disabled={busy !== null || !resetPassword || !resetConfirm}
-            >
-              {busy !== null
-                ? t("settings.adminUsers.resetSubmitting")
-                : t("settings.adminUsers.resetSubmit")}
-            </Button>
-          </>
-        }
-        footerNote={resetError ? <Alert tone="negative">{resetError}</Alert> : undefined}
-      >
-        <form
-          id="admin-reset-password"
-          onSubmit={handleReset}
-          className="flex flex-col gap-4 px-4 py-4"
-        >
-          <p className="text-sm text-fg-muted">
-            {t("settings.adminUsers.resetDescription", {
-              username: resetTarget?.username ?? "",
-            })}
-          </p>
-          <Field
-            label={t("settings.adminUsers.resetNewPasswordLabel")}
-            hint={t("settings.account.newPasswordHint")}
-          >
-            <Input
-              type="password"
-              value={resetPassword}
-              onChange={(e) => {
-                setResetPassword(e.target.value);
-                setResetError(null);
-              }}
-              autoComplete="new-password"
-              required
-            />
-          </Field>
-          <Field label={t("settings.adminUsers.resetConfirmLabel")}>
-            <Input
-              type="password"
-              value={resetConfirm}
-              onChange={(e) => {
-                setResetConfirm(e.target.value);
-                setResetError(null);
-              }}
-              autoComplete="new-password"
-              required
-            />
-          </Field>
-        </form>
-      </Dialog>
-
-      <ConfirmDialog
-        open={adminTarget !== null}
-        onClose={() => setAdminTarget(null)}
-        onConfirm={() => {
-          if (adminTarget) void handleAdminToggle(adminTarget);
+        onCreated={(username) => {
+          setAddOpen(false);
+          setActionError(null);
+          setNotice(t("settings.adminUsers.addDone", { username }));
+          void refresh();
         }}
-        tone={adminTarget?.is_admin ? "danger" : "primary"}
-        title={t(
-          adminTarget?.is_admin
-            ? "settings.adminUsers.demoteTitle"
-            : "settings.adminUsers.promoteTitle",
-          { username: adminTarget?.username ?? "" },
-        )}
-        description={
-          <p className="text-sm text-fg-muted">
-            {t(
-              adminTarget?.is_admin
-                ? "settings.adminUsers.demoteDescription"
-                : "settings.adminUsers.promoteDescription",
-              { username: adminTarget?.username ?? "" },
-            )}
-          </p>
-        }
-        confirmLabel={t(
-          adminTarget?.is_admin
-            ? "settings.adminUsers.demoteConfirm"
-            : "settings.adminUsers.promoteConfirm",
-        )}
-        confirmingLabel={t("settings.adminUsers.working")}
-        confirming={busy !== null && adminTarget !== null}
+        describe={describe}
       />
 
-      {/* Reversible, so a plain yes/no dialog: no typed confirmation. */}
-      <ConfirmDialog
-        open={disableTarget !== null}
-        onClose={() => setDisableTarget(null)}
-        onConfirm={() => {
-          if (disableTarget) void handleDisableToggle(disableTarget);
+      <AdminUserResetDialog
+        target={resetTarget}
+        onClose={() => setResetTarget(null)}
+        onDone={(username) => {
+          setResetTarget(null);
+          setActionError(null);
+          setNotice(t("settings.adminUsers.resetDone", { username }));
+          void refresh();
         }}
-        tone={disableTarget?.disabled ? "primary" : "danger"}
-        title={t(
-          disableTarget?.disabled
-            ? "settings.adminUsers.restoreTitle"
-            : "settings.adminUsers.suspendTitle",
-          { username: disableTarget?.username ?? "" },
-        )}
-        description={
-          <p className="text-sm text-fg-muted">
-            {t(
-              disableTarget?.disabled
-                ? "settings.adminUsers.restoreDescription"
-                : "settings.adminUsers.suspendDescription",
-              { username: disableTarget?.username ?? "" },
-            )}
-          </p>
-        }
-        confirmLabel={t(
-          disableTarget?.disabled
-            ? "settings.adminUsers.restoreConfirm"
-            : "settings.adminUsers.suspendConfirm",
-        )}
-        confirmingLabel={t("settings.adminUsers.working")}
-        confirming={busy !== null && disableTarget !== null}
+        describe={describe}
       />
 
-      {/* Reversible like suspension, so a plain yes/no dialog — but it does
-          revoke the account's sessions, so it is not silent either. */}
-      <ConfirmDialog
-        open={holdTarget !== null}
-        onClose={() => setHoldTarget(null)}
-        onConfirm={() => {
-          if (holdTarget) void handleApproval(holdTarget, false);
-        }}
-        tone="danger"
-        title={t("settings.adminUsers.holdTitle", { username: holdTarget?.username ?? "" })}
-        description={
-          <p className="text-sm text-fg-muted">
-            {t("settings.adminUsers.holdDescription", { username: holdTarget?.username ?? "" })}
-          </p>
-        }
-        confirmLabel={t("settings.adminUsers.holdConfirm")}
-        confirmingLabel={t("settings.adminUsers.working")}
-        confirming={busy !== null && holdTarget !== null}
-      />
-
-      {/* Irreversible, so it asks for the username to be typed — the same
-          bar the repository and run deletions use. */}
-      <ConfirmDialog
-        open={revokeTarget !== null}
-        onClose={() => setRevokeTarget(null)}
-        onConfirm={() => {
-          if (revokeTarget) void handleRevoke(revokeTarget);
-        }}
-        requireText={revokeTarget?.username}
-        title={t("settings.adminUsers.revokeTitle", { username: revokeTarget?.username ?? "" })}
-        description={
-          <Alert tone="negative">
-            {t("settings.adminUsers.revokeDescription", {
-              username: revokeTarget?.username ?? "",
-            })}
-          </Alert>
-        }
-        confirmLabel={t("settings.adminUsers.revokeConfirm")}
-        confirmingLabel={t("settings.adminUsers.working")}
-        confirming={busy !== null && revokeTarget !== null}
+      <AdminUserConfirms
+        target={confirmTarget}
+        onClose={() => setConfirmTarget(null)}
+        onConfirm={handleConfirm}
       />
     </div>
   );

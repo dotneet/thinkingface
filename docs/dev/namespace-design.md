@@ -54,7 +54,7 @@ namespace renaming), `api-contract.md` §1.
 | Existence check | `/{ns}` fetches the models / datasets / experiments lists, and **calls `notFound()` if there are zero hits** | A freshly registered user or an empty organization 404s. There's no API to ask whether a namespace exists |
 | Experiments tab | `GET /api/v1/experiments` fetches everything (capped at 100) and filters by `namespace` client-side | Anything beyond 100 items goes missing. There's no `author=` filter |
 | Sign-up | `auth.usernameHint` only describes the allowed character set | It doesn't say "this can't be changed" or "`{username}/` becomes your namespace" |
-| Profile | Organizations only (`display_name` etc.). `whoami-v2.fullname` is just a copy of the username | Users have no display name or bio. The `namespaces` columns already exist as of migration 0010 but are unused |
+| Profile | Organizations only (`display_name` etc.). `whoami-v2.fullname` is just a copy of the username | Users have no display name or bio. The `namespaces` columns already exist (organization-design.md §6.1) but are unused for user namespaces |
 | Reserved names | Three separate places: `backend/internal/api/names.go`, `frontend/lib/validation.ts`, `frontend/lib/namespace.ts`. Even the contents don't match (`favicon.ico` / `robots.txt` / `duckdb` / `public` are frontend-only, `orgs` / `organizations` / `raw` etc. are backend-only) | Adding a new top-level route is easy to forget in one of the lists |
 | Validation | The organization profile's `website` / `avatar_url` have no length or scheme validation | A `javascript:` URL could end up in `<a href>` / `<img src>` (§10) |
 
@@ -263,11 +263,11 @@ listing) stays compatible with no arguments.
 ## 6. Data model
 
 **No migration needed.** This just starts using the `display_name` / `description` / `website` /
-`avatar_url` / `updated_at` columns that migration 0010 already added to `namespaces`, now for user
-namespaces too.
+`avatar_url` / `updated_at` columns that already exist on `namespaces` (organization-design.md
+§6.1), now for user namespaces too.
 
 Store layer (new `internal/store/namespaces.go`, moving `GetNamespace` / `NamespacesForUser` /
-`CanWriteNamespace` there from `users.go`):
+the namespace write-access predicate there from `users.go`):
 
 ```go
 type NamespaceProfile struct {

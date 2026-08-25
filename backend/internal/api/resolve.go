@@ -177,9 +177,8 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, kind stri
 		return
 	}
 
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
+	gitRepo, ok := s.openGit(w, repo)
+	if !ok {
 		return
 	}
 	rev, ok := revParam(w, r, "rev", repo)
@@ -241,6 +240,25 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, kind stri
 	// total the UI shows it against.
 	s.recordDownload(r.Context(), repo.ID)
 
+	contentType := writeResolveHeaders(w, commit, rev, filePath)
+
+	if entry.LFS != nil {
+		s.serveLFSFile(w, r, repo, entry, contentType)
+		return
+	}
+	serveGitBlob(w, r, gitRepo, entry, contentType)
+}
+
+// writeResolveHeaders sets everything a resolve response carries before its
+// body -- the commit it was served from, the cache policy, and the
+// content-type defence -- and returns the content type it settled on, which
+// the two body paths need.
+//
+// It runs for the LFS branch and the git-blob branch alike, and before either
+// decides anything: the headers describe the file the request named, not how
+// the bytes happen to be stored, so a client must not be able to tell a
+// pointer from a plain blob by what comes back above the body.
+func writeResolveHeaders(w http.ResponseWriter, commit plumbing.Hash, rev, filePath string) string {
 	w.Header().Set("X-Repo-Commit", commit.String())
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Cache-Control", resolveCacheControl(rev, commit))
@@ -254,12 +272,18 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, kind stri
 	// the downgrade above should not be separable by an unrelated refactor.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Disposition", attachmentDisposition(path.Base(filePath)))
+	return contentType
+}
 
-	if entry.LFS != nil {
-		s.serveLFSFile(w, r, repo, entry, contentType)
-		return
-	}
-
+// serveGitBlob streams a plain (non-LFS) file out of the object database,
+// honouring a conditional request and a single Range.
+//
+// The sibling of serveLFSFile, and deliberately not merged with it: that one
+// redirects to a signed URL or proxies the bucket, this one reads a *sequential*
+// go-git reader and therefore has to discard the prefix of a range rather than
+// seek over it. What the two genuinely share is already shared -- parseRange
+// and writePartialContent.
+func serveGitBlob(w http.ResponseWriter, r *http.Request, gitRepo *gitrepo.Repo, entry gitrepo.Entry, contentType string) {
 	etag := `"` + entry.Hash.String() + `"`
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Content-Type", contentType)
@@ -524,18 +548,12 @@ func parseRange(header string, size int64) (offset, length int64, ok bool) {
 // handleRaw returns a bounded preview for the UI, base64-encoding anything that
 // is not valid UTF-8 so the response is always JSON-safe.
 func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
-	repo, ok := s.loadRepoForRead(w, r, chi.URLParam(r, "kind"), chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectUI)
+	repo, rev, filePath, ok := s.uiFileTarget(w, r)
 	if !ok {
 		return
 	}
-	filePath := wildcardPath(r)
-	rev, ok := revParam(w, r, "rev", repo)
+	gitRepo, ok := s.openGit(w, repo)
 	if !ok {
-		return
-	}
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
 		return
 	}
 	entry, _, err := gitRepo.Stat(rev, filePath)

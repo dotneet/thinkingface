@@ -168,6 +168,41 @@ lineage:
 	}
 }
 
+// TestLineageEdgesSplitTheRevisionWhereTheFilterDoes pins the boundary cases
+// of the reference syntax, which are only interesting because the store
+// splits the same text on the read side (repocard.SplitRepoRef, shared by
+// both). An edge indexed under a name the `?base_model=` filter never asks
+// for takes the repository out of its own lineage listing.
+func TestLineageEdgesSplitTheRevisionWhereTheFilterDoes(t *testing.T) {
+	edges := edgesFor(t, `---
+lineage:
+  base_models:
+    - a/b@x@y
+    - "@main"
+    - c/d
+  datasets:
+    - ""
+---
+`)
+	if len(edges) != 3 {
+		t.Fatalf("want 3 edges, got %d: %+v", len(edges), edges)
+	}
+	// The last "@" is the separator, so the name keeps the first one.
+	if e := find(edges, store.LineageKindBaseModel, "a/b@x@y"); e == nil ||
+		e.Namespace != "a" || e.Name != "b@x" || e.Rev != "y" {
+		t.Errorf("a/b@x@y = %+v; want a / b@x @ y", e)
+	}
+	// A leading "@" is not a separator: there is no ns/name in front of it.
+	if e := find(edges, store.LineageKindBaseModel, "@main"); e == nil ||
+		e.Namespace != "" || e.Name != "" || e.Rev != "" {
+		t.Errorf("@main resolved to a target but should be dangling: %+v", e)
+	}
+	if e := find(edges, store.LineageKindBaseModel, "c/d"); e == nil ||
+		e.Namespace != "c" || e.Name != "d" || e.Rev != "" {
+		t.Errorf("c/d = %+v; want c / d with no revision", e)
+	}
+}
+
 func TestLineageEdgesTrimsAndDedupes(t *testing.T) {
 	edges := edgesFor(t, `---
 lineage:

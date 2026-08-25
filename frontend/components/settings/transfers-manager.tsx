@@ -1,11 +1,11 @@
 "use client";
 
 import { ArrowLeftRight } from "lucide-react";
-import Link from "next/link";
 import { useEffect, useState } from "react";
+import { LoginRequiredState } from "@/components/settings/login-required-state";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button, buttonClass } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
@@ -132,20 +132,7 @@ export function TransfersManager() {
   }
 
   if (needsLogin) {
-    return (
-      <ErrorState
-        title={t("settings.transfers.loginRequiredTitle")}
-        message={t("settings.transfers.loginRequiredMessage")}
-        action={
-          <Link
-            href="/login?next=/settings/transfers"
-            className={buttonClass({ variant: "primary" })}
-          >
-            {t("settings.transfers.login")}
-          </Link>
-        }
-      />
-    );
+    return <LoginRequiredState next="/settings/transfers" />;
   }
 
   if (incoming === null || outgoing === null) {

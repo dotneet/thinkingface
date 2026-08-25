@@ -208,6 +208,46 @@ func TestProcess_UnknownJobKindFails(t *testing.T) {
 	}
 }
 
+// TestRunPushPipeline_ReloadFailureFailsTheJob covers the one place the
+// pipeline used to swallow a database error. The re-read at the end exists so
+// the experiment indexer sees the is_experiment flag this run may have just
+// written; a repository deleted underneath the job is fine there, but any
+// other failure means the indexing was skipped -- and reporting the job done
+// anyway left the run's metrics missing until somebody pushed again.
+func TestRunPushPipeline_ReloadFailureFailsTheJob(t *testing.T) {
+	f := newPushFixture(t)
+	f.push("main", addOp("README.md", "# foo\n"))
+
+	head, _, err := f.git.Commit(gitrepo.CommitRequest{
+		Branch: "main", Message: "sync test",
+		Author: gitrepo.Signature{Name: "alice", Email: "alice@example.com"},
+		Ops:    []gitrepo.Op{addOp("more.txt", "second commit\n")},
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// Take out exactly the query the reload runs: GetRepoByID is the only
+	// step left in the pipeline that joins namespaces, so everything before
+	// it still succeeds and the failure can only come from the reload.
+	f.breakSchema(`ALTER TABLE namespaces RENAME TO namespaces_gone`)
+
+	held, err := f.syn.refLocks.lock(f.ctx, f.repo.ID, "main")
+	if err != nil {
+		t.Fatalf("lock ref: %v", err)
+	}
+	defer held.unlock()
+
+	job := &store.SyncJob{RepoID: f.repo.ID, Ref: "main", Kind: "push", NewSHA: head.String()}
+	out, err := f.syn.runPushPipeline(f.ctx, f.repo, job, held)
+	if err == nil {
+		t.Fatalf("runPushPipeline with a broken reload = %+v, nil; want an error", out)
+	}
+	if !strings.Contains(err.Error(), "reload repository") {
+		t.Fatalf("runPushPipeline error = %v; want it to name the reload", err)
+	}
+}
+
 // TestPublishBlobs_CoversFilesALostJobSkipped is the hole a per-push diff
 // would leave: the job for one push dies (or two jobs for the ref race) and a
 // later push's job, whose own old..new range does not include the earlier
