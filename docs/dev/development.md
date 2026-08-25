@@ -177,7 +177,14 @@ release has to be before it is allowed in. It runs on the job's `GITHUB_TOKEN`, 
 two things to know when one of its PRs shows up:
 
 - **It has no CI runs on it.** Nothing done with `GITHUB_TOKEN` starts a workflow. Press
-  **Approve and run** on the PR; an unchecked dependency PR is an unreviewed one.
+  **Approve and run** on the PR; an unchecked dependency PR is an unreviewed one. That is
+  also all you normally have to do: `renovate.json` sets `automerge`, so a PR whose checks
+  come back green is merged by Renovate itself (as a merge commit) within about three hours.
+  Majors are the exception — those wait for a human to read them and merge.
+  A red one just sits there. Nothing merges before the checks have actually run — a branch
+  with no check runs reads as pending, not as passing. If `main` moves on while the PR waits,
+  Renovate rebases the branch (automerge implies `rebaseWhen=behind-base-branch`), which
+  moves the head commit and drops the approval with it: press **Approve and run** again.
 - **Nothing under `.github/workflows/` becomes a PR.** `GITHUB_TOKEN` cannot write there, so
   those updates — action SHAs, and Renovate's own pinned image — are listed on the Dependency
   Dashboard issue under "Pending Approval" and applied by hand, moving each SHA together with
