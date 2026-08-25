@@ -102,6 +102,26 @@ type FlushResult struct {
 	NumAppended int
 }
 
+// FlushRef is the ref a flush commits its parquet to.
+//
+// It is exported because the syncer has to know the answer *before* the flush
+// runs: it takes that ref's lock first, so that a sync job holding the ref is
+// answered by deferring rather than by committing into a pipeline that is
+// about to overwrite the index (syncer.FlushProject). Two copies of the
+// derivation would be worse than none -- if they ever disagreed, the lock
+// would be taken under one key and the commit made under another, which
+// un-serialises the two silently and leaves the flush unable to finish at all.
+//
+// The fallback covers a repository row whose default_branch is empty. The
+// column is NOT NULL DEFAULT 'main' on both backends and nothing writes ""
+// today, so this is belt and braces rather than a live path.
+func FlushRef(repo *store.Repo) string {
+	if repo.DefaultBranch == "" {
+		return "main"
+	}
+	return repo.DefaultBranch
+}
+
 // Flush rebuilds the project's metrics parquet with its buffered points
 // appended and commits it. It returns nil when there was nothing to do.
 func (f *Flusher) Flush(ctx context.Context, repo *store.Repo, projectID int64, project string) (*FlushResult, error) {
@@ -123,10 +143,7 @@ func (f *Flusher) Flush(ctx context.Context, repo *store.Repo, projectID int64, 
 		return nil, err
 	}
 
-	ref := repo.DefaultBranch
-	if ref == "" {
-		ref = "main"
-	}
+	ref := FlushRef(repo)
 	path, err := f.metricsPath(ctx, repo, project)
 	if err != nil {
 		return nil, err

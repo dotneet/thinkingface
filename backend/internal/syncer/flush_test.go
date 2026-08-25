@@ -270,3 +270,30 @@ func TestFlushProject_DefersBeforeCommittingWhenTheRefIsBusy(t *testing.T) {
 		t.Error("the retry did not commit the parquet")
 	}
 }
+
+// TestFlushProject_EmptyDefaultBranchStillDrains pins that the syncer and the
+// flusher agree on the ref. They have to: the lock is taken before the commit,
+// so a syncer that derived "" where the flusher derived "main" would lock one
+// key and commit under another -- the serialisation this file relies on would
+// be silently off, and the ref check after Flush would then fail every time,
+// leaving the project's points buffered forever. Sharing FlushRef is what
+// makes that impossible; this is the test that would notice a second copy.
+func TestFlushProject_EmptyDefaultBranchStillDrains(t *testing.T) {
+	h := newFlushHarness(t)
+	if _, err := h.st.SetRepoDefaultBranch(h.ctx, h.repo.ID, ""); err != nil {
+		t.Skipf("the store refuses an empty default_branch, so the fallback is unreachable: %v", err)
+	}
+	projectID := h.ingest("demo", "run-1", "finished", []int64{1, 2, 3})
+
+	if err := h.syn.FlushProject(h.ctx, h.repo.ID, projectID, "demo"); err != nil {
+		t.Fatalf("FlushProject with an empty default_branch: %v", err)
+	}
+
+	pending, err := h.st.ListPendingFlushProjects(h.ctx, 10)
+	if err != nil {
+		t.Fatalf("list pending flush projects: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("points still buffered after the flush: %+v", pending)
+	}
+}

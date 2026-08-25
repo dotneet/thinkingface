@@ -174,11 +174,11 @@ func (s *Syncer) FlushProject(ctx context.Context, repoID, projectID int64, proj
 	// commit -- the points are untouched and the next poll, ten seconds
 	// later, tries the whole thing again.
 	//
-	// The ref is the one experiments.Flusher commits to, which is the same
-	// repo row's DefaultBranch; the check after Flush is there so that a
-	// future flusher that picks its own ref cannot silently end up indexing
-	// under a lock held for a different one.
-	ref := repo.DefaultBranch
+	// The ref is the one the flusher will commit to, asked of the flusher
+	// rather than re-derived here: a second copy that drifted would take the
+	// lock under one key and commit under another. The check after Flush is
+	// the belt to that braces.
+	ref := experiments.FlushRef(repo)
 	held, ok := s.refLocks.tryLock(repo.ID, ref)
 	if !ok {
 		return errRefBusy
