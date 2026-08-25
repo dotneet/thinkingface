@@ -172,3 +172,75 @@ func TestWalkDropsTheShadowedBlob(t *testing.T) {
 		t.Fatalf("walk left the file foo in place beside the directory foo")
 	}
 }
+
+// TestEnsureLoadedRepairsADuplicatedName covers the repositories the bug above
+// already damaged. Their trees name the same entry as both a file and a
+// directory, and write() refuses to encode that -- correctly, since a fresh
+// collision means a bug in walk or setBlob. Without a repair on the way in,
+// though, every later commit to such a repository would fail with no way back:
+// the API is the only writer, and it would reject its own history.
+func TestEnsureLoadedRepairsADuplicatedName(t *testing.T) {
+	_, repo := newTestRepo(t)
+	s := repo.storer()
+
+	blob, err := repo.writeBlob([]byte("the shadowed file"))
+	if err != nil {
+		t.Fatalf("writeBlob: %v", err)
+	}
+	inner, err := repo.writeBlob([]byte("nested"))
+	if err != nil {
+		t.Fatalf("writeBlob: %v", err)
+	}
+
+	// The subtree that shares its parent entry's name with a blob.
+	sub := newDirNode()
+	sub.blobs["bar"] = object.TreeEntry{Name: "bar", Mode: filemode.Regular, Hash: inner}
+	subHash, err := sub.write(s)
+	if err != nil {
+		t.Fatalf("write subtree: %v", err)
+	}
+
+	// Encoded by hand: the builder refuses to produce this shape, which is
+	// the whole point -- only a repository written before the fix has one.
+	corrupt := &object.Tree{Entries: []object.TreeEntry{
+		{Name: "foo", Mode: filemode.Regular, Hash: blob},
+		{Name: "foo", Mode: filemode.Dir, Hash: subHash},
+	}}
+	obj := s.NewEncodedObject()
+	if err := corrupt.Encode(obj); err != nil {
+		t.Fatalf("encode corrupt tree: %v", err)
+	}
+	corruptHash, err := s.SetEncodedObject(obj)
+	if err != nil {
+		t.Fatalf("store corrupt tree: %v", err)
+	}
+
+	root := &dirNode{hash: corruptHash}
+	if err := root.ensureLoaded(s); err != nil {
+		t.Fatalf("ensureLoaded: %v", err)
+	}
+	if _, still := root.blobs["foo"]; still {
+		t.Error("the shadowed file survived the load beside the directory of the same name")
+	}
+	if _, ok := root.subs["foo"]; !ok {
+		t.Error("the directory did not survive the load")
+	}
+	if !root.dirty {
+		t.Error("the repaired node was not marked dirty, so write() would reuse the corrupt hash")
+	}
+
+	// And the repaired node encodes cleanly, which is what makes the next
+	// commit to such a repository succeed instead of failing forever.
+	h, err := root.write(s)
+	if err != nil {
+		t.Fatalf("write after repair: %v", err)
+	}
+	rewritten, err := object.GetTree(s, h)
+	if err != nil {
+		t.Fatalf("read rewritten tree: %v", err)
+	}
+	if len(rewritten.Entries) != 1 || rewritten.Entries[0].Name != "foo" ||
+		rewritten.Entries[0].Mode != filemode.Dir {
+		t.Fatalf("rewritten tree = %+v, want a single directory entry foo", rewritten.Entries)
+	}
+}

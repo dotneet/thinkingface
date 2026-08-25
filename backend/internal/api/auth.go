@@ -226,7 +226,10 @@ const detachedWriteTimeout = 10 * time.Second
 
 // detachedWrite is the context for such a write: the request's values (the
 // request id the store logs with, among them) without its cancellation, and a
-// deadline of its own.
+// deadline of its own. Compensating work uses it for the same reason from the
+// other direction -- a rollback whose whole job is to undo a step the client's
+// disconnect just broke cannot run on the context that disconnect cancelled
+// (rollbackCreateRepo).
 //
 // A bounded lifetime is all this does; it does not bound how many of these
 // goroutines exist at one instant, which stays proportional to the request

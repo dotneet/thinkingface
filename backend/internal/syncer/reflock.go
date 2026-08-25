@@ -51,10 +51,22 @@ func refLockKey(repoID int64, ref string) string {
 	return strconv.FormatInt(repoID, 10) + "\x00" + ref
 }
 
-// lock acquires the ref's lock and returns the release function. It gives up
-// and returns ctx.Err() if the context is cancelled while waiting, so a
-// shutdown does not have to sit behind a large repository's publish.
-func (l *refLocks) lock(ctx context.Context, repoID int64, ref string) (release func(), err error) {
+// refHold is proof that the caller holds a ref's lock. runPushPipeline takes
+// one, so the compiler -- not a comment -- is what stops a future entry point
+// from indexing a ref without serialising against the others.
+type refHold struct{ release func() }
+
+func (h refHold) unlock() {
+	if h.release != nil {
+		h.release()
+	}
+}
+
+// enter registers a waiter on the ref's entry, creating it if this is the
+// first, and returns it with the function that unregisters again. Both lock
+// and tryLock go through here so the bookkeeping that keeps the table from
+// growing forever exists in one place.
+func (l *refLocks) enter(repoID int64, ref string) (*refLock, func()) {
 	key := refLockKey(repoID, ref)
 
 	l.mu.Lock()
@@ -71,7 +83,7 @@ func (l *refLocks) lock(ctx context.Context, repoID int64, ref string) (release 
 	e.waiters++
 	l.mu.Unlock()
 
-	drop := func() {
+	return e, func() {
 		l.mu.Lock()
 		e.waiters--
 		if e.waiters == 0 {
@@ -79,19 +91,46 @@ func (l *refLocks) lock(ctx context.Context, repoID int64, ref string) (release 
 		}
 		l.mu.Unlock()
 	}
+}
 
-	select {
-	case e.ch <- struct{}{}:
-	case <-ctx.Done():
-		drop()
-		return nil, ctx.Err()
-	}
-
+// hold wraps an acquired entry in the idempotent release.
+func hold(e *refLock, leave func()) refHold {
 	var once sync.Once
-	return func() {
+	return refHold{release: func() {
 		once.Do(func() {
 			<-e.ch
-			drop()
+			leave()
 		})
-	}, nil
+	}}
+}
+
+// lock waits for the ref's lock. It gives up and returns ctx.Err() if the
+// context is cancelled while waiting, so a shutdown does not have to sit
+// behind a large repository's publish.
+func (l *refLocks) lock(ctx context.Context, repoID int64, ref string) (refHold, error) {
+	e, leave := l.enter(repoID, ref)
+	select {
+	case e.ch <- struct{}{}:
+		return hold(e, leave), nil
+	case <-ctx.Done():
+		leave()
+		return refHold{}, ctx.Err()
+	}
+}
+
+// tryLock takes the ref's lock only if it is free. The metrics flush uses it:
+// flushDue walks its candidates one at a time, so a flush that waited here
+// would hold up every *other* project behind whichever repository happens to
+// be mid-publish. There is nothing to wait for anyway -- the parquet commit is
+// already durable, the points stay buffered, and the next poll ten seconds
+// later re-runs a flush that appends nothing twice (FlushProject's comment).
+func (l *refLocks) tryLock(repoID int64, ref string) (refHold, bool) {
+	e, leave := l.enter(repoID, ref)
+	select {
+	case e.ch <- struct{}{}:
+		return hold(e, leave), true
+	default:
+		leave()
+		return refHold{}, false
+	}
 }

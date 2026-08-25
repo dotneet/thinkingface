@@ -54,10 +54,8 @@ export function WebhookDeliveriesPanel({ webhookId }: { webhookId: number }) {
 
   const refresh = useCallback(
     async (isStale: () => boolean = () => false) => {
-      setLoadingPage(true);
       const result = await listWebhookDeliveries(webhookId, { limit: PAGE_SIZE, offset });
       if (isStale()) return;
-      setLoadingPage(false);
       if (!result.ok) {
         setLoadError(errorMessage(t, result));
         setDeliveries(null);
@@ -75,18 +73,30 @@ export function WebhookDeliveriesPanel({ webhookId }: { webhookId: number }) {
   );
 
   // A different webhook starts back on its first page rather than wherever
-  // this one happened to be paged to.
-  useEffect(() => {
+  // this one happened to be paged to. Adjusted during render rather than in an
+  // effect: an effect would run after this render's fetch had already been
+  // scheduled for the old offset, so switching webhooks from page 2 would fire
+  // a request for page 2 of the new one and immediately abandon it.
+  const [shownWebhookId, setShownWebhookId] = useState(webhookId);
+  if (webhookId !== shownWebhookId) {
+    setShownWebhookId(webhookId);
     setOffset(0);
-  }, [webhookId]);
+  }
 
   // Guards against a fast Prev/Next click letting an older, slower response
   // land after the newer one and overwrite it, silently rewinding the page
   // (mirrors admin-users-manager.tsx / admin-sync-jobs-manager.tsx). Buttons
   // only ever move `offset`; this effect is the one place that fetches.
+  //
+  // The in-flight flag lives here rather than inside refresh so that a
+  // superseded fetch cannot leave it stuck on: whichever effect is current
+  // sets it, and only that same effect clears it.
   useEffect(() => {
     let cancelled = false;
-    refresh(() => cancelled);
+    setLoadingPage(true);
+    refresh(() => cancelled).finally(() => {
+      if (!cancelled) setLoadingPage(false);
+    });
     return () => {
       cancelled = true;
     };

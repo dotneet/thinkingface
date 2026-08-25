@@ -83,7 +83,7 @@ type Syncer struct {
 	// One post-push pipeline per repository+ref at a time (reflock.go). The
 	// queue's lease already serialises worker against worker; this is what
 	// serialises them against the metrics flush, which runs the same pipeline
-	// without taking a job.
+	// without taking a job. The worker waits for it, the flush skips.
 	refLocks refLocks
 }
 
@@ -297,7 +297,17 @@ func (s *Syncer) process(ctx context.Context, job *store.SyncJob) error {
 // (flush.go), which re-indexes its own commit inline but must not masquerade
 // as somebody's push.
 func (s *Syncer) processPush(ctx context.Context, repo *store.Repo, job *store.SyncJob) error {
-	changed, err := s.runPushPipeline(ctx, repo, job)
+	// Waits, unlike the flush: this job is the reason the ref needs indexing,
+	// and dropping it would leave the index behind the ref until somebody
+	// pushed again. ClaimSyncJob keeps another worker off this ref, so the
+	// only thing to wait for is a flush, which is bounded by one commit.
+	held, err := s.refLocks.lock(ctx, repo.ID, job.Ref)
+	if err != nil {
+		return err
+	}
+	defer held.unlock()
+
+	changed, err := s.runPushPipeline(ctx, repo, job, held)
 	if err != nil || changed == nil {
 		return err
 	}
@@ -321,18 +331,13 @@ type pushOutcome struct {
 // runPushPipeline publishes one ref's blobs and refreshes the
 // file/parquet/lineage/experiment indexes. A nil outcome with a nil error
 // means there was nothing to index (missing or empty repository).
-func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *store.SyncJob) (*pushOutcome, error) {
-	// Held across the whole pipeline, because the stale write this prevents
-	// is a read at the top being overwritten by a write at the bottom. Every
-	// caller goes through here, which is the point: a second entry point that
-	// indexed a ref without taking the lock would put the hazard straight
-	// back (see refLocks).
-	release, err := s.refLocks.lock(ctx, repo.ID, job.Ref)
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-
+// The caller must already hold the ref's lock (refLocks) and keep holding it
+// until this returns: the stale write it prevents is a read at the top being
+// overwritten by a write at the bottom, so the whole pipeline is the critical
+// section. Taking the hold as an argument is what makes that a compile error
+// to forget rather than a comment to overlook -- there is no way to reach the
+// pipeline without having acquired.
+func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *store.SyncJob, _ refHold) (*pushOutcome, error) {
 	gitRepo, err := s.git.Open(repo.StoragePath)
 	if err != nil {
 		if errors.Is(err, gitrepo.ErrRepoNotFound) {

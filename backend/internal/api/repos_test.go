@@ -232,3 +232,44 @@ func TestCreateRepoRollsBackWhenTheIndexJobCannotBeQueued(t *testing.T) {
 			retry.status(), retry.rec.Body.String())
 	}
 }
+
+// cancellingEnqueuer fails the way a client hanging up mid-request does: the
+// context is cancelled, and the queue call fails because of it.
+type cancellingEnqueuer struct{ cancel context.CancelFunc }
+
+func (e *cancellingEnqueuer) Enqueue(ctx context.Context, _ int64, _, _, _ string) error {
+	e.cancel()
+	return ctx.Err()
+}
+
+// TestCreateRepoRollsBackOnACancelledRequest is the other half of the rollback
+// above. The most likely reason the queue call fails is that the request's
+// context died, and a rollback running on that same context deletes nothing --
+// while git.Remove, which takes no context, still succeeds. That combination
+// is worse than no rollback at all: the name stays taken by a row whose bare
+// repository is gone, so the retry gets the 409 the rollback exists to avoid
+// and the repository it names can never be opened.
+func TestCreateRepoRollsBackOnACancelledRequest(t *testing.T) {
+	f := newTransferFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.s.sync = &cancellingEnqueuer{cancel: cancel}
+
+	repo, err := f.s.createRepo(ctx, f.alice, "model", "alice", "cut-off", "")
+	if err == nil {
+		t.Fatalf("createRepo on a cancelled request returned %+v, want an error", repo)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("createRepo error = %v, want it to wrap context.Canceled", err)
+	}
+
+	if _, err := f.st.GetRepo(context.Background(), "model", "alice", "cut-off"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("repository row survived a cancelled create: err = %v", err)
+	}
+
+	// The name is free again, which is the whole point.
+	f.s.sync = noopEnqueuer{}
+	if _, err := f.s.createRepo(context.Background(), f.alice, "model", "alice", "cut-off", ""); err != nil {
+		t.Fatalf("re-creating the rolled-back repository: %v", err)
+	}
+}

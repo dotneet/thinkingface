@@ -49,10 +49,38 @@ func (b *blockingStorage) Put(ctx context.Context, key string, r io.Reader, cont
 //
 // The metrics flush (flush.go) runs this same pipeline without holding a
 // sync_jobs row, so ClaimSyncJob's NOT EXISTS clause -- which is what keeps
-// two workers off one ref -- does not apply to it. Before the ref lock, a
-// flush landing inside a worker's pipeline was overwritten by it and the
-// freshly committed parquet dropped straight back out of repo_files.
+// two workers off one ref -- does not apply to it.
+//
+// Both halves are run: the unlocked one is what the code did before the lock
+// existed, and asserting that it still loses the newer tree is what keeps this
+// test honest about what it is proving.
 func TestRunPushPipelineDoesNotIndexAStaleTree(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		serialise bool
+		wantB     bool
+	}{
+		{"without the ref lock the older tree wins", false, false},
+		{"with the ref lock the newer tree survives", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runStaleTreeRace(t, tc.serialise)
+			if !got["a.txt"] {
+				t.Errorf("index = %v, want a.txt", got)
+			}
+			if got["b.txt"] != tc.wantB {
+				t.Errorf("index = %v, want b.txt present = %v", got, tc.wantB)
+			}
+		})
+	}
+}
+
+// runStaleTreeRace parks one pipeline mid-publish, commits a second revision
+// underneath it, runs a second pipeline, and returns the index both left
+// behind. With serialise the two take the ref lock the way processPush and
+// FlushProject do; without it they interleave the way they used to.
+func runStaleTreeRace(t *testing.T, serialise bool) map[string]bool {
+	t.Helper()
 	h := newHarness(t)
 	h.user("alice")
 	ns := h.namespace("alice")
@@ -87,9 +115,20 @@ func TestRunPushPipelineDoesNotIndexAStaleTree(t *testing.T) {
 	run := func(sha string) chan error {
 		done := make(chan error, 1)
 		go func() {
+			// The zero refHold is "no lock held", which is only reachable
+			// from a test -- every production caller acquires one first.
+			held := refHold{}
+			if serialise {
+				var err error
+				if held, err = syn.refLocks.lock(h.ctx, repo.ID, "main"); err != nil {
+					done <- err
+					return
+				}
+				defer held.unlock()
+			}
 			_, err := syn.runPushPipeline(h.ctx, repo, &store.SyncJob{
 				RepoID: repo.ID, Ref: "main", NewSHA: sha,
-			})
+			}, held)
 			done <- err
 		}()
 		return done
@@ -105,10 +144,10 @@ func TestRunPushPipelineDoesNotIndexAStaleTree(t *testing.T) {
 	newer := commit(addOp("b.txt", "b"))
 	second := run(newer)
 
-	// Without the lock the second pipeline runs to completion here, so the
-	// parked one is guaranteed to write last and lose b.txt. With the lock it
-	// cannot start until the first releases, so the wait has to fall back to
-	// a timeout instead of deadlocking on it.
+	// Unserialised the second pipeline runs to completion here, so the parked
+	// one is guaranteed to write last. Serialised it cannot start until the
+	// first releases, so the wait falls back to a timeout instead of
+	// deadlocking on it.
 	secondErr := make(chan error, 1)
 	select {
 	case err := <-second:
@@ -133,8 +172,40 @@ func TestRunPushPipelineDoesNotIndexAStaleTree(t *testing.T) {
 	for _, f := range files {
 		got[f.Path] = true
 	}
-	if !got["a.txt"] || !got["b.txt"] {
-		t.Errorf("index = %v, want both a.txt and b.txt; the pipeline that read the older tree overwrote the one that read %s", got, newer)
+	return got
+}
+
+// TestRefLocksTryLockDoesNotWait keeps the metrics flush from stalling every
+// other project behind whichever repository a sync job happens to be
+// publishing: flushDue walks its candidates one at a time.
+func TestRefLocksTryLockDoesNotWait(t *testing.T) {
+	var l refLocks
+	held, err := l.lock(context.Background(), 3, "main")
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+
+	if _, ok := l.tryLock(3, "main"); ok {
+		t.Error("tryLock succeeded on a ref that is already held")
+	}
+	// A different ref of the same repository is not contended.
+	if other, ok := l.tryLock(3, "dev"); !ok {
+		t.Error("tryLock failed on a free ref")
+	} else {
+		other.unlock()
+	}
+
+	held.unlock()
+	regained, ok := l.tryLock(3, "main")
+	if !ok {
+		t.Fatal("tryLock failed after the holder released")
+	}
+	regained.unlock()
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.locks) != 0 {
+		t.Errorf("locks after every release = %d, want 0", len(l.locks))
 	}
 }
 
@@ -143,19 +214,19 @@ func TestRunPushPipelineDoesNotIndexAStaleTree(t *testing.T) {
 // carry for the rest of its life.
 func TestRefLocksReleaseDropsTheEntry(t *testing.T) {
 	var l refLocks
-	release, err := l.lock(context.Background(), 7, "refs/heads/main")
+	held, err := l.lock(context.Background(), 7, "refs/heads/main")
 	if err != nil {
 		t.Fatalf("lock: %v", err)
 	}
 	l.mu.Lock()
-	held := len(l.locks)
+	entries := len(l.locks)
 	l.mu.Unlock()
-	if held != 1 {
-		t.Fatalf("locks held while locked = %d, want 1", held)
+	if entries != 1 {
+		t.Fatalf("locks held while locked = %d, want 1", entries)
 	}
 
-	release()
-	release() // idempotent: a double release must not corrupt the table
+	held.unlock()
+	held.unlock() // idempotent: a double release must not corrupt the table
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -168,11 +239,11 @@ func TestRefLocksReleaseDropsTheEntry(t *testing.T) {
 // a large repository's publish.
 func TestRefLocksLockRespectsContext(t *testing.T) {
 	var l refLocks
-	release, err := l.lock(context.Background(), 1, "main")
+	held, err := l.lock(context.Background(), 1, "main")
 	if err != nil {
 		t.Fatalf("lock: %v", err)
 	}
-	defer release()
+	defer held.unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

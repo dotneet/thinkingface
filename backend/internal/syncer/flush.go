@@ -29,6 +29,11 @@ const flushPollInterval = 10 * time.Second
 // building an enormous batch.
 const maxFlushProjects = 100
 
+// errRefBusy says a sync worker holds the ref this flush would have indexed.
+// It is a deferral, not a failure: the commit is already in place and the
+// points are still buffered, so the only thing to do is come back next poll.
+var errRefBusy = errors.New("syncer: the ref is being indexed by a sync job")
+
 // EnableFlush turns on the periodic metrics flush. interval is the maximum
 // time a still-running project's points stay database-only; a run that has
 // reached a terminal status is flushed on the next poll regardless. Calling
@@ -100,11 +105,17 @@ func (s *Syncer) flushDue(ctx context.Context) error {
 
 	for _, p := range due {
 		if err := s.FlushProject(ctx, p.RepoID, p.ProjectID, p.Project); err != nil {
-			// One project's failure (a stale precondition, a schema this
-			// package cannot rewrite) must not stop the others. The points
-			// stay buffered and the next poll tries again.
-			slog.Warn("flush experiment project", "repo_id", p.RepoID,
-				"project", p.Project, "points", p.NumPoints, "error", err)
+			// A ref a sync job is holding is the ordinary outcome of pushing
+			// to a project while it flushes, not something an operator has to
+			// see. Leaving the project unstamped is what brings it back on the
+			// next poll.
+			if !errors.Is(err, errRefBusy) {
+				// One project's failure (a stale precondition, a schema this
+				// package cannot rewrite) must not stop the others. The points
+				// stay buffered and the next poll tries again.
+				slog.Warn("flush experiment project", "repo_id", p.RepoID,
+					"project", p.Project, "points", p.NumPoints, "error", err)
+			}
 			continue
 		}
 		if p.NumPoints > experiments.MaxFlushPoints {
@@ -161,9 +172,26 @@ func (s *Syncer) FlushProject(ctx context.Context, repoID, projectID int64, proj
 		return nil
 	}
 
+	// Step 2 runs the shared pipeline, so it needs the ref's lock (reflock.go)
+	// -- without it a sync worker that read the tree before this commit would
+	// write its older index over the one about to be built here, and the
+	// parquet would drop straight back out of repo_files.
+	//
+	// Taken without waiting, though. flushDue walks its candidates one at a
+	// time, so blocking here would stall every other project behind whichever
+	// repository is mid-publish. Nothing is lost by giving up: step 1 is
+	// committed and durable, the points below stay buffered because this
+	// returns before deleting them, and the next poll re-runs a flush that
+	// recognises what it already wrote and appends nothing twice.
+	held, ok := s.refLocks.tryLock(repo.ID, result.Ref)
+	if !ok {
+		return errRefBusy
+	}
+	defer held.unlock()
+
 	if _, err := s.runPushPipeline(ctx, repo, &store.SyncJob{
 		RepoID: repo.ID, Ref: result.Ref, OldSHA: result.OldSHA, NewSHA: result.NewSHA,
-	}); err != nil {
+	}, held); err != nil {
 		return err
 	}
 	if err := s.store.DeletePoints(ctx, result.PointIDs); err != nil {

@@ -276,7 +276,7 @@ func (s *Server) createRepo(ctx context.Context, user *store.User, kind, ns, nam
 	}
 	if err := s.git.Init(repo.StoragePath, "main"); err != nil {
 		// Roll the row back so a retry is not blocked by a half-created repo.
-		_ = s.store.DeleteRepo(ctx, repo.ID)
+		rollbackCreateRepo(ctx, s, repo, false)
 		return nil, fmt.Errorf("initialise git repository: %w", err)
 	}
 
@@ -304,8 +304,7 @@ func (s *Server) createRepo(ctx context.Context, user *store.User, kind, ns, nam
 		// Same rollback as a failed Init: without it a repository row with no
 		// initial commit (and, in authoritative mode, no WAL index) would be
 		// unusable yet block its name against re-creation forever.
-		_ = s.git.Remove(repo.StoragePath)
-		_ = s.store.DeleteRepo(ctx, repo.ID)
+		rollbackCreateRepo(ctx, s, repo, true)
 		return nil, fmt.Errorf("write initial commit: %w", err)
 	}
 
@@ -318,8 +317,7 @@ func (s *Server) createRepo(ctx context.Context, user *store.User, kind, ns, nam
 		// README.md would never be indexed at all. Leaving the row and the
 		// bare directory behind while answering 500 also blocks the retry the
 		// client will make with a 409 on a name it does not own yet.
-		_ = s.git.Remove(repo.StoragePath)
-		_ = s.store.DeleteRepo(ctx, repo.ID)
+		rollbackCreateRepo(ctx, s, repo, true)
 		return nil, fmt.Errorf("schedule initial index: %w", err)
 	}
 	s.fireWebhook(ctx, string(apitypes.WebhookEventRepoCreated), ns, &repo.ID, map[string]any{
@@ -330,6 +328,32 @@ func (s *Server) createRepo(ctx context.Context, user *store.User, kind, ns, nam
 			map[string]any{"kind": kind})
 	}
 	return s.store.GetRepoByID(ctx, repo.ID)
+}
+
+// rollbackCreateRepo undoes a half-created repository. It runs on a detached
+// context on purpose: the most likely reason the step it is undoing failed is
+// that the client hung up, and on the request's own context the DeleteRepo
+// would then fail too -- while git.Remove, which takes no context, would
+// succeed. That leaves the worst of both: the name still taken by a row whose
+// bare repository is gone, and the 409 on the client's retry that this rollback
+// exists to prevent.
+//
+// Both steps are best-effort and logged rather than returned: the caller is
+// already reporting the original failure, which is the one worth seeing.
+func rollbackCreateRepo(ctx context.Context, s *Server, repo *store.Repo, removeGit bool) {
+	rollbackCtx, cancel := detachedWrite(ctx)
+	defer cancel()
+
+	if removeGit {
+		if err := s.git.Remove(repo.StoragePath); err != nil {
+			slog.Error("roll back the bare repository of a failed create",
+				"repo", repo.FullName(), "path", repo.StoragePath, "error", err)
+		}
+	}
+	if err := s.store.DeleteRepo(rollbackCtx, repo.ID); err != nil {
+		slog.Error("roll back the row of a failed create",
+			"repo", repo.FullName(), "error", err)
+	}
 }
 
 // writeCreateRepoError answers a createRepo failure. A name collision is left

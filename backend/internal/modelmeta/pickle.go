@@ -77,15 +77,26 @@ const maxPickleStack = 1 << 20
 // only grows the memo. A map[uint64]any entry costs around 45 bytes, so an
 // unbounded memo let a file well within maxPickleFile's 64 MiB limit force
 // gigabytes of live heap out of a stream of single-byte opcodes that
-// compress to almost nothing, the same trick a zip bomb uses. The limit
-// mirrors maxPickleStack: a legitimate stream never needs to remember more
-// distinct values than it could ever hold on the stack at once.
-const maxPickleMemoEntries = maxPickleStack
+// compress to almost nothing, the same trick a zip bomb uses.
+//
+// The ceiling is a quarter of maxPickleStack rather than a mirror of it,
+// because the two are not paid for the same way. Cache.Inspect's singleflight
+// only collapses callers asking for the *same* object, so N distinct crafted
+// files are N concurrent parses; at 40 requests per instance
+// (max_instance_request_concurrency in infra/main.tf) a mirrored limit still
+// reserved ~45 MB of memo each, which is a real fraction of an 8 GiB instance
+// that is also holding a tmpfs GIT_ROOT. A quarter of a million entries is
+// still an order of magnitude more than any real checkpoint needs -- the
+// largest published models carry ~10^4 tensors and a handful of memo entries
+// each -- while costing ~12 MB at the ceiling.
+const maxPickleMemoEntries = 1 << 18
 
 // maxPickleMarks bounds the mark stack for the same reason: MARK ('(') is
 // also a single byte that never touches the value stack, so it needs a limit
-// of its own rather than inheriting the one on u.stack.
-const maxPickleMarks = maxPickleStack
+// of its own rather than inheriting the one on u.stack. An int apiece makes
+// it far cheaper than the memo, but a mark is only ever useful with a value
+// stack under it, so it is held to the same ceiling.
+const maxPickleMarks = maxPickleMemoEntries
 
 // reducer turns a REDUCE/NEWOBJ of a known callable into a value. Returning
 // false leaves the unpickler to build a generic pickleObject.

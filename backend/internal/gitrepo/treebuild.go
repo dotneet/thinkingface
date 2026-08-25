@@ -45,9 +45,28 @@ func (d *dirNode) ensureLoaded(s storer.EncodedObjectStorer) error {
 	for _, te := range t.Entries {
 		if te.Mode == filemode.Dir {
 			d.subs[te.Name] = &dirNode{hash: te.Hash}
-		} else {
-			d.blobs[te.Name] = te
+			// A tree written before this package refused to build one can
+			// carry the same name as both a file and a directory -- the
+			// duplicateEntries shape git fsck rejects. Resolving it here, the
+			// way a checkout does (the directory wins, since that is what
+			// clients already see on disk), is what lets the next commit
+			// repair such a repository instead of failing on it forever:
+			// write() below treats the collision as unrecoverable, and it has
+			// to, or a genuine bug in walk/setBlob would go out as a corrupt
+			// tree again.
+			if _, dup := d.blobs[te.Name]; dup {
+				delete(d.blobs, te.Name)
+				// The loaded hash no longer describes what this node holds,
+				// so it must be rewritten rather than reused as clean.
+				d.dirty = true
+			}
+			continue
 		}
+		if _, dup := d.subs[te.Name]; dup {
+			d.dirty = true
+			continue
+		}
+		d.blobs[te.Name] = te
 	}
 	return nil
 }
