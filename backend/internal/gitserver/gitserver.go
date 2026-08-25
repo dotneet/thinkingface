@@ -82,11 +82,25 @@ func (h *Handler) AdvertiseRefs(ctx context.Context, w http.ResponseWriter, stor
 	// not leave upload-pack walking the object database on its behalf.
 	cmd := exec.CommandContext(ctx, "git", string(service)[len("git-"):], "--stateless-rpc", "--advertise-refs", dir)
 	cmd.Env = gitEnv()
+	// And WaitDelay for the same reason Serve sets it: Stdout and Stderr are
+	// buffers rather than pipes, so os/exec makes its own pipes and copies on
+	// goroutines that Wait then waits for -- and a grandchild holding one of
+	// those write ends keeps Wait blocked with nothing left to cancel, since
+	// CommandContext only ever kills the child it started. Less likely to
+	// happen here than in Serve, because --advertise-refs does not fork
+	// pack-objects, but this is the first request of every clone, fetch and
+	// push, so it is not a place to leave the possibility open.
+	cmd.WaitDelay = serveWaitDelay
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s --advertise-refs: %w: %s", service, err, stderr.String())
+		// A delay that expired after git itself exited cleanly means the
+		// advertisement in the buffer is complete and only a stray pipe
+		// holder was outstanding -- the same call Serve makes.
+		if !errors.Is(err, exec.ErrWaitDelay) || cmd.ProcessState == nil || !cmd.ProcessState.Success() {
+			return fmt.Errorf("%s --advertise-refs: %w: %s", service, err, stderr.String())
+		}
 	}
 
 	// The advertisement is prefixed with a service pkt-line and a flush packet.
