@@ -223,16 +223,42 @@ func (s *Store) RecordLFSObject(ctx context.Context, repoID int64, oid string, s
 // revision, which is what covers a pointer pushed as an ordinary blob by a
 // client that never spoke the LFS protocol.
 //
-// Only oids lfs_objects already knows are linked. Pointer text is just text --
-// a writer can commit one naming anything -- so an oid nobody ever uploaded
-// silently links to nothing rather than producing a row promising bytes that
-// are not there. Unlike RecordLFSObject there is no confirmPresent round trip:
-// the caller is not the one putting the bytes in the bucket, and the row lock
-// below is what keeps a concurrent collector from taking them away.
-func (s *Store) LinkLFSObjects(ctx context.Context, repoID int64, oids []string) error {
+// **The declared size is the entitlement, and it is checked here.** An oid is
+// public -- every LFS pointer in every readable repository is one -- so naming
+// it proves nothing; what a holder of the content can also say is how many
+// bytes it is. That is the same rule the LFS batch's dedup enforces
+// (lfs.storedAt) and the same one the commit handler leans on, and it has to
+// be enforced on this path too: a pointer is just text, so without the check a
+// writer could push `size 1` against somebody else's oid and have resolve hand
+// the bytes over through their own repository. A pointer written by git-lfs
+// always carries the real size, so nothing legitimate is turned away.
+//
+// An oid lfs_objects has never heard of links to nothing at all, rather than
+// producing a row promising bytes that are not there. Unlike RecordLFSObject
+// there is no confirmPresent round trip: the caller is not the one putting the
+// bytes in the bucket, and the row lock below is what keeps a concurrent
+// collector from taking them away.
+//
+// Nothing removes a link again. A later commit that drops the last pointer to
+// an object leaves the row, so the object stays out of gc's reach until the
+// repository itself is deleted -- the same property links made by
+// RecordLFSObject have always had, over a wider set now that a whole revision
+// is linked rather than only what this repository uploaded. It errs towards
+// keeping bytes somebody may still be able to name.
+func (s *Store) LinkLFSObjects(ctx context.Context, repoID int64, objects []LFSObjectRef) error {
+	declared := make(map[string]int64, len(objects))
+	oids := make([]string, 0, len(objects))
+	for _, o := range objects {
+		if _, seen := declared[o.OID]; seen {
+			continue
+		}
+		declared[o.OID] = o.Size
+		oids = append(oids, o.OID)
+	}
 	if len(oids) == 0 {
 		return nil
 	}
+
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -241,6 +267,8 @@ func (s *Store) LinkLFSObjects(ctx context.Context, repoID int64, oids []string)
 
 	// Lock parent rows before inserting the reference so GC cannot treat
 	// them as orphaned and delete storage while this transaction is open.
+	// Reading the size under the same lock is what makes the check above
+	// meaningful rather than advisory.
 	//
 	// ORDER BY oid so two callers holding overlapping sets take the rows in
 	// the same sequence. That matters more than it used to: the syncer links
@@ -252,12 +280,33 @@ func (s *Store) LinkLFSObjects(ctx context.Context, repoID int64, oids []string)
 	// a deadlock that does happen costs one aborted sync job that the queue
 	// retries. SQLite runs every write alone on its single writer, so the
 	// question does not arise there.
-	oidArg := s.d.stringArrayArg(oids)
-	if _, err := tx.Exec(ctx,
-		`SELECT oid FROM lfs_objects WHERE oid `+s.d.inArray("$1")+` ORDER BY oid`+s.d.forUpdate(""), oidArg); err != nil {
+	rows, err := tx.Query(ctx,
+		`SELECT oid, size FROM lfs_objects WHERE oid `+s.d.inArray("$1")+` ORDER BY oid`+s.d.forUpdate(""),
+		s.d.stringArrayArg(oids))
+	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, s.d.queries().linkLFSObjectsInsert, repoID, oidArg); err != nil {
+	entitled := make([]string, 0, len(oids))
+	for rows.Next() {
+		var oid string
+		var size int64
+		if err := rows.Scan(&oid, &size); err != nil {
+			rows.Close()
+			return err
+		}
+		if declared[oid] == size {
+			entitled = append(entitled, oid)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(entitled) == 0 {
+		return tx.Commit(ctx)
+	}
+
+	if _, err := tx.Exec(ctx, s.d.queries().linkLFSObjectsInsert, repoID, s.d.stringArrayArg(entitled)); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

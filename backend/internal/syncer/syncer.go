@@ -390,13 +390,13 @@ func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *sto
 	// alone, so the bytes behind a live pointer looked collectable the moment
 	// the repository that uploaded them went away.
 	//
-	// Doing it here grants nothing a writer did not already have. Linking an
-	// oid needs the oid and its size, which is exactly what a pointer carries
-	// and exactly what the batch API's upload dedup accepts as evidence of
-	// holding the content (lfs.storedAt) -- and pointers are public text in
-	// every readable repository. LinkLFSObjects only links oids lfs_objects
-	// already knows, so a pointer for content nobody ever uploaded still buys
-	// no claim on anything.
+	// Doing it here grants nothing a writer did not already have. A link is
+	// issued only when the size the pointer declares matches the recorded one
+	// (LinkLFSObjects), which is the same evidence the batch API's upload
+	// dedup demands (lfs.storedAt) -- an oid on its own is public, every
+	// pointer in every readable repository is one, so naming it proves
+	// nothing. A pointer for content nobody ever uploaded, or one declaring a
+	// size it cannot know, buys no claim on anything.
 	indexed, err := s.store.ListIndexedBlobSHAs(ctx, repo.ID, job.Ref)
 	if err != nil {
 		return nil, fmt.Errorf("list indexed blobs: %w", err)
@@ -404,7 +404,7 @@ func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *sto
 	if err := s.publishBlobs(ctx, gitRepo, entries, indexed); err != nil {
 		return nil, fmt.Errorf("publish blobs: %w", err)
 	}
-	if err := s.store.LinkLFSObjects(ctx, repo.ID, lfsOIDs(files)); err != nil {
+	if err := s.store.LinkLFSObjects(ctx, repo.ID, lfsObjectRefs(files)); err != nil {
 		return nil, fmt.Errorf("link lfs objects: %w", err)
 	}
 	if err := s.store.ReplaceRepoFiles(ctx, repo.ID, job.Ref, files); err != nil {
@@ -459,21 +459,27 @@ func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *sto
 	return &pushOutcome{repo: repo, numChangedFiles: len(s.changedPaths(gitRepo, job, entries))}, nil
 }
 
-// lfsOIDs is the revision's distinct LFS oids, in tree order. The whole tree
-// rather than the push's own diff, for the reason publishBlobs works off the
-// index rather than the diff: a job that died, or two jobs racing on one ref,
-// must not be able to leave a file the link pass skipped. Duplicates are
-// dropped because one oid appearing under several paths is one row either way,
-// and the statement locks a parent row per element.
-func lfsOIDs(files []store.RepoFile) []string {
+// lfsObjectRefs is the revision's distinct LFS objects, each with the size its
+// pointer declares -- LinkLFSObjects checks that against the recorded one, and
+// that check is the entitlement, so the size has to travel with the oid rather
+// than be dropped here.
+//
+// The whole tree rather than the push's own diff, for the reason publishBlobs
+// works off the index rather than the diff: a job that died, or two jobs
+// racing on one ref, must not be able to leave a file the link pass skipped.
+// Duplicates are dropped because one oid appearing under several paths is one
+// row either way, and the statement locks a parent row per element.
+func lfsObjectRefs(files []store.RepoFile) []store.LFSObjectRef {
 	seen := make(map[string]bool)
-	out := make([]string, 0)
+	out := make([]store.LFSObjectRef, 0)
 	for _, f := range files {
 		if f.LFSOID == nil || seen[*f.LFSOID] {
 			continue
 		}
 		seen[*f.LFSOID] = true
-		out = append(out, *f.LFSOID)
+		// RepoFile.Size is Entry.TargetSize(), which for an LFS entry is the
+		// size the pointer declares -- exactly what has to be proven.
+		out = append(out, store.LFSObjectRef{OID: *f.LFSOID, Size: f.Size})
 	}
 	return out
 }

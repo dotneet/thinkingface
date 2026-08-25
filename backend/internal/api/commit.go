@@ -16,6 +16,7 @@ import (
 
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
 	"github.com/dotneet/thinkingface/backend/internal/storage"
+	"github.com/dotneet/thinkingface/backend/internal/store"
 )
 
 // maxCommitBody bounds an inline upload. Anything larger is expected to arrive
@@ -287,7 +288,7 @@ type pendingCopy struct {
 // returned anyway so the caller re-links it with the rest of the commit's
 // objects: the insert is idempotent, and it costs one row to be certain a copy
 // never leaves a pointer whose object GC believes nothing references.
-func resolveCopies(w http.ResponseWriter, gitRepo *gitrepo.Repo, rev string, copies []pendingCopy, ops []gitrepo.Op) ([]string, bool) {
+func resolveCopies(w http.ResponseWriter, gitRepo *gitrepo.Repo, rev string, copies []pendingCopy, ops []gitrepo.Op) ([]store.LFSObjectRef, bool) {
 	// Grouped in first-appearance order, so an error names whichever line the
 	// caller would read first rather than whatever the map iterated to.
 	order := []string{}
@@ -306,7 +307,7 @@ func resolveCopies(w http.ResponseWriter, gitRepo *gitrepo.Repo, rev string, cop
 		byRev[srcRev] = append(byRev[srcRev], c)
 	}
 
-	var lfsOIDs []string
+	var lfsOIDs []store.LFSObjectRef
 	for _, srcRev := range order {
 		group := byRev[srcRev]
 		paths := make([]string, 0, len(group))
@@ -346,7 +347,7 @@ func resolveCopies(w http.ResponseWriter, gitRepo *gitrepo.Repo, rev string, cop
 			ops[c.op].SrcHash = e.Hash
 			ops[c.op].Executable = e.Mode == filemode.Executable
 			if e.LFS != nil {
-				lfsOIDs = append(lfsOIDs, e.LFS.OID)
+				lfsOIDs = append(lfsOIDs, store.LFSObjectRef{OID: e.LFS.OID, Size: e.LFS.Size})
 			}
 		}
 	}
@@ -389,7 +390,7 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	summary := "Upload files"
 	parentCommit := ""
 	var ops []gitrepo.Op
-	var lfsOIDs []string
+	var lfsOIDs []store.LFSObjectRef
 	var copies []pendingCopy
 
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxCommitBody))
@@ -526,7 +527,9 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 			ops = append(ops, gitrepo.Op{
 				Kind: gitrepo.OpAdd, Path: v.Path, Data: gitrepo.FormatLFSPointer(v.OID, info.Size),
 			})
-			lfsOIDs = append(lfsOIDs, v.OID)
+			// info.Size is the object as stored, already checked against
+			// v.Size above -- so this is the declared size, verified.
+			lfsOIDs = append(lfsOIDs, store.LFSObjectRef{OID: v.OID, Size: info.Size})
 
 		// The two delete operations refuse a malformed entry rather than
 		// skipping it, for the same reason the default case below refuses an

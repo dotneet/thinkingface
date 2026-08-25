@@ -139,3 +139,47 @@ func TestPush_DoesNotLinkAnOIDThatWasNeverUploaded(t *testing.T) {
 		t.Error("a pointer for content that was never uploaded produced a link")
 	}
 }
+
+// TestPush_DoesNotLinkAPointerThatLiesAboutTheSize is the other limit of the
+// link, and the one that matters: the object exists, so the previous test's
+// "lfs_objects has never heard of it" guard does not apply, and the only thing
+// standing between a writer and somebody else's bytes is whether the pointer
+// declares their real length.
+//
+// An oid is public -- every pointer in every readable repository is one -- so
+// naming one is not evidence of anything. Declaring its size is. That is the
+// rule the LFS batch's dedup enforces (lfs.storedAt, which stopped accepting a
+// declared zero for exactly this reason), and a push must not be the way
+// around it.
+func TestPush_DoesNotLinkAPointerThatLiesAboutTheSize(t *testing.T) {
+	content := []byte("somebody else's bytes")
+
+	for _, tc := range []struct {
+		name     string
+		declared int64
+		want     bool
+	}{
+		{"a guessed size", 1, false},
+		// Zero is the guess that used to work on the batch side.
+		{"zero", 0, false},
+		{"the real size", int64(len(content)), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPushFixture(t)
+			other := spareRepo(t, f.harness, "origin")
+			seedLFSObject(t, f.harness, other.ID, pointerOID, content)
+
+			f.push("main", gitrepo.Op{Kind: gitrepo.OpAdd, Path: "model.bin",
+				Data: gitrepo.FormatLFSPointer(pointerOID, tc.declared)})
+
+			owned, err := f.st.RepoHasLFSObject(f.ctx, f.repo.ID, pointerOID)
+			if err != nil {
+				t.Fatalf("RepoHasLFSObject: %v", err)
+			}
+			if owned != tc.want {
+				t.Errorf("a pointer declaring %d bytes for a %d byte object: linked = %v, want %v",
+					tc.declared, len(content), owned, tc.want)
+			}
+		})
+	}
+}
