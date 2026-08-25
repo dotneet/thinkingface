@@ -39,10 +39,12 @@ func (f File) Open() (io.ReadCloser, error) {
 
 // Scan walks root. When root is a directory every regular file below it is
 // returned with RepoPath relative to root; when root is a single file, one
-// entry with RepoPath = its base name. Always skipped: ".git" directories,
-// ".DS_Store", "Thumbs.db", "__pycache__" directories, and symlinks that point
-// at directories (to avoid loops; symlinked files are followed). Results are
-// sorted by RepoPath. A root that does not exist is an error.
+// entry with RepoPath = its base name. If root itself is a symlink to a
+// directory, it is followed and its contents are scanned as normal. Always
+// skipped: ".git" directories, ".DS_Store", "Thumbs.db", "__pycache__"
+// directories, and symlinks *inside* the tree that point at directories (to
+// avoid loops; symlinked files are followed). Results are sorted by
+// RepoPath. A root that does not exist is an error.
 //
 // allPaths reports every RepoPath the walk visited (subject only to the
 // always-skipped names above, never to Include/Exclude): callers that need to
@@ -73,6 +75,25 @@ func Scan(root string, opts Options) (files []File, allPaths []string, err error
 			files = append(files, f)
 		}
 		return files, allPaths, nil
+	}
+
+	// root itself may be a symlink to a directory (or sit behind one via an
+	// intermediate path component). os.Stat above follows symlinks, so
+	// info.IsDir() is already correct, but filepath.Abs only makes the path
+	// absolute -- it does not resolve symlinks -- and filepath.WalkDir
+	// classifies its *starting* path with os.Lstat rather than os.Stat. Left
+	// unresolved, WalkDir's Lstat would see the symlink itself (not a
+	// directory), and the `p == rootAbs` check below would return
+	// immediately without ever recursing, silently skipping every file
+	// underneath. Resolve to the real path so WalkDir's own Lstat agrees
+	// with the os.Stat check above. This only changes what rootAbs points
+	// to, not how RepoPath is derived (still Rel(rootAbs, p) inside the same
+	// walk) or how symlinks *inside* the tree are handled below. os.Stat
+	// already proved the path resolves, so a failure here would only be a
+	// race; fall back to the unresolved path rather than surface a new,
+	// more confusing error.
+	if resolved, evalErr := filepath.EvalSymlinks(rootAbs); evalErr == nil {
+		rootAbs = resolved
 	}
 
 	walkErr := filepath.WalkDir(rootAbs, func(p string, d fs.DirEntry, err error) error {
