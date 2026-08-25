@@ -333,6 +333,18 @@ body {
   margin: 0.8em 0;
 }
 
+/* Wrapper MarkdownMermaid renders a rendered ```mermaid fence into. The SVG
+   itself is mermaid's own output (colours picked from its "default"/"dark"
+   theme, not our tokens — see that component's doc comment), so only the
+   outer spacing and responsive sizing are ours. */
+.tf-markdown .tf-mermaid {
+  margin: 0.8em 0;
+}
+.tf-markdown .tf-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
 /* highlight.js token colours, tuned from the existing semantic tokens so
    both themes stay readable on --tf-bg-sunken.
 

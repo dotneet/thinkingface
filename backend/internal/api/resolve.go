@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
@@ -85,6 +86,81 @@ func attachmentDisposition(name string) string {
 	return "attachment; filename=\"" + fallback + "\"; filename*=UTF-8''" + url.PathEscape(name)
 }
 
+// resolveCacheControl picks the caching policy for one resolve response.
+//
+// A blob's bytes are immutable -- git names them by their own hash -- but the
+// URL only names those bytes when the revision in it does. `/resolve/main/x`
+// is a moving target: the next push gives the same URL different content, so
+// the response may be stored but has to be revalidated every time, which is
+// what `no-cache` means (it is not "do not store"; that is `no-store`).
+// `/resolve/<commit sha>/x` can never mean anything else, so it gets the
+// year-long immutable form browsers and CDNs already understand.
+//
+// Either way the revalidation is cheap: If-None-Match against the ETag is
+// answered by notModified with a 304 instead of a repeated gigabyte.
+//
+// `public` is accurate here rather than merely convenient: this server has no
+// per-repository visibility at all (docs/dev/thinkingface-design.md §11), so a
+// shared cache holding a resolve response cannot expose it to anyone who could
+// not have asked for it directly.
+func resolveCacheControl(rev string, commit plumbing.Hash) string {
+	// EqualFold, because a client may spell the sha in either case; the
+	// revision has already been resolved *to* this commit, so an equal string
+	// means the URL is pinned to it rather than to a ref that happens to be
+	// there today.
+	if strings.EqualFold(rev, commit.String()) {
+		return "public, max-age=31536000, immutable"
+	}
+	return "no-cache"
+}
+
+// notModified answers a conditional request whose If-None-Match already names
+// the entity this request would return, and reports whether it did.
+//
+// It is what makes the ETag this handler has always emitted worth anything:
+// without it a client holding a 40 GB checkpoint that asked whether its copy
+// was still current was answered with the whole file again. The 304 carries
+// no body and keeps the ETag (RFC 9110 §15.4.5); net/http drops Content-Type
+// and Content-Length for this status on its own.
+//
+// Range is deliberately not consulted: RFC 9110 §13.2.2 evaluates
+// If-None-Match before Range, so a matched precondition wins over a partial
+// request. The download counters are not consulted either -- recordDownload
+// has already run by the time any caller reaches this, which keeps the "one
+// resolve request is one count" rule that HEAD and the LFS 302 also obey.
+func notModified(w http.ResponseWriter, r *http.Request, etag string) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if !etagMatches(r.Header.Get("If-None-Match"), etag) {
+		return false
+	}
+	w.WriteHeader(http.StatusNotModified)
+	return true
+}
+
+// etagMatches applies RFC 9110 §8.8.3.2's weak comparison to an If-None-Match
+// list: "*" matches any current representation, and a `W/` prefix is ignored
+// on both sides. Ignoring it is safe here because every ETag this package
+// emits is a content hash -- two representations that share one can only be
+// byte-identical -- so weak and strong comparison agree.
+func etagMatches(header, etag string) bool {
+	header = strings.TrimSpace(header)
+	switch header {
+	case "":
+		return false
+	case "*":
+		return true
+	}
+	want := strings.TrimPrefix(etag, "W/")
+	for _, candidate := range strings.Split(header, ",") {
+		if strings.TrimPrefix(strings.TrimSpace(candidate), "W/") == want {
+			return true
+		}
+	}
+	return false
+}
+
 // handleResolve serves a file at a revision. Regular blobs stream from git;
 // LFS files redirect to a signed URL, or are proxied when the storage driver
 // cannot sign (the local emulator).
@@ -110,7 +186,34 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, kind stri
 	if !ok {
 		return
 	}
-	entry, commit, err := gitRepo.Stat(rev, filePath)
+	// The revision is resolved on its own, before the file is looked for, so
+	// that "this revision does not exist" and "this file does not exist at a
+	// revision that does" stay separable. gitRepo.Stat cannot separate them:
+	// it reports an unknown revision and an unborn HEAD alike as ErrEmptyRepo,
+	// which is why this used to answer a bare 404 for both -- and a bare 404
+	// is an HfHubHTTPError, so neither `file_exists()` nor
+	// `hf_hub_download()` could tell what was actually missing. Answering
+	// RevisionNotFound for both would have been worse still: a typo in a
+	// *path* would then be reported as a missing revision.
+	//
+	// revisionOrEmpty (refs.go) makes exactly that split and writes the
+	// RevisionNotFound 404 itself when the revision does not resolve.
+	commit, empty, ok := s.revisionOrEmpty(w, gitRepo, repo, rev)
+	if !ok {
+		return
+	}
+	if empty {
+		// The repository has no commits at all. The revision is not what is
+		// wrong here -- there is simply no file -- so this is the same
+		// EntryNotFound the missing-path branch below answers with, and
+		// file_exists() reports False rather than raising.
+		entryNotFound(w, filePath+" does not exist at revision "+rev)
+		return
+	}
+	// Stat against the resolved commit rather than the name: the revision is
+	// resolved exactly once per request, so a push landing mid-request cannot
+	// make X-Repo-Commit disagree with the bytes served under it.
+	entry, _, err := gitRepo.Stat(commit.String(), filePath)
 	if err != nil {
 		if errors.Is(err, gitrepo.ErrPathNotFound) {
 			// EntryNotFound, not a bare 404: huggingface_hub only raises
@@ -120,13 +223,6 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, kind stri
 			// HfHubHTTPError, indistinguishable from the repository itself
 			// being gone.
 			entryNotFound(w, filePath+" does not exist at revision "+rev)
-			return
-		}
-		if errors.Is(err, gitrepo.ErrEmptyRepo) {
-			// The revision did not resolve at all (an unborn HEAD reads the
-			// same way; see revisionOrEmpty). Left as a plain 404 rather than
-			// RevisionNotFound, because the two are not told apart here.
-			notFound(w, filePath+" does not exist at revision "+rev)
 			return
 		}
 		internalError(w, "stat file", err)
@@ -147,6 +243,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, kind stri
 
 	w.Header().Set("X-Repo-Commit", commit.String())
 	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", resolveCacheControl(rev, commit))
 	contentType := mime.TypeByExtension(path.Ext(filePath))
 	if contentType == "" {
 		contentType = "application/octet-stream"
@@ -163,8 +260,15 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, kind stri
 		return
 	}
 
-	w.Header().Set("ETag", `"`+entry.Hash.String()+`"`)
+	etag := `"` + entry.Hash.String() + `"`
+	w.Header().Set("ETag", etag)
 	w.Header().Set("Content-Type", contentType)
+	// Before the HEAD branch: a revalidation is a conditional HEAD as often as
+	// it is a conditional GET, and both must answer 304 rather than repeating
+	// the metadata (or the body) the client already holds.
+	if notModified(w, r, etag) {
+		return
+	}
 	if r.Method == http.MethodHead {
 		// A HEAD reports the whole file even when a Range is attached (same as
 		// the LFS path): huggingface_hub reads Content-Length here to learn the
@@ -294,10 +398,23 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 	}
 	// hf_hub_download reads the linked headers to learn the real object's
 	// identity before it follows the redirect.
-	w.Header().Set("ETag", `"`+oid+`"`)
-	w.Header().Set("X-Linked-Etag", `"`+oid+`"`)
+	etag := `"` + oid + `"`
+	w.Header().Set("ETag", etag)
+	w.Header().Set("X-Linked-Etag", etag)
 	w.Header().Set("X-Linked-Size", strconv.FormatInt(entry.LFS.Size, 10))
 	w.Header().Set("Content-Type", contentType)
+
+	// Deliberately after lfsObjectOwned: a 304 confirms that the oid the
+	// caller put in If-None-Match is the content of this path, which is
+	// precisely what the ownership check refuses to tell a caller whose
+	// repository does not link that object.
+	//
+	// This is also where the conditional request pays for itself most: the
+	// answer is a few bytes of headers instead of a signed URL and a
+	// multi-gigabyte transfer out of GCS.
+	if notModified(w, r, etag) {
+		return
+	}
 
 	if r.Method == http.MethodHead {
 		// Unlike GET below, a HEAD never touches storage, so nothing here can
@@ -321,6 +438,15 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 			internalError(w, "sign download url", err)
 			return
 		}
+		// The redirect names a URL that expires (lfs.TTLFor bounds the TTL to
+		// what this one transfer needs), so the *redirect* must never be
+		// served from a cache: a stored 302 would hand a later client a
+		// signed URL GCS has since started rejecting, which looks like a
+		// corrupt repository rather than a stale cache entry. This overwrites
+		// the revision-derived value handleResolve set, and only on this
+		// path -- the object bytes themselves are still cacheable under the
+		// ETag above, which is what makes the next request a cheap 304.
+		w.Header().Set("Cache-Control", "no-store")
 		// Content-Length is never set on this path, so there is nothing to
 		// strip before the redirect: it must not describe the redirect body.
 		http.Redirect(w, r, url, http.StatusFound)

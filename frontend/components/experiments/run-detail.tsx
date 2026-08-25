@@ -5,12 +5,20 @@ import { Archive, ArchiveRestore, LineChart, Star, Tag, Trash2 } from "lucide-re
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import { ConfigEntryTable } from "@/components/experiments/config-entry-table";
+import { CsvDownloadButton } from "@/components/experiments/csv-download-button";
+import {
+  isLiveRun,
+  LIVE_REFRESH_INTERVAL_MS,
+  liveRefetchInterval,
+} from "@/components/experiments/live-refresh";
 import { MetricsCharts } from "@/components/experiments/metrics-charts";
 import { RunArtifactsCard } from "@/components/experiments/run-artifacts-card";
+import { csvFilename, metricSeriesCsv } from "@/components/experiments/run-csv";
 import { RunDeleteDialog } from "@/components/experiments/run-delete-dialog";
 import { RunEnvCard } from "@/components/experiments/run-env-card";
 import { RunModelsCard } from "@/components/experiments/run-models-card";
 import { RunNoteCard } from "@/components/experiments/run-note-card";
+import { RunStatusBadge } from "@/components/experiments/run-status-badge";
 import { RunTagsDialog } from "@/components/experiments/run-tags-dialog";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -104,6 +112,13 @@ export function RunDetail({
       return result.data;
     },
     initialData: { runs: initialRuns },
+    // Polls only while *this* run is live. The page shows one run, so a sweep
+    // sibling still training next door is no reason to keep re-reading here —
+    // and a run that finished, failed or went stale stops the timer outright.
+    refetchInterval: (query) =>
+      liveRefetchInterval((query.state.data?.runs ?? []).filter((r) => r.name === runName)),
+    // Nobody is watching a chart in a backgrounded tab.
+    refetchIntervalInBackground: false,
   });
   const runs = runsData.runs;
   const run = runs.find((r) => r.name === runName);
@@ -158,6 +173,10 @@ export function RunDetail({
       if (!result.ok) throw new ApiResultError(result);
       return result.data;
     },
+    // The chart follows the same rule as the run list above: a live run redraws
+    // itself, everything else is a static page.
+    refetchInterval: isLiveRun(run) ? LIVE_REFRESH_INTERVAL_MS : false,
+    refetchIntervalInBackground: false,
   });
 
   const config = useMemo(() => splitRunConfig(run?.config), [run]);
@@ -175,14 +194,6 @@ export function RunDetail({
     );
   }
 
-  const statusTone =
-    run.status === "finished" ? "positive" : run.status === "failed" ? "negative" : "accent";
-  const statusLabel =
-    run.status === "finished"
-      ? t("experiments.table.statusFinished")
-      : run.status === "failed"
-        ? t("experiments.table.statusFailed")
-        : t("experiments.table.statusRunning");
   const annotateError = annotate.isError
     ? queryErrorMessage(t, annotate.error, t("experiments.dashboard.updateFailed"))
     : undefined;
@@ -211,7 +222,7 @@ export function RunDetail({
             style={{ background: colorForRun(runOrder.indexOf(run.name)) }}
           />
           <h1 className="text-2xl font-semibold tracking-tight break-all">{run.name}</h1>
-          <Badge tone={statusTone}>{statusLabel}</Badge>
+          <RunStatusBadge status={run.status} updatedAt={run.updated_at} />
           {run.is_baseline && <Badge tone="accent">{t("experiments.table.baselineBadge")}</Badge>}
           {run.archived && <Badge>{t("experiments.table.archivedBadge")}</Badge>}
         </div>
@@ -359,6 +370,13 @@ export function RunDetail({
             size={14}
             label={t("experiments.dashboard.loadingMetrics")}
           />
+
+          <CsvDownloadButton
+            label={t("experiments.dashboard.exportMetricsCsv")}
+            filename={csvFilename([ns, repo, project, runName, "metrics"])}
+            disabled={(metrics.data?.series.length ?? 0) === 0}
+            build={() => metricSeriesCsv(metrics.data?.series ?? [], xMode === "time")}
+          />
         </div>
 
         {metrics.isError ? (
@@ -400,7 +418,13 @@ export function RunDetail({
         title={t("experiments.artifacts.title")}
         description={t("experiments.artifacts.description")}
       >
-        <RunArtifactsCard ns={ns} repo={repo} project={project} runName={runName} />
+        <RunArtifactsCard
+          ns={ns}
+          repo={repo}
+          project={project}
+          runName={runName}
+          live={isLiveRun(run)}
+        />
       </Section>
 
       <Section

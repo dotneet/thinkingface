@@ -104,6 +104,12 @@ type Handler struct {
 	maxTTL    time.Duration
 	publicURL string
 	secret    []byte
+	// quota is the namespace storage allowance the upload path checks
+	// against, and defaultQuota the instance-wide fallback for a namespace
+	// with no override. A nil quota means enforcement is off: nothing on the
+	// upload path asks the database anything (see quota.go).
+	quota        QuotaSource
+	defaultQuota int64
 }
 
 // New builds the batch handler. ttl is the base signed-URL lifetime
@@ -306,6 +312,17 @@ func (h *Handler) Batch(ctx context.Context, repoID int64, req *BatchRequest, au
 		}
 
 		resp.Objects = append(resp.Objects, item)
+	}
+
+	// Nothing has been authorised yet -- the loop above only decided what it
+	// would authorise -- so this is the last point at which the whole batch's
+	// appetite is known and no URL has been handed out. Downloads cost the
+	// namespace nothing and are never gated.
+	if req.Operation == "upload" {
+		var err error
+		if pending, err = h.withinQuota(ctx, repoID, resp, pending); err != nil {
+			return nil, err
+		}
 	}
 
 	ttl := TTLFor(h.ttl, h.maxTTL, totalBytes)

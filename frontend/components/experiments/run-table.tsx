@@ -14,6 +14,9 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
+import { CsvDownloadButton } from "@/components/experiments/csv-download-button";
+import { csvFilename, runTableCsv } from "@/components/experiments/run-csv";
+import { RunStatusBadge, statusLabel, statusTone } from "@/components/experiments/run-status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/field";
@@ -129,6 +132,19 @@ export function RunTable({
     [runModels],
   );
 
+  // The rows in the order the table draws them: group members follow their
+  // group header, and a folded group still exports its members — a CSV has no
+  // fold, and dropping them would silently export a subset of what the filters
+  // selected.
+  const exportRows = useMemo(() => groups.flatMap((group) => group.runs), [groups]);
+  const exportModels = useMemo(() => {
+    const out: Record<string, string[]> = {};
+    for (const [run, models] of Object.entries(runModels ?? {})) {
+      out[run] = models.map((m) => m.repo.full_name);
+    }
+    return out;
+  }, [runModels]);
+
   function toggleExpanded(key: string) {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -236,16 +252,34 @@ export function RunTable({
           </tbody>
         </table>
       </div>
-      {hiddenMetrics > 0 && (
-        <p className="text-xs font-medium text-fg-subtle">
-          {t(
-            hiddenMetrics === 1
-              ? "experiments.table.moreMetricsOne"
-              : "experiments.table.moreMetricsOther",
-            { count: hiddenMetrics },
-          )}
-        </p>
-      )}
+      <div className="flex flex-wrap items-center gap-2">
+        {hiddenMetrics > 0 && (
+          <p className="text-xs font-medium text-fg-subtle">
+            {t(
+              hiddenMetrics === 1
+                ? "experiments.table.moreMetricsOne"
+                : "experiments.table.moreMetricsOther",
+              { count: hiddenMetrics },
+            )}
+          </p>
+        )}
+        <div className="ml-auto">
+          <CsvDownloadButton
+            label={t("experiments.table.exportCsv")}
+            filename={csvFilename([ns, repo, project, "runs"])}
+            disabled={exportRows.length === 0}
+            // Built from the flattened display order, not from the project: what
+            // comes out is what is on screen, filters, sort, folded sweeps and
+            // metric columns included.
+            build={() =>
+              runTableCsv(exportRows, metricKeys, {
+                includeModels: hasModels,
+                modelsByRun: exportModels,
+              })
+            }
+          />
+        </div>
+      </div>
     </div>
   );
 }
@@ -400,18 +434,6 @@ function GroupRows({
   );
 }
 
-function statusTone(status: RunStatus): "positive" | "negative" | "accent" {
-  return status === "finished" ? "positive" : status === "failed" ? "negative" : "accent";
-}
-
-function statusLabel(t: ReturnType<typeof useT>, status: RunStatus): string {
-  return status === "finished"
-    ? t("experiments.table.statusFinished")
-    : status === "failed"
-      ? t("experiments.table.statusFailed")
-      : t("experiments.table.statusRunning");
-}
-
 function RunRow({
   run,
   ns,
@@ -481,7 +503,7 @@ function RunRow({
         </span>
       </td>
       <td className="px-3 py-2">
-        <Badge tone={statusTone(run.status)}>{statusLabel(t, run.status)}</Badge>
+        <RunStatusBadge status={run.status} updatedAt={run.updated_at} />
       </td>
       <td className="px-3 py-2">
         {run.tags.length === 0 ? (

@@ -16,15 +16,19 @@ import { apiFetch } from "@/lib/api";
 import type { MessageKey } from "@/lib/i18n";
 import type { FetchOpts } from "@/lib/repos";
 import type {
+  AdminNamespaceListResponse,
+  AdminNamespaceQuotaRequest,
+  AdminNamespaceUsage,
   AdminUserCreateRequest,
   AdminUserListResponse,
   AdminUserResponse,
   AdminUserUpdateRequest,
   PasswordChangeRequest,
   SyncJobListResponse,
+  UserApproval,
 } from "@/types/api";
 
-export type { SyncJob } from "@/types/api";
+export type { AdminNamespaceUsage, SyncJob } from "@/types/api";
 
 /**
  * Replace your own password. 204 on success, 401 when `current_password` is
@@ -111,6 +115,29 @@ export function setAdminUserDisabled(
 }
 
 /**
+ * Admit an account from the sign-up waiting room, or put one back into it —
+ * `updateAdminUser` with the one field, named so a call site reads as what it
+ * does.
+ *
+ * An account is pending when it self-registered on an instance running
+ * `TF_SIGNUP_REQUIRE_APPROVAL`. Until it is approved it authenticates on
+ * nothing at all — not its password, not an access token, not an SSH key —
+ * so approving is what actually lets somebody in. Putting one back revokes
+ * its sessions in the same statement, the way suspending does.
+ *
+ * It is independent of `disabled`: approving does not un-suspend and
+ * restoring does not approve. 400 `self_pending` for your own account and
+ * 409 `last_admin` for the last remaining site administrator.
+ */
+export function setAdminUserApproval(
+  username: string,
+  approval: UserApproval,
+  opts?: FetchOpts,
+): Promise<ApiResult<AdminUserResponse>> {
+  return updateAdminUser(username, { approval }, opts);
+}
+
+/**
  * Delete every access token and registered SSH key the account holds, and
  * revoke its sessions. 204 on success.
  *
@@ -140,6 +167,7 @@ const ERROR_KEYS: Record<string, MessageKey> = {
   last_admin: "settings.adminUsers.errors.lastAdmin",
   self_demote: "settings.adminUsers.errors.selfDemote",
   self_disable: "settings.adminUsers.errors.selfDisable",
+  self_pending: "settings.adminUsers.errors.selfPending",
   self_revoke: "settings.adminUsers.errors.selfRevoke",
   // Every /api/v1/admin endpoint accepts the session cookie only. A browser
   // on these screens always has one, so this is what a session that expired
@@ -211,5 +239,73 @@ export function syncJobErrorKey(
   if (result.status === 401) return "settings.adminUsers.errors.loginRequired";
   if (result.status === 403) return "settings.adminUsers.errors.permissionDenied";
   if (result.status === 404) return "settings.adminSyncJobs.errors.jobGone";
+  return null;
+}
+
+export type AdminNamespacesParams = {
+  search?: string;
+  limit?: number;
+  offset?: number;
+};
+
+/**
+ * Every namespace on the instance with what it stores and what it may store.
+ * Site administrators only, from a browser session, like the rest of
+ * /api/v1/admin.
+ *
+ * `quota_bytes` is the namespace's own override and `effective_quota_bytes`
+ * what is actually enforced — the override when there is one, otherwise the
+ * instance default (`default_quota_bytes`). Null means unlimited in both.
+ */
+export function listAdminNamespaces(
+  params: AdminNamespacesParams = {},
+  opts?: FetchOpts,
+): Promise<ApiResult<AdminNamespaceListResponse>> {
+  return apiFetch<AdminNamespaceListResponse>("/api/v1/admin/namespaces", {
+    query: params,
+    headers: opts?.headers,
+  });
+}
+
+/**
+ * Set or clear one namespace's storage quota.
+ *
+ * `quotaBytes` is required and nullable, and the two "no number" cases are
+ * different instructions: `null` removes the override so the instance default
+ * applies again, while `0` is a real quota of zero bytes — a namespace that
+ * may hold repositories but upload nothing. Never send one meaning the other.
+ *
+ * The quota is enforced on the LFS upload path, so lowering it below what a
+ * namespace already stores refuses the next upload rather than deleting
+ * anything: 200 here always means "recorded", never "reclaimed".
+ */
+export function setNamespaceQuota(
+  namespace: string,
+  quotaBytes: number | null,
+  opts?: FetchOpts,
+): Promise<ApiResult<AdminNamespaceUsage>> {
+  const body: AdminNamespaceQuotaRequest = { quota_bytes: quotaBytes };
+  return apiFetch<AdminNamespaceUsage>(
+    `/api/v1/admin/namespaces/${encodeURIComponent(namespace)}`,
+    {
+      method: "PATCH",
+      body,
+      headers: opts?.headers,
+    },
+  );
+}
+
+/**
+ * Same idea as `adminUserErrorKey`, for the namespace quota endpoints. They
+ * answer no types of their own, so this is purely the status mapping; returns
+ * null when the caller should fall back to `errorMessage(t, result)`.
+ */
+export function namespaceQuotaErrorKey(
+  result: Extract<ApiResult<unknown>, { ok: false }>,
+): MessageKey | null {
+  if (result.type === "session_required") return "settings.adminUsers.errors.sessionRequired";
+  if (result.status === 401) return "settings.adminUsers.errors.loginRequired";
+  if (result.status === 403) return "settings.adminUsers.errors.permissionDenied";
+  if (result.status === 404) return "settings.adminQuotas.errors.namespaceGone";
   return null;
 }

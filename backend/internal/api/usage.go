@@ -32,17 +32,33 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The ceiling belongs next to the number it caps: an upload refused with
+	// 507 by the LFS batch API is otherwise a surprise on a page that only
+	// ever said how much was used. Only the namespace's own override is read
+	// here -- resolving it against the instance default is EffectiveQuota's
+	// job, because a stored 0 is a real quota and a configured 0 is not.
+	overrides, err := s.store.NamespaceQuotaOverrides(r.Context(), names)
+	if err != nil {
+		internalError(w, "load storage quotas", err)
+		return
+	}
+
 	writeJSON(w, http.StatusOK, apitypes.UsageResponse{
-		Namespaces: toUsageNamespaces(store.AggregateUsageByNamespace(repoUsage)),
+		Namespaces: s.toUsageNamespaces(store.AggregateUsageByNamespace(repoUsage), overrides),
 		Repos:      toUsageRepos(repoUsage),
 	})
 }
 
-func toUsageNamespaces(rows []store.NamespaceUsage) []apitypes.UsageNamespace {
+func (s *Server) toUsageNamespaces(rows []store.NamespaceUsage, overrides map[string]int64) []apitypes.UsageNamespace {
 	out := make([]apitypes.UsageNamespace, 0, len(rows))
 	for _, r := range rows {
+		var override *int64
+		if v, ok := overrides[r.Namespace]; ok {
+			override = &v
+		}
 		out = append(out, apitypes.UsageNamespace{
 			Namespace: r.Namespace, LFSSize: r.LFSSize, NumFiles: r.NumFiles, NumRepos: r.NumRepos,
+			QuotaBytes: store.EffectiveQuota(override, s.cfg.DefaultStorageQuotaBytes),
 		})
 	}
 	return out

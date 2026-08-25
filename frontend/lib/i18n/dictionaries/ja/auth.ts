@@ -14,6 +14,8 @@ export const auth = {
   submitLogin: "ログイン",
   submitSignup: "アカウントを作成",
   pleaseWait: "お待ちください…",
+  forgotPasswordHint:
+    "パスワードをお忘れですか？サイト管理者にご連絡いただければ再設定いたします。",
   preview: {
     profileLabel: "プロフィール",
     repositoriesLabel: "リポジトリ",

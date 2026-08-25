@@ -170,6 +170,50 @@ const (
 	maxRunNoteBytes = 16384
 )
 
+// runStaleAfter is how long a run stored as "running" may go without an update
+// before this API reports it as apitypes.RunStatusStale.
+//
+// 30 minutes. The number has to sit above the longest gap a *live* run leaves
+// between updates and below the point where "still running" stops being a
+// useful thing to read. The Python shim flushes its buffer on a timer and
+// pings even when a step logged nothing, so a healthy job checks in on the
+// order of seconds; the slowest realistic case is a large-model training loop
+// that only logs once per evaluation, which is minutes, not half an hour.
+// Below ten minutes such a job would flicker into "stale" and back; much above
+// half an hour a crashed job would sit in the list looking alive for most of a
+// working session. Deliberately not configurable: it is a presentation
+// threshold, and a knob here would only make two deployments disagree about
+// what the same row means.
+const runStaleAfter = 30 * time.Minute
+
+// deriveRunStatus is the whole of the stale-run feature: a status is computed
+// on read from the row's own updated_at and never written back, so there is no
+// column, no migration and no sweeper to keep honest, and a run that comes
+// back to life clears the flag simply by logging again (its updated_at moves).
+//
+// Only a "running" row can change. finished and failed are terminal states
+// whose age says nothing -- a job that finished last year is still finished --
+// and an unknown status is passed through rather than reinterpreted.
+//
+// The comparison is strictly greater, so a run whose last update is exactly
+// runStaleAfter old still reads as running: the boundary belongs to the
+// optimistic side, where a job that is merely slow to check in lives.
+func deriveRunStatus(stored string, updatedAt, now time.Time) apitypes.RunStatus {
+	status := apitypes.RunStatus(stored)
+	if status != apitypes.RunStatusRunning {
+		return status
+	}
+	// A row with no timestamp at all (a run recovered from an export that
+	// carried none) cannot be judged, so it keeps what it claims.
+	if updatedAt.IsZero() {
+		return status
+	}
+	if now.Sub(updatedAt) > runStaleAfter {
+		return apitypes.RunStatusStale
+	}
+	return status
+}
+
 // normalizeNote validates a run note. Unlike a tag it may span lines, so only
 // the control characters that are not whitespace are rejected; trailing
 // whitespace is trimmed so "clear the note" is expressible as a blank string.
@@ -487,7 +531,16 @@ func toExpProjects(rows []store.ExpProject) []apitypes.ExpProject {
 //
 // modelsByRun comes from store.ListRunModels and may be nil, which simply
 // leaves every run's Models empty.
+//
+// This is also the one place a run's reported status is decided
+// (deriveRunStatus), and it is the single funnel every endpoint that returns
+// an apitypes.ExpRun goes through -- the listing and the annotation response
+// alike -- so "running" cannot mean one thing on one route and another on the
+// next.
 func toExpRuns(rows []store.ExpRun, modelsByRun map[string][]store.ExpRunModel) []apitypes.ExpRun {
+	// One clock reading for the whole batch, so two runs that were updated at
+	// the same instant cannot land on opposite sides of the threshold.
+	now := time.Now()
 	out := make([]apitypes.ExpRun, 0, len(rows))
 	for _, r := range rows {
 		models := make([]apitypes.ExpRunModelRef, 0, len(modelsByRun[r.Name]))
@@ -507,7 +560,7 @@ func toExpRuns(rows []store.ExpRun, modelsByRun map[string][]store.ExpRunModel) 
 			tags = []string{}
 		}
 		out = append(out, apitypes.ExpRun{
-			Name: r.Name, Status: apitypes.RunStatus(r.Status),
+			Name: r.Name, Status: deriveRunStatus(r.Status, r.UpdatedAt, now),
 			LastStep: r.LastStep, NumPoints: r.NumPoints,
 			StartedAt: r.StartedAt, UpdatedAt: r.UpdatedAt,
 			Config: r.Config, MetricKeys: r.MetricKeys, Summary: summary,

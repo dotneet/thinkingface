@@ -126,3 +126,57 @@ func (f *fixture) mustRepo(t *testing.T, kind, ns, name string) *Repo {
 	}
 	return r
 }
+
+// A repository-scoped webhook is dropped by a transfer because it belonged to
+// the previous owner. A rename inside the same namespace has no previous
+// owner, so the same code path must not treat it as one: renaming used to be
+// reachable only through the transfer form, which is how deleting the
+// subscriptions passed for correct. It is now its own settings action, and
+// silently destroying a repository's webhooks is not what "rename" means.
+func TestIntegrationRenameKeepsRepoScopedWebhooks(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+		aliceNS := f.ns(t, "alice")
+		bobNS := f.ns(t, "bob")
+
+		hooksOf := func(t *testing.T, repoID int64, nsID int64) int {
+			t.Helper()
+			hooks, err := s.ListWebhooksForNamespace(ctx, nsID)
+			if err != nil {
+				t.Fatalf("list webhooks: %v", err)
+			}
+			n := 0
+			for _, h := range hooks {
+				if h.RepoID != nil && *h.RepoID == repoID {
+					n++
+				}
+			}
+			return n
+		}
+
+		renamed := f.repo(t, "alice", "before", "model", nil)
+		if _, err := s.CreateWebhook(ctx, aliceNS.ID, &renamed.ID, "https://example.test/renamed", "s", []string{"repo.push"}, true); err != nil {
+			t.Fatalf("create webhook: %v", err)
+		}
+		if _, err := s.TransferRepo(ctx, TransferSpec{RepoID: renamed.ID, ToNamespaceID: aliceNS.ID, ToName: "after", ActorID: f.alice.ID}); err != nil {
+			t.Fatalf("rename: %v", err)
+		}
+		if got := hooksOf(t, renamed.ID, aliceNS.ID); got != 1 {
+			t.Errorf("after a same-namespace rename: %d repo-scoped webhooks, want 1", got)
+		}
+
+		// The transfer case is the one the deletion was written for, and it
+		// still has to happen: the old owner must stop receiving events.
+		moved := f.repo(t, "alice", "moving", "model", nil)
+		if _, err := s.CreateWebhook(ctx, aliceNS.ID, &moved.ID, "https://example.test/moved", "s", []string{"repo.push"}, true); err != nil {
+			t.Fatalf("create webhook: %v", err)
+		}
+		if _, err := s.TransferRepo(ctx, TransferSpec{RepoID: moved.ID, ToNamespaceID: bobNS.ID, ActorID: f.alice.ID}); err != nil {
+			t.Fatalf("transfer: %v", err)
+		}
+		if got := hooksOf(t, moved.ID, aliceNS.ID); got != 0 {
+			t.Errorf("after a cross-namespace transfer: %d repo-scoped webhooks left behind, want 0", got)
+		}
+	})
+}

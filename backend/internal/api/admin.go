@@ -75,9 +75,14 @@ func (s *Server) requireSiteAdmin(w http.ResponseWriter, r *http.Request, write 
 // not carried across -- apitypes is the wire contract, and nothing on it can
 // be leaked by a later handler that forgets.
 func toAdminUser(u *store.User) apitypes.AdminUser {
+	approval := apitypes.UserApprovalApproved
+	if u.PendingApproval() {
+		approval = apitypes.UserApprovalPending
+	}
 	return apitypes.AdminUser{
 		ID: u.ID, Username: u.Username, Email: u.Email,
 		IsAdmin: u.IsAdmin, Disabled: u.Disabled(), CreatedAt: u.CreatedAt,
+		LastLoginAt: u.LastLoginAt, Approval: approval,
 	}
 }
 
@@ -165,9 +170,11 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAdminUpdateUser answers PATCH /api/v1/admin/users/{username}: reset
-// the password, flip the administrator flag, or both. Absent fields are left
-// alone; a body that sets neither is a 400 rather than a no-op 200, so a
-// misspelled field name cannot look like a successful change.
+// the password, flip the administrator flag, suspend or restore the account,
+// admit it from the sign-up waiting room or send it back -- any of them, or
+// several at once. Absent fields are left alone; a body that sets none is a
+// 400 rather than a no-op 200, so a misspelled field name cannot look like a
+// successful change.
 //
 // Everything that can fail on its own terms -- validation, the target lookup,
 // the self-demotion rule, and the bcrypt hash -- completes before the first
@@ -180,11 +187,12 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	username := chi.URLParam(r, "username")
 	var req apitypes.AdminUserUpdateRequest
-	if !decodeJSON(w, r, maxAuthBody, &req, "request body must be JSON with password, is_admin, or both") {
+	if !decodeJSON(w, r, maxAuthBody, &req,
+		"request body must be JSON with password, is_admin, disabled or approval") {
 		return
 	}
-	if req.Password == nil && req.IsAdmin == nil && req.Disabled == nil {
-		badRequest(w, "request body must set password, is_admin, disabled, or a combination")
+	if req.Password == nil && req.IsAdmin == nil && req.Disabled == nil && req.Approval == nil {
+		badRequest(w, "request body must set password, is_admin, disabled, approval, or a combination")
 		return
 	}
 	if req.Password != nil {
@@ -192,6 +200,14 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 			badRequest(w, err.Error())
 			return
 		}
+	}
+	// Validated before the lookup, with everything else that can refuse on
+	// its own terms: an unrecognised value must not reach the store and be
+	// silently read as one of the two.
+	if req.Approval != nil &&
+		*req.Approval != apitypes.UserApprovalApproved && *req.Approval != apitypes.UserApprovalPending {
+		badRequest(w, `approval must be "approved" or "pending"`)
+		return
 	}
 	target, err := s.store.GetUserByUsername(r.Context(), username)
 	if err != nil {
@@ -223,6 +239,16 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	if req.Disabled != nil && *req.Disabled && target.ID == actor.ID {
 		writeError(w, http.StatusBadRequest, "self_disable",
 			"you cannot disable your own account; ask another administrator to do it")
+		return
+	}
+	// And once more for the waiting room. Putting your own account back into
+	// it revokes the session this request arrived on, exactly as suspending
+	// yourself would, so it is refused for the same reason and with its own
+	// type. The UI leaves the control off your own row.
+	if req.Approval != nil && *req.Approval == apitypes.UserApprovalPending && target.ID == actor.ID {
+		writeError(w, http.StatusBadRequest, "self_pending",
+			"you cannot put your own account back into the sign-up waiting room; "+
+				"ask another administrator to do it")
 		return
 	}
 
@@ -287,6 +313,40 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 			"actor", actor.Username, "actor_id", actor.ID,
 			"username", target.Username, "user_id", target.ID,
 			"disabled", *req.Disabled)
+	}
+
+	// Approval sits with suspension rather than with the password, for the
+	// same reason: it is the other write that can still refuse on its own
+	// terms (ErrLastSiteAdmin), so a logical rejection lands before anything
+	// irreversible. Sending an account back to pending revokes its sessions
+	// inside the same statement.
+	if req.Approval != nil {
+		approved := *req.Approval == apitypes.UserApprovalApproved
+		// An account is being *changed* exactly when the request asks for
+		// the state it is not in. The store no-ops on the other case anyway
+		// (so a retry does not revoke sessions twice); this is only so the
+		// log line does not claim a change that did not happen.
+		changed := approved == target.PendingApproval()
+		if err := s.store.SetUserApproval(r.Context(), target.Username, approved); err != nil {
+			if errors.Is(err, store.ErrLastSiteAdmin) {
+				// The same 409 the two neighbouring branches answer. It is
+				// one rule -- "an instance must keep a usable site
+				// administrator" -- and giving it a different status
+				// depending on which field tripped it would only make a
+				// client guess.
+				writeError(w, http.StatusConflict, "last_admin",
+					"appoint another site administrator before un-approving the last one")
+				return
+			}
+			handleStoreError(w, "update account approval", err)
+			return
+		}
+		if changed {
+			slog.Info("account approval changed",
+				"actor", actor.Username, "actor_id", actor.ID,
+				"username", target.Username, "user_id", target.ID,
+				"approval", string(*req.Approval))
+		}
 	}
 
 	if req.Password != nil {

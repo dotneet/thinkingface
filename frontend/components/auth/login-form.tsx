@@ -135,6 +135,13 @@ export function LoginForm({ next }: { next?: string }) {
           />
         </Field>
 
+        {/* No self-service reset exists on this instance — a forgotten
+            password is an admin-issued forced reset — so this stays a plain
+            hint rather than a link to a page that isn't there. */}
+        {tab === "login" && (
+          <p className="text-xs font-medium text-fg-subtle">{t("auth.forgotPasswordHint")}</p>
+        )}
+
         {tab === "signup" && (
           <p className="flex items-start gap-1.5 text-xs font-medium text-fg-subtle">
             <Lock size={13} className="mt-0.5 shrink-0" aria-hidden="true" />

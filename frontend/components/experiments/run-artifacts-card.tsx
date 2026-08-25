@@ -11,6 +11,7 @@ import {
   Table2,
 } from "lucide-react";
 import Link from "next/link";
+import { LIVE_REFRESH_INTERVAL_MS } from "@/components/experiments/live-refresh";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
@@ -49,11 +50,19 @@ export function RunArtifactsCard({
   repo,
   project,
   runName,
+  live = false,
 }: {
   ns: string;
   repo: string;
   project: string;
   runName: string;
+  /**
+   * The run is still training, so it may still be committing artifacts. The
+   * caller decides this from the run's derived status (see live-refresh.ts);
+   * a finished, failed or stale run never grows a new file, so its listing is
+   * fetched once and left alone.
+   */
+  live?: boolean;
 }) {
   const t = useT();
   const artifacts = useQuery({
@@ -63,6 +72,8 @@ export function RunArtifactsCard({
       if (!result.ok) throw new ApiResultError(result);
       return result.data;
     },
+    refetchInterval: live ? LIVE_REFRESH_INTERVAL_MS : false,
+    refetchIntervalInBackground: false,
   });
 
   if (artifacts.isPending) {

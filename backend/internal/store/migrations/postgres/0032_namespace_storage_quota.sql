@@ -1,0 +1,25 @@
+-- Storage quotas: the ceiling on what one namespace may keep in GCS.
+--
+-- Object storage is billed by the byte and nothing on the upload path ever
+-- looked at how much a namespace was already holding, so a single account
+-- could fill the bucket -- and the bill -- without limit. The usage dashboard
+-- (backend/internal/api/usage.go) could show the number afterwards, which is
+-- the wrong end of the problem.
+--
+-- The quota is per namespace rather than per user or per repository: a
+-- namespace is what both an account and an organisation are (namespace-design
+-- §3), it is what the usage aggregation already groups by, and it is the unit
+-- an operator thinks in when deciding who gets how much.
+--
+-- NULL means "no quota of its own", not "unlimited": the instance-wide
+-- default (TF_DEFAULT_STORAGE_QUOTA_BYTES) applies to those rows, and it is
+-- unlimited only when that is unset. A stored 0 is a real quota of zero
+-- bytes -- an account that may create repositories but upload nothing -- so
+-- the two are deliberately distinguishable, here and all the way out to
+-- PATCH /api/v1/admin/namespaces/{ns}.
+--
+-- Only a site administrator may write this column. An organisation admin
+-- able to raise their own cap would not be a cap, so it is deliberately
+-- absent from the organisation settings API.
+ALTER TABLE namespaces ADD COLUMN IF NOT EXISTS storage_quota_bytes BIGINT
+    CHECK (storage_quota_bytes IS NULL OR storage_quota_bytes >= 0);

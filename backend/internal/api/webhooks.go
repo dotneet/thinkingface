@@ -47,6 +47,7 @@ var validWebhookEvents = map[apitypes.WebhookEvent]bool{
 	apitypes.WebhookEventRepoTransferRequested: true,
 	apitypes.WebhookEventRepoArchived:          true,
 	apitypes.WebhookEventRepoUnarchived:        true,
+	apitypes.WebhookEventRepoRefDeleted:        true,
 	apitypes.WebhookEventRunFinished:           true,
 	apitypes.WebhookEventRunFailed:             true,
 }

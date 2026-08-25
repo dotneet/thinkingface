@@ -225,6 +225,58 @@ export const repo = {
     emptyForPath: "このパスへのコミットはありません",
     empty: "まだコミットがありません",
     browseFiles: "ファイルを見る",
+    viewDiff: "差分を見る",
+  },
+  // コミット差分。additions / deletions は has_patch が true のときしか
+  // 意味を持たないため、パッチが無い 3 つの理由（バイナリ / LFS / サイズ超過）
+  // をそれぞれ言い分ける。
+  diff: {
+    metaTitle: "コミット",
+    backToHistory: "コミット履歴に戻る",
+    browseFiles: "このコミット時点のファイルを見る",
+    copySha: "コミット SHA 全体をコピー",
+    // {oid} は親コミットの短縮 SHA（等幅で表示）。
+    parent: "親コミット {oid}",
+    rootCommit: "最初のコミットです。親が無いため、すべてのファイルが追加として表示されます。",
+    filesChangedOne: "{count} 件のファイルを変更",
+    filesChangedOther: "{count} 件のファイルを変更",
+    additions: "+{count}",
+    additionsTitle: "{count} 行追加",
+    deletions: "−{count}",
+    deletionsTitle: "{count} 行削除",
+    countsPartial:
+      "この合計は下に差分を表示できたファイルの分だけです。バイナリ・LFS・スキップされたファイルの行は数えられていません。",
+    filesTruncatedTitle: "変更された {total} 件のうち {shown} 件を表示しています",
+    filesTruncated:
+      "1 回の応答に載る件数を超えるパスが変更されています。省かれたファイルはここには一切表示されません。コミット全体を見るにはリポジトリを clone してください。",
+    empty: "このコミットはファイルを変更していません",
+    emptyDescription: "第一親との間に差分がありません。",
+    revisionNotFound: "コミットが見つかりません",
+    revisionNotFoundMessage:
+      "このリビジョンはコミットに解決できません。削除されたか、リポジトリにまだコミットが無い可能性があります。",
+    errorHint: "バックエンド API に接続できないか、このコミットが存在しない可能性があります。",
+    status: {
+      added: "追加",
+      modified: "変更",
+      deleted: "削除",
+    },
+    // 行数の代わりに表示する。行数そのものが存在しないため。
+    noPatch: {
+      binary: "バイナリファイルです。テキスト差分は表示できません。",
+      lfs: "Git LFS で保存されています。変わったのはポインタの oid で、内容の差分はここには出ません。",
+      tooLarge: "差分を取るには大きすぎるためスキップされました。行数も数えられていません。",
+      noTextChange:
+        "表示する行がありません。前後とも空のファイルであるか、モードだけが変わっています。",
+      unsupported:
+        "通常のファイルではありません。サブモジュールなどの特別なエントリにテキスト差分はありません。",
+      linesNotCounted: "行数は未計測",
+    },
+    sizeAdded: "{size} を追加",
+    sizeDeleted: "{size} を削除",
+    // {from} と {to} はコミット前後のバイトサイズ。
+    sizeChanged: "{from} → {to}",
+    patchEmpty: "このファイルに表示できる行の変更はありません。",
+    patchTruncated: "このパッチは途中で打ち切られています。以降の変更は表示されていません。",
   },
   blob: {
     fileNotFound: "ツリー一覧にファイルが見つかりません。",
@@ -358,6 +410,17 @@ export const repo = {
     deleting: "削除中…",
     cancel: "キャンセル",
   },
+  renameFile: {
+    action: "リネーム",
+    title: "ファイルのリネーム・移動",
+    body: "{file} を {rev} 上の 1 コミットで新しいパスへ移動します。それ以前のコミットには元の場所のまま残ります。",
+    pathLabel: "新しいパス",
+    pathHint:
+      "リポジトリルートからのフルパスです。末尾だけを変えるとリネーム、それ以外を変えると別ディレクトリへの移動になります。",
+    confirm: "リネームする",
+    renaming: "リネーム中…",
+    cancel: "キャンセル",
+  },
   editor: {
     conflict:
       "編集中にこのファイルが変更されました。ページを再読み込みして変更を適用し直してください — 現在の編集内容はそのまま残っています。",
@@ -415,6 +478,32 @@ export const repo = {
         nameInvalid: "その名前は使用できません。",
         nameGitSuffix: "リポジトリ名の末尾に「.git」は使用できません。",
       },
+    },
+    rename: {
+      title: "リポジトリのリネーム",
+      description:
+        "所有者を変えずにリポジトリ名だけを変更します。移管と同じくリダイレクトが残るため、以前の名前の URL も引き続き解決されます。",
+      label: "リポジトリ名",
+      hint: "英数字・ドット・ハイフン・アンダースコアが使えます（先頭は英数字）。",
+      save: "リネームする",
+      saving: "リネーム中…",
+      blockedByArchive: "リネームするには先にアーカイブを解除してください。",
+      errors: {
+        nameInvalid: "その名前は使用できません。",
+        nameGitSuffix: "リポジトリ名の末尾に「.git」は使用できません。",
+      },
+    },
+    description: {
+      title: "説明",
+      description: "一覧やリポジトリ画面の先頭に表示される 1 行の説明です。",
+      label: "説明",
+      placeholder: "このリポジトリの内容",
+      cardNote:
+        "README のカードに description があるとそちらが優先され、push のたびにこの内容を上書きします。この欄はカードに description が無い場合の説明になります。",
+      save: "保存",
+      saving: "保存中…",
+      saved: "説明を更新しました。",
+      blockedByArchive: "説明を変更するには先にアーカイブを解除してください。",
     },
     defaultBranch: {
       hint: "すでにデフォルトになっているブランチを保存すると、そのブランチのインデックスを再作成します。",

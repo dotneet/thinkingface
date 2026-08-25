@@ -238,6 +238,62 @@ export const repo = {
     emptyForPath: "No commits for this path",
     empty: "No commits yet",
     browseFiles: "Browse files",
+    viewDiff: "View diff",
+  },
+  // Commit diff: what one commit changed against its first parent.
+  //
+  // Most of this group exists because the response's numbers are only
+  // sometimes numbers. `additions` / `deletions` mean nothing unless the file
+  // has a patch, and the three reasons it may not have one (binary, LFS,
+  // skipped for size) each need saying — printing "+0 −0" for any of them
+  // would state that nothing changed (DESIGN.md §9,
+  // docs/dev/api-contract.md §2).
+  diff: {
+    metaTitle: "Commit",
+    backToHistory: "Back to commit history",
+    browseFiles: "Browse files at this commit",
+    copySha: "Copy the full commit SHA",
+    // {oid} is the abbreviated parent SHA (shown in monospace).
+    parent: "Parent {oid}",
+    rootCommit: "Root commit — it has no parent, so every file reads as added.",
+    filesChangedOne: "{count} file changed",
+    filesChangedOther: "{count} files changed",
+    additions: "+{count}",
+    additionsTitle: "{count} lines added",
+    deletions: "−{count}",
+    deletionsTitle: "{count} lines removed",
+    countsPartial:
+      "These totals only cover the files with a text diff below — binary, LFS and skipped files were never counted.",
+    filesTruncatedTitle: "Showing {shown} of {total} changed files",
+    filesTruncated:
+      "This commit touched more paths than one response lists. The files left out are not shown here at all; clone the repository to see the whole commit.",
+    empty: "This commit changed no files",
+    emptyDescription: "Nothing differs between it and its first parent.",
+    revisionNotFound: "No commit here",
+    revisionNotFoundMessage:
+      "This revision doesn't resolve to a commit — it may have been deleted, or the repository may have no commits yet.",
+    errorHint: "The backend API may be unreachable, or this commit doesn't exist.",
+    status: {
+      added: "added",
+      modified: "modified",
+      deleted: "deleted",
+    },
+    // Shown instead of a line count, because there is no line count.
+    noPatch: {
+      binary: "Binary file — there is no text diff to show.",
+      lfs: "Stored with Git LFS — the pointer's oid changed; the contents are not diffed here.",
+      tooLarge: "Too large to diff — the patch was skipped, so its lines were not counted.",
+      noTextChange: "No lines to show — the file is empty on both sides, or only its mode changed.",
+      unsupported: "Not a regular file — a submodule or a special entry has no text diff.",
+      linesNotCounted: "lines not counted",
+    },
+    sizeAdded: "{size} added",
+    sizeDeleted: "{size} removed",
+    // {from} and {to} are byte sizes on either side of the commit.
+    sizeChanged: "{from} → {to}",
+    patchEmpty: "No line changes to show for this file.",
+    patchTruncated:
+      "This patch was cut off mid-diff — the rest of this file's changes are not shown.",
   },
   blob: {
     fileNotFound: "File not found in tree listing.",
@@ -380,6 +436,17 @@ export const repo = {
     deleting: "Deleting…",
     cancel: "Cancel",
   },
+  renameFile: {
+    action: "Rename",
+    title: "Rename or move this file",
+    body: "{file} will move to its new path in a single commit on {rev}. Earlier commits still show it where it was.",
+    pathLabel: "New path",
+    pathHint:
+      "The full path from the repository root. Change the last part to rename the file, the rest to move it into another directory.",
+    confirm: "Rename file",
+    renaming: "Renaming…",
+    cancel: "Cancel",
+  },
   editor: {
     conflict:
       "This file changed while you were editing. Reload the page and reapply your changes — your edit is still here in the meantime.",
@@ -436,6 +503,32 @@ export const repo = {
         nameInvalid: "That name isn't valid.",
         nameGitSuffix: 'A repository name can\'t end in ".git".',
       },
+    },
+    rename: {
+      title: "Rename repository",
+      description:
+        "Change this repository's name without changing who owns it. The old name keeps working: a redirect is left behind, exactly as a transfer leaves one.",
+      label: "Repository name",
+      hint: "Letters, digits, dot, dash and underscore, starting with a letter or digit.",
+      save: "Rename",
+      saving: "Renaming…",
+      blockedByArchive: "Unarchive this repository before renaming it.",
+      errors: {
+        nameInvalid: "That name isn't valid.",
+        nameGitSuffix: 'A repository name can\'t end in ".git".',
+      },
+    },
+    description: {
+      title: "Description",
+      description: "The one line shown in listings and at the top of this repository.",
+      label: "Description",
+      placeholder: "What is in this repository?",
+      cardNote:
+        "If the README's card carries a description, that one wins and replaces this on every push. This field is what a repository with no card description has instead.",
+      save: "Save",
+      saving: "Saving…",
+      saved: "Description updated.",
+      blockedByArchive: "Unarchive this repository before changing its description.",
     },
     defaultBranch: {
       hint: "Saving the branch that is already the default re-runs indexing for it.",

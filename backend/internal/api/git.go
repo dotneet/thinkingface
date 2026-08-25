@@ -108,14 +108,43 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, kind 
 		return
 	}
 	// The response is already written, so failures here can only be logged.
-	ctx := context.WithoutCancel(r.Context())
+	s.schedulePostPush(context.WithoutCancel(r.Context()), repo, before, after, "push")
+}
+
+// schedulePostPush turns one push's before/after branch tips into the two
+// kinds of follow-up work a push creates: a sync job for every branch it moved
+// or created, and a repo.ref_deleted webhook for every branch it removed.
+//
+// Both transports go through it -- HTTP above and SSH in gitssh.go -- because
+// they had already been drifting apart in comments while running identical
+// loops, and a push that lands over SSH has to reach subscribers exactly as an
+// HTTP one does.
+//
+// The deletion half is what a loop over `after` structurally cannot see: a
+// branch that is gone is absent from `after`, so scanning it announced every
+// case except the one a mirror most needs to hear about. `before` is where a
+// deleted branch still exists.
+//
+// Only branches, because that is all HeadsAfterPush lists: `git push --delete
+// v1.0` on a *tag* is invisible from here and stays invisible. The API's tag
+// delete (handleHFDeleteTag) is what announces those, and the same blind spot
+// already governs the sync side -- a pushed tag schedules no job either.
+//
+// what names the transport in the log line ("push" / "ssh push").
+func (s *Server) schedulePostPush(ctx context.Context, repo *store.Repo, before, after map[string]string, what string) {
 	for branch, newSHA := range after {
 		if before[branch] == newSHA {
 			continue
 		}
 		if err := s.sync.Enqueue(ctx, repo.ID, branch, before[branch], newSHA); err != nil {
-			slog.Error("schedule sync after push", "repo", repo.FullName(), "branch", branch, "error", err)
+			slog.Error("schedule sync after "+what, "repo", repo.FullName(), "branch", branch, "error", err)
 		}
+	}
+	for branch, oldSHA := range before {
+		if _, kept := after[branch]; kept {
+			continue
+		}
+		s.fireRefDeleted(ctx, repo, "branch", branch, oldSHA)
 	}
 }
 

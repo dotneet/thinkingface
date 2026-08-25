@@ -12,6 +12,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 
+	"github.com/dotneet/thinkingface/backend/internal/apitypes"
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
@@ -211,6 +213,36 @@ func (s *Server) revisionOrEmpty(w http.ResponseWriter, gitRepo *gitrepo.Repo, r
 	return plumbing.ZeroHash, false, false
 }
 
+// fireRefDeleted announces a branch or tag that is no longer there.
+//
+// Creation and movement already reach subscribers as repo.push -- the sync job
+// every write path schedules fires it -- but deletion reached nobody, from
+// either direction: `git push --delete` was silent because handleReceivePack
+// only looks at the branches present *after* a push, and the API deletes were
+// silent because they schedule no sync job at all. A subscriber mirroring this
+// instance therefore watched refs appear and never watched them go away, which
+// is worse than not knowing: it leaves a ref in the mirror that the source
+// says nothing more about.
+//
+// The payload deliberately mirrors the one syncer.processPush builds for
+// repo.push, so a subscriber parses one shape for both. new_sha is empty
+// because there is no new value -- that is what "deleted" means here -- and
+// ref_type is what tells a branch from a tag, since one short name can be
+// both at once.
+//
+// No sync job goes with it, and that asymmetry with creation is deliberate:
+// the file index rows for a deleted ref are already unreachable (every read
+// resolves the revision in git first, and it no longer resolves) and are
+// dropped with the repository, so there is nothing left to re-index. Only
+// something to announce.
+func (s *Server) fireRefDeleted(ctx context.Context, repo *store.Repo, refType, name, oldSHA string) {
+	s.fireWebhook(ctx, string(apitypes.WebhookEventRepoRefDeleted), repo.Namespace, &repo.ID, map[string]any{
+		"namespace": repo.Namespace, "repo": repo.Name,
+		"full_name": repo.FullName(), "kind": repo.Kind,
+		"ref": name, "ref_type": refType, "old_sha": oldSHA, "new_sha": "",
+	})
+}
+
 // ------------------------------------------------------------------ branches
 
 // handleHFCreateBranch answers POST /api/{type}s/{ns}/{name}/branch/{branch}
@@ -306,6 +338,10 @@ func (s *Server) handleHFDeleteBranch(w http.ResponseWriter, r *http.Request) {
 	// resolves) and are dropped with the repository. This is what
 	// `git push --delete` already does -- handleReceivePack only enqueues for
 	// branches present *after* the push.
+	//
+	// A webhook, though: nothing to re-index is not the same as nothing to
+	// announce, and the sync job is what used to carry the announcement.
+	s.fireRefDeleted(r.Context(), repo, "branch", branch, old.String())
 	writeJSON(w, http.StatusOK, hfRefResult{
 		Name: branch, Ref: gitrepo.BranchRef(branch), Target: old.String(),
 	})
@@ -394,6 +430,11 @@ func (s *Server) handleHFDeleteTag(w http.ResponseWriter, r *http.Request) {
 		writeRefError(w, "tag", tag, err)
 		return
 	}
+	// Creating a tag schedules nothing (see handleHFCreateTag) and so
+	// announced nothing; removing one has to be announced anyway, because a
+	// tag disappearing is the whole event -- there is no later push that will
+	// tell a subscriber about it.
+	s.fireRefDeleted(r.Context(), repo, "tag", tag, old.String())
 	writeJSON(w, http.StatusOK, hfRefResult{
 		Name: tag, Ref: gitrepo.TagRef(tag), Target: old.String(),
 	})

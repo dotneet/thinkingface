@@ -12,7 +12,7 @@ import { TimeText } from "@/components/ui/time-text";
 import { isNotFound } from "@/lib/api";
 import { errorMessage } from "@/lib/api-error-message";
 import { getT } from "@/lib/i18n/server";
-import { repoCommitsHref, repoTreeHref } from "@/lib/paths";
+import { repoCommitHref, repoCommitsHref, repoTreeHref } from "@/lib/paths";
 import { redirectIfRepoMoved } from "@/lib/repo-redirect";
 import { getCommits, getRefs, getRepo } from "@/lib/repos";
 import { authHeaders } from "@/lib/server-auth";
@@ -142,7 +142,15 @@ export async function RepoCommits({
               <div key={commit.oid} className="flex items-center gap-3 px-4 py-3 text-sm">
                 <GitCommitVertical size={16} className="shrink-0 text-fg-subtle" />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-fg">{commit.message}</p>
+                  {/* The row's primary target: a commit message that reads
+                      like a claim about what changed should be the thing that
+                      opens the change. */}
+                  <Link
+                    href={repoCommitHref(kind, ns, name, commit.oid)}
+                    className="block truncate text-fg hover:underline"
+                  >
+                    {commit.message}
+                  </Link>
                   <p className="truncate text-xs font-medium text-fg-subtle">{commit.author}</p>
                 </div>
                 <TimeText
@@ -150,9 +158,13 @@ export async function RepoCommits({
                   style="relative"
                   className="shrink-0 text-xs font-medium text-fg-subtle"
                 />
-                <span className="shrink-0 font-mono text-xs font-medium text-fg-subtle">
+                <Link
+                  href={repoCommitHref(kind, ns, name, commit.oid)}
+                  title={t("repo.commits.viewDiff")}
+                  className="shrink-0 font-mono text-xs font-medium text-accent hover:underline"
+                >
                   {commit.oid.slice(0, 7)}
-                </span>
+                </Link>
                 <Link
                   href={repoTreeHref(kind, ns, name, commit.oid)}
                   className="shrink-0 text-xs font-medium text-accent hover:underline"

@@ -129,6 +129,9 @@ export const settings = {
     emptyTitle: "No storage usage yet",
     emptyDescription:
       "Upload files to a repository in one of your namespaces to see LFS storage here.",
+    quota: "Quota",
+    quotaUnlimited: "Unlimited",
+    quotaExceeded: "Over quota — new large-file uploads are refused",
     lfsStorage: "LFS storage",
     files: "Files",
     repositories: "Repositories",
@@ -209,6 +212,10 @@ export const settings = {
     repoUnarchived: {
       label: "Repository unarchived",
       hint: "A repository's read-only archive was lifted",
+    },
+    repoRefDeleted: {
+      label: "Branch or tag deleted",
+      hint: "A branch or tag was removed; creation and updates arrive as repo.push",
     },
     runFinished: { label: "Run finished", hint: "An experiment run completed" },
     runFailed: { label: "Run failed", hint: "An experiment run failed" },
@@ -315,6 +322,7 @@ export const settings = {
     colUsername: "Username",
     colEmail: "Email",
     colCreated: "Created",
+    colLastLogin: "Last login",
     colActions: "Actions",
     adminBadge: "Admin",
     you: "you",
@@ -372,6 +380,24 @@ export const settings = {
     restoreConfirm: "Restore account",
     suspendDone: "{username} was suspended.",
     restoreDone: "{username} was restored.",
+    // Only ever moved by a password sign-in. An access token and an SSH key
+    // each carry their own last-used date, so an account whose automation
+    // runs nightly can still be dormant here — which is the question this
+    // column answers.
+    neverLoggedIn: "Never",
+    pendingBadge: "Awaiting approval",
+    pendingNoticeOne:
+      "{count} account is waiting for approval. Until it is approved it cannot sign in, push, or use an access token.",
+    pendingNoticeOther:
+      "{count} accounts are waiting for approval. Until they are approved they cannot sign in, push, or use an access token.",
+    approve: "Approve",
+    approveDone: "{username} was approved and can now sign in.",
+    hold: "Hold for approval",
+    holdTitle: "Put {username} back in the waiting room?",
+    holdDescription:
+      "{username} is signed out everywhere immediately and stops being able to sign in, push over SSH, or use any access token, until you approve them again. Nothing is deleted.",
+    holdConfirm: "Hold for approval",
+    holdDone: "{username} was put back in the waiting room.",
     revokeTitle: "Revoke {username}'s credentials?",
     revokeDescription:
       "Permanently deletes every access token and SSH key {username} holds and signs them out everywhere. This cannot be undone, and it does not suspend the account — they can sign in with their password and issue new ones.",
@@ -391,6 +417,8 @@ export const settings = {
       selfDemote:
         "You can't revoke your own administrator access. Ask another administrator to do it.",
       selfDisable: "You can't suspend your own account. Ask another administrator to do it.",
+      selfPending:
+        "You can't put your own account back in the waiting room. Ask another administrator to do it.",
       selfRevoke:
         "Revoke your own tokens and SSH keys from Settings → Access tokens and Settings → SSH keys.",
       sessionRequired: "Your session has expired. Sign in again to continue.",
@@ -431,6 +459,51 @@ export const settings = {
       "The sync queue covers every repository on the instance, so it's restricted to site administrators.",
     errors: {
       jobGone: "That job is no longer failed — someone may have retried it already.",
+    },
+  },
+  adminQuotas: {
+    navLabel: "Storage quotas",
+    title: "Storage quotas",
+    description:
+      "How much object storage each namespace holds, and the ceiling it is held to. A quota is checked when LFS objects are uploaded, so lowering one refuses the next upload — it never deletes anything.",
+    defaultQuota: "Instance default: {quota}",
+    defaultQuotaUnlimited: "Instance default: unlimited",
+    defaultQuotaNote:
+      "Namespaces without a quota of their own are held to the instance default, which is set with TF_DEFAULT_STORAGE_QUOTA_BYTES and changes only on a redeploy.",
+    countOne: "{count} namespace",
+    countOther: "{count} namespaces",
+    searchPlaceholder: "Search namespaces",
+    refresh: "Refresh",
+    colNamespace: "Namespace",
+    colKind: "Kind",
+    colRepos: "Repositories",
+    colUsed: "Used",
+    colQuota: "Quota",
+    colActions: "Actions",
+    kindUser: "Account",
+    kindOrg: "Organization",
+    unlimited: "Unlimited",
+    inherited: "Instance default",
+    overQuota: "Over quota",
+    edit: "Set quota",
+    quotaLabel: "Quota in bytes",
+    quotaHint:
+      "Leave the field empty to fall back to the instance default. 0 is a quota of zero bytes, which refuses every upload — the two are not the same thing.",
+    quotaInvalid: "Enter a whole number of bytes that isn't negative, or leave the field empty.",
+    save: "Save",
+    saving: "Saving…",
+    cancel: "Cancel",
+    saved: "{namespace} is now limited to {quota}.",
+    cleared: "{namespace} is back on the instance default.",
+    loadFailed: "Failed to load namespaces",
+    loadFailedHint: "The backend API may be unreachable. Try reloading the page.",
+    emptyTitle: "No namespaces found",
+    emptyDescription: "No namespace on this instance matches that search.",
+    accessDeniedTitle: "Site administrators only",
+    accessDeniedMessage:
+      "A quota its holder could raise wouldn't be a quota, so storage limits are set by site administrators rather than from an organization's own settings.",
+    errors: {
+      namespaceGone: "That namespace no longer exists.",
     },
   },
 };

@@ -65,25 +65,31 @@ func (s *Server) identify(next http.Handler) http.Handler {
 	})
 }
 
-// resolveIdentity is resolveCredential plus the one rule that applies to
-// every credential this server accepts: a suspended account authenticates as
-// nobody.
+// resolveIdentity is resolveCredential plus the rules that apply to every
+// credential this server accepts: an account that is suspended, or that has
+// never been let in, authenticates as nobody.
 //
 // The check is here, at the single exit of credential resolution, rather than
 // in each of the four branches below. That is the whole point -- the audit
 // finding this closes was that an administrator had no offboarding switch at
 // all, and the way such a switch usually fails is by covering three of the
-// four ways in. The two identity paths that do not pass through here are the
-// SSH public key (refused in store.LookupSSHKey, since internal/sshserver
-// authenticates before any of this package runs) and handleLogin's own
-// checkPassword call (which answers passwordDisabled).
+// four ways in. Sign-up approval is the same shape of rule, so it is enforced
+// at the same spot rather than at a new one of its own. The two identity
+// paths that do not pass through here are the SSH public key (refused in
+// store.LookupSSHKey, since internal/sshserver authenticates before any of
+// this package runs) and handleLogin's own checkPassword call (which answers
+// passwordDisabled / passwordPending).
 func (s *Server) resolveIdentity(r *http.Request) (*store.User, string, authMethod) {
 	user, scope, method := s.resolveCredential(r)
-	if user.Disabled() {
-		// Warn rather than Info: a credential for a suspended account is
-		// still being presented, which is worth seeing in a log even though
-		// the request simply proceeds as anonymous.
-		slog.Warn("authentication refused: account is disabled",
+	if user.Blocked() {
+		// Warn rather than Info: a credential for a barred account is still
+		// being presented, which is worth seeing in a log even though the
+		// request simply proceeds as anonymous.
+		reason := "account is disabled"
+		if user.PendingApproval() {
+			reason = "account is waiting for approval"
+		}
+		slog.Warn("authentication refused: "+reason,
 			"username", user.Username, "user_id", user.ID,
 			"auth", string(method), "client_ip", s.clientIP(r),
 			"path", r.URL.Path)
@@ -117,7 +123,7 @@ func (s *Server) resolveCredential(r *http.Request) (*store.User, string, authMe
 			switch outcome {
 			case passwordOK:
 				return u, "write", authPassword
-			case passwordDisabled:
+			case passwordDisabled, passwordPending:
 				// Carried out so resolveIdentity can log it by name; the
 				// gate there is what turns it into an anonymous request.
 				return u, "", authPassword
@@ -166,6 +172,14 @@ const (
 	// would only make the account harder to restore later. The user is
 	// returned alongside it so the caller can name them in a log line.
 	passwordDisabled
+	// passwordPending means the password was right and the account has never
+	// been admitted -- it registered while TF_SIGNUP_REQUIRE_APPROVAL was on
+	// and no site administrator has approved it yet. Separate from
+	// passwordDisabled because the two are different sentences to the person
+	// waiting: "ask an administrator to restore your account" is wrong advice
+	// for somebody who signed up ten minutes ago. It carries no penalty
+	// either, for passwordDisabled's reason.
+	passwordPending
 )
 
 func (s *Server) checkPassword(ctx context.Context, username, password string) (*store.User, passwordOutcome) {
@@ -188,11 +202,14 @@ func (s *Server) checkPassword(ctx context.Context, username, password string) (
 		return nil, passwordWrong
 	}
 	s.authGuard.reset(usernameKey(username))
-	// The suspension check sits *after* the comparison rather than before it,
-	// so a disabled account takes exactly as long to answer as an active one
-	// and the two are not distinguishable by timing.
+	// The two account gates sit *after* the comparison rather than before it,
+	// so a barred account takes exactly as long to answer as an active one
+	// and they are not distinguishable by timing.
 	if user.Disabled() {
 		return user, passwordDisabled
+	}
+	if user.PendingApproval() {
+		return user, passwordPending
 	}
 	return user, passwordOK
 }
@@ -477,9 +494,29 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "account_disabled",
 			"this account has been disabled; ask a site administrator to restore it")
 		return
+	case passwordPending:
+		// Like account_disabled, only reachable with the *correct* password,
+		// so it enumerates nothing -- and it is the one answer that stops
+		// somebody who registered an hour ago from concluding they mistyped
+		// their own password and going round the reset loop.
+		slog.Info("login refused: account is waiting for approval",
+			"username", user.Username, "user_id", user.ID, "client_ip", clientIP)
+		writeError(w, http.StatusForbidden, "account_pending",
+			"this account is waiting for a site administrator to approve it; "+
+				"you will be able to sign in once it has been approved")
+		return
 	}
 	s.authGuard.reset(addrKey)
 	s.setSessionCookie(w, user)
+	// The one write that moves users.last_login_at. It is deliberately here
+	// and not in setSessionCookie: that helper also re-issues a cookie after
+	// a password change, which is not a sign-in and must not look like one.
+	// Best effort -- a dormancy timestamp is not worth failing a sign-in for
+	// -- and synchronous, because it is one UPDATE next to a bcrypt compare.
+	if err := s.store.TouchUserLogin(r.Context(), user.ID); err != nil {
+		slog.Warn("could not record last login", "username", user.Username,
+			"user_id", user.ID, "error", err)
+	}
 	slog.Info("login succeeded", "username", user.Username, "user_id", user.ID, "client_ip", clientIP)
 	writeJSON(w, http.StatusOK, apitypes.UserResponse{User: s.userResponse(r.Context(), user)})
 }
@@ -511,13 +548,52 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "email: "+err.Error())
 		return
 	}
-	// Signup mints an account and a session, so it is as much an
+	// The domain allow list is checked here, after the syntax, so a malformed
+	// address is still answered as malformed rather than as "wrong company".
+	// It is a bad_request with the accepted domains named: an instance that
+	// publishes a sign-up form and then refuses an address without saying
+	// which addresses it wants is a form nobody can fill in, and the list is
+	// not a secret -- it is the deployment's own domain.
+	if err := checkSignupEmailDomain(s.cfg.SignupEmailDomains, req.Email); err != nil {
+		badRequest(w, "email: "+err.Error())
+		return
+	}
+	// Signup mints an account and (usually) a session, so it is as much an
 	// unauthenticated bcrypt trigger as login is.
 	addrKey := s.clientAddrKey(r)
 	hash, ok := s.hashNewPassword(w, r, req.Password)
 	if !ok {
 		return
 	}
+
+	if s.cfg.SignupRequireApproval {
+		user, err := s.store.CreatePendingUser(r.Context(), req.Username, req.Email, hash)
+		if err != nil {
+			s.authGuard.penalize(addrKey)
+			handleStoreError(w, "create user", err)
+			return
+		}
+		slog.Info("sign-up is waiting for approval",
+			"username", user.Username, "user_id", user.ID, "client_ip", s.clientIP(r))
+		// No session cookie: the account authenticates on no path until it is
+		// approved, and handing out a cookie it cannot use would only produce
+		// a browser that looks signed in and 401s on its first click.
+		//
+		// The answer is error-shaped even though the account was created,
+		// because the *outcome the caller asked for* -- being signed in --
+		// did not happen, and this response is the only place the person will
+		// ever be told why. A 2xx would send the web UI's sign-up form
+		// straight to its redirect and leave them looking at a signed-out
+		// home page with no explanation, which is how somebody ends up
+		// registering twice and being told their own username is taken.
+		// 403 rather than 202 for the same reason: every client this server
+		// has treats 2xx as "and now you are signed in".
+		writeError(w, http.StatusForbidden, "approval_pending",
+			"your account was created and is waiting for a site administrator to approve it; "+
+				"you will be able to sign in once it has been approved")
+		return
+	}
+
 	user, err := s.store.CreateUser(r.Context(), req.Username, req.Email, hash, false)
 	if err != nil {
 		s.authGuard.penalize(addrKey)
@@ -526,6 +602,40 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setSessionCookie(w, user)
 	writeJSON(w, http.StatusOK, apitypes.UserResponse{User: s.userResponse(r.Context(), user)})
+}
+
+// checkSignupEmailDomain applies TF_SIGNUP_EMAIL_DOMAINS. An empty list is no
+// restriction at all, which is the default and the only behaviour that
+// existed before it.
+//
+// The match is exact on the part after the last "@", compared lower-cased:
+// domains are case-insensitive, and "Alice@EXAMPLE.com" is the same address
+// as "alice@example.com". A subdomain does **not** match its parent --
+// alice@sub.example.com is refused by a list of "example.com" -- because the
+// permissive reading admits anybody who controls any subdomain of yours, and
+// a list is the wrong place to discover that. List the subdomain if it should
+// be allowed.
+//
+// The caller has already run validateEmail, so the address has exactly the
+// shape this relies on.
+func checkSignupEmailDomain(allowed []string, email string) error {
+	if len(allowed) == 0 {
+		return nil
+	}
+	at := strings.LastIndex(email, "@")
+	if at < 0 {
+		return errors.New("must look like an email address")
+	}
+	domain := strings.ToLower(email[at+1:])
+	for _, d := range allowed {
+		// The configured entries are already lower-cased by
+		// config.parseSignupEmailDomains, so this stays a plain equality.
+		if domain == d {
+			return nil
+		}
+	}
+	return fmt.Errorf("sign-up on this instance is limited to these email domains: %s",
+		strings.Join(allowed, ", "))
 }
 
 // minPasswordBytes is the shortest password this instance accepts. It is

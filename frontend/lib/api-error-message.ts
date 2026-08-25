@@ -22,6 +22,13 @@ const ERROR_TYPE_KEYS: Record<string, MessageKey> = {
   transfer_not_pending: "errors.transferNotPending",
   method_not_allowed: "errors.methodNotAllowed",
   xet_not_supported: "errors.xetNotSupported",
+  account_disabled: "errors.accountDisabled",
+  // Two states, two sentences: approval_pending answers the sign-up that
+  // just created the account, account_pending answers a later sign-in by
+  // one still waiting. Telling somebody "your account is being reviewed"
+  // when they have not registered yet reads as a bug.
+  approval_pending: "errors.approvalPending",
+  account_pending: "errors.accountPending",
   rate_limited: "errors.rateLimited",
   overloaded: "errors.overloaded",
 };

@@ -71,6 +71,15 @@ type Config struct {
 	// pushes that grace period out too.
 	SignedURLMaxTTL time.Duration
 
+	// DefaultStorageQuotaBytes is the storage ceiling applied to every
+	// namespace that carries no override of its own
+	// (namespaces.storage_quota_bytes). Zero -- the default -- means
+	// unlimited, which is what an instance that never configures this gets,
+	// so enabling quotas is opt-in and no existing deployment starts
+	// refusing uploads on an upgrade. It is enforced on the LFS upload path,
+	// where the bytes actually reach the bucket.
+	DefaultStorageQuotaBytes int64
+
 	// Seed values applied on first boot when the users table is empty.
 	AdminUsername string
 	AdminPassword string
@@ -89,6 +98,30 @@ type Config struct {
 	ViewerCacheDir string
 	SyncWorkers    int
 	AllowSignup    bool
+	// SignupEmailDomains restricts self-service sign-up to these email
+	// domains (TF_SIGNUP_EMAIL_DOMAINS, comma separated). Empty means no
+	// restriction, which is the default.
+	//
+	// Entries are stored lower-cased and matched **exactly**: "example.com"
+	// admits alice@example.com and refuses alice@sub.example.com. Letting a
+	// domain imply its subdomains is the sort of surprise that only shows up
+	// as an unwanted account -- anybody who controls a subdomain of yours
+	// would be admitted -- so a subdomain that should be allowed is listed
+	// on its own.
+	//
+	// It applies to POST /api/v1/auth/signup only. An administrator adding
+	// an account at POST /api/v1/admin/users is a deliberate act by somebody
+	// already trusted, and gating that on the list would make it another
+	// one-way door -- the same reason TF_ALLOW_SIGNUP is not consulted there.
+	SignupEmailDomains []string
+	// SignupRequireApproval puts every self-registration in a waiting room:
+	// the account is created with users.approval_pending_at set, no session
+	// is issued, and it authenticates on no path at all until a site
+	// administrator approves it at PATCH /api/v1/admin/users/{username}.
+	//
+	// It is orthogonal to SignupEmailDomains: the domain list decides who
+	// may register, this decides whether registering is enough.
+	SignupRequireApproval bool
 
 	// SessionTTL bounds how long an issued tf_session cookie stays valid.
 	// It is also the blast radius of a stolen cookie that is never noticed,
@@ -172,6 +205,7 @@ func Load() (*Config, error) {
 		ViewerMetadataCacheBytes: e.int64("TF_VIEWER_METADATA_CACHE_BYTES", 256<<20),
 		SignedURLTTL:             e.duration("TF_SIGNED_URL_TTL", time.Hour),
 		SignedURLMaxTTL:          e.duration("TF_SIGNED_URL_MAX_TTL", 12*time.Hour),
+		DefaultStorageQuotaBytes: e.int64("TF_DEFAULT_STORAGE_QUOTA_BYTES", 0),
 		AdminUsername:            env("TF_ADMIN_USERNAME", "admin"),
 		AdminPassword:            env("TF_ADMIN_PASSWORD", DefaultAdminPassword),
 		AdminEmail:               env("TF_ADMIN_EMAIL", "admin@example.com"),
@@ -181,6 +215,8 @@ func Load() (*Config, error) {
 		ViewerCacheDir:           env("TF_VIEWER_CACHE_DIR", "/data/cache"),
 		SyncWorkers:              e.int("TF_SYNC_WORKERS", 2),
 		AllowSignup:              e.bool("TF_ALLOW_SIGNUP", true),
+		SignupEmailDomains:       parseSignupEmailDomains(env("TF_SIGNUP_EMAIL_DOMAINS", "")),
+		SignupRequireApproval:    e.bool("TF_SIGNUP_REQUIRE_APPROVAL", false),
 		ExpFlushInterval:         e.duration("TF_EXP_FLUSH_INTERVAL", time.Minute),
 
 		SSHEnabled:     e.bool("TF_SSH_ENABLED", false),
@@ -220,6 +256,12 @@ func Load() (*Config, error) {
 	}
 	if c.StorageDriver == "gcs-emulator" && c.EmulatorHost == "" {
 		return nil, fmt.Errorf("STORAGE_EMULATOR_HOST is required when STORAGE_DRIVER=gcs-emulator")
+	}
+	// A negative default would be a quota nothing could satisfy, which is not
+	// what anybody means by it -- "no limit" is spelled 0, and zero bytes is
+	// spelled 0 on a namespace's own override, never here.
+	if c.DefaultStorageQuotaBytes < 0 {
+		return nil, fmt.Errorf("TF_DEFAULT_STORAGE_QUOTA_BYTES must not be negative, got %d", c.DefaultStorageQuotaBytes)
 	}
 	switch c.WALMode {
 	case "off", "shadow", "authoritative":
@@ -437,4 +479,23 @@ func isLoopbackURL(raw string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// parseSignupEmailDomains splits TF_SIGNUP_EMAIL_DOMAINS into the allow list
+// SignupEmailDomains holds. Blank entries are dropped (so a trailing comma is
+// harmless), a leading "@" is tolerated because "@example.com" is what people
+// type, and every entry is lower-cased here rather than at every comparison
+// -- domains are case-insensitive, and normalising once is what keeps the
+// comparison a plain string equality.
+//
+// Nil for an empty value, which is what "no restriction" is spelled as.
+func parseSignupEmailDomains(raw string) []string {
+	var out []string
+	for _, d := range strings.Split(raw, ",") {
+		d = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(d), "@"))
+		if d != "" {
+			out = append(out, d)
+		}
+	}
+	return out
 }

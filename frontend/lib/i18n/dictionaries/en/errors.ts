@@ -24,6 +24,10 @@ export const errors = {
   transferNotPending: "This transfer is no longer pending.",
   methodNotAllowed: "This action isn't supported here.",
   xetNotSupported: "This operation isn't supported for Xet-backed files.",
+  accountDisabled: "This account has been disabled. Contact a site administrator.",
+  approvalPending:
+    "Your account was created and is waiting for a site administrator to approve it. You will be able to sign in once it is approved.",
+  accountPending: "This account is still waiting for a site administrator to approve it.",
   rateLimited: "Too many requests. Try again in a moment.",
   // 503 from the rate limiter's overload guard, not from a per-client quota.
   overloaded: "The server is busy right now. Try again in a moment.",

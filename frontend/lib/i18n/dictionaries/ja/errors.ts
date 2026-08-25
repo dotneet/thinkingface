@@ -21,6 +21,10 @@ export const errors = {
   transferNotPending: "この移管はすでに承認待ちではありません。",
   methodNotAllowed: "この操作はサポートされていません。",
   xetNotSupported: "この操作は Xet 管理下のファイルではサポートされていません。",
+  accountDisabled: "このアカウントは無効化されています。サイト管理者に連絡してください。",
+  approvalPending:
+    "アカウントを作成しました。サイト管理者の承認待ちです。承認されるとサインインできるようになります。",
+  accountPending: "このアカウントはサイト管理者の承認待ちです。",
   rateLimited: "リクエストが多すぎます。しばらくしてから再度お試しください。",
   overloaded: "サーバーが混み合っています。少し時間をおいて再度お試しください。",
 };

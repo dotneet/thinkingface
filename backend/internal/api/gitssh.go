@@ -39,10 +39,14 @@ func (s *Server) ServeGit(ctx context.Context, user *store.User, service gitserv
 		return refuse("authentication required")
 	}
 	// Belt and braces. store.LookupSSHKey already refuses to resolve a key
-	// whose owner is suspended, so an offboarded account never authenticates
-	// far enough to reach this -- but ServeGit takes the user as an argument
-	// from another package, and the whole point of the suspension switch is
-	// that no path may be the one that forgot.
+	// whose owner is suspended or still waiting for approval, so neither an
+	// offboarded nor an unadmitted account authenticates far enough to reach
+	// this -- but ServeGit takes the user as an argument from another
+	// package, and the whole point of these switches is that no path may be
+	// the one that forgot.
+	if user.PendingApproval() {
+		return refuse("this account is waiting for a site administrator to approve it")
+	}
 	if user.Disabled() {
 		return refuse("this account has been disabled")
 	}
@@ -116,14 +120,10 @@ func (s *Server) sshReceivePack(ctx context.Context, repo *store.Repo, gitProtoc
 		slog.Error("read refs after ssh push", "repo", repo.FullName(), "error", err)
 		return nil
 	}
-	for branch, newSHA := range after {
-		if before[branch] == newSHA {
-			continue
-		}
-		if err := s.sync.Enqueue(detached, repo.ID, branch, before[branch], newSHA); err != nil {
-			slog.Error("schedule sync after ssh push", "repo", repo.FullName(), "branch", branch, "error", err)
-		}
-	}
+	// Shared with the HTTP path (schedulePostPush in git.go): the same sync
+	// jobs, and the same repo.ref_deleted webhook for a branch this push
+	// removed.
+	s.schedulePostPush(detached, repo, before, after, "ssh push")
 	return nil
 }
 

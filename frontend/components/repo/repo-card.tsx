@@ -1,6 +1,6 @@
 import { Archive, Boxes, Database, Download, FlaskConical } from "lucide-react";
 import Link from "next/link";
-import { Badge } from "@/components/ui/badge";
+import { Badge, badgeClass } from "@/components/ui/badge";
 import { TimeText } from "@/components/ui/time-text";
 import { formatCompactNumber } from "@/lib/format";
 import { getT } from "@/lib/i18n/server";
@@ -59,9 +59,20 @@ export async function RepoCard({ repo }: { repo: RepoSummary }) {
       )}
 
       {repo.tags.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
+        // `relative z-10`, same reason as the namespace link above: without
+        // it these would sit under the repository link's full-card
+        // `after:absolute after:inset-0` overlay and never receive clicks.
+        <div className="relative z-10 flex flex-wrap gap-1.5">
           {repo.tags.slice(0, 4).map((tag) => (
-            <Badge key={tag}>{tag}</Badge>
+            <Link
+              key={tag}
+              href={`/${repo.kind}s?tag=${encodeURIComponent(tag)}`}
+              className={badgeClass({
+                className: "hover:border-border-strong hover:text-fg",
+              })}
+            >
+              {tag}
+            </Link>
           ))}
           {repo.tags.length > 4 && <Badge>+{repo.tags.length - 4}</Badge>}
         </div>

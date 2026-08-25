@@ -133,6 +133,9 @@ export const settings = {
     emptyTitle: "ストレージ使用量はまだありません",
     emptyDescription:
       "自分の名前空間のリポジトリにファイルをアップロードすると、LFS ストレージがここに表示されます。",
+    quota: "上限",
+    quotaUnlimited: "無制限",
+    quotaExceeded: "上限超過 — 新しい大容量ファイルのアップロードは拒否されます",
     lfsStorage: "LFS ストレージ",
     files: "ファイル数",
     repositories: "リポジトリ数",
@@ -215,6 +218,10 @@ export const settings = {
     repoUnarchived: {
       label: "リポジトリのアーカイブ解除",
       hint: "リポジトリの読み取り専用状態が解除された",
+    },
+    repoRefDeleted: {
+      label: "ブランチ・タグの削除",
+      hint: "ブランチまたはタグが削除された。作成と更新は repo.push として届く",
     },
     runFinished: { label: "Run の完了", hint: "実験 run が完了した" },
     runFailed: { label: "Run の失敗", hint: "実験 run が失敗した" },
@@ -321,6 +328,7 @@ export const settings = {
     colUsername: "ユーザー名",
     colEmail: "メールアドレス",
     colCreated: "作成日",
+    colLastLogin: "最終ログイン",
     colActions: "操作",
     adminBadge: "管理者",
     you: "自分",
@@ -377,6 +385,20 @@ export const settings = {
     restoreConfirm: "アカウントを復帰",
     suspendDone: "{username} を停止しました。",
     restoreDone: "{username} を復帰しました。",
+    neverLoggedIn: "なし",
+    pendingBadge: "承認待ち",
+    pendingNoticeOne:
+      "承認待ちのアカウントが {count} 件あります。承認するまで、そのアカウントはログインも push もアクセストークンの利用もできません。",
+    pendingNoticeOther:
+      "承認待ちのアカウントが {count} 件あります。承認するまで、それらのアカウントはログインも push もアクセストークンの利用もできません。",
+    approve: "承認",
+    approveDone: "{username} を承認しました。ログインできるようになりました。",
+    hold: "承認待ちに戻す",
+    holdTitle: "{username} を承認待ちに戻しますか？",
+    holdDescription:
+      "{username} はただちにすべての端末からサインアウトされ、再度承認するまでログイン・SSH での push・アクセストークンの利用ができなくなります。削除されるものはありません。",
+    holdConfirm: "承認待ちに戻す",
+    holdDone: "{username} を承認待ちに戻しました。",
     revokeTitle: "{username} の資格情報を失効しますか？",
     revokeDescription:
       "{username} が持つアクセストークンと SSH 鍵をすべて完全に削除し、すべての端末からサインアウトさせます。取り消せません。アカウントの停止ではないため、本人はパスワードでログインして新しい資格情報を発行できます。",
@@ -398,6 +420,8 @@ export const settings = {
         "インスタンスには最低 1 人のサイト管理者が必要です。先に別の人を管理者にしてください。",
       selfDemote: "自分自身の管理者権限は解除できません。別の管理者に依頼してください。",
       selfDisable: "自分自身のアカウントは停止できません。別の管理者に依頼してください。",
+      selfPending:
+        "自分自身のアカウントを承認待ちに戻すことはできません。別の管理者に依頼してください。",
       selfRevoke:
         "自分のトークンと SSH 鍵は Settings → Access tokens と Settings → SSH keys から失効してください。",
       sessionRequired: "セッションの有効期限が切れました。もう一度サインインしてください。",
@@ -436,6 +460,52 @@ export const settings = {
       "同期キューはインスタンス上のすべてのリポジトリを対象とするため、サイト管理者のみが利用できます。",
     errors: {
       jobGone: "そのジョブはすでに失敗状態ではありません。誰かが再実行した可能性があります。",
+    },
+  },
+  adminQuotas: {
+    navLabel: "ストレージ上限",
+    title: "ストレージ上限",
+    description:
+      "各ネームスペースが使っているオブジェクトストレージ量と、その上限です。上限は LFS オブジェクトのアップロード時に判定されるため、上限を下げても既存のデータが削除されることはなく、次回のアップロードが拒否されます。",
+    defaultQuota: "インスタンス既定値: {quota}",
+    defaultQuotaUnlimited: "インスタンス既定値: 無制限",
+    defaultQuotaNote:
+      "個別の上限を持たないネームスペースにはインスタンス既定値が適用されます。TF_DEFAULT_STORAGE_QUOTA_BYTES で設定し、変更には再デプロイが必要です。",
+    countOne: "ネームスペース {count} 件",
+    countOther: "ネームスペース {count} 件",
+    searchPlaceholder: "ネームスペースを検索",
+    refresh: "再読み込み",
+    colNamespace: "ネームスペース",
+    colKind: "種別",
+    colRepos: "リポジトリ数",
+    colUsed: "使用量",
+    colQuota: "上限",
+    colActions: "操作",
+    kindUser: "アカウント",
+    kindOrg: "Organization",
+    unlimited: "無制限",
+    inherited: "インスタンス既定値",
+    overQuota: "上限超過",
+    edit: "上限を設定",
+    quotaLabel: "上限（バイト）",
+    quotaHint:
+      "空欄にするとインスタンス既定値に戻ります。0 は「0 バイトの上限」で、あらゆるアップロードを拒否します。両者は別の意味です。",
+    quotaInvalid: "0 以上の整数のバイト数を入力するか、空欄にしてください。",
+    save: "保存",
+    saving: "保存中…",
+    cancel: "キャンセル",
+    saved: "{namespace} の上限を {quota} にしました。",
+    cleared: "{namespace} をインスタンス既定値に戻しました。",
+    loadFailed: "ネームスペースの読み込みに失敗しました",
+    loadFailedHint:
+      "バックエンド API に接続できない可能性があります。ページを再読み込みしてください。",
+    emptyTitle: "ネームスペースが見つかりません",
+    emptyDescription: "その検索条件に一致するネームスペースはありません。",
+    accessDeniedTitle: "サイト管理者専用",
+    accessDeniedMessage:
+      "自分で引き上げられる上限は上限として機能しないため、ストレージ上限は組織の設定画面ではなくサイト管理者が設定します。",
+    errors: {
+      namespaceGone: "そのネームスペースは存在しません。",
     },
   },
 };

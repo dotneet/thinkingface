@@ -1,5 +1,6 @@
 import { type ApiResult, apiFetch } from "@/lib/api";
 import type {
+  CommitDiffResponse,
   CommitListResponse,
   RawFileResponse,
   RefsResponseUI,
@@ -261,6 +262,27 @@ export function getCommits(
   return apiFetch<CommitListResponse>(
     `/api/v1/repos/${kind}/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/commits/${encodeURIComponent(rev)}`,
     { query: params, headers: opts?.headers },
+  );
+}
+
+/**
+ * What one commit changed, against its **first parent**
+ * (docs/dev/api-contract.md §2). `rev` may be a branch, a tag or a SHA.
+ *
+ * Unlike `getCommits`, a repository with no commits answers 404 here rather
+ * than an empty body: the response describes one commit and there is none to
+ * describe. Callers should render that as an error, not as "nothing changed".
+ */
+export function getCommitDiff(
+  kind: RepoKind,
+  ns: string,
+  name: string,
+  rev: string,
+  opts?: FetchOpts,
+): Promise<ApiResult<CommitDiffResponse>> {
+  return apiFetch<CommitDiffResponse>(
+    `/api/v1/repos/${kind}/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/diff/${encodeURIComponent(rev)}`,
+    { headers: opts?.headers },
   );
 }
 

@@ -1,6 +1,15 @@
 "use client";
 
-import { KeyRound, ShieldCheck, ShieldOff, UserCheck, UserPlus, Users, UserX } from "lucide-react";
+import {
+  Clock,
+  KeyRound,
+  ShieldCheck,
+  ShieldOff,
+  UserCheck,
+  UserPlus,
+  Users,
+  UserX,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -18,6 +27,7 @@ import {
   createAdminUser,
   listAdminUsers,
   revokeAdminUserCredentials,
+  setAdminUserApproval,
   setAdminUserDisabled,
   updateAdminUser,
 } from "@/lib/admin";
@@ -26,6 +36,7 @@ import { errorMessage } from "@/lib/api-error-message";
 import { formatNumber } from "@/lib/format";
 import { useT } from "@/lib/i18n/client";
 import type { AdminUser } from "@/types/api";
+import { UserApprovalApproved, UserApprovalPending } from "@/types/api";
 
 /** Mirrors the backend's validatePassword (backend/internal/api/auth.go). */
 const MIN_PASSWORD_LENGTH = 8;
@@ -77,6 +88,11 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
   // their own piece of state: the two are independent actions on the same row.
   const [disableTarget, setDisableTarget] = useState<AdminUser | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<AdminUser | null>(null);
+  // Sending an account back to the waiting room revokes its sessions, so it
+  // gets a confirmation like suspension does. Approving does not: it only
+  // grants, and a dialog in front of the one action an administrator came to
+  // this screen to perform is friction with nothing to protect.
+  const [holdTarget, setHoldTarget] = useState<AdminUser | null>(null);
 
   // The "add user" dialog. Its own fields rather than a shared form object:
   // the create and reset dialogs can never be open at once, but sharing state
@@ -247,6 +263,28 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
     await refresh();
   }
 
+  async function handleApproval(target: AdminUser, approve: boolean) {
+    setHoldTarget(null);
+    setBusy(target.username);
+    setActionError(null);
+    setNotice(null);
+    const result = await setAdminUserApproval(
+      target.username,
+      approve ? UserApprovalApproved : UserApprovalPending,
+    );
+    setBusy(null);
+    if (!result.ok) {
+      setActionError(describe(result));
+      return;
+    }
+    setNotice(
+      t(approve ? "settings.adminUsers.approveDone" : "settings.adminUsers.holdDone", {
+        username: target.username,
+      }),
+    );
+    await refresh();
+  }
+
   async function handleRevoke(target: AdminUser) {
     setRevokeTarget(null);
     setBusy(target.username);
@@ -267,6 +305,11 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
 
   const hasPrev = offset > 0;
   const hasNext = total !== null && offset + PAGE_SIZE < total;
+  // A failed read leaves `users` null, and the banner below is simply not
+  // rendered then: "nobody is waiting" is a different statement from "we
+  // could not ask", and the error state already says the second (DESIGN.md §9).
+  const pendingHere =
+    users === null ? 0 : users.filter((u) => u.approval === UserApprovalPending).length;
 
   return (
     <div className="flex flex-col gap-4">
@@ -294,6 +337,24 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
       {actionError && <Alert tone="negative">{actionError}</Alert>}
       {notice && <Alert tone="positive">{notice}</Alert>}
 
+      {/* A pending account authenticates on nothing at all, so somebody is
+          sitting locked out until an administrator acts. The listing already
+          sorts them to the top; this is what makes the reason visible without
+          reading the badges. Only ever rendered from a successful read, and it
+          counts what is on this page rather than the instance — the endpoint
+          reports no instance-wide pending total, and inventing one from a page
+          would state something the screen does not know (DESIGN.md §9). */}
+      {pendingHere > 0 && (
+        <Alert tone="warning">
+          {t(
+            pendingHere === 1
+              ? "settings.adminUsers.pendingNoticeOne"
+              : "settings.adminUsers.pendingNoticeOther",
+            { count: formatNumber(pendingHere) },
+          )}
+        </Alert>
+      )}
+
       {users === null && !loadError ? (
         <SkeletonLines lines={5} />
       ) : users === null ? (
@@ -316,6 +377,7 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
                 <th className="px-3 py-2 font-medium">{t("settings.adminUsers.colUsername")}</th>
                 <th className="px-3 py-2 font-medium">{t("settings.adminUsers.colEmail")}</th>
                 <th className="px-3 py-2 font-medium">{t("settings.adminUsers.colCreated")}</th>
+                <th className="px-3 py-2 font-medium">{t("settings.adminUsers.colLastLogin")}</th>
                 <th className="px-3 py-2 text-right font-medium">
                   {t("settings.adminUsers.colActions")}
                 </th>
@@ -338,6 +400,13 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
                         {user.disabled && (
                           <Badge tone="negative">{t("settings.adminUsers.disabledBadge")}</Badge>
                         )}
+                        {/* The waiting room is invisible everywhere else on
+                            this row: a pending account looks exactly like an
+                            active one, and answers even the correct password
+                            with a refusal. */}
+                        {user.approval === UserApprovalPending && (
+                          <Badge tone="warning">{t("settings.adminUsers.pendingBadge")}</Badge>
+                        )}
                         {isSelf && (
                           <span className="text-xs font-medium text-fg-subtle">
                             ({t("settings.adminUsers.you")})
@@ -348,6 +417,16 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
                     <td className="px-3 py-2 text-fg-muted">{user.email}</td>
                     <td className="px-3 py-2 text-fg-subtle">
                       <TimeText iso={user.created_at} style="date" />
+                    </td>
+                    {/* "Never" is spelled out rather than left blank: an empty
+                        cell reads as missing data, and the whole point of this
+                        column is telling a dormant account from a live one. */}
+                    <td className="px-3 py-2 text-fg-subtle">
+                      {user.last_login_at ? (
+                        <TimeText iso={user.last_login_at} style="date" />
+                      ) : (
+                        t("settings.adminUsers.neverLoggedIn")
+                      )}
                     </td>
                     <td className="px-3 py-2">
                       <div className="flex justify-end gap-2">
@@ -363,6 +442,33 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
                         >
                           {t("settings.adminUsers.resetPassword")}
                         </Button>
+                        {/* Approving is the one action that lets somebody in
+                            at all, so it leads. Putting an account *back* is
+                            offered only for an approved one, and never on your
+                            own row: the write revokes the session this page is
+                            running on, which the backend refuses with a 400. */}
+                        {user.approval === UserApprovalPending ? (
+                          <Button
+                            size="sm"
+                            variant="primary"
+                            disabled={busy === user.username}
+                            onClick={() => void handleApproval(user, true)}
+                          >
+                            <UserCheck size={13} />
+                            {t("settings.adminUsers.approve")}
+                          </Button>
+                        ) : (
+                          !isSelf && (
+                            <Button
+                              size="sm"
+                              disabled={busy === user.username}
+                              onClick={() => setHoldTarget(user)}
+                            >
+                              <Clock size={13} />
+                              {t("settings.adminUsers.hold")}
+                            </Button>
+                          )
+                        )}
                         {/* Suspending or revoking your own account is a 400
                             by design, so neither control appears on your own
                             row (the same rule as the admin toggle below). */}
@@ -655,6 +761,26 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
         )}
         confirmingLabel={t("settings.adminUsers.working")}
         confirming={busy !== null && disableTarget !== null}
+      />
+
+      {/* Reversible like suspension, so a plain yes/no dialog — but it does
+          revoke the account's sessions, so it is not silent either. */}
+      <ConfirmDialog
+        open={holdTarget !== null}
+        onClose={() => setHoldTarget(null)}
+        onConfirm={() => {
+          if (holdTarget) void handleApproval(holdTarget, false);
+        }}
+        tone="danger"
+        title={t("settings.adminUsers.holdTitle", { username: holdTarget?.username ?? "" })}
+        description={
+          <p className="text-sm text-fg-muted">
+            {t("settings.adminUsers.holdDescription", { username: holdTarget?.username ?? "" })}
+          </p>
+        }
+        confirmLabel={t("settings.adminUsers.holdConfirm")}
+        confirmingLabel={t("settings.adminUsers.working")}
+        confirming={busy !== null && holdTarget !== null}
       />
 
       {/* Irreversible, so it asks for the username to be typed — the same
