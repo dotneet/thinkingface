@@ -310,11 +310,15 @@ export function OrgMembersManager({
               members" rather than "we could not ask" (DESIGN.md §9). The
               buttons stay, because paging back is how you recover. */}
           <span className="tabular-nums">
-            {total === null
+            {total === null || members === null
               ? "—"
               : t("ui.pagination.range", {
-                  from: offset + 1,
-                  to: Math.min(offset + PAGE_SIZE, total),
+                  from: formatNumber(offset + 1),
+                  // From what actually arrived, not from the window's width:
+                  // the count and the page are separate reads, so a short last
+                  // page or a roster that changed between them would otherwise
+                  // be described by a number no row backs up.
+                  to: formatNumber(offset + members.length),
                   total: formatNumber(total),
                 })}
           </span>

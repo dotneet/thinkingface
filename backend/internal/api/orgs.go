@@ -675,7 +675,12 @@ func (s *Server) handleOrgAuditLog(w http.ResponseWriter, r *http.Request) {
 //
 // The pages therefore arrive in username order, and the roster is sorted into
 // the display order (admins first, alphabetical within a role) once it is all
-// here -- the same order ListOrgMembers returns.
+// here. Alphabetical by Go's comparison, which is bytes -- close to but not
+// always the same arrangement ListOrgMembers gets from the database, whose
+// ORDER BY follows its own collation (docs/dev/thinkingface-design.md §10).
+// The two agree on SQLite and on a C-collated PostgreSQL and can differ on a
+// glibc one; nothing here depends on which, since huggingface_hub reads this
+// response as a set.
 func (s *Server) allOrgMembers(ctx context.Context, orgID int64) ([]store.OrgMember, error) {
 	out := []store.OrgMember{}
 	after := ""

@@ -385,10 +385,6 @@ func scanOrgMember(row rowScanner) (*OrgMember, error) {
 	return m, nil
 }
 
-// CountOrgMembers is the organisation's headcount on its own. The
-// organisation page shows the number without showing the roster, and reading
-// every membership row only to take its length made that page cost more the
-// larger the organisation got.
 // ListOrgMembersAfter returns the members whose username sorts after the given
 // one, alphabetically, at most limit of them. An empty username starts at the
 // beginning.
@@ -434,6 +430,10 @@ func (s *Store) ListOrgMembersAfter(ctx context.Context, id int64, afterUsername
 	return out, rows.Err()
 }
 
+// CountOrgMembers is the organisation's headcount on its own. The
+// organisation page shows the number without showing the roster, and reading
+// every membership row only to take its length made that page cost more the
+// larger the organisation got.
 func (s *Store) CountOrgMembers(ctx context.Context, id int64) (int64, error) {
 	var n int64
 	err := s.db.QueryRow(ctx,
