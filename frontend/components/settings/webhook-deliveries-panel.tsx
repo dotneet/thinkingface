@@ -1,7 +1,7 @@
 "use client";
 
 import { FileText, Inbox, RotateCw } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -52,10 +52,19 @@ export function WebhookDeliveriesPanel({ webhookId }: { webhookId: number }) {
   // the current page cannot blank out a dialog the user is reading.
   const [detail, setDetail] = useState<WebhookDelivery | null>(null);
 
+  // Every fetch, whoever started it, is only allowed to write state if it is
+  // still the newest one. The `cancelled` closure below covers the effect's
+  // own supersession, but an action handler that reloads the list after
+  // succeeding calls refresh directly and has no closure to be cancelled by --
+  // so a slow reload could still land on top of a page the user has since
+  // moved to. Comparing against the latest ticket covers both.
+  const latestRequest = useRef(0);
+
   const refresh = useCallback(
     async (isStale: () => boolean = () => false) => {
+      const ticket = ++latestRequest.current;
       const result = await listWebhookDeliveries(webhookId, { limit: PAGE_SIZE, offset });
-      if (isStale()) return;
+      if (isStale() || ticket !== latestRequest.current) return;
       if (!result.ok) {
         setLoadError(errorMessage(t, result));
         setDeliveries(null);

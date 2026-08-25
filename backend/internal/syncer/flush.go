@@ -10,6 +10,7 @@ package syncer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -144,6 +145,14 @@ func (s *Syncer) flushDue(ctx context.Context) error {
 // the retry recognises what it already wrote through the ingest-id column and
 // appends nothing twice. A crash between 2 and 3 leaves rows that are already
 // in the parquet, which the same check removes on the retry.
+//
+// All three run under the ref's lock (reflock.go), taken before step 1 rather
+// than around step 2 alone. The lock is what stops a sync worker that read the
+// tree first from writing its older index over this one -- and taking it early
+// is what keeps step 1 from happening at all when the ref is busy. Committing
+// the parquet and then giving up would leave the file in git but out of
+// repo_files until the next poll, which is the very gap Series reads
+// repo_files to close.
 func (s *Syncer) FlushProject(ctx context.Context, repoID, projectID int64, project string) error {
 	if s.flusher == nil {
 		return nil
@@ -159,6 +168,23 @@ func (s *Syncer) FlushProject(ctx context.Context, repoID, projectID int64, proj
 		return nil
 	}
 
+	// Taken without waiting: flushDue walks its candidates one at a time, so
+	// blocking here would stall every other project behind whichever
+	// repository is mid-publish. Nothing is lost by giving up before the
+	// commit -- the points are untouched and the next poll, ten seconds
+	// later, tries the whole thing again.
+	//
+	// The ref is the one experiments.Flusher commits to, which is the same
+	// repo row's DefaultBranch; the check after Flush is there so that a
+	// future flusher that picks its own ref cannot silently end up indexing
+	// under a lock held for a different one.
+	ref := repo.DefaultBranch
+	held, ok := s.refLocks.tryLock(repo.ID, ref)
+	if !ok {
+		return errRefBusy
+	}
+	defer held.unlock()
+
 	result, err := s.flusher.Flush(ctx, repo, projectID, project)
 	if err != nil {
 		if errors.Is(err, gitrepo.ErrRepoNotFound) {
@@ -172,22 +198,9 @@ func (s *Syncer) FlushProject(ctx context.Context, repoID, projectID int64, proj
 		return nil
 	}
 
-	// Step 2 runs the shared pipeline, so it needs the ref's lock (reflock.go)
-	// -- without it a sync worker that read the tree before this commit would
-	// write its older index over the one about to be built here, and the
-	// parquet would drop straight back out of repo_files.
-	//
-	// Taken without waiting, though. flushDue walks its candidates one at a
-	// time, so blocking here would stall every other project behind whichever
-	// repository is mid-publish. Nothing is lost by giving up: step 1 is
-	// committed and durable, the points below stay buffered because this
-	// returns before deleting them, and the next poll re-runs a flush that
-	// recognises what it already wrote and appends nothing twice.
-	held, ok := s.refLocks.tryLock(repo.ID, result.Ref)
-	if !ok {
-		return errRefBusy
+	if result.Ref != ref {
+		return fmt.Errorf("syncer: flush committed to %q but the ref lock is held for %q", result.Ref, ref)
 	}
-	defer held.unlock()
 
 	if _, err := s.runPushPipeline(ctx, repo, &store.SyncJob{
 		RepoID: repo.ID, Ref: result.Ref, OldSHA: result.OldSHA, NewSHA: result.NewSHA,
