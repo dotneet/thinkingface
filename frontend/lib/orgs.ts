@@ -83,16 +83,30 @@ export function deleteOrg(name: string, opts?: FetchOpts): Promise<ApiResult<voi
   return apiFetch<void>(orgPath(name), { method: "DELETE", headers: opts?.headers });
 }
 
+export type ListMembersParams = {
+  limit?: number;
+  offset?: number;
+};
+
 /**
- * Members. 403 for a non-member unless the organisation set
+ * One page of the members. 403 for a non-member unless the organisation set
  * `members_visibility = "public"`, so callers treat a failure as "hidden"
  * rather than as an error.
+ *
+ * The window is clamped server-side to 200, and `total` counts the whole
+ * membership regardless of it — so "is there another page?" is
+ * `offset + items.length < total`, never a comparison against the `limit`
+ * that was sent (docs/dev/api-contract.md §1.1).
  */
 export function listMembers(
   name: string,
+  params: ListMembersParams = {},
   opts?: FetchOpts,
 ): Promise<ApiResult<OrgMembersResponse>> {
-  return apiFetch<OrgMembersResponse>(orgPath(name, "/members"), { headers: opts?.headers });
+  return apiFetch<OrgMembersResponse>(orgPath(name, "/members"), {
+    query: params,
+    headers: opts?.headers,
+  });
 }
 
 export function addMember(

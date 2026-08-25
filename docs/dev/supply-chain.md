@@ -37,7 +37,8 @@ at the end of this document.
 | Python client (`clients/python/`) | `pyproject.toml` + `uv.lock` | `uv run --locked` | Renovate |
 | Docs / lint tooling | `docs/requirements.in` → `docs/requirements.txt`, `requirements-lint.in` → `requirements-lint.txt` (pinned + hashed) | `pip install --require-hashes -r ...` | manual bump + `pip-audit` |
 | Docker base images | tag **and** `@sha256:` digest in the Dockerfiles and compose files | `docker build` / `docker compose` | Renovate |
-| GitHub Actions | commit SHA in `uses:`, version in the trailing comment | — | Renovate |
+| GitHub Actions | commit SHA in `uses:`, version in the trailing comment | — | Renovate reports, a human bumps — see [Running Renovate](#running-renovate) |
+| Renovate itself | `renovatebot/github-action` by commit SHA, and the Renovate image by tag **and** digest in the `renovate-version` input | `docker run`, from inside the action | Renovate reports (via `customManagers`), a human bumps |
 | Terraform providers | `infra/.terraform.lock.hcl` | `terraform init` | Renovate |
 
 ### Minimum release age
@@ -93,8 +94,9 @@ the CLI flag: on bun 1.4.0 `BUN_CONFIG_MINIMUM_RELEASE_AGE` has no effect at all
   line — stayed green. The builder stage asserts the two match and fails the
   build otherwise, so this cannot drift silently.
 
-Renovate keeps all of these current once it is enabled; the commands above are
-for doing it by hand.
+Renovate keeps all of these current once it is enabled — except the action
+SHAs, which it can only report on (see [Running Renovate](#running-renovate)).
+The commands above are for doing it by hand.
 
 ### Regenerating locks
 
@@ -157,7 +159,7 @@ Nothing in this directory can set these; they need a repository admin.
 
 | Setting | Why | Where |
 |---|---|---|
-| Renovate app | `renovate.json` does nothing until the app can see the repository | <https://github.com/apps/renovate> |
+| Allow GitHub Actions to create and approve pull requests | Renovate runs as a workflow (`.github/workflows/renovate.yml`) and opens its PRs with the job's `GITHUB_TOKEN`. Without this, GitHub refuses to create them | Settings → Actions → General → Workflow permissions |
 | Dependabot alerts | Advisory notifications for the dependency graph. Complements `make audit` rather than duplicating it — it sees the graph GitHub builds, and it notices things between weekly runs | Settings → Advanced Security |
 | Branch protection / ruleset on `main` | Required review and required status checks. Without it a single compromised credential can push straight to `main`, and none of the above matters | Settings → Rules |
 | Require SHA-pinned actions | Enforces mechanically what the workflows do by convention | Settings → Actions → General |
@@ -166,20 +168,91 @@ Nothing in this directory can set these; they need a repository admin.
 Dependabot *security updates* (the automatic PRs) should stay off while
 Renovate is in use: both would open PRs for the same advisory.
 
+## Running Renovate
+
+Renovate is **self-hosted**: `.github/workflows/renovate.yml` runs it as an
+ordinary job with [`renovatebot/github-action`], and `renovate.json` configures
+it. Nothing is delegated to the Mend-hosted app. That is the same argument as
+the rest of this document — the bot with write access to every lockfile here is
+itself a dependency, so it is pinned by digest, its logs are ours to read, and
+its version moves when we move it.
+
+The two files split the job cleanly:
+
+- **`renovate.json`** — *what* may be updated, grouped how, and inside which
+  window (`schedule`, `minimumReleaseAge`, `packageRules`).
+- **`.github/workflows/renovate.yml`** — *how often* Renovate looks, and *as
+  whom*. It runs every three hours; a run outside the window `renovate.json`
+  allows simply finds nothing to do. That is the point: `vulnerabilityAlerts`
+  is scheduled `at any time`, so a security update lands within hours rather
+  than waiting for Monday, and ticking an update's checkbox on the Dependency
+  Dashboard takes effect on the next run instead of the next week. Impatient?
+  Actions → *renovate* → *Run workflow*.
+
+The workflow itself is pinned twice over: the action by commit SHA like every
+other `uses:`, and the Renovate image by tag *and* digest in the
+`renovate-version` input. The `github-actions` manager only reads `uses:`
+lines, so the image is covered by the `customManagers` entry in
+`renovate.json` — which is what notices when the bot's own version has gone
+stale.
+
+To check a `renovate.json` change before pushing it, run the validator out of
+the very image the workflow pins:
+
+```bash
+docker run --rm -v "$PWD:/repo:ro" -w /repo \
+  "ghcr.io/renovatebot/renovate:$(sed -n 's/.*renovate-version: //p' .github/workflows/renovate.yml)" \
+  renovate-config-validator renovate.json
+```
+
+[`renovatebot/github-action`]: https://github.com/renovatebot/github-action
+
+### What it costs to run on `GITHUB_TOKEN`
+
+Renovate authenticates as the workflow itself, with the job's `GITHUB_TOKEN`.
+There is no secret to create, nothing to rotate, and no personal credential
+whose theft would hand someone write access to this repository. GitHub charges
+two things for that, and both are consequences to work with rather than bugs to
+fix:
+
+1. **It cannot write to `.github/workflows/`.** The `workflows` permission
+   simply does not exist for `GITHUB_TOKEN`, and a push that touches a workflow
+   file is refused. So `renovate.json` holds *everything under that directory*
+   behind `dependencyDashboardApproval` — the action SHAs, and the Renovate
+   image pinned in `renovate.yml` itself. They are *listed* on the Dependency
+   Dashboard under "Pending Approval", and a human applies them: the SHA and
+   its trailing `# vX.Y.Z` comment moved together, the image tag and its digest
+   moved together. Ticking the checkbox there will fail on push — the list is a
+   to-do, not a button.
+2. **Its pull requests do not start CI.** Nothing done with `GITHUB_TOKEN`
+   triggers another workflow, so a Renovate PR arrives with no checks. Each one
+   carries an **Approve and run** button; press it. A dependency PR without a
+   green CI run has not been verified, whatever its diff looks like.
+
+Both disappear the moment Renovate is given a credential of its own — a classic
+personal access token with `repo` + `workflow`, or a GitHub App token minted by
+`actions/create-github-app-token` with Contents, Pull requests, Issues and
+Workflows write. That is a change to two things: the `token:` input in the
+workflow (plus `RENOVATE_GIT_AUTHOR`, which currently has to name
+`github-actions[bot]` because that is who the pushes come from), and deleting
+the `.github/workflows/**` packageRule from `renovate.json`. If keeping action SHAs
+fresh ever matters more than avoiding a stored credential, that is the trade to
+make.
+
 ### Turning Renovate on
 
-1. Install <https://github.com/apps/renovate> and grant it this repository
-   (*Only select repositories*). Nothing else is needed on this side.
-2. There is no onboarding PR to merge: `renovate.json` already exists, so
-   Renovate treats the repository as configured and goes straight to work.
-   The first sign it is alive is the **Dependency Dashboard** issue it opens.
-3. The schedule is `before 9am on monday` (Asia/Tokyo), so the first batch of
-   PRs may not appear until then. The checkbox at the top of the dashboard only
-   asks Renovate to run again — the run still honours `schedule`. To pull one
-   update forward, tick that update's own checkbox in the dashboard list, which
-   is what forces a PR outside the schedule.
-4. Expect the first run to be the noisiest one — `pinDigests` fills in image
-   digests and `helpers:pinGitHubActionDigests` refreshes action SHAs.
+1. **Settings → Actions → General → Workflow permissions**: tick *Allow GitHub
+   Actions to create and approve pull requests*. Without it Renovate runs,
+   finds its updates, and fails at the last step.
+2. Run it by hand once with **Dry run** ticked (Actions → *renovate* → *Run
+   workflow*). It reports what it would open and creates nothing. Read the log,
+   then run it again with dry run off. Set the log level to `debug` on the same
+   form if a run does something surprising.
+3. There is no onboarding pull request to merge: `renovate.json` already
+   exists, so Renovate treats the repository as configured and goes straight to
+   work. The first sign it is alive is the **Dependency Dashboard** issue.
+4. Expect that first real run to be the noisiest one — `pinDigests` fills in
+   image digests across the Dockerfiles and compose files.
    `prConcurrentLimit: 5` keeps it to five PRs at a time.
 5. Confirm Dependabot security updates are off (the table above), or the two
    will race on the same advisory.

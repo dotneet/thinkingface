@@ -33,6 +33,26 @@ var (
 type Manager struct {
 	root string
 
+	// One mutex per repository directory, and it is never removed again.
+	//
+	// That is deliberate, and the obvious tidy-up is a correctness bug rather
+	// than a saving. Open hands the mutex to the *Repo it returns, which the
+	// caller then holds for as long as it is working -- a whole sync job, a
+	// whole request -- and takes and releases many times inside that span
+	// (commit.go, refs.go). Dropping the map entry when the last acquirer let
+	// go would let a later Open of the same directory mint a *different*
+	// mutex while an older *Repo still points at the first, so two writers to
+	// one bare repository would serialise against different locks and neither
+	// would notice. Reference-counting the entry cannot fix that either: the
+	// thing that needs counting is the *Repo handle, whose lifetime this type
+	// does not see.
+	//
+	// The cost of keeping them is one map entry -- a path and a pointer,
+	// something like a hundred bytes -- per repository this process has ever
+	// opened, which is small beside the materialised copy of any one of them.
+	// Note it is not bounded by the WAL cache: eviction removes the working
+	// directory and leaves the entry, so a long-lived instance accumulates one
+	// per repository it has touched rather than one per repository it holds.
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
 

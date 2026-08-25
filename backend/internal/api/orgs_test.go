@@ -949,3 +949,113 @@ func TestLeaveOrgIsCaseInsensitive(t *testing.T) {
 		t.Fatalf("audit = %+v, want a %s entry on top", entries, auditMemberLeft)
 	}
 }
+
+// TestOrgMembersPaging covers the roster's page window and the one endpoint
+// deliberately left outside it.
+//
+// GET /api/v1/orgs/{org}/members is ours to define, so it pages like every
+// other listing: `limit` / `offset` with a `total` that ignores the window.
+// The oversized-limit case is the one that used to go wrong elsewhere -- an
+// unclamped limit makes a full page look short, so a client deciding "is
+// there another page?" from what it asked for stops early.
+//
+// GET /api/organizations/{org}/members is HuggingFace's, whose body is a bare
+// array with nowhere to say "there is more": it stays complete, however many
+// members there are (CLAUDE.md invariant 5).
+func TestOrgMembersPaging(t *testing.T) {
+	f := newOrgFixture(t, "admin")
+	ctx := context.Background()
+	tok := f.token(f.actor, "write")
+
+	// More members than one clamped page holds, so a page that stops at the
+	// ceiling still has members behind it.
+	const extra = store.MaxOrgPageSize + 10
+	for i := 0; i < extra; i++ {
+		u := f.mustUser(ctx, fmt.Sprintf("member%04d", i), false)
+		f.addOrgMember(f.org.ID, u.ID, "read")
+	}
+	// bob founded acme and alice is the fixture's admin member; carol exists
+	// but was never added.
+	wantTotal := int64(extra + 2)
+
+	// No window asked for is the default page, not the whole roster.
+	var body apitypes.OrgMembersResponse
+	resp := f.do("GET", "/api/v1/orgs/acme/members", tok, nil)
+	if resp.status() != 200 {
+		t.Fatalf("status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+	resp.json(t, &body)
+	if len(body.Items) != 50 || body.Total != wantTotal {
+		t.Fatalf("default page = %d items, total %d; want 50 items, total %d",
+			len(body.Items), body.Total, wantTotal)
+	}
+
+	// An oversized limit is clamped, and `total` still counts the roster --
+	// so offset + len(items) < total keeps finding the next page.
+	resp = f.do("GET", "/api/v1/orgs/acme/members?limit=500", tok, nil)
+	resp.json(t, &body)
+	if len(body.Items) != store.MaxOrgPageSize {
+		t.Fatalf("clamped page = %d items, want %d", len(body.Items), store.MaxOrgPageSize)
+	}
+	if body.Total != wantTotal {
+		t.Fatalf("total = %d, want %d", body.Total, wantTotal)
+	}
+	if int64(len(body.Items)) >= body.Total {
+		t.Fatalf("a clamped page of %d looks like the end of a roster of %d",
+			len(body.Items), body.Total)
+	}
+
+	// Paging through with a small window visits everyone exactly once.
+	seen := map[string]bool{}
+	for offset := 0; ; offset += 30 {
+		page := f.do("GET", fmt.Sprintf("/api/v1/orgs/acme/members?limit=30&offset=%d", offset), tok, nil)
+		if page.status() != 200 {
+			t.Fatalf("page at %d = %d", offset, page.status())
+		}
+		var got apitypes.OrgMembersResponse
+		page.json(t, &got)
+		if len(got.Items) == 0 {
+			t.Fatalf("paging stalled after %d of %d members", len(seen), got.Total)
+		}
+		for _, m := range got.Items {
+			if seen[m.Username] {
+				t.Fatalf("%s appeared on two pages", m.Username)
+			}
+			seen[m.Username] = true
+		}
+		if int64(len(seen)) >= got.Total {
+			break
+		}
+	}
+	if int64(len(seen)) != wantTotal {
+		t.Fatalf("walked %d members, want %d", len(seen), wantTotal)
+	}
+
+	// The organisation page's headcount is the whole membership, not a page
+	// of it -- it is counted rather than read now.
+	var org apitypes.OrgResponse
+	f.do("GET", "/api/v1/orgs/acme", tok, nil).json(t, &org)
+	if org.Org.NumMembers != wantTotal {
+		t.Fatalf("num_members = %d, want %d", org.Org.NumMembers, wantTotal)
+	}
+
+	// The HF-compatible list has no paging in its protocol, so it answers in
+	// full: a short array there is a wrong answer, not a smaller one.
+	hf := f.do("GET", "/api/organizations/acme/members", tok, nil)
+	if hf.status() != 200 {
+		t.Fatalf("HF members status = %d", hf.status())
+	}
+	var hfBody []map[string]any
+	hf.json(t, &hfBody)
+	if int64(len(hfBody)) != wantTotal {
+		t.Fatalf("HF members = %d entries, want the whole roster of %d", len(hfBody), wantTotal)
+	}
+	hfSeen := map[string]bool{}
+	for _, entry := range hfBody {
+		name, _ := entry["user"].(string)
+		if name == "" || hfSeen[name] {
+			t.Fatalf("HF entry %+v is empty or duplicated", entry)
+		}
+		hfSeen[name] = true
+	}
+}

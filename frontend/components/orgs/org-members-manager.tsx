@@ -1,7 +1,7 @@
 "use client";
 
-import { UserPlus, Users } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { Inbox, UserPlus, Users } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { orgRoleLabelKey } from "@/components/orgs/org-role-badge";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import { Field, Input, Select } from "@/components/ui/field";
 import { SkeletonLines } from "@/components/ui/skeleton";
 import { TimeText } from "@/components/ui/time-text";
 import { errorMessage } from "@/lib/api-error-message";
+import { formatNumber } from "@/lib/format";
 import { useT } from "@/lib/i18n/client";
 import {
   addMember,
@@ -24,6 +25,10 @@ import {
 } from "@/lib/orgs";
 import type { OrgMember, OrgRole } from "@/types/api";
 
+// One screen of members. The server clamps to 200 whatever is asked for
+// (store.MaxOrgPageSize), so this only has to be a comfortable page.
+const PAGE_SIZE = 50;
+
 export function OrgMembersManager({
   org,
   /** Username of the signed-in admin, so their own row can be marked. */
@@ -34,6 +39,8 @@ export function OrgMembersManager({
 }) {
   const t = useT();
   const [members, setMembers] = useState<OrgMember[] | null>(null);
+  const [total, setTotal] = useState<number | null>(null);
+  const [offset, setOffset] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -45,25 +52,38 @@ export function OrgMembersManager({
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
 
+  // Every fetch, whoever started it, is only allowed to write state if it is
+  // still the newest one. The `cancelled` closure below covers the effect's
+  // own supersession, but the mutation handlers reload by calling refresh
+  // directly and have no closure to be cancelled by -- so a slow reload could
+  // land on a page the admin has since moved away from.
+  const latestRequest = useRef(0);
+
   // Memoised because every mutation below re-reads through it and the mount
   // effect depends on it; without this the effect would re-run on every render.
   const refresh = useCallback(
     async (isStale: () => boolean = () => false) => {
-      const result = await listMembers(org);
-      if (isStale()) return;
+      const ticket = ++latestRequest.current;
+      const result = await listMembers(org, { limit: PAGE_SIZE, offset });
+      if (isStale() || ticket !== latestRequest.current) return;
       if (!result.ok) {
         setLoadError(errorMessage(t, result));
         setMembers(null);
+        // Never carry a count over from a failed read: a count beside an
+        // empty list states something the page does not know (DESIGN.md §9).
+        setTotal(null);
         return;
       }
       setLoadError(null);
       setMembers(result.data.items);
+      setTotal(result.data.total);
     },
-    [org],
+    [org, offset],
   );
 
-  // Guards against a stale response landing after a newer one if `org`
-  // changes while a request from the previous org is still in flight.
+  // Guards against a stale response landing after a newer one -- a fast
+  // Prev/Next, or `org` changing while a request from the previous one is
+  // still in flight.
   useEffect(() => {
     let cancelled = false;
     refresh(() => cancelled);
@@ -121,6 +141,17 @@ export function OrgMembersManager({
     }
     await refresh();
   }
+
+  // "This page is empty" and "there is nothing here" are different answers,
+  // and paging is what makes the difference reachable: deleting the last row
+  // of the last page leaves the window past the end of a list that is not
+  // empty at all (DESIGN.md §9). The dedicated empty state says which one it
+  // is, and the range line below is skipped because `to` would be smaller
+  // than `from`.
+  const outOfRange = total !== null && total > 0 && offset >= total;
+
+  const hasPrev = offset > 0;
+  const hasNext = total !== null && offset + PAGE_SIZE < total;
 
   return (
     <div className="flex flex-col gap-6">
@@ -188,11 +219,24 @@ export function OrgMembersManager({
           hint={t("org.settings.members.loadFailedHint")}
         />
       ) : members.length === 0 ? (
-        <EmptyState
-          icon={Users}
-          title={t("org.settings.members.emptyTitle")}
-          description={t("org.settings.members.emptyDescription")}
-        />
+        outOfRange ? (
+          <EmptyState
+            icon={Inbox}
+            title={t("ui.pagination.outOfRangeTitle")}
+            description={t("ui.pagination.outOfRangeDescription")}
+            action={
+              <Button size="sm" onClick={() => setOffset(0)}>
+                {t("ui.pagination.backToFirstPage")}
+              </Button>
+            }
+          />
+        ) : (
+          <EmptyState
+            icon={Users}
+            title={t("org.settings.members.emptyTitle")}
+            description={t("org.settings.members.emptyDescription")}
+          />
+        )
       ) : (
         <div className="scroll-x rounded-lg border border-border">
           <table className="w-full min-w-[520px] border-collapse text-sm">
@@ -256,6 +300,40 @@ export function OrgMembersManager({
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {!outOfRange && (hasPrev || hasNext) && (
+        <div className="flex items-center justify-between text-sm text-fg-subtle">
+          {/* A failed reload leaves total null, and a count rendered as 0
+              under the error state would read as "this organisation has no
+              members" rather than "we could not ask" (DESIGN.md §9). The
+              buttons stay, because paging back is how you recover. */}
+          <span className="tabular-nums">
+            {total === null || members === null
+              ? "—"
+              : t("ui.pagination.range", {
+                  from: formatNumber(offset + 1),
+                  // From what actually arrived, not from the window's width:
+                  // the count and the page are separate reads, so a short last
+                  // page or a roster that changed between them would otherwise
+                  // be described by a number no row backs up.
+                  to: formatNumber(offset + members.length),
+                  total: formatNumber(total),
+                })}
+          </span>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              disabled={!hasPrev}
+              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+            >
+              {t("ui.pagination.prev")}
+            </Button>
+            <Button size="sm" disabled={!hasNext} onClick={() => setOffset(offset + PAGE_SIZE)}>
+              {t("ui.pagination.next")}
+            </Button>
+          </div>
         </div>
       )}
 

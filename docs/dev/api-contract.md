@@ -182,6 +182,13 @@ Called by `HfApi.list_organization_members()`. Authorization is the same as the 
 [ { "user": "alice", "fullname": "alice", "avatarUrl": "", "type": "user", "isPro": false } ]
 ```
 
+**This one is not paged, and takes no `limit` / `offset`.** The body is a bare array with nowhere
+to say "there is more", and `list_organization_members()` reads whatever comes back as the
+complete roster — a truncated array would not be a smaller answer but a wrong one, and the
+external protocol is the source of truth here (CLAUDE.md invariant 5). Internally the server still
+reads it a clamped page at a time, so no single query materializes an unbounded result set;
+paging for the *client* is offered on the UI-facing endpoint, which is ours to define.
+
 ### `GET /api/users/{username}/overview`  (HF-compatible)
 Called by `HfApi.get_user_overview()`. Anyone can call it (even unauthenticated). res 200:
 ```json
@@ -287,11 +294,21 @@ type OrgAuditEntry = {
 | `GET /api/v1/orgs/{org}` | Anyone (200 even for non-members; `viewer_role` is `""`) | – | 200 `{"org": Org}` / 404 (a `kind=user` name, or not yet created) |
 | `PATCH /api/v1/orgs/{org}` | admin | `OrgUpdateRequest` (a partial update where every field is optional: `display_name` `description` `website` `avatar_url` `members_visibility`) | 200 `{"org": Org}` |
 | `DELETE /api/v1/orgs/{org}` | admin | – | 204 / 409 `has_repositories` (if even one repository remains) |
-| `GET /api/v1/orgs/{org}/members` | A member, or anyone if `members_visibility=public` | – | 200 `{"items": OrgMember[]}` |
+| `GET /api/v1/orgs/{org}/members` | A member, or anyone if `members_visibility=public` | query `limit?` (default 50, **clamped to 200**) `offset?` | 200 `{"items": OrgMember[], "total": number}` |
 | `POST /api/v1/orgs/{org}/members` | admin | `{"username","role?"}` (`role` defaults to `read` when omitted) | 201 `{"member": OrgMember}` / 404 (user doesn't exist) / 409 `already_member` |
 | `PATCH /api/v1/orgs/{org}/members/{username}` | admin | `{"role"}` | 200 `{"member": OrgMember}` / 409 `last_admin` (attempted to demote the last admin) |
 | `DELETE /api/v1/orgs/{org}/members/{username}` | admin, or the member themself (leaving; `{username}` is matched case-insensitively, like every other account lookup) | – | 204 / 409 `last_admin` |
 | `GET /api/v1/orgs/{org}/audit-log` | admin | query `before?` (cursor) `limit?` (default 50, **clamped to 200**) | 200 `{"items": OrgAuditEntry[], "next_before": number}` (0 marks the end) |
+
+On the member list, `total` is the organization's whole membership, ignoring the page window:
+that is what lets a client tell a full page with more behind it from the end of the roster.
+Derive that from what came back (`offset + items.length < total`), never from the `limit` that was
+sent — an over-large one is clamped, so a full page never equals it and the listing looks like it
+ended early (the bug this endpoint's `limit` is clamped in the handler to avoid, same as the audit
+log above). The roster used to return every member on every call, so both the response and the
+read behind it grew with the organization; the HF-compatible twin in §1.2 is deliberately the one
+exception.
+
 
 The four profile fields on `POST /api/v1/orgs` and `PATCH /api/v1/orgs/{org}`
 (`display_name` / `description` / `website` / `avatar_url`) go through the **same validation**
@@ -2323,7 +2340,11 @@ to it directly. While archived, both ingest (`log` / `finish`) and PATCH/DELETE 
   req: `{"tags":["lr-sweep"],"archived":false,"is_baseline":true,"note":"# lr sweep\n...","models":[{"repo_id":"team/bert-ja","revision":"a1b2c3d"}]}` (at least one of these)
   res 200: `{"run": ExpRun}`
   - `tags` is saved after trimming surrounding whitespace, dropping empty elements, and
-    deduplicating (at most 32 entries, 64 bytes each)
+    deduplicating (at most 32 entries, 64 bytes each). It is **replaced wholesale** like `models`:
+    sending `[]` clears the list.
+  - For both list fields (`tags` and `models`), **`null` is not `[]`**. Omitting the key, or
+    sending `null`, leaves the list unchanged — same as every other omitted field. Only `[]`
+    clears it.
   - `is_baseline: true` clears `is_baseline` on every other run in the same project. The "one per
     project" rule is also enforced by a partial unique index.
   - `note` is free-form Markdown (up to 16384 bytes). Newlines and tabs are allowed; any other

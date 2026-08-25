@@ -1147,8 +1147,16 @@ export interface ExpArtifactListResponse {
  * ExpRunAnnotationRequest is a partial update of a run's annotations: an
  * omitted field is left as it is, so a client can toggle one flag without
  * having to send the rest.
+ * For the two list fields, Tags and Models, "omitted" and "empty" are
+ * different requests and JSON spells them differently: a missing key or an
+ * explicit null leaves the list unchanged, while [] replaces it with nothing
+ * -- which is the only way to clear one. Sending null to clear a list is the
+ * mistake this note exists to prevent.
  */
 export interface ExpRunAnnotationRequest {
+  /**
+   * Tags replaces the run's tag list wholesale; an empty array clears it.
+   */
   tags?: string[];
   archived?: boolean;
   is_baseline?: boolean;
@@ -1567,10 +1575,13 @@ export interface OrgListResponse {
   total: number /* int64 */;
 }
 /**
- * OrgMembersResponse is the body of GET /api/v1/orgs/{org}/members.
+ * OrgMembersResponse is one page of GET /api/v1/orgs/{org}/members. Total is
+ * the organisation's whole membership, ignoring the page window, so a client
+ * can tell a full page with more behind it from the end of the roster.
  */
 export interface OrgMembersResponse {
   items: OrgMember[];
+  total: number /* int64 */;
 }
 /**
  * OrgMemberResponse wraps one membership row.
