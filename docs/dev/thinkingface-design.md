@@ -632,6 +632,18 @@ Constraints:
   same reason as `search=`'s ASCII-only case insensitivity — it works correctly under either dialect
 - Web UI full-text search uses FTS5 (`unicode61` tokenizer) and does not produce results
   identical to PostgreSQL's `tsvector` (language-specific stemming, etc.)
+- `?sort=name` orders by the database's collation, so the two backends can disagree about it.
+  SQLite compares bytes (`BINARY`), which puts every uppercase letter before every lowercase one
+  and `-` / `.` before the digits; PostgreSQL follows the collation the database was created
+  with, which on a glibc host with a locale like `en_US.utf8` is linguistic instead — case is
+  folded together and punctuation largely ignored, so `Foo-bar` and `foobar` change places.
+  Ordering is consistent within one backend, so paging does not skip or repeat rows; only the
+  arrangement differs. **This does not reproduce in development**: the `postgres:17-alpine` image
+  is musl, whose locale support is thin enough that `en_US.utf8` compares bytes like SQLite
+  does, so the divergence appears only against a glibc server such as Cloud SQL. Making it
+  identical would mean spelling `COLLATE "C"` into the ORDER BY, which trades a cosmetic
+  difference for a sort the repository listing's indexes cannot help with — not a trade worth
+  making on that path
 - If SQLite is used in production, there's a window during Cloud Run revision swaps where old
   and new instances coexist, and writes to the old instance during that window can be lost
   (Litestream assumes a single writer; see §14)

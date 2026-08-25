@@ -76,6 +76,7 @@ export const org = {
     membersHiddenDescription: "Only members of this organization can see who belongs to it.",
     membersEmptyTitle: "No members",
     membersEmptyDescription: "An admin can add people from the organization's settings.",
+    membersMore: "+{count} more",
     manageMembers: "Manage members",
   },
   settings: {

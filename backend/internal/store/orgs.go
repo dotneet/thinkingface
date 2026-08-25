@@ -385,14 +385,35 @@ func scanOrgMember(row rowScanner) (*OrgMember, error) {
 	return m, nil
 }
 
-// ListOrgMembers returns the members, admins first and alphabetical inside
-// each role.
-func (s *Store) ListOrgMembers(ctx context.Context, id int64) ([]OrgMember, error) {
+// ListOrgMembersAfter returns the members whose username sorts after the given
+// one, alphabetically, at most limit of them. An empty username starts at the
+// beginning.
+//
+// It exists for reading a roster whole (api.allOrgMembers). Paging that with
+// LIMIT/OFFSET means asking "skip the first N rows" of a set that another
+// request may be changing underneath, which double-counts a row when someone
+// ahead of it is removed and steps over one when someone is added. Keying on
+// the username instead makes each page ask for rows after a specific point, so
+// a row that exists for the whole walk is returned exactly once however much
+// the rest of the roster moves.
+//
+// The order is username alone -- not the role-first order the paged listing
+// returns -- because the cursor has to be something that cannot change while
+// the walk is in progress, and a member's role can. Callers that want the
+// display order sort what they collected.
+func (s *Store) ListOrgMembersAfter(ctx context.Context, id int64, afterUsername string, limit int) ([]OrgMember, error) {
+	limit = pageLimit(limit, defaultOrgPageSize, MaxOrgPageSize)
+
+	args := []any{id, afterUsername}
+	bind := binder(&args)
+	limitP := bind(limit)
+
 	rows, err := s.db.Query(ctx,
 		`SELECT `+orgMemberColumns+`
 		 FROM org_members m JOIN users u ON u.id = m.user_id
-		 WHERE m.namespace_id = $1
-		 ORDER BY CASE m.role WHEN 'admin' THEN 0 WHEN 'write' THEN 1 ELSE 2 END, u.username`, id)
+		 WHERE m.namespace_id = $1 AND u.username > $2
+		 ORDER BY u.username
+		 LIMIT `+limitP, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -407,6 +428,66 @@ func (s *Store) ListOrgMembers(ctx context.Context, id int64) ([]OrgMember, erro
 		out = append(out, *m)
 	}
 	return out, rows.Err()
+}
+
+// CountOrgMembers is the organisation's headcount on its own. The
+// organisation page shows the number without showing the roster, and reading
+// every membership row only to take its length made that page cost more the
+// larger the organisation got.
+func (s *Store) CountOrgMembers(ctx context.Context, id int64) (int64, error) {
+	var n int64
+	err := s.db.QueryRow(ctx,
+		`SELECT `+orgMemberCount+` FROM namespaces n WHERE n.id = $1`, id).Scan(&n)
+	return n, norm(err)
+}
+
+// ListOrgMembers returns one page of the members, admins first and
+// alphabetical inside each role, plus the total headcount -- which ignores
+// the page window, so a caller can tell whether anything follows the page it
+// asked for. The window is clamped like every other org-scoped listing: an
+// unbounded roster query means both the response and the rows the driver
+// materialises grow with the organisation, and there is no size at which that
+// becomes anybody's intention.
+//
+// The ordering is total (usernames are unique), so within one unchanging
+// roster a row cannot appear on two consecutive pages or be skipped between
+// them. That is a statement about a fixed set, not a guarantee across a walk:
+// OFFSET counts rows at the moment each query runs, so a membership added or
+// removed between two pages shifts everything after it and the walk can then
+// repeat a row or step over one. Reading a whole roster wants
+// ListOrgMembersAfter, which does not count.
+func (s *Store) ListOrgMembers(ctx context.Context, id int64, limit, offset int) ([]OrgMember, int64, error) {
+	limit, offset = pageWindow(limit, offset, defaultOrgPageSize, MaxOrgPageSize)
+
+	total, err := s.CountOrgMembers(ctx, id)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	args := []any{id}
+	bind := binder(&args)
+	limitP, offsetP := bind(limit), bind(offset)
+
+	rows, err := s.db.Query(ctx,
+		`SELECT `+orgMemberColumns+`
+		 FROM org_members m JOIN users u ON u.id = m.user_id
+		 WHERE m.namespace_id = $1
+		 ORDER BY CASE m.role WHEN 'admin' THEN 0 WHEN 'write' THEN 1 ELSE 2 END, u.username
+		 LIMIT `+limitP+` OFFSET `+offsetP, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	out := []OrgMember{}
+	for rows.Next() {
+		m, err := scanOrgMember(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, *m)
+	}
+	return out, total, rows.Err()
 }
 
 // GetOrgMember reads one membership row. ErrNotFound when the user is not a

@@ -1,6 +1,15 @@
 "use client";
 
-import { KeyRound, ShieldCheck, ShieldOff, UserCheck, UserPlus, Users, UserX } from "lucide-react";
+import {
+  Inbox,
+  KeyRound,
+  ShieldCheck,
+  ShieldOff,
+  UserCheck,
+  UserPlus,
+  Users,
+  UserX,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -265,6 +274,14 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
     await refresh();
   }
 
+  // "This page is empty" and "there is nothing here" are different answers,
+  // and paging is what makes the difference reachable: deleting the last row
+  // of the last page leaves the window past the end of a list that is not
+  // empty at all (DESIGN.md §9). The dedicated empty state says which one it
+  // is, and the range line below is skipped because `to` would be smaller
+  // than `from`.
+  const outOfRange = total !== null && total > 0 && offset >= total;
+
   const hasPrev = offset > 0;
   const hasNext = total !== null && offset + PAGE_SIZE < total;
 
@@ -303,11 +320,24 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
           hint={t("settings.adminUsers.loadFailedHint")}
         />
       ) : users.length === 0 ? (
-        <EmptyState
-          icon={Users}
-          title={t("settings.adminUsers.emptyTitle")}
-          description={t("settings.adminUsers.emptyDescription")}
-        />
+        outOfRange ? (
+          <EmptyState
+            icon={Inbox}
+            title={t("ui.pagination.outOfRangeTitle")}
+            description={t("ui.pagination.outOfRangeDescription")}
+            action={
+              <Button size="sm" onClick={() => setOffset(0)}>
+                {t("ui.pagination.backToFirstPage")}
+              </Button>
+            }
+          />
+        ) : (
+          <EmptyState
+            icon={Users}
+            title={t("settings.adminUsers.emptyTitle")}
+            description={t("settings.adminUsers.emptyDescription")}
+          />
+        )
       ) : (
         <div className="scroll-x rounded-lg border border-border">
           <table className="w-full min-w-[640px] border-collapse text-sm">
@@ -416,18 +446,22 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
         </div>
       )}
 
-      {(hasPrev || hasNext) && (
+      {!outOfRange && (hasPrev || hasNext) && (
         <div className="flex items-center justify-between text-sm text-fg-subtle">
           {/* A failed reload leaves total null. Rendering it as 0 would put
               "51–0 of 0" directly under the error state, which reads as "the
               directory is empty" rather than "we could not ask" (DESIGN.md
               §9). The buttons stay, because paging back is how you recover. */}
           <span className="tabular-nums">
-            {total === null
+            {total === null || users === null
               ? "—"
               : t("ui.pagination.range", {
-                  from: offset + 1,
-                  to: Math.min(offset + PAGE_SIZE, total),
+                  from: formatNumber(offset + 1),
+                  // From what actually arrived, not from the window's width:
+                  // the count and the page are separate reads, so a short last
+                  // page or a roster that changed between them would otherwise
+                  // be described by a number no row backs up.
+                  to: formatNumber(offset + users.length),
                   total: formatNumber(total),
                 })}
           </span>

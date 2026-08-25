@@ -69,6 +69,7 @@ export const org = {
     membersHiddenDescription: "この組織のメンバーだけが所属者を確認できます。",
     membersEmptyTitle: "メンバーがいません",
     membersEmptyDescription: "管理者が組織の設定からメンバーを追加できます。",
+    membersMore: "ほか {count} 名",
     manageMembers: "メンバーを管理",
   },
   settings: {

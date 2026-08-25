@@ -441,9 +441,15 @@ Error codes (`{"error": {"type": ...}}`): `org_creation_disabled` (403), `reserv
   public and never answers 403. Without this, the members-only roster the two member-list
   endpoints protect could simply be reassembled username by username.
   `whoami-v2` describes the caller's own account and is not filtered
-- Other HF organization APIs such as `GET /api/organizations/{org}/overview` are **not
-  implemented** (no public method in `huggingface_hub` calls them). Unimplemented endpoints keep
-  returning a JSON 404, as today
+- `GET /api/organizations/{org}/overview` — supports `HfApi.get_organization_overview()`, and is
+  the organization half of the user overview above (`handleHFOrgOverview`, routed in
+  `internal/api/server.go`; the response is spelled out in `docs/dev/api-contract.md` §
+  "GET /api/organizations/{org}/overview"). It describes the organization itself — display name,
+  avatar, counts — and carries no membership, so the disclosure rule that filters the *user*
+  overview's `orgs` array has nothing to apply to here. A user namespace of that name is a 404,
+  the mirror of what `GET /api/users/{username}/overview` does for an organization
+- HF organization APIs beyond the ones listed here are **not implemented** (no public method in
+  `huggingface_hub` calls them). Unimplemented endpoints keep returning a JSON 404, as today
 - `create_repo(..., organization=)` (a deprecated argument) and `repo_id="org/name"` both work
   through the existing `createRepo`. No changes
 - `list_models(author="team")` works through the existing `author=` filter. No changes
