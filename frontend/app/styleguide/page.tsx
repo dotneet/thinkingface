@@ -10,6 +10,7 @@ import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { CodeBlock } from "@/components/ui/code-block";
 import { CopyButton } from "@/components/ui/copy-button";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
+import { DiffView } from "@/components/ui/diff-view";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { Checkbox, Field, Input, Select, Textarea } from "@/components/ui/field";
@@ -114,6 +115,25 @@ const ACCENT_TOKENS = [
   { name: "warning-strong", className: "bg-warning-strong", use: "text on bg-warning/20" },
 ];
 
+// A patch as the commit-diff endpoint hands it over: hunks only, no
+// `diff --git` / `---` / `+++` headers. The long line is deliberate — it is
+// what proves the block scrolls inside its own border instead of widening
+// the page.
+const DIFF_SAMPLE = [
+  "@@ -1,6 +1,7 @@",
+  " from transformers import AutoModel",
+  "",
+  "-model = AutoModel.from_pretrained('bert-base-uncased')",
+  "+model = AutoModel.from_pretrained('bert-base-uncased', revision='refs/pr/1', trust_remote_code=False, torch_dtype='auto')",
+  "+model.eval()",
+  " ",
+  " print(model.config)",
+  "@@ -20,3 +21,2 @@",
+  "-# TODO: drop this once the loader lands",
+  "-legacy_load()",
+  " return model",
+].join("\n");
+
 const MARKDOWN_SAMPLE = `# Heading 1
 
 ## Heading 2
@@ -169,6 +189,17 @@ print(greet("world"))
 \`\`\`bash
 docker compose up -d
 curl -sS http://localhost:8080/api/whoami
+\`\`\`
+
+\`\`\`mermaid
+flowchart LR
+  push[git push] --> sync[sync worker]
+  sync --> blobs[(blobs/)]
+  sync --> index[file index]
+\`\`\`
+
+\`\`\`mermaid
+this is not a valid diagram
 \`\`\`
 
 > A blockquote spanning a single line.
@@ -423,6 +454,21 @@ export default function StyleguidePage() {
             label="Scrollable script"
             maxHeight="max-h-24"
           />
+        </div>
+      </Section>
+
+      <Section title="Diff view" hint="one file's unified diff — added / removed / context">
+        <div className="flex max-w-3xl flex-col gap-4">
+          <DiffView
+            patch={DIFF_SAMPLE}
+            emptyLabel="No line changes to show for this file."
+            truncatedNote="This patch was cut off mid-diff — the rest is not shown."
+          />
+          {/* The other branch: a patch with nothing in it. A file with no
+              patch at all (binary / LFS / skipped for size) is not this — it
+              never reaches DiffView, because the reason has to be said out
+              loud instead (components/repo-pages/repo-commit-diff.tsx). */}
+          <DiffView patch="" emptyLabel="No line changes to show for this file." />
         </div>
       </Section>
 

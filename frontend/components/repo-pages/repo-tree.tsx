@@ -146,6 +146,9 @@ export async function RepoTree({
           path={path}
           latestCommit={treeResult.data.latest_commit}
           commitsHref={repoCommitsHref(kind, ns, name, rev)}
+          // Same gate the file page puts on its edit/delete controls: a
+          // writer, on a branch. A tag or a commit SHA has no ref to advance.
+          canRename={repo.can_write && repo.branches.includes(rev)}
         />
       )}
 

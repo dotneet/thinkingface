@@ -2,6 +2,7 @@ import { ChartNoAxesCombined, CornerLeftUp } from "lucide-react";
 import Link from "next/link";
 import { CommitBar } from "@/components/repo/commit-bar";
 import { EntryIcon } from "@/components/repo/file-icon";
+import { RenameFileButton } from "@/components/repo/rename-file-button";
 import { Badge } from "@/components/ui/badge";
 import { TimeText } from "@/components/ui/time-text";
 import { formatBytes } from "@/lib/format";
@@ -18,6 +19,7 @@ export async function FileTreeTable({
   path,
   latestCommit,
   commitsHref,
+  canRename = false,
 }: {
   entries: TreeEntryUI[];
   kind: RepoKind;
@@ -28,6 +30,12 @@ export async function FileTreeTable({
   path: string[];
   latestCommit?: CommitInfoUI | null;
   commitsHref?: string;
+  /**
+   * Whether to offer the per-row rename. False for a reader, and false on a
+   * revision that is not a branch — there is no ref to advance on a tag or a
+   * detached SHA, and the API refuses it.
+   */
+  canRename?: boolean;
 }) {
   const t = await getT();
   const sorted = [...entries].sort((a, b) => {
@@ -126,15 +134,32 @@ export async function FileTreeTable({
                   )}
                 </td>
                 <td className="px-3 py-2 text-right">
-                  {entry.is_parquet && (
-                    <Link
-                      href={repoViewerHref(kind, ns, name, rev, entry.path)}
-                      className="relative z-10 inline-flex items-center gap-1 text-xs font-medium text-accent hover:underline"
-                    >
-                      <ChartNoAxesCombined size={12} />
-                      {t("repo.treeTable.openInViewer")}
-                    </Link>
-                  )}
+                  <div className="flex items-center justify-end gap-2">
+                    {entry.is_parquet && (
+                      <Link
+                        href={repoViewerHref(kind, ns, name, rev, entry.path)}
+                        className="relative z-10 inline-flex items-center gap-1 text-xs font-medium text-accent hover:underline"
+                      >
+                        <ChartNoAxesCombined size={12} />
+                        {t("repo.treeTable.openInViewer")}
+                      </Link>
+                    )}
+                    {/* Directories are left out: git has no directory objects
+                        to move, so renaming one means rewriting every path
+                        below it -- a different operation from this one, and
+                        not one the single-file endpoint performs. */}
+                    {canRename && entry.type === "file" && (
+                      <RenameFileButton
+                        kind={kind}
+                        ns={ns}
+                        name={name}
+                        rev={rev}
+                        path={entry.path.split("/")}
+                        baseOid={entry.oid}
+                        variant="link"
+                      />
+                    )}
+                  </div>
                 </td>
               </tr>
             );

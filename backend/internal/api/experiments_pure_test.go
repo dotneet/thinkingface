@@ -3,8 +3,10 @@ package api
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
+	"github.com/dotneet/thinkingface/backend/internal/store"
 )
 
 func TestRunArtifactDir(t *testing.T) {
@@ -109,5 +111,85 @@ func TestNormalizeRunModelsEmptyListIsValid(t *testing.T) {
 	got, err := normalizeRunModels([]apitypes.ExpRunModelInput{})
 	if err != nil || len(got) != 0 {
 		t.Fatalf("normalizeRunModels(empty) = %+v, %v", got, err)
+	}
+}
+
+// ----------------------------------------------------------- stale detection
+
+func TestDeriveRunStatus(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name      string
+		stored    string
+		updatedAt time.Time
+		want      apitypes.RunStatus
+	}{
+		{"fresh running", "running", now.Add(-time.Minute), apitypes.RunStatusRunning},
+		{"running updated just now", "running", now, apitypes.RunStatusRunning},
+		// The boundary belongs to the optimistic side: exactly the window old
+		// is still running, one instant past it is stale.
+		{"running exactly at the window", "running", now.Add(-runStaleAfter), apitypes.RunStatusRunning},
+		{"running one nanosecond past", "running", now.Add(-runStaleAfter - time.Nanosecond), apitypes.RunStatusStale},
+		{"running long past", "running", now.Add(-72 * time.Hour), apitypes.RunStatusStale},
+		// Terminal states are untouched no matter how old they are: the age of
+		// a finished run says nothing about it.
+		{"old finished", "finished", now.Add(-72 * time.Hour), apitypes.RunStatusFinished},
+		{"old failed", "failed", now.Add(-72 * time.Hour), apitypes.RunStatusFailed},
+		// An unknown status is passed through rather than reinterpreted.
+		{"unknown status", "queued", now.Add(-72 * time.Hour), apitypes.RunStatus("queued")},
+		// Nothing to judge against, so the row keeps what it claims.
+		{"running with no timestamp", "running", time.Time{}, apitypes.RunStatusRunning},
+		// A clock skew that puts the update in the future must not read as
+		// stale (now.Sub is negative there).
+		{"running in the future", "running", now.Add(time.Hour), apitypes.RunStatusRunning},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deriveRunStatus(tc.stored, tc.updatedAt, now); got != tc.want {
+				t.Fatalf("deriveRunStatus(%q, %v) = %q, want %q", tc.stored, tc.updatedAt, got, tc.want)
+			}
+		})
+	}
+}
+
+// The derived status must never be storable: ingest accepts only the three
+// lifecycle states, and "stale" is an answer the server computes, not a claim
+// a client may make.
+func TestStaleIsNotAnIngestStatus(t *testing.T) {
+	if validRunStatus(string(apitypes.RunStatusStale)) {
+		t.Fatal("validRunStatus accepted the derived stale status")
+	}
+}
+
+// toExpRuns is the single funnel every ExpRun-returning endpoint goes through,
+// so the derivation is pinned here rather than once per handler.
+func TestToExpRunsDerivesStale(t *testing.T) {
+	old := time.Now().Add(-2 * runStaleAfter)
+	fresh := time.Now().Add(-time.Second)
+	rows := []store.ExpRun{
+		{Name: "dead", Status: "running", UpdatedAt: old},
+		{Name: "alive", Status: "running", UpdatedAt: fresh},
+		{Name: "done", Status: "finished", UpdatedAt: old},
+		{Name: "broke", Status: "failed", UpdatedAt: old},
+	}
+	got := toExpRuns(rows, nil)
+	want := map[string]apitypes.RunStatus{
+		"dead":  apitypes.RunStatusStale,
+		"alive": apitypes.RunStatusRunning,
+		"done":  apitypes.RunStatusFinished,
+		"broke": apitypes.RunStatusFailed,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("toExpRuns returned %d runs, want %d", len(got), len(want))
+	}
+	for _, run := range got {
+		if run.Status != want[run.Name] {
+			t.Errorf("run %q status = %q, want %q", run.Name, run.Status, want[run.Name])
+		}
+		// The timestamp itself is reported unchanged: the UI needs it to say
+		// how long ago the run was last heard from.
+		if run.UpdatedAt.IsZero() {
+			t.Errorf("run %q lost its updated_at", run.Name)
+		}
 	}
 }

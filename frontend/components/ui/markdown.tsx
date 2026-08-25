@@ -4,9 +4,10 @@ import Link from "next/link";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { MarkdownCodeBlock } from "@/components/ui/markdown-code-block";
 import { MarkdownHeadingAnchor } from "@/components/ui/markdown-heading-anchor";
+import { MarkdownMermaid } from "@/components/ui/markdown-mermaid";
 import { MarkdownTable } from "@/components/ui/markdown-table";
 import { cn } from "@/lib/cn";
-import { markdownRehypePlugins, markdownRemarkPlugins } from "@/lib/markdown-pipeline";
+import { hastText, markdownRehypePlugins, markdownRemarkPlugins } from "@/lib/markdown-pipeline";
 import {
   isExternalHref,
   type MarkdownLinkContext,
@@ -37,10 +38,16 @@ export type MarkdownProps = {
   className?: string;
 };
 
+/** The fence's child `<code>` element, if `pre` has one. */
+function fenceCode(node: Element | undefined): Element | undefined {
+  const code = node?.children.find((child) => child.type === "element" && child.tagName === "code");
+  return code?.type === "element" ? code : undefined;
+}
+
 /** The `xxx` of a fence's `language-xxx` class, read off the child `<code>`. */
 function fenceLanguage(node: Element | undefined): string | undefined {
-  const code = node?.children.find((child) => child.type === "element" && child.tagName === "code");
-  if (code?.type !== "element") return undefined;
+  const code = fenceCode(node);
+  if (!code) return undefined;
   return classList(code)
     .find((c) => c.startsWith("language-"))
     ?.slice("language-".length);
@@ -114,7 +121,16 @@ const components: Components = {
     );
   },
   pre({ node, children }) {
-    return <MarkdownCodeBlock language={fenceLanguage(node)}>{children}</MarkdownCodeBlock>;
+    const language = fenceLanguage(node);
+    // The diagram source is read straight off the hast tree with `hastText`,
+    // not from `children` (react-markdown's already-rendered React nodes for
+    // the highlighted `<code>`) — see MarkdownMermaid's doc comment for why
+    // that matters for the untrusted-input story.
+    if (language === "mermaid") {
+      const code = fenceCode(node);
+      if (code) return <MarkdownMermaid code={hastText(code)} />;
+    }
+    return <MarkdownCodeBlock language={language}>{children}</MarkdownCodeBlock>;
   },
   table({ children }) {
     return <MarkdownTable>{children}</MarkdownTable>;

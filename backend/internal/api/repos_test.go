@@ -3,7 +3,10 @@ package api
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+
+	"github.com/dotneet/thinkingface/backend/internal/apitypes"
 
 	"github.com/dotneet/thinkingface/backend/internal/config"
 	"github.com/dotneet/thinkingface/backend/internal/store"
@@ -271,5 +274,197 @@ func TestCreateRepoRollsBackOnACancelledRequest(t *testing.T) {
 	f.s.sync = noopEnqueuer{}
 	if _, err := f.s.createRepo(context.Background(), f.alice, "model", "alice", "cut-off", ""); err != nil {
 		t.Fatalf("re-creating the rolled-back repository: %v", err)
+	}
+}
+
+// --------------------------------------------- PATCH: rename / description
+//
+// The default_branch half of this endpoint is covered in default_branch_test.go;
+// these are the two fields that were added next to it. They reuse that file's
+// fixture (a real Server over real HTTP) rather than standing up a third one.
+
+// TestUpdateRepo_RenameLeavesARedirect is the reason a rename may go through
+// PATCH at all: it is the *same* move a transfer performs, minus the change of
+// owner, so everything a transfer leaves behind has to be left behind here too
+// -- above all the redirect, without which every existing clone URL, model
+// card reference and bookmark 404s.
+func TestUpdateRepo_RenameLeavesARedirect(t *testing.T) {
+	f := newDefaultBranchFixture(t)
+	r := f.repo("alice", "foo", "model")
+	f.commit(r, "main", "README.md", "hello")
+	tok := f.token(f.alice, "write")
+
+	resp := f.patch("model", "alice", "foo", tok, apitypes.RepoUpdateRequest{Name: strPtr("bar")})
+	if resp.status() != 200 {
+		t.Fatalf("status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+	var body apitypes.RepoDetailResponse
+	resp.json(t, &body)
+	if body.Repo.Name != "bar" || body.Repo.FullName != "alice/bar" {
+		t.Fatalf("renamed repo = %q / %q, want bar / alice/bar", body.Repo.Name, body.Repo.FullName)
+	}
+
+	if resp := f.do("GET", "/api/v1/repos/model/alice/bar", tok, nil); resp.status() != 200 {
+		t.Fatalf("new name status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+	// The old name answers with the repo_moved shape the UI follows.
+	old := f.do("GET", "/api/v1/repos/model/alice/foo", tok, nil)
+	if old.status() != 404 {
+		t.Fatalf("old name status = %d, want 404; body = %s", old.status(), old.rec.Body.String())
+	}
+	var errBody apitypes.ApiErrorBody
+	old.json(t, &errBody)
+	if errBody.Error.Type != "repo_moved" {
+		t.Fatalf("old name error type = %q, want repo_moved", errBody.Error.Type)
+	}
+	if errBody.Error.MovedTo == nil || errBody.Error.MovedTo.Namespace != "alice" || errBody.Error.MovedTo.Name != "bar" {
+		t.Fatalf("moved_to = %+v, want alice/bar", errBody.Error.MovedTo)
+	}
+}
+
+// A rename never becomes a *takeover*: the name has to be free, and a taken
+// one is the same 409 a transfer into an occupied name answers with.
+func TestUpdateRepo_RenameConflictIs409(t *testing.T) {
+	f := newDefaultBranchFixture(t)
+	f.repo("alice", "foo", "model")
+	f.repo("alice", "bar", "model")
+	tok := f.token(f.alice, "write")
+
+	resp := f.patch("model", "alice", "foo", tok, apitypes.RepoUpdateRequest{Name: strPtr("bar")})
+	if resp.status() != 409 {
+		t.Fatalf("status = %d, want 409; body = %s", resp.status(), resp.rec.Body.String())
+	}
+	// Both repositories are still where they were.
+	if resp := f.do("GET", "/api/v1/repos/model/alice/foo", tok, nil); resp.status() != 200 {
+		t.Fatalf("source status = %d after a refused rename", resp.status())
+	}
+}
+
+// Renaming to the name it already has is a no-op rather than the ErrConflict
+// store.TransferRepo reports for a move that goes nowhere.
+func TestUpdateRepo_RenameToTheSameNameIsANoop(t *testing.T) {
+	f := newDefaultBranchFixture(t)
+	f.repo("alice", "foo", "model")
+	tok := f.token(f.alice, "write")
+
+	resp := f.patch("model", "alice", "foo", tok, apitypes.RepoUpdateRequest{Name: strPtr("foo")})
+	if resp.status() != 200 {
+		t.Fatalf("status = %d, want 200; body = %s", resp.status(), resp.rec.Body.String())
+	}
+}
+
+func TestUpdateRepo_RenameValidatesTheName(t *testing.T) {
+	f := newDefaultBranchFixture(t)
+	f.repo("alice", "foo", "model")
+	tok := f.token(f.alice, "write")
+
+	for _, name := range []string{"", "bad name", "-leading", "has/slash", "repo.git", strings.Repeat("x", 97)} {
+		resp := f.patch("model", "alice", "foo", tok, apitypes.RepoUpdateRequest{Name: strPtr(name)})
+		if resp.status() != 400 {
+			t.Errorf("name %q: status = %d, want 400; body = %s", name, resp.status(), resp.rec.Body.String())
+		}
+	}
+	// Nothing was renamed along the way.
+	if resp := f.do("GET", "/api/v1/repos/model/alice/foo", tok, nil); resp.status() != 200 {
+		t.Fatalf("repo status = %d after refused renames", resp.status())
+	}
+}
+
+// The same namespace-admin bar the rest of this endpoint applies: a write
+// member may push, but not rename the repository out from under everyone's
+// bookmarks.
+func TestUpdateRepo_RenameRequiresNamespaceAdmin(t *testing.T) {
+	f := newDefaultBranchFixture(t)
+	ns, err := f.st.CreateOrg(context.Background(), "acme", f.alice.ID, store.OrgUpdate{})
+	if err != nil {
+		t.Fatalf("create org: %v", err)
+	}
+	f.repo("acme", "foo", "model")
+	f.addOrgMember(ns.ID, f.bob.ID, "write")
+
+	resp := f.patch("model", "acme", "foo", f.token(f.bob, "write"), apitypes.RepoUpdateRequest{Name: strPtr("bar")})
+	if resp.status() != 403 {
+		t.Fatalf("write member status = %d, want 403; body = %s", resp.status(), resp.rec.Body.String())
+	}
+	resp = f.patch("model", "acme", "foo", f.token(f.alice, "write"), apitypes.RepoUpdateRequest{Name: strPtr("bar")})
+	if resp.status() != 200 {
+		t.Fatalf("org admin status = %d, want 200; body = %s", resp.status(), resp.rec.Body.String())
+	}
+}
+
+func TestUpdateRepo_RenameRejectsWhenArchived(t *testing.T) {
+	f := newDefaultBranchFixture(t)
+	f.repo("alice", "foo", "model")
+	tok := f.token(f.alice, "write")
+	if resp := f.do("POST", "/api/v1/repos/model/alice/foo/archive", tok, nil); resp.status() != 200 {
+		t.Fatalf("archive status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+
+	resp := f.patch("model", "alice", "foo", tok, apitypes.RepoUpdateRequest{Name: strPtr("bar")})
+	if resp.status() != 403 {
+		t.Fatalf("status = %d, want 403; body = %s", resp.status(), resp.rec.Body.String())
+	}
+}
+
+// description is editable after creation, and clearable. What it is *not* is
+// stronger than the README card: store.UpdateRepoIndex still overwrites it on
+// the next push of a card that carries one (covered in
+// internal/store/repos_test.go).
+func TestUpdateRepo_SetsAndClearsDescription(t *testing.T) {
+	f := newDefaultBranchFixture(t)
+	f.repo("alice", "foo", "model")
+	tok := f.token(f.alice, "write")
+
+	resp := f.patch("model", "alice", "foo", tok, apitypes.RepoUpdateRequest{Description: strPtr("  a better summary  ")})
+	if resp.status() != 200 {
+		t.Fatalf("status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+	var body apitypes.RepoDetailResponse
+	resp.json(t, &body)
+	if body.Repo.Description != "a better summary" {
+		t.Fatalf("description = %q, want it trimmed and stored", body.Repo.Description)
+	}
+
+	resp = f.patch("model", "alice", "foo", tok, apitypes.RepoUpdateRequest{Description: strPtr("")})
+	if resp.status() != 200 {
+		t.Fatalf("clear status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+	resp.json(t, &body)
+	if body.Repo.Description != "" {
+		t.Fatalf("description = %q, want it cleared", body.Repo.Description)
+	}
+}
+
+func TestUpdateRepo_RejectsAnOversizedDescription(t *testing.T) {
+	f := newDefaultBranchFixture(t)
+	f.repo("alice", "foo", "model")
+	tok := f.token(f.alice, "write")
+
+	resp := f.patch("model", "alice", "foo", tok,
+		apitypes.RepoUpdateRequest{Description: strPtr(strings.Repeat("あ", maxDescriptionRunes+1))})
+	if resp.status() != 400 {
+		t.Fatalf("status = %d, want 400; body = %s", resp.status(), resp.rec.Body.String())
+	}
+}
+
+// One request may carry all three fields, and the response describes the
+// repository as it stands after every one of them landed.
+func TestUpdateRepo_AppliesEveryFieldInOneRequest(t *testing.T) {
+	f := newDefaultBranchFixture(t)
+	r := f.repo("alice", "foo", "model")
+	f.commit(r, "main", "README.md", "hello")
+	f.commit(r, "release", "VERSION", "1.0")
+	tok := f.token(f.alice, "write")
+
+	resp := f.patch("model", "alice", "foo", tok, apitypes.RepoUpdateRequest{
+		DefaultBranch: strPtr("release"), Name: strPtr("bar"), Description: strPtr("everything at once"),
+	})
+	if resp.status() != 200 {
+		t.Fatalf("status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+	var body apitypes.RepoDetailResponse
+	resp.json(t, &body)
+	if body.Repo.Name != "bar" || body.Repo.DefaultBranch != "release" || body.Repo.Description != "everything at once" {
+		t.Fatalf("repo = %+v, want bar / release / everything at once", body.Repo.RepoSummary)
 	}
 }

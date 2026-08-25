@@ -17,6 +17,10 @@ export const auth = {
   submitLogin: "Log in",
   submitSignup: "Create account",
   pleaseWait: "Please wait…",
+  // Login tab only. There is no self-service password reset on this
+  // instance — resets are an admin-issued forced reset — so this is
+  // deliberately not a link to a page that does not exist.
+  forgotPasswordHint: "Forgot your password? Contact your site administrator to have it reset.",
   // NamespaceUrlPreview row labels (components/namespace/namespace-url-preview.tsx),
   // shared by sign-up and organisation creation.
   preview: {

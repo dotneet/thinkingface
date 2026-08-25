@@ -33,6 +33,10 @@ export HF_HUB_DISABLE_XET=1
 | `create_tag()` / `delete_tag()` | Yes, including `exist_ok=True`. A `tag_message` creates a real annotated tag |
 | `list_repo_commits()` | Yes, newest first, with `revision=` and pagination |
 | `upload_folder()` | Yes, for a folder mixing a plain file and a Git LFS-tracked one. Re-uploading byte-identical content creates **no** new commit, and changing one file uploads only that file — verified in both directions, for the regular path and the LFS path |
+| `auth_check()` | Yes, and raises `RepositoryNotFoundError` for a repository that is not there. Since this instance has no read boundary, "may I read it" is the same question as "is it there" |
+| `file_exists()` | Yes, including the two ways it answers `False`: a path missing at a real revision, and a revision that does not exist |
+| `get_model_tags()` / `get_dataset_tags()` | Yes, built from the same facet aggregation the Web UI filters with |
+| `super_squash_history()` | Yes, collapsing a branch to a single parentless commit that keeps the current tree |
 | `snapshot_download()` | Partly: an unknown `revision=` is verified to raise `RevisionNotFoundError` rather than silently materializing an empty snapshot. A successful whole-repository snapshot is **not** asserted by the suite |
 
 Two notes on the last two rows, since "verified" means something narrower there:
@@ -101,6 +105,14 @@ Git LFS only — Xet endpoints answer with an explicit `501` telling the client 
 instead of a confusing failure. Set `HF_HUB_DISABLE_XET=1` in the environment before using
 `huggingface_hub` against a thinkingface instance (the `thinkingface` Python package's
 `login()` helper sets this for you).
+
+**Git LFS file locking is not supported.** The lock API (`git lfs lock`, `git lfs unlock`,
+`git lfs locks`) is not implemented: those endpoints match no route, so the commands fail with an
+unexpected HTTP 404 from the server rather than a message saying locking is unavailable. Nothing
+else about LFS is affected — `git push`, `git pull` and `git fetch` never depend on it (the
+optional pre-push lock check treats a 404 as "this server does not support locking" and carries
+on). The practical consequence is that there is no server-side coordination for two people
+editing the same large file: the last push to land wins, exactly as for any other file in git.
 
 **SQLite mode has narrower search semantics than PostgreSQL.** An instance can run on either
 PostgreSQL or SQLite (`DATABASE_URL`'s scheme selects which). Under SQLite:

@@ -26,6 +26,7 @@ func TestValidateWebhookEvents_AllApitypesConstants(t *testing.T) {
 		apitypes.WebhookEventRepoTransferRequested,
 		apitypes.WebhookEventRepoArchived,
 		apitypes.WebhookEventRepoUnarchived,
+		apitypes.WebhookEventRepoRefDeleted,
 		apitypes.WebhookEventRunFinished,
 		apitypes.WebhookEventRunFailed,
 	} {

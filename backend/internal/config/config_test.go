@@ -373,3 +373,40 @@ func TestLoad_UnsetTypedValuesKeepTheirDefaults(t *testing.T) {
 		t.Fatalf("defaults not applied: %+v", c)
 	}
 }
+
+// TF_SIGNUP_EMAIL_DOMAINS is normalised once, here, so that every comparison
+// against it stays a plain string equality (see api.checkSignupEmailDomain).
+func TestLoad_SignupEmailDomainsAreNormalised(t *testing.T) {
+	setBase(t)
+	t.Setenv("TF_SIGNUP_EMAIL_DOMAINS", " Example.COM , @corp.example.org ,, ")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"example.com", "corp.example.org"}
+	if len(c.SignupEmailDomains) != len(want) {
+		t.Fatalf("SignupEmailDomains = %q, want %q", c.SignupEmailDomains, want)
+	}
+	for i := range want {
+		if c.SignupEmailDomains[i] != want[i] {
+			t.Fatalf("SignupEmailDomains = %q, want %q", c.SignupEmailDomains, want)
+		}
+	}
+	if c.SignupRequireApproval {
+		t.Error("TF_SIGNUP_REQUIRE_APPROVAL defaults to true; it must default to off")
+	}
+}
+
+// An unset (or empty) value is no restriction at all -- nil rather than a
+// one-element list containing the empty string, which would refuse everybody.
+func TestLoad_SignupEmailDomainsEmptyMeansUnrestricted(t *testing.T) {
+	setBase(t)
+	t.Setenv("TF_SIGNUP_EMAIL_DOMAINS", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.SignupEmailDomains) != 0 {
+		t.Fatalf("SignupEmailDomains = %q, want empty", c.SignupEmailDomains)
+	}
+}

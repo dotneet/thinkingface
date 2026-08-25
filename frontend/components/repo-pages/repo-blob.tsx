@@ -5,6 +5,7 @@ import { CommitBar } from "@/components/repo/commit-bar";
 import { DeleteFileButton } from "@/components/repo/delete-file-button";
 import { FileNav } from "@/components/repo/file-nav";
 import { FilePreview } from "@/components/repo/file-preview";
+import { RenameFileButton } from "@/components/repo/rename-file-button";
 import { RepoBreadcrumb } from "@/components/repo/repo-breadcrumb";
 import { RepoNotFoundOrLogin } from "@/components/repo/repo-not-found";
 import { RepoTabs } from "@/components/repo/repo-tabs";
@@ -144,6 +145,17 @@ export async function RepoBlob({
                       {t("repo.blob.edit")}
                     </Link>
                   )}
+                  {/* Offered for every file, LFS pointers included: a rename
+                      moves a tree entry by hash, so nothing is read or
+                      re-uploaded and the pointer travels as a pointer. */}
+                  <RenameFileButton
+                    kind={kind}
+                    ns={ns}
+                    name={name}
+                    rev={rev}
+                    path={path}
+                    baseOid={entry.oid}
+                  />
                   <DeleteFileButton
                     kind={kind}
                     ns={ns}

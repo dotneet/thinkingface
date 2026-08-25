@@ -4,8 +4,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FlaskConical } from "lucide-react";
 import { useMemo, useState } from "react";
 import { ConfigDiffTable } from "@/components/experiments/config-diff-table";
+import { CsvDownloadButton } from "@/components/experiments/csv-download-button";
+import {
+  hasLiveRun,
+  LIVE_REFRESH_INTERVAL_MS,
+  liveRefetchInterval,
+} from "@/components/experiments/live-refresh";
 import { MetricsCharts } from "@/components/experiments/metrics-charts";
 import { ParallelCoordinates } from "@/components/experiments/parallel-coordinates";
+import { csvFilename, metricSeriesCsv } from "@/components/experiments/run-csv";
 import { RunDeleteDialog } from "@/components/experiments/run-delete-dialog";
 import { RunScatter } from "@/components/experiments/run-scatter";
 import { RunTable } from "@/components/experiments/run-table";
@@ -76,6 +83,15 @@ export function ExperimentDashboard({
       return result.data;
     },
     initialData: { runs: initialRuns },
+    // Live training curves: while any run in this project is still logging,
+    // the list re-reads itself so the table's last-step and summary columns
+    // move on their own. The predicate reads the *response*, so a project
+    // whose runs have all finished (or gone stale) settles back to no polling
+    // without the page having to be reloaded.
+    refetchInterval: (query) => liveRefetchInterval(query.state.data?.runs ?? []),
+    // A backgrounded tab is nobody watching a chart. Left on, every experiment
+    // page anyone forgot to close would keep polling all day.
+    refetchIntervalInBackground: false,
   });
   const runs = runsData.runs;
 
@@ -218,6 +234,10 @@ export function ExperimentDashboard({
       return result.data;
     },
     enabled: selectedNames.length > 0,
+    // Only the plotted runs decide this: a live run nobody selected is not
+    // drawing a line, so re-reading the series for it would buy nothing.
+    refetchInterval: hasLiveRun(selectedRuns) ? LIVE_REFRESH_INTERVAL_MS : false,
+    refetchIntervalInBackground: false,
   });
 
   if (runs.length === 0) {
@@ -379,6 +399,13 @@ export function ExperimentDashboard({
               active={isFetching}
               size={14}
               label={t("experiments.dashboard.loadingMetrics")}
+            />
+
+            <CsvDownloadButton
+              label={t("experiments.dashboard.exportMetricsCsv")}
+              filename={csvFilename([ns, repo, project, "metrics"])}
+              disabled={(data?.series.length ?? 0) === 0}
+              build={() => metricSeriesCsv(data?.series ?? [], xMode === "time")}
             />
           </div>
 

@@ -92,7 +92,8 @@ func scanRepoTransfer(row rowScanner) (*RepoTransfer, error) {
 // transferMove performs the physical relocation of a repository: updating
 // repositories.namespace_id/name, leaving a redirect at the old name,
 // rewriting repo_lineage targets that pointed at the old name and dropping
-// repo-scoped webhooks -- docs/dev/repo-transfer-design.md §7.1's steps between
+// repo-scoped webhooks when the owner actually changes --
+// docs/dev/repo-transfer-design.md §7.1's steps between
 // the repositories UPDATE and the repo_transfers INSERT. Object storage needs
 // no step of its own: every key is content-addressed, so not one byte moves
 // when a repository changes hands. It does not touch repo_transfers itself:
@@ -206,8 +207,14 @@ func (s *Store) transferMove(ctx context.Context, ex executor, spec TransferSpec
 
 	// A repository-scoped webhook subscription belonged to the old owner;
 	// keeping it would leak events about a repository they no longer own.
-	if _, err = ex.Exec(ctx, `DELETE FROM webhooks WHERE repo_id = $1`, spec.RepoID); err != nil {
-		return nil, 0, "", err
+	// A rename inside the same namespace has no old owner, so it keeps its
+	// subscriptions: the reason to drop them never arises, and dropping them
+	// would silently destroy configuration on what is, to the person doing
+	// it, just a change of name.
+	if spec.ToNamespaceID != repoNSID {
+		if _, err = ex.Exec(ctx, `DELETE FROM webhooks WHERE repo_id = $1`, spec.RepoID); err != nil {
+			return nil, 0, "", err
+		}
 	}
 
 	repo, err = scanRepo(ex.QueryRow(ctx,

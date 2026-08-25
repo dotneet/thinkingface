@@ -106,6 +106,23 @@ req: `{"username","email","password"}` → res 200: `{"user": User}` + cookie
   `Alice` and `alice` are treated as the same namespace, and whichever signs up second gets 409.
   Display and URLs keep the spelling as registered (it is not re-saved via `lower()`).
 - The same rate limit as login (per IP) applies.
+- `TF_SIGNUP_EMAIL_DOMAINS` (comma separated, empty = unrestricted) narrows which addresses may
+  register. The match is on the part after the last `@`, lower-cased on both sides, and
+  **exact**: an instance listing `example.com` refuses `alice@sub.example.com`, because a
+  domain implicitly admitting every subdomain of itself is a surprise that only surfaces as an
+  unwanted account. It is checked *after* `validateEmail`, so a malformed address is still
+  answered as malformed, and the 400 names the accepted domains — a form that refuses without
+  saying what it wants cannot be filled in, and the list is the deployment's own domain rather
+  than a secret. `POST /api/v1/admin/users` deliberately does not consult it, for the same
+  reason it does not consult `TF_ALLOW_SIGNUP`.
+- `TF_SIGNUP_REQUIRE_APPROVAL=true` changes the success case: the account is created with
+  `users.approval_pending_at` set (one INSERT, not a create-then-mark pair), **no session
+  cookie is issued**, and the answer is 403 `approval_pending` naming the reason. It is
+  error-shaped even though the account exists because the outcome the caller asked for — being
+  signed in — did not happen, and this response is the only place they are ever told why; a 2xx
+  would send the web UI's form straight to its redirect and leave somebody looking at a
+  signed-out page, registering again, and being told their own username is taken. See
+  `approval` under `PATCH /api/v1/admin/users/{username}`.
 
 ### `POST /api/v1/auth/logout`
 res 204. Invalidates the cookie and **also invalidates all of that user's existing sessions
@@ -539,7 +556,7 @@ Site administrators only, session cookie, write scope. req — every field optio
 is left unchanged:
 
 ```json
-{ "password": "…", "is_admin": true, "disabled": true }
+{ "password": "…", "is_admin": true, "disabled": true, "approval": "approved" }
 ```
 
 res 200 `{"user": AdminUser}`. Errors:
@@ -549,10 +566,12 @@ res 200 `{"user": AdminUser}`. Errors:
 | 400 | `bad_request` | No field set (a body that changes nothing is refused rather than answered 200), or an invalid `password` |
 | 400 | `self_demote` | An attempt to clear **your own** `is_admin`. Its own type so the UI can translate it; the web UI leaves the control off your own row, so it answers a race or a hand-made request |
 | 400 | `self_disable` | An attempt to set `disabled` on **your own** account. Same reasoning, one step stronger: the write revokes the session the request arrived on, so the mistake would lock you out mid-click with nothing left to undo it with |
+| 400 | `self_pending` | An attempt to set `approval` to `"pending"` on **your own** account. The same reasoning as `self_disable`, and for the same reason: un-approving revokes the session the request arrived on |
+| 400 | `bad_request` | An `approval` that is neither `"approved"` nor `"pending"`. Refused before the lookup, so an unrecognised value cannot be read as one of the two |
 | 403 | `forbidden` | The caller is not a site administrator, or holds a read-only token |
 | 403 | `session_required` | The caller presented a token or HTTP Basic rather than a session cookie |
 | 404 | `not_found` | No account with that username |
-| 409 | `last_admin` | Clearing `is_admin`, or setting `disabled`, would leave the instance with no usable site administrator |
+| 409 | `last_admin` | Clearing `is_admin`, setting `disabled`, or setting `approval` to `"pending"`, would leave the instance with no usable site administrator |
 
 Everything that can fail on its own terms — validation, the target lookup, the self-demotion rule,
 and the bcrypt hash — completes before the first durable write, so a refused request cannot have
@@ -595,6 +614,43 @@ that colleague no longer needed.
   epoch a second time.
 - A credential presented for a suspended account is logged at `slog.Warn` (naming the account, the
   auth method, the client IP and the path) and the request simply proceeds as anonymous.
+
+##### `approval`: the sign-up waiting room
+
+`approval` is `"approved"` or `"pending"`, and it exists because `TF_ALLOW_SIGNUP` is a binary
+with nothing between "anybody may register" and "an administrator adds every account by hand".
+With `TF_SIGNUP_REQUIRE_APPROVAL=true`, `POST /api/v1/auth/signup` creates the account with
+`users.approval_pending_at` set, issues **no session**, and answers 403 `approval_pending`
+naming the reason. This field is what admits it.
+
+- A pending account authenticates on **no path at all**, exactly like a disabled one, and
+  through exactly the same code: `resolveIdentity` refuses both at the single exit of
+  credential resolution, `store.LookupToken` and `store.LookupSSHKey` carry
+  `approval_pending_at IS NULL` alongside `disabled_at IS NULL`, `handleLogin` answers 403
+  `account_pending` (only ever reachable with the *correct* password), and `ServeGit`
+  re-checks it. Adding a second gate at a second place is how one of them ends up forgotten.
+- **The two gates are independent.** Suspension means "this account used to be allowed in";
+  pending means "it never has been". Approving does not un-suspend and restoring does not
+  approve, so one administrator's decision cannot be undone by another's unrelated one.
+- Setting `"pending"` increments `session_epoch` in the same statement; setting `"approved"`
+  does not touch it, since a pending account can never have been issued a cookie. Setting the
+  state an account is already in is a no-op, so a retry does not revoke twice.
+- **Every account that predates the column is approved**, and so is every account
+  `POST /api/v1/admin/users` creates: `approval_pending_at` records the *pending* instant
+  rather than an approved one, so NULL — the migration default — means approved. The reverse
+  spelling would have locked every existing account out on upgrade.
+- `AdminUser.approval` reports it, and `GET /api/v1/admin/users` sorts pending accounts to the
+  top of every page (username order within each group), because the waiting room is the only
+  thing on that screen that needs acting on.
+
+##### `last_login_at`
+
+`AdminUser.last_login_at` is when a password last minted a session for the account, null for
+one that never has — including every account that predates the column. Only `handleLogin`
+writes it. Access tokens and SSH keys carry their own last-used timestamps and deliberately do
+not move this one: the question it answers is "is anybody still using this account", for which
+an unattended CI token is the wrong signal. HTTP Basic does not move it either — no session is
+minted there, and a `git fetch` loop would otherwise write to `users` on every request.
 
 #### `POST /api/v1/admin/users/{username}/revoke-credentials`
 
@@ -698,6 +754,111 @@ token is 403. No body. res **204**.
   beside its wake channel, so a requeued job is claimed within that window; the response says the
   job was requeued, not that it has since succeeded. If it fails again it parks again and
   reappears in the listing.
+
+#### Namespace storage quotas
+
+Object storage is billed by the byte and, before these endpoints, nothing capped it: one
+namespace could fill the bucket, and `GET /api/v1/usage` only reported that after the fact.
+
+The allowance is per **namespace** — both an account's own and an organisation's — held in
+`namespaces.storage_quota_bytes`, and what it counts is the LFS footprint `GET /api/v1/usage`
+reports.
+
+**It counts LFS objects only.** Whether a file goes to LFS is decided by the repository's
+`.gitattributes`, which the pusher controls, and a plain git blob is still published to
+`blobs/` by the sync worker — so a repository that routes nothing through LFS can put bytes in
+the bucket that this quota neither counts nor refuses. The cap is a guard against the ordinary
+way large files arrive here, not a hard ceiling on what a namespace can cost.
+
+Three states, and they are deliberately distinct:
+
+| `quota_bytes` | Meaning |
+|---|---|
+| `null` | No quota of its own; the instance default `TF_DEFAULT_STORAGE_QUOTA_BYTES` applies |
+| `0` | A quota of **zero bytes** — the namespace may hold repositories but upload nothing |
+| *n* | *n* bytes |
+
+`TF_DEFAULT_STORAGE_QUOTA_BYTES` itself spells "unlimited" as `0`, which is its default: an
+instance that never configures quotas refuses nothing. `effective_quota_bytes` is the resolution
+of the two — the override when there is one, otherwise the default, `null` for unlimited — so no
+client has to re-implement that fallback and get the "0 is not an absence" half wrong.
+
+**Enforcement** is in the LFS batch API, the one place that authorises a write into the bucket.
+An `operation: "upload"` batch whose objects total more than what is left refuses **the whole
+batch**, before any transfer URL is minted, with a per-object error carrying code **507**
+(Insufficient Storage) and a message naming the namespace, both sides of the ratio and the
+shortfall. Checking one object at a time would let a hundred-file push land a hundred times the
+remaining allowance; refusing only the objects that do not fit would leave the push half
+transferred and the commit impossible. Objects the bucket already holds are **not** counted — a
+deduplicated hit transfers nothing — and downloads are never gated. Lowering a quota below what
+a namespace already stores deletes nothing; it refuses the next upload.
+
+Both endpoints are **site administrators only**, for the reason the feature exists: an
+organisation admin able to raise their own ceiling would not be under one. There is deliberately
+no organisation-settings equivalent.
+
+```ts
+type AdminNamespaceUsage = {
+  namespace: string
+  kind: "user" | "org"
+  lfs_size: number                     // bytes currently stored
+  num_repos: number
+  quota_bytes: number | null           // the namespace's own override
+  effective_quota_bytes: number | null // what is actually enforced; null = unlimited
+}
+```
+
+##### `GET /api/v1/admin/namespaces`
+
+Session cookie only, like every `/admin` endpoint: a token of either scope is 403
+`session_required`.
+
+Query: `search` (case-insensitive substring of the name), `limit` (default 50, capped at 200),
+`offset`. res 200:
+
+```json
+{ "items": [ /* AdminNamespaceUsage */ ], "total": 12, "default_quota_bytes": null }
+```
+
+- Ordered by name, so paging stays stable while an administrator works through the list — usage
+  moves under them on every push.
+- `total` counts every namespace matching `search`, ignoring the page window.
+- A namespace holding nothing is listed with zeroes rather than omitted: a quota is often set
+  before the first push.
+- `default_quota_bytes` is `TF_DEFAULT_STORAGE_QUOTA_BYTES` as the wire spells it (`null` for
+  unlimited). It is configuration, not data — changing it needs a redeploy.
+
+##### `PATCH /api/v1/admin/namespaces/{ns}`
+
+Site administrators only, session cookie, **write scope** — this changes state, so a read-scoped
+token is 403. `{ns}` is matched case-insensitively.
+
+```json
+{ "quota_bytes": 10737418240 }
+```
+
+`quota_bytes` is **required and nullable**: `null` clears the override so the instance default
+applies again, `0` sets a quota of zero bytes. A body that omits the field entirely is a 400
+rather than a guess between those two.
+
+res 200: the updated `AdminNamespaceUsage`, re-read so the usage sits next to the new ceiling
+(an administrator lowering a quota needs to see immediately whether the namespace is already
+over it) and so the name comes back in its stored spelling.
+
+| Status | Type | When |
+|---|---|---|
+| 400 | `bad_request` | Body is not JSON, `quota_bytes` is absent, not a number or null, or negative |
+| 403 | `forbidden` | The caller is not a site administrator, or holds a read-only token |
+| 403 | `session_required` | The caller presented a token or HTTP Basic rather than a session cookie |
+| 404 | `not_found` | No namespace of that name |
+
+Every change is recorded as a structured `slog.Info` line naming the actor, the namespace, the
+new quota (`cleared` when it is null, so the log keeps the same distinction the wire does) and
+the namespace's usage at that moment.
+
+`GET /api/v1/usage` carries the same figure per namespace as `effective_quota_bytes` — already resolved
+against the instance default, `null` for unlimited — so a namespace's own members can see the
+ceiling their uploads are checked against without any administrative access.
 
 ---
 
@@ -962,7 +1123,8 @@ jump to the top of "recently updated").
 - Effect: every write operation is rejected with 403 `{"error":{"type":"repository_archived",...}}`.
   This covers git receive-pack (starting from the advertisement stage of
   `info/refs?service=git-receive-pack`), HF's `preupload` / `commit`, the LFS batch `upload`,
-  `PUT /api/v1/edit/...`, starting a transfer (`POST /api/repos/move` and the Web UI version), and
+  `PUT /api/v1/edit/...`, `POST /api/v1/rename/...`, renaming through `PATCH /api/v1/repos/...`,
+  starting a transfer (`POST /api/repos/move` and the Web UI version), and
   experiment ingest (`log` / `finish`, and PATCH/DELETE of a run).
 - Not affected: reads in general (`resolve` / clone / tree / parquet / HF's repo info), repository
   **deletion**, viewing and canceling a pending transfer (`GET` / `DELETE .../transfer`), and
@@ -976,8 +1138,9 @@ jump to the top of "recently updated").
 PATCH /api/v1/repos/{kind}/{ns}/{name}   req RepoUpdateRequest {default_branch?: string}
       → 200 {"repo": RepoDetail}
 ```
-A partial update over repository configuration; `default_branch` is the only field today, and the
-request must set it (400 `bad_request` otherwise). Fixes the common "pushed to `master`, meant
+A partial update over repository configuration. Three fields today — `default_branch`, `name` and
+`description` (the last two are documented in "Renaming and describing" below) — and the request
+must set at least one (400 `bad_request` otherwise). The rest of this section is `default_branch`. Fixes the common "pushed to `master`, meant
 `main`" mistake without a re-push; before this the column was only ever set by `CreateRepo`, so
 there was no way to correct it short of editing the database. `RepoUpdateRequest` is shaped for
 future fields: every field is a pointer and absent ones are left alone.
@@ -1038,6 +1201,49 @@ future fields: every field is a pointer and absent ones are left alone.
     repository can reset its bare-repo `HEAD` to the heuristic's answer rather than the configured
     default until the next push realigns it. Fixing this needs the symref recorded in the WAL index
     itself (a format change), which is out of scope here.
+
+### Renaming and describing
+
+The other two fields of the same `PATCH /api/v1/repos/{kind}/{ns}/{name}`:
+
+```
+PATCH /api/v1/repos/{kind}/{ns}/{name}   req RepoUpdateRequest {name?: string, description?: string}
+      → 200 {"repo": RepoDetail}
+```
+
+Present fields are applied in the order `default_branch`, `description`, `name`, and the response
+describes the repository as it stands afterwards. They are separate writes with no transaction
+spanning them: a request carrying several fields can therefore leave the earlier ones applied if a
+later one fails. Both names are validated before anything is written, so the common case of a bad
+name is refused before the other fields land.
+
+- **`name`** renames the repository inside the namespace it already lives in. It goes through
+  exactly the same path a transfer does (`startTransfer` → `store.TransferRepo`), so everything a
+  transfer leaves behind is left behind here: the `repo_redirects` row that keeps old URLs
+  resolving, the rewritten `repo_lineage` edges, cancelled pending transfers, deleted
+  repository-scoped webhook subscriptions, the `repo.moved` webhook and the
+  `repo.transferred_out` / `repo.transferred_in` audit entries (a rename inside one organisation
+  records both, which is what the log should show for a move that stayed put). What it
+  deliberately does **not** inherit is the approval flow: that exists so the *destination
+  namespace* can consent, and the destination here is the namespace that already owns the
+  repository, so the move always completes immediately.
+  - Same permission as the rest of this endpoint (namespace admin), refused while archived,
+    400 for a name `validateName` rejects, **409 `conflict`** when the namespace already holds a
+    repository of that kind and name. Renaming to the name it already has is a 200 no-op.
+  - Renaming through this endpoint is what the repository settings page now offers. The optional
+    `name` field on the transfer form still works and still means the same thing; it is no longer
+    the only way to rename, which is what put someone who wanted to fix a typo in front of a
+    transfer confirmation.
+- **`description`** replaces the one-line description shown in listings and at the top of the
+  repository page. Trimmed, capped at 1024 characters (400 beyond that, counted in runes like the
+  profile fields), and clearable by sending `""`.
+  - The README card is still the source of truth **whenever it says anything**: the post-push
+    indexer overwrites this column with the card's `description` on every push that carries one.
+    What changed is that a card with *no* description no longer wipes it — `store.UpdateRepoIndex`
+    now writes `description = CASE WHEN $5 = '' THEN description ELSE $5 END`, so an empty card
+    description means "the card said nothing" rather than "the description is empty". Before this,
+    a description typed here (or at creation) survived only until the next push.
+
 
 ### `POST /api/repos/move`  (HF-compatible: `HfApi.move_repo`)
 req: `{"fromRepo":"alice/foo","toRepo":"team/foo","type":"model"|"dataset"}`
@@ -1235,11 +1441,101 @@ Server-side effects:
   by branch tips (`HeadsAfterPush` lists branches only).
 - **Deleting a ref enqueues nothing and leaves its `repo_files` rows behind**, matching
   `git push --delete`. The rows are unreachable once the revision stops resolving, and go with
-  the repository.
+  the repository. It does fire **`repo.ref_deleted`** (§9), which is the one announcement a
+  deletion needs: creation and movement already reach subscribers as `repo.push`, so without it
+  a mirror watched refs appear and never watched them go away. The same event fires from the
+  push path for a branch a `git push --delete` removed, over HTTP and SSH alike.
 - In `TF_WAL_MODE=shadow` / `authoritative` the ref update goes through the WAL exactly as a push
   does (`docs/dev/continuity-design.md` §6): authoritative mode acknowledges only after the CAS
   is won, and rolls the on-disk ref back otherwise. A ref written to disk alone would be deleted
   by the next materialisation.
+
+### `POST /api/{datasets|models}/{ns}/{name}/super-squash/{branch}`  (HF-compatible)
+
+`HfApi.super_squash_history()`. Replaces everything reachable from `{branch}` with **one commit
+that has the branch's current tree and no parent at all**. The branch name arrives
+percent-encoded, like the branch/tag routes above.
+
+req: `{"message": "<commit message>"}` — optional here; the client always sends one
+(`Super-squash branch '<branch>' using huggingface_hub` when the caller gave none), and an empty
+one becomes `Super-squash branch '<branch>'`. res 200: `{"name","ref","targetCommit"}`, the same
+body the branch and tag writes answer with (`super_squash_history` returns `None` and reads only
+the status).
+
+- The tree is reused **by hash**: no blob is read, rewritten or re-uploaded, so squashing a
+  terabyte of checkpoints costs one commit object. The superseded commits are not deleted, only
+  made unreachable — reclaiming their objects is `thinkingface gc`'s job.
+- **Idempotent.** A branch whose head already has no parents is left exactly as it is (same sha,
+  no WAL entry, no sync job): rewriting it would change the sha every caller was just told about
+  in exchange for an identical tree.
+- **404 + `X-Error-Code: RevisionNotFound`** for a branch that is not there, which is what
+  `super_squash_history` documents. A **tag** name lands here too: only `refs/heads/{branch}` is
+  looked up, so a tag is simply not a branch that exists ("You cannot squash history on tags").
+- **503 `overloaded` + `Retry-After`** on WAL index contention, for the same reason the ref
+  writes answer that way — the local ref is rolled back, so nothing happened and the caller may
+  retry.
+- Authorization is `loadRepoForWrite` and **403 `repository_archived`** on an archived
+  repository. Discarding history is the most destructive write this API offers; a repository
+  frozen read-only must not be able to lose its history.
+- **Enqueues a sync job** for the branch (`old_sha` the discarded head, `new_sha` the squashed
+  one). The tree did not change, but the commit it hangs from did, and the file index and the
+  repository row's `head_sha` would otherwise name a commit nothing can reach. That job fires the
+  usual `repo.push` webhook, so squashing needs no event of its own — `changed_files` comes out
+  as 0, which is true.
+- In `TF_WAL_MODE=shadow` / `authoritative` the move is recorded as a genuine **force** update
+  (`<old>` is the discarded head and `<new>` is not its descendant). The CAS is on the ref's
+  current value, so a push that lands in between loses it and is reported as contention rather
+  than silently overwritten.
+
+### `GET /api/{datasets|models}/{ns}/{name}/auth-check`  (HF-compatible)
+
+`huggingface_hub.auth_check()` / `HfApi.auth_check()`, which a client calls to find out whether
+it may read a repository before it starts doing so. res 200: `{"repoId","repoType"}` (the client
+reads only the status; `auth_check` returns `None`).
+
+On the Hub the call separates three answers an ordinary read cannot: no such repository
+(`RepositoryNotFoundError`), gated and this caller is not in (`GatedRepoError`), or fine. **Only
+the first and the last exist here**: there is no per-repository visibility and no gating at all
+(`docs/dev/thinkingface-design.md` §11), so "may this caller read it" collapses into "does it
+exist", and the route is `loadRepoForRead` plus a 200 — including **404 +
+`X-Error-Code: RepoNotFound`** for a repository that is not there, and the 308 redirect a renamed
+one gets. No token is required, and refusing an anonymous caller would be a lie: the same caller
+can clone the repository a moment later.
+
+Before this route existed the call fell through to the router's own 404, which
+`hf_raise_for_status` reads as "no such repository" — so a client asking about its access to a
+perfectly readable repository was told the repository was gone.
+
+### `GET /api/models-tags-by-type` and `GET /api/datasets-tags-by-type`  (HF-compatible)
+
+`HfApi.get_model_tags()` / `get_dataset_tags()`. res 200 is an object of group name → array of
+`{"id","label","type"}`, where `type` repeats the group name and `label` equals `id` (this server
+stores card values verbatim and has no display names for them):
+
+```json
+{ "library": [], "language": [], "license": [{"id":"apache-2.0","label":"apache-2.0","type":"license"}],
+  "dataset": [], "pipeline_tag": [{"id":"text-generation","label":"text-generation","type":"pipeline_tag"}],
+  "other": [{"id":"nlp","label":"nlp","type":"other"}] }
+```
+
+- Groups for models: `library`, `language`, `license`, `dataset`, `pipeline_tag`, `other`. For
+  datasets: `language`, `multilinguality`, `language_creators`, `task_categories`,
+  `size_categories`, `benchmark`, `task_ids`, `license`, `other`. **Every group is always
+  present, empty when there is nothing in it**: `huggingface_hub` up to 0.17 unpacked the
+  response through `GeneralTags`, which indexes a fixed key list and raises `KeyError` on a
+  missing one. Later versions hand the decoded JSON back untouched, so extra keys are harmless
+  and missing ones are not.
+- The content is the same faceted aggregation the listing sidebar is built from
+  (`store.ListRepos(WithFacets)`, scoped to the kind): the card `license` field fills `license`,
+  the task facet fills `pipeline_tag` for models and `task_categories` for datasets (which is
+  where each kind's card keeps it), and free-form card `tags` fill `other`. The remaining groups
+  are HuggingFace taxonomy dimensions nothing here parses out of a card. `base_model` relations
+  are deliberately left out — they describe an edge between two repositories, not a tag a listing
+  can be filtered by.
+- So the catalogue describes **what is actually on this instance** rather than HuggingFace's
+  curated taxonomy, which is the only answer a self-hosted hub can give honestly. Facet counts
+  are dropped: the HF shape has nowhere to put them. No authentication (it exposes nothing a
+  repository listing does not, and the client sends no token).
 
 ### `GET /api/{datasets|models}/{ns}/{name}/commits/{rev}`  (HF-compatible)
 
@@ -1410,6 +1706,50 @@ is returned with fewer than `limit` entries (possibly zero) along with a `next_c
   repository has commits but `{rev}` doesn't resolve; 200 with `commits: []` for a repository with
   zero commits.
 
+### `GET /api/v1/repos/{kind}/{ns}/{name}/diff/{rev}`  (for the UI)
+What the commit `{rev}` resolves to changed, against its **first parent**. A merge commit is
+diffed against its first parent only — the same first-parent walk the commit list uses — so the
+file list holds what the merge itself decided rather than everything either side touched.
+res:
+```ts
+{
+  commit: CommitInfoUI
+  parent_oid: string | null    // null for the root commit, where every file reads as added
+  files: DiffFile[]            // Sorted by path, capped (see files_truncated)
+  num_files: number            // The true total, even when files was capped
+  files_truncated: boolean
+  additions: number            // Totals of the per-file counts that were computed
+  deletions: number
+}
+
+type DiffFile = {
+  path: string
+  status: "added" | "modified" | "deleted"
+  additions: number            // Meaningless unless has_patch
+  deletions: number            // Meaningless unless has_patch
+  binary: boolean              // Content holds a NUL byte or is not valid UTF-8
+  lfs: boolean                 // Either side is a Git LFS pointer
+  has_patch: boolean
+  patch: string                // Hunks only (`@@ …`), no `diff --git` / `index` / `---` / `+++`
+  patch_truncated: boolean     // patch was cut off mid-diff
+  old_size: number             // Blob size on each side; 0 where the path wasn't there.
+  size: number                 // For an LFS file this is the pointer's own size.
+}
+```
+
+- **`additions` / `deletions` are only counts when `has_patch` is true.** For a binary, LFS or
+  size-skipped path they stay 0 because nothing was counted, not because nothing changed — read
+  `binary` / `lfs` / `has_patch` before rendering "+0 −0" as a fact (`frontend/DESIGN.md` §9).
+  `has_patch` false with `binary` and `lfs` both false means the patch was skipped for size.
+- **Caps** (named constants in `backend/internal/gitrepo/patch.go`): a patch is generated only
+  when both sides are at most `DiffPatchMaxBlobBytes` (1 MiB); a rendered patch longer than
+  `DiffPatchMaxBytes` (256 KiB) is cut at a line boundary with `patch_truncated: true`; at most
+  `CommitDiffMaxFiles` (200) files are listed, with `num_files` still the true total and
+  `files_truncated: true`.
+- `{rev}` may be a branch, a tag or a commit SHA. Unlike the UI `tree` / `commits` endpoints, a
+  repository with **zero commits is a 404** here (+ `X-Error-Code: RevisionNotFound`), the same as
+  an unresolvable `{rev}`: this response describes one commit, and there is none to describe.
+
 ---
 
 ## 3. Upload / Commit
@@ -1527,7 +1867,8 @@ the write would create `refs/heads/{rev}` as a parentless root commit while ever
 kept resolving `refs/tags/{rev}` first (go-git's `RefRevParseRules`), so the commit would be
 reported as successful and then never be visible again. A `{rev}` that resolves to nothing is
 still accepted and creates the branch — that's the first commit on a new branch. The same rule and
-status apply to `PUT`/`DELETE /api/v1/edit/...` and to `POST /api/v1/upload/...`.
+status apply to `PUT`/`DELETE /api/v1/edit/...`, `POST /api/v1/rename/...` and
+`POST /api/v1/upload/...`.
 
 An NDJSON line that can't be parsed returns 400 `bad_request`. The message is one of the fixed
 strings `commit body must be newline-delimited JSON` / `invalid header entry` /
@@ -1612,6 +1953,44 @@ Constraints and status codes:
 | Optimistic locking | When `base_oid` is given and it doesn't match the current blob SHA, returns **409 `conflict`**. For an LFS file this is the SHA of the *pointer* blob, which is what the tree listing reports |
 | Sync | A sync job is enqueued exactly as for any other commit (`Enqueue`), so the index is updated and the `repo.push` webhook fires |
 | Auth | 401 when unauthenticated; 403 without write permission (a read-scope token also gets 403); 403 `repository_archived` for an archived repository |
+
+### `POST /api/v1/rename/{kind}/{ns}/{name}/{rev}/{path...}`  (renaming/moving from the Web UI)
+
+Moves one file to a new path in **a single commit**. That is the whole point of the endpoint: the
+browser previously had to write the new path and then delete the old one, which put two commits in
+the history for one rename and left the repository momentarily holding both copies. Renaming and
+moving are the same call — `new_path` is a full path from the repository root, so changing its last
+segment renames the file and changing the rest moves it.
+
+req:
+```ts
+{
+  new_path: string     // Required. Destination path from the repository root
+  message: string      // Optional. Defaults to "Rename {old} to {new}"
+  description: string  // Optional. Appended to the body of the commit message
+  base_oid: string     // Optional. The blob SHA the caller last saw at the source path
+}
+```
+res 200: `RenameFileResponse` `{path, old_path, commit_oid, oid, size}`. `oid` is the blob, which
+is unchanged — a rename moves a tree entry, it does not rewrite content. `size` is the target's
+size, so for an LFS file it is the object's, not the pointer text's.
+
+Constraints and status codes:
+
+| Condition | Behavior |
+|---|---|
+| Body size | Capped at 64KiB (`maxMetaBody`). Exceeding it returns **413 `payload_too_large`**; a body that will not parse is 400 |
+| `new_path` | Validated with `gitrepo.ValidatePath`, the same check the upload endpoint applies: no traversal (`..`), no empty segment, nothing under a `.git` component (matched case-insensitively). Leading slashes are trimmed. 400 otherwise, and 400 for a `new_path` equal to the current path |
+| Missing source | **404 `not_found`** |
+| Directory | 400 for either end. Git has no directory objects to move, so renaming a directory means rewriting every path below it — a different operation, and one the commit API's `deletedFolder` plus fresh writes covers |
+| Symlink | 400. A symlink's blob holds a path, not content, so moving it silently changes what it resolves to (the same reason `copyFile` on the commit API refuses one) |
+| **Occupied destination** | **409 `conflict`** — never a silent overwrite. Checked before the commit *and* repeated as an absent-precondition inside it, so a file appearing at the destination in between is refused rather than overwritten |
+| **LFS-managed path** | **Allowed**, unlike `PUT /api/v1/edit/...`. The tree entry is copied by hash (`gitrepo.OpCopy`), so a pointer moves as a pointer, the object in the bucket is neither read nor re-uploaded, and the set of LFS oids the repository references is unchanged — a rename of a 40GB file costs the same as a rename of a README. Refused with 400 only when the two paths *disagree* about LFS routing under the repository's `.gitattributes` (weighed at the file's own size, so an ordinary large blob does not trip it): a pointer landing on an untracked path would sit there as literal text no client ever smudges |
+| `rev` | Branch name only, as for `PUT` / `DELETE /api/v1/edit/...`: a commit SHA is 400, a `rev` resolving to something other than a branch is **409 `conflict`** |
+| Optimistic locking | When `base_oid` is given and it doesn't match the source path's current blob SHA, returns **409 `conflict`**. For an LFS file this is the SHA of the *pointer* blob, which is what the tree listing reports |
+| Sync | A sync job is enqueued exactly as for any other commit (`Enqueue`), so the index is updated and the `repo.push` webhook fires |
+| Auth | 401 when unauthenticated; 403 without write permission (a read-scope token also gets 403); 403 `repository_archived` for an archived repository |
+
 
 ### `POST /api/v1/upload/{kind}/{ns}/{name}/{rev}`  (uploading from the Web UI)
 
@@ -1724,6 +2103,34 @@ Constraints and status codes:
   - `X-Repo-Commit: <commit sha>`
   - `X-Linked-Etag` / `X-Linked-Size` (for LFS)
   - `Content-Length`, `Content-Type`, `Accept-Ranges: bytes`
+  - `Cache-Control` — see the conditional-request rules below
+- **A `{rev}` that does not resolve is 404 + `X-Error-Code: RevisionNotFound`**, as on repo-info /
+  tree / commits, while a path missing at a revision that *does* resolve stays 404 +
+  `X-Error-Code: EntryNotFound`. The two are separated by resolving the revision on its own before
+  the file is looked for (`revisionOrEmpty`): `gitrepo.Stat` reports an unknown revision and an
+  unborn HEAD alike, so a bare 404 used to cover both — and a bare 404 is an `HfHubHTTPError`,
+  which neither `file_exists()` nor `hf_hub_download()` catch. A repository with **zero commits**
+  answers `EntryNotFound`, not `RevisionNotFound`: the repository exists and simply holds nothing,
+  so `file_exists()` returns `False` rather than raising.
+- **Conditional requests are honoured on every path.** `If-None-Match` matching the current ETag
+  answers **304** with no body and the ETag still attached (RFC 9110 §15.4.5); `*` and a
+  comma-separated list are understood, and a `W/` prefix is ignored on both sides (every ETag here
+  is a content hash, so weak and strong comparison agree). A conditional **HEAD** answers 304 too —
+  that is how `huggingface_hub` revalidates — and a matched precondition **outranks `Range`**
+  (RFC 9110 §13.2.2 evaluates `If-None-Match` first), so a conditional ranged GET is a 304 and not
+  a 206. On the LFS path the check runs **after** the oid-ownership check, so a repository that
+  merely names a foreign oid in a pointer cannot use a 304 to confirm the guess the 404 refuses.
+  A 304 still counts as one download, exactly as a HEAD and an LFS 302 do.
+- **`Cache-Control` depends on what the URL names.** `/resolve/<commit sha>/...` can never mean
+  anything else, so it is `public, max-age=31536000, immutable`; `/resolve/<branch or tag>/...` is
+  a moving target and is `no-cache`, which means "store it, but revalidate every time" — and the
+  revalidation is the cheap 304 above. `public` is accurate rather than merely convenient: there
+  is no per-repository visibility here (`docs/dev/thinkingface-design.md` §11), so a shared cache
+  cannot expose a response to anyone who could not have asked for it directly. **The LFS
+  signed-URL redirect overrides both with `no-store`**: the 302 names a URL that expires, and a
+  cached redirect would hand a later client a signature GCS has since started rejecting. The
+  object's bytes stay cacheable under the ETag, so the next request comes back here and is
+  answered 304 without any signing at all.
 - Range requests are supported on both paths: a regular file streams the requested slice straight
   out of the git blob (never buffered — these run to gigabytes), LFS uses a storage range read. One
   range per request (`bytes=a-b` / `bytes=a-` / `bytes=-n`); a satisfiable one answers 206 with
@@ -1862,7 +2269,7 @@ dtype names are normalized to a shared vocabulary across safetensors and PyTorch
 type ExpProject = { name: string; num_runs: number; updated_at: string }
 type ExpRun = {
   name: string
-  status: "running" | "finished" | "failed"
+  status: "running" | "finished" | "failed" | "stale"
   last_step: number
   num_points: number
   started_at: string | null
@@ -1885,6 +2292,15 @@ type ExpRunModelRef = {
   exists: boolean    // Whether it's actually a model repository the viewer can see. If false, don't render as a link
 }
 ```
+
+`status: "stale"` is **derived on read, never stored**: a run still recorded as
+`running` whose `updated_at` is older than 30 minutes is reported as stale. A
+training job killed by OOM or a lost host never gets to call `finish()`, so
+without this a dead run sits in the listing as `running` forever,
+indistinguishable from a live one. Ingest never writes the value, and a run that
+logs again goes straight back to `running` — so the window is a display rule,
+not a state transition. Clients that switch on `status` must handle it.
+
 
 `tags` / `archived` / `is_baseline` / `note` / `models` are annotations attached by a human (or a
 training script); ingest and the parquet indexer never overwrite them (they survive
@@ -2129,6 +2545,23 @@ different name already exists) and deletes it from `exp_points`. See `docs/dev/t
 - `POST /api/v1/lfs/{repo_id}/verify`
 - `POST /{...}.git/info/lfs/objects/verify`
 
+**The LFS file locking API is not implemented, and there is no plan to implement it.** None of
+`POST/GET /{...}.git/info/lfs/locks`, `POST /{...}.git/info/lfs/locks/verify` or
+`POST /{...}.git/info/lfs/locks/{id}/unlock` matches a route, so each answers **404 `not_found`**
+with this API's own JSON error body (`{"error":{"type","message"}}`) rather than the
+`{"message": ...}` shape the LFS spec defines for lock errors. What a client sees:
+
+- `git lfs lock` / `git lfs unlock` / `git lfs locks` fail. The error is git-lfs reporting an
+  unexpected 404 from the endpoint, not a message saying locking is unsupported — the 404 is
+  produced by the router, which has no way to know what the caller was asking for.
+- `git push` / `git pull` / `git fetch` are **unaffected**. The only lock endpoint a transfer
+  touches is the pre-push `locks/verify`, which the spec defines as optional and whose 404
+  git-lfs treats as "this server does not support locking", so it carries on with the push.
+
+There is therefore no server-side coordination for concurrent edits of one large file: the last
+push to land wins, exactly as for any other file in git. Locking would need per-path lock rows,
+an ownership model and a force-unlock permission, none of which exist here.
+
 When none of the three `/api/v1/lfs/{repo_id}/...` endpoints pass either the signature or the
 permission check, they return **404 `not_found` (`object not found`)** regardless of whether the
 repository ID exists. Distinguishing 401 from 404 here would let scanning numeric IDs reveal how
@@ -2168,7 +2601,7 @@ a user namespace the owner is admin, so behavior doesn't change (`docs/dev/organ
 §4).
 
 ```ts
-type WebhookEvent = "repo.push" | "repo.created" | "repo.deleted" | "repo.moved" | "repo.transfer_requested" | "repo.archived" | "repo.unarchived" | "run.finished" | "run.failed"
+type WebhookEvent = "repo.push" | "repo.created" | "repo.deleted" | "repo.moved" | "repo.transfer_requested" | "repo.archived" | "repo.unarchived" | "repo.ref_deleted" | "run.finished" | "run.failed"
 type WebhookDeliveryStatus = "pending" | "success" | "failed"
 
 type Webhook = {
@@ -2245,6 +2678,17 @@ Re-enqueues a new delivery with the same event/payload as an existing one. res: 
     `{transfer_id, kind, from: {namespace, name}, to: {namespace, name}, requested_by, expires_at}`
   - `repo.archived` / `repo.unarchived` (making read-only / undoing that — lets a mirroring
     consumer know no changes are coming while archived): `{namespace, name, kind, full_name, archived}`
+  - `repo.ref_deleted` (a branch or tag was removed, by `git push --delete` over either transport
+    or through `DELETE .../branch/{branch}` / `DELETE .../tag/{tag}`):
+    `{namespace, repo, full_name, kind, ref, ref_type, old_sha, new_sha}` — deliberately the same
+    shape as `repo.push`, with `ref` the **short** name, `ref_type` either `"branch"` or `"tag"`
+    (one short name can be both), and `new_sha` always `""`, which is what "deleted" means here.
+    Creation and movement already reach a subscriber as `repo.push`; without this one, a mirror
+    saw refs appear and never saw them go away. **No sync job is enqueued** — the file-index rows
+    for a ref nothing can resolve are unreachable and are dropped with the repository, so there is
+    nothing to re-index, only something to announce. A **tag** deleted by `git push --delete` is
+    the one gap: the push path reads branch tips only (`HeadsAfterPush`), exactly as it does for
+    the sync side, where a pushed tag also schedules nothing.
   - `run.finished` / `run.failed` (fired only when a run's status transitions to that value, to
     prevent duplicate sends): `{namespace, repo, full_name, project, run, status}`
 
@@ -2270,8 +2714,17 @@ GCS storage usage for the namespaces the caller can access (the same set as `Nam
 LFS object shared across multiple repositories is counted separately in each repository's
 breakdown). Plain git blobs (like README) never reach GCS, so they're not included.
 
+`quota_bytes` is the ceiling that namespace's uploads are actually checked against — its own
+override if it has one, otherwise `TF_DEFAULT_STORAGE_QUOTA_BYTES`, `null` for unlimited. Only a
+site administrator can change it (§1.3, "Namespace storage quotas"); it is reported here so the
+namespace's own members can see the limit before an LFS upload is refused with a 507 rather than
+after.
+
 ```ts
-type UsageNamespace = { namespace: string; lfs_size: number; num_files: number; num_repos: number }
+type UsageNamespace = {
+  namespace: string; lfs_size: number; num_files: number; num_repos: number
+  effective_quota_bytes: number | null  // Already resolved; null = unlimited
+}
 type UsageRepo = {
   namespace: string; name: string; kind: "dataset" | "model"; full_name: string
   lfs_size: number; num_files: number

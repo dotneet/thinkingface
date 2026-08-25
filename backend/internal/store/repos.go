@@ -703,6 +703,19 @@ func (s *Store) queryFacet(ctx context.Context, query string, args []any) ([]Rep
 }
 
 // UpdateRepoIndex records what the sync worker learned from the latest commit.
+//
+// description is the README card's, and an empty one means the card said
+// nothing rather than "the description is empty": the column is left alone in
+// that case, so a description typed into the repository settings
+// (SetRepoDescription) survives every later push of a README without a
+// `description:` key. A card that does carry one still wins -- it is the
+// source of truth whenever it speaks, which is what makes a pushed README
+// enough to describe a repository.
+//
+// The CASE is written against the same placeholder twice, which both drivers
+// bind identically: pgx sends $5 once for two references, and SQLite treats
+// the repeated $5 as one named parameter sharing an index, so the six
+// arguments still line up (see TestUpdateRepoIndexKeepsManualDescription).
 func (s *Store) UpdateRepoIndex(ctx context.Context, repoID int64, headSHA string, totalSize int64, card map[string]any, description string, isExperiment bool) error {
 	cardRaw, err := json.Marshal(card)
 	if err != nil {
@@ -710,11 +723,28 @@ func (s *Store) UpdateRepoIndex(ctx context.Context, repoID int64, headSHA strin
 	}
 	_, err = s.db.Exec(ctx,
 		`UPDATE repositories
-		 SET head_sha = $2, total_size = $3, card = $4, description = $5,
+		 SET head_sha = $2, total_size = $3, card = $4,
+		     description = CASE WHEN $5 = '' THEN description ELSE $5 END,
 		     is_experiment = $6, updated_at = now()
 		 WHERE id = $1`,
 		repoID, headSHA, totalSize, cardRaw, description, isExperiment)
 	return err
+}
+
+// SetRepoDescription writes the one-line description shown in listings and on
+// the repository page, and returns the row as it now stands. It is the
+// settings form's field, not the indexer's: UpdateRepoIndex overwrites it on
+// the next push only when the README card carries a `description` of its own.
+//
+// updated_at is bumped for the same reason SetRepoDefaultBranch bumps it --
+// this changes what a plain visit to the repository shows.
+func (s *Store) SetRepoDescription(ctx context.Context, repoID int64, description string) (*Repo, error) {
+	if _, err := s.db.Exec(ctx,
+		`UPDATE repositories SET description = $2, updated_at = now() WHERE id = $1`,
+		repoID, description); err != nil {
+		return nil, err
+	}
+	return s.GetRepoByID(ctx, repoID)
 }
 
 func (s *Store) SetRepoHead(ctx context.Context, repoID int64, headSHA string) error {

@@ -42,6 +42,11 @@ export const WEBHOOK_EVENT_OPTIONS: {
     hintKey: "settings.webhookEvents.repoUnarchived.hint",
   },
   {
+    value: "repo.ref_deleted",
+    labelKey: "settings.webhookEvents.repoRefDeleted.label",
+    hintKey: "settings.webhookEvents.repoRefDeleted.hint",
+  },
+  {
     value: "run.finished",
     labelKey: "settings.webhookEvents.runFinished.label",
     hintKey: "settings.webhookEvents.runFinished.hint",

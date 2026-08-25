@@ -101,6 +101,12 @@ const (
 	RunStatusRunning  RunStatus = "running"
 	RunStatusFinished RunStatus = "finished"
 	RunStatusFailed   RunStatus = "failed"
+	// RunStatusStale is a *derived* status, never stored: a run still
+	// recorded as running whose last update is older than the staleness
+	// window reads as stale. A training job killed by OOM or a lost host
+	// never gets to call finish(), and before this existed such a run sat in
+	// the listing as "running" forever, indistinguishable from a live one.
+	RunStatusStale RunStatus = "stale"
 )
 
 // ------------------------------------------------------- accounts and auth
@@ -332,6 +338,17 @@ type RepoUpdateRequest struct {
 	// repository card, lineage and the parquet index read by default. The
 	// branch must already exist in the repository.
 	DefaultBranch *string `json:"default_branch,omitempty"`
+	// Name renames the repository inside its current namespace, leaving a
+	// redirect behind exactly as a transfer does. Renaming is a rename, not
+	// a change of owner: it deliberately does not go through the transfer
+	// approval flow, which exists because the *destination namespace* has to
+	// consent -- here the destination is the namespace it already lives in.
+	Name *string `json:"name,omitempty"`
+	// Description replaces the repository's one-line description. A README
+	// card that carries its own `description` still wins on the next push
+	// (the card is the source of truth when it says anything); this field is
+	// what a repository with no card description has instead.
+	Description *string `json:"description,omitempty"`
 }
 
 // RepoFacetItem is one value of a listing facet (a tag, a license, a task)
@@ -387,6 +404,16 @@ type UsageNamespace struct {
 	LFSSize   int64  `json:"lfs_size"`
 	NumFiles  int64  `json:"num_files"`
 	NumRepos  int64  `json:"num_repos"`
+	// EffectiveQuotaBytes is the storage limit actually enforced for this
+	// namespace (its own override, or the instance default). Null means
+	// unlimited. Only a site administrator can change it -- an organisation
+	// admin raising their own cap would not be a cap.
+	//
+	// It is spelled the same as AdminNamespaceUsage.EffectiveQuotaBytes on
+	// purpose: `quota_bytes` there means the *override*, and one name that
+	// means the resolved limit in one response and the raw override in
+	// another is a field whose null is read backwards half the time.
+	EffectiveQuotaBytes *int64 `json:"effective_quota_bytes" tstype:"number | null,required"`
 }
 
 // UsageRepo is one repository's contribution to storage usage.
@@ -507,6 +534,98 @@ type CommitListResponse struct {
 	NextCursor *string `json:"next_cursor" tstype:"string | null,required"`
 }
 
+// ------------------------------------------------------------- commit diff
+
+// DiffStatus is what happened to one path between two commits.
+type DiffStatus string
+
+const (
+	DiffStatusAdded    DiffStatus = "added"
+	DiffStatusModified DiffStatus = "modified"
+	DiffStatusDeleted  DiffStatus = "deleted"
+)
+
+// DiffNoPatchReason says why a file carries no unified diff. It is stated
+// rather than inferred: a reader that works it out from Binary/LFS being
+// false has to assume the only remaining reason is size, and there are two
+// others -- which is how an empty file came to be reported as "too large to
+// diff".
+type DiffNoPatchReason string
+
+const (
+	// DiffNoPatchNone is the value on a file that does carry a patch.
+	DiffNoPatchNone DiffNoPatchReason = ""
+	DiffNoPatchLFS  DiffNoPatchReason = "lfs"
+	// DiffNoPatchBinary is a file that is not text on either side.
+	DiffNoPatchBinary DiffNoPatchReason = "binary"
+	// DiffNoPatchTooLarge is a text file whose blob exceeded the size budget.
+	DiffNoPatchTooLarge DiffNoPatchReason = "too_large"
+	// DiffNoPatchNoTextChange is a change with nothing to render as lines:
+	// an added or deleted empty file, or a file whose mode moved while its
+	// bytes did not. The change is real; it just has no lines in it.
+	DiffNoPatchNoTextChange DiffNoPatchReason = "no_text_change"
+	// DiffNoPatchUnsupported is a path that is not a regular file on either
+	// side, such as a submodule.
+	DiffNoPatchUnsupported DiffNoPatchReason = "unsupported"
+	// DiffNoPatchBudgetSpent is a file the response's overall patch budget
+	// ran out before. The per-file ceilings alone do not bound a response --
+	// enough large-but-allowed patches add up -- so the sum is capped too,
+	// and a file past the cap is listed without one. Nothing is wrong with
+	// the file: the commit changed more text than one response renders.
+	DiffNoPatchBudgetSpent DiffNoPatchReason = "budget_spent"
+)
+
+// DiffFile is one path's change in a commit. Additions/Deletions are line
+// counts and are 0 for a file with no textual diff (binary, LFS, or one whose
+// patch was skipped for size) -- read HasPatch to tell "no lines changed"
+// apart from "lines were not counted", rather than showing a 0 that looks
+// like a fact, and NoPatchReason for why there is no patch.
+type DiffFile struct {
+	Path   string     `json:"path"`
+	Status DiffStatus `json:"status"`
+	// Additions and Deletions are meaningless unless HasPatch is true.
+	Additions int `json:"additions"`
+	Deletions int `json:"deletions"`
+	// Binary reports a path whose contents are not text on either side.
+	Binary bool `json:"binary"`
+	// LFS reports a path stored as a Git LFS pointer. The pointer itself is
+	// text, but diffing it shows an oid changing rather than the content, so
+	// it is called out instead of rendered.
+	LFS bool `json:"lfs"`
+	// HasPatch reports whether Patch carries a unified diff.
+	HasPatch bool `json:"has_patch"`
+	// NoPatchReason says why, whenever HasPatch is false; it is "" exactly
+	// when HasPatch is true.
+	NoPatchReason DiffNoPatchReason `json:"no_patch_reason"`
+	// Patch is a unified diff body without the `diff --git` header, empty
+	// unless HasPatch.
+	Patch string `json:"patch"`
+	// PatchTruncated reports that Patch was cut off mid-diff.
+	PatchTruncated bool `json:"patch_truncated"`
+	// OldSize and Size are the blob sizes on each side; 0 where the path did
+	// not exist on that side.
+	OldSize int64 `json:"old_size"`
+	Size    int64 `json:"size"`
+}
+
+// CommitDiffResponse is the body of
+// GET /api/v1/repos/{kind}/{ns}/{name}/diff/{rev}: what one commit changed,
+// against its first parent. A merge commit is diffed against its first parent
+// only, which is what makes the file list readable.
+type CommitDiffResponse struct {
+	Commit CommitInfoUI `json:"commit"`
+	// ParentOID is null for the root commit, where every file reads as added.
+	ParentOID *string `json:"parent_oid" tstype:"string | null,required"`
+	// Files is capped; FilesTruncated says the commit touched more paths
+	// than are listed. NumFiles is always the true total.
+	Files          []DiffFile `json:"files"`
+	NumFiles       int        `json:"num_files"`
+	FilesTruncated bool       `json:"files_truncated"`
+	// Additions and Deletions total the per-file counts that were computed.
+	Additions int `json:"additions"`
+	Deletions int `json:"deletions"`
+}
+
 // RawFileResponse is a file's contents, cut off at the preview limit.
 type RawFileResponse struct {
 	Path string `json:"path"`
@@ -547,6 +666,34 @@ type DeleteFileRequest struct {
 	// version nobody looked at. For an LFS file this is the SHA of the
 	// *pointer* blob, which is what the tree listing reports.
 	BaseOID string `json:"base_oid,omitempty"`
+}
+
+// RenameFileRequest moves one file to a new path in a single commit. Doing
+// it as one commit is the point: the browser had to create-then-delete before
+// this existed, which put two commits in the history for one rename and left
+// the repository momentarily holding both copies.
+type RenameFileRequest struct {
+	// NewPath is the destination, relative to the repository root. Its
+	// parent directories do not need to exist -- git has no empty
+	// directories, so a path is all it takes to "create" one.
+	NewPath     string `json:"new_path"`
+	Message     string `json:"message,omitempty"`
+	Description string `json:"description,omitempty"`
+	// BaseOID is the blob SHA the caller last saw at the source path. When
+	// set, the rename is refused if the path has moved on since. For an LFS
+	// file this is the SHA of the *pointer* blob, as the tree listing
+	// reports it -- the object itself is untouched by a rename, which is why
+	// renaming an LFS file costs no transfer.
+	BaseOID string `json:"base_oid,omitempty"`
+}
+
+// RenameFileResponse reports where the rename landed.
+type RenameFileResponse struct {
+	Path      string `json:"path"`
+	OldPath   string `json:"old_path"`
+	CommitOID string `json:"commit_oid"`
+	OID       string `json:"oid"`
+	Size      int64  `json:"size"`
 }
 
 // UploadFilesResponse reports the single commit one browser upload produced.
@@ -1180,6 +1327,11 @@ const (
 	// an archived repository will not change until it is unarchived.
 	WebhookEventRepoArchived   WebhookEvent = "repo.archived"
 	WebhookEventRepoUnarchived WebhookEvent = "repo.unarchived"
+	// WebhookEventRepoRefDeleted fires when a branch or tag is removed,
+	// whether by `git push --delete` or through the API. Creation and
+	// update already arrive as repo.push; without this one a mirroring
+	// subscriber saw refs appear and never saw them go away.
+	WebhookEventRepoRefDeleted WebhookEvent = "repo.ref_deleted"
 	WebhookEventRunFinished    WebhookEvent = "run.finished"
 	WebhookEventRunFailed      WebhookEvent = "run.failed"
 )
@@ -1303,7 +1455,25 @@ type AdminUser struct {
 	// there was no way to actually cut somebody off.
 	Disabled  bool      `json:"disabled"`
 	CreatedAt time.Time `json:"created_at"`
+	// LastLoginAt is when this account last authenticated with its password
+	// (a session being minted), null for one that never has. Access tokens
+	// and SSH keys carry their own last-used timestamps and deliberately do
+	// not move this one: the question it answers is "is anybody still using
+	// this account", for which an automation's token is the wrong signal.
+	LastLoginAt *time.Time `json:"last_login_at" tstype:"string | null,required"`
+	// Approval is "pending" for an account that signed up while
+	// TF_SIGNUP_REQUIRE_APPROVAL was on and has not been approved yet. A
+	// pending account cannot authenticate on any path.
+	Approval UserApproval `json:"approval"`
 }
+
+// UserApproval is whether a self-registered account has been let in yet.
+type UserApproval string
+
+const (
+	UserApprovalApproved UserApproval = "approved"
+	UserApprovalPending  UserApproval = "pending"
+)
 
 // AdminUserListResponse is one page of the account directory. Total counts
 // every account matching `search`, ignoring the page window.
@@ -1343,10 +1513,50 @@ type AdminUserUpdateRequest struct {
 	IsAdmin *bool `json:"is_admin,omitempty"`
 	// Disabled suspends or restores the account. Suspending it stops every
 	// identity path at once (session, password, access token, SSH key) and
-	// revokes its sessions; disabling your own account is 400, and so is
-	// disabling the last site administrator. Restoring does not bring back
-	// credentials revoked separately.
+	// revokes its sessions; disabling your own account is 400
+	// (self_disable) and disabling the last usable site administrator is
+	// 409 (last_admin). Restoring does not bring back credentials revoked
+	// separately.
 	Disabled *bool `json:"disabled,omitempty"`
+	// Approval admits a pending self-registration ("approved") or puts an
+	// account back in the waiting room ("pending"). Sending "pending" for
+	// your own account is 400 (self_pending); doing it to the last usable
+	// site administrator is 409 (last_admin), the same pair of codes the
+	// Disabled field uses.
+	Approval *UserApproval `json:"approval,omitempty"`
+}
+
+// AdminNamespaceUsage is one namespace as GET /api/v1/admin/namespaces lists
+// it: what it is storing and what it is allowed to store.
+type AdminNamespaceUsage struct {
+	Namespace string        `json:"namespace"`
+	Kind      NamespaceKind `json:"kind"`
+	LFSSize   int64         `json:"lfs_size"`
+	NumRepos  int64         `json:"num_repos"`
+	// QuotaBytes is this namespace's own override; null means it has none
+	// and the instance default applies.
+	QuotaBytes *int64 `json:"quota_bytes" tstype:"number | null,required"`
+	// EffectiveQuotaBytes is what is actually enforced on an upload: the
+	// override when set, otherwise the instance default. Null is unlimited.
+	EffectiveQuotaBytes *int64 `json:"effective_quota_bytes" tstype:"number | null,required"`
+}
+
+// AdminNamespaceListResponse is one page of the namespace directory.
+type AdminNamespaceListResponse struct {
+	Items []AdminNamespaceUsage `json:"items"`
+	Total int64                 `json:"total"`
+	// DefaultQuotaBytes is the instance-wide default every namespace without
+	// an override gets (TF_DEFAULT_STORAGE_QUOTA_BYTES). Null is unlimited.
+	// It is configuration, not data: changing it needs a redeploy.
+	DefaultQuotaBytes *int64 `json:"default_quota_bytes" tstype:"number | null,required"`
+}
+
+// AdminNamespaceQuotaRequest is the body of PATCH
+// /api/v1/admin/namespaces/{ns}. The field is required and nullable: null
+// clears the override so the instance default applies again, which is a
+// different thing from setting a quota of zero.
+type AdminNamespaceQuotaRequest struct {
+	QuotaBytes *int64 `json:"quota_bytes" tstype:"number | null,required"`
 }
 
 // SyncJob is one row of the post-push queue as GET /api/v1/admin/sync-jobs

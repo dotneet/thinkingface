@@ -27,6 +27,21 @@ creates directly. When signup is open, a new account needs a username, an email 
 a password of at least 8 characters (and, because passwords are hashed with bcrypt, at most
 72 bytes).
 
+Two further controls can narrow signup without closing it:
+
+- `TF_SIGNUP_EMAIL_DOMAINS` limits it to a list of email domains. The match is
+  case-insensitive and **exact** — an instance that lists `example.com` accepts
+  `alice@example.com` and refuses `alice@sub.example.com`, because a domain silently
+  admitting every subdomain of itself is the kind of surprise you only notice as an
+  unwanted account. A refused address is told which domains are accepted, so the form is
+  still fillable.
+- `TF_SIGNUP_REQUIRE_APPROVAL` puts new signups in a waiting room. The account is created,
+  but no session is issued and it authenticates on **nothing** — not its password, not an
+  access token, not an SSH key — until an administrator approves it at **Settings → Users**.
+  The signup form says so rather than pretending to sign you in, and trying to log in
+  before approval answers 403 `account_pending` (only ever with the *correct* password, so
+  it tells nobody else that the account exists).
+
 Every instance also seeds one admin account on first boot, from `TF_ADMIN_USERNAME` /
 `TF_ADMIN_PASSWORD` / `TF_ADMIN_EMAIL` (defaulting to `admin` / `admin` /
 `admin@example.com` if the operator hasn't changed them — change these before exposing an
@@ -52,8 +67,10 @@ leaked, delete that token at **Settings → Access tokens**.
 ## When an admin resets a password
 
 `TF_ADMIN_PASSWORD` only ever creates the very first account, on an instance whose user table is
-empty; changing it afterwards has no effect. So a forgotten password is fixed by an
-administrator, not by editing an environment variable.
+empty; changing it afterwards has no effect. So a forgotten password is fixed by another
+administrator, not by editing an environment variable — or, when there is no other
+administrator, from the server's own command line
+([Recovering a locked-out instance](#recovering-a-locked-out-instance)).
 
 Accounts with site administrator rights get a **Settings → Users** entry
 (`/settings/admin/users`) listing every account on the instance, with a search box over
@@ -76,6 +93,19 @@ usernames and email addresses. Each row offers:
   out. Unlike suspension this cannot be undone, and it does not stop the account working: it is
   for credentials you think have leaked (a lost laptop, a token in a build log) on an account
   that should keep going once new ones are issued.
+- **Approve** / **Hold for approval** — let an account out of the signup waiting room, or put
+  it back. This only appears on instances running `TF_SIGNUP_REQUIRE_APPROVAL`, where a
+  self-registered account starts out unable to authenticate on any path at all; approving is
+  what actually lets that person in. Accounts waiting for approval are badged and sorted to the
+  top of the list, with a banner above it, so nobody sits locked out unnoticed. Holding one
+  again signs it out everywhere immediately. It is independent of suspension: approving does not
+  un-suspend, and restoring does not approve.
+
+The list also shows each account's **Last login** — the last time a *password* signed it in.
+Access tokens and SSH keys have their own last-used dates and deliberately don't move this one,
+because the question it answers is "is anybody still using this account", which a nightly CI
+token answers wrongly. **Never** means exactly that, including for every account that existed
+before the column did.
 
 **Add user** at the top of the same screen creates an account outright: a username, an email
 address, a password, and optionally the administrator flag. It works **whether or not
@@ -100,6 +130,44 @@ not merely hidden by the UI.
     create accounts, reset anyone's password, and register an SSH key that outlives the token's
     revocation; requiring a browser session keeps automation out of that blast radius. Use the
     screens under **Settings**.
+
+## Recovering a locked-out instance { #recovering-a-locked-out-instance }
+
+Everything above assumes somebody can still sign in. When nobody can — the only administrator
+forgot their password, and `/api/v1/admin` accepts a browser session and nothing else — the
+repair runs on the server itself, next to the database:
+
+```bash
+# In the container or on the host running the server, with the same
+# DATABASE_URL the server uses:
+thinkingface admin passwd alice     # prompts twice, with no echo
+thinkingface admin promote alice    # grant site administrator rights
+```
+
+- **The password is never an argument.** It's read from the terminal without echo (twice, and
+  the two must match), or from standard input when there is no terminal, so an automated run can
+  do it unattended:
+
+  ```bash
+  printf '%s' "$NEW_PASSWORD" | thinkingface admin passwd alice
+  ```
+
+  A password passed as an argument would sit in the shell history of whoever typed it and in the
+  process list for every other user on the machine, which is why there is no flag for it.
+
+- `admin passwd` applies the same rules the web UI does — at least 8 characters, at most 72
+  bytes — and, like every other password change, **signs the account out everywhere** while
+  leaving its access tokens and SSH keys alone.
+- `admin promote` is how an instance regains an administrator when it has none. There is no
+  matching "demote": taking rights away is ordinary administration, not an emergency, and it
+  already has a screen and a last-administrator guard.
+- Both commands say what they did and to whom, and warn you when the account they just fixed is
+  still suspended or still waiting for approval — both of which refuse even a correct password,
+  so without the warning you would think you were done.
+
+Authorization here is shell access to the deployment: anyone who can run this could already read
+the database directly. That is the point — it is the one repair that does not need a working
+account, and it replaces "edit the users table by hand" as the answer of last resort.
 
 ## Failed background jobs
 

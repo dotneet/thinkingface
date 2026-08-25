@@ -41,6 +41,17 @@ export function repoCommitsHref(
   return path ? `${base}?path=${encodeURIComponent(path)}` : base;
 }
 
+/**
+ * One commit's diff against its first parent. `oid` is normally a full SHA
+ * (that is what the commit list carries), but the route accepts anything the
+ * backend can resolve — a branch or tag reaches the commit it points at.
+ * Deliberately `/commit/` singular, next to `/commits/` which is the history
+ * of a revision.
+ */
+export function repoCommitHref(kind: RepoKind, ns: string, name: string, oid: string): string {
+  return `${repoBase(kind, ns, name)}/commit/${encodeURIComponent(oid)}`;
+}
+
 export function repoBlobHref(
   kind: RepoKind,
   ns: string,

@@ -66,7 +66,15 @@ export type ModelFormat = typeof ModelFormatSafetensors | typeof ModelFormatPyTo
 export const RunStatusRunning = "running";
 export const RunStatusFinished = "finished";
 export const RunStatusFailed = "failed";
-export type RunStatus = typeof RunStatusRunning | typeof RunStatusFinished | typeof RunStatusFailed;
+/**
+ * RunStatusStale is a *derived* status, never stored: a run still
+ * recorded as running whose last update is older than the staleness
+ * window reads as stale. A training job killed by OOM or a lost host
+ * never gets to call finish(), and before this existed such a run sat in
+ * the listing as "running" forever, indistinguishable from a live one.
+ */
+export const RunStatusStale = "stale";
+export type RunStatus = typeof RunStatusRunning | typeof RunStatusFinished | typeof RunStatusFailed | typeof RunStatusStale;
 /**
  * Namespace is somewhere the user may create repositories.
  */
@@ -362,6 +370,21 @@ export interface RepoUpdateRequest {
    * branch must already exist in the repository.
    */
   default_branch?: string;
+  /**
+   * Name renames the repository inside its current namespace, leaving a
+   * redirect behind exactly as a transfer does. Renaming is a rename, not
+   * a change of owner: it deliberately does not go through the transfer
+   * approval flow, which exists because the *destination namespace* has to
+   * consent -- here the destination is the namespace it already lives in.
+   */
+  name?: string;
+  /**
+   * Description replaces the repository's one-line description. A README
+   * card that carries its own `description` still wins on the next push
+   * (the card is the source of truth when it says anything); this field is
+   * what a repository with no card description has instead.
+   */
+  description?: string;
 }
 /**
  * RepoFacetItem is one value of a listing facet (a tag, a license, a task)
@@ -428,6 +451,17 @@ export interface UsageNamespace {
   lfs_size: number /* int64 */;
   num_files: number /* int64 */;
   num_repos: number /* int64 */;
+  /**
+   * EffectiveQuotaBytes is the storage limit actually enforced for this
+   * namespace (its own override, or the instance default). Null means
+   * unlimited. Only a site administrator can change it -- an organisation
+   * admin raising their own cap would not be a cap.
+   * It is spelled the same as AdminNamespaceUsage.EffectiveQuotaBytes on
+   * purpose: `quota_bytes` there means the *override*, and one name that
+   * means the resolved limit in one response and the raw override in
+   * another is a field whose null is read backwards half the time.
+   */
+  effective_quota_bytes: number | null;
 }
 /**
  * UsageRepo is one repository's contribution to storage usage.
@@ -582,6 +616,128 @@ export interface CommitListResponse {
   next_cursor: string | null;
 }
 /**
+ * DiffStatus is what happened to one path between two commits.
+ */
+export const DiffStatusAdded = "added";
+export const DiffStatusModified = "modified";
+export const DiffStatusDeleted = "deleted";
+export type DiffStatus = typeof DiffStatusAdded | typeof DiffStatusModified | typeof DiffStatusDeleted;
+/**
+ * DiffNoPatchReason says why a file carries no unified diff. It is stated
+ * rather than inferred: a reader that works it out from Binary/LFS being
+ * false has to assume the only remaining reason is size, and there are two
+ * others -- which is how an empty file came to be reported as "too large to
+ * diff".
+ */
+export type DiffNoPatchReason = string;
+/**
+ * DiffNoPatchNone is the value on a file that does carry a patch.
+ */
+export const DiffNoPatchNone: DiffNoPatchReason = "";
+export const DiffNoPatchLFS: DiffNoPatchReason = "lfs";
+/**
+ * DiffNoPatchBinary is a file that is not text on either side.
+ */
+export const DiffNoPatchBinary: DiffNoPatchReason = "binary";
+/**
+ * DiffNoPatchTooLarge is a text file whose blob exceeded the size budget.
+ */
+export const DiffNoPatchTooLarge: DiffNoPatchReason = "too_large";
+/**
+ * DiffNoPatchNoTextChange is a change with nothing to render as lines:
+ * an added or deleted empty file, or a file whose mode moved while its
+ * bytes did not. The change is real; it just has no lines in it.
+ */
+export const DiffNoPatchNoTextChange: DiffNoPatchReason = "no_text_change";
+/**
+ * DiffNoPatchUnsupported is a path that is not a regular file on either
+ * side, such as a submodule.
+ */
+export const DiffNoPatchUnsupported: DiffNoPatchReason = "unsupported";
+/**
+ * DiffNoPatchBudgetSpent is a file the response's overall patch budget
+ * ran out before. The per-file ceilings alone do not bound a response --
+ * enough large-but-allowed patches add up -- so the sum is capped too,
+ * and a file past the cap is listed without one. Nothing is wrong with
+ * the file: the commit changed more text than one response renders.
+ */
+export const DiffNoPatchBudgetSpent: DiffNoPatchReason = "budget_spent";
+/**
+ * DiffFile is one path's change in a commit. Additions/Deletions are line
+ * counts and are 0 for a file with no textual diff (binary, LFS, or one whose
+ * patch was skipped for size) -- read HasPatch to tell "no lines changed"
+ * apart from "lines were not counted", rather than showing a 0 that looks
+ * like a fact, and NoPatchReason for why there is no patch.
+ */
+export interface DiffFile {
+  path: string;
+  status: DiffStatus;
+  /**
+   * Additions and Deletions are meaningless unless HasPatch is true.
+   */
+  additions: number /* int */;
+  deletions: number /* int */;
+  /**
+   * Binary reports a path whose contents are not text on either side.
+   */
+  binary: boolean;
+  /**
+   * LFS reports a path stored as a Git LFS pointer. The pointer itself is
+   * text, but diffing it shows an oid changing rather than the content, so
+   * it is called out instead of rendered.
+   */
+  lfs: boolean;
+  /**
+   * HasPatch reports whether Patch carries a unified diff.
+   */
+  has_patch: boolean;
+  /**
+   * NoPatchReason says why, whenever HasPatch is false; it is "" exactly
+   * when HasPatch is true.
+   */
+  no_patch_reason: DiffNoPatchReason;
+  /**
+   * Patch is a unified diff body without the `diff --git` header, empty
+   * unless HasPatch.
+   */
+  patch: string;
+  /**
+   * PatchTruncated reports that Patch was cut off mid-diff.
+   */
+  patch_truncated: boolean;
+  /**
+   * OldSize and Size are the blob sizes on each side; 0 where the path did
+   * not exist on that side.
+   */
+  old_size: number /* int64 */;
+  size: number /* int64 */;
+}
+/**
+ * CommitDiffResponse is the body of
+ * GET /api/v1/repos/{kind}/{ns}/{name}/diff/{rev}: what one commit changed,
+ * against its first parent. A merge commit is diffed against its first parent
+ * only, which is what makes the file list readable.
+ */
+export interface CommitDiffResponse {
+  commit: CommitInfoUI;
+  /**
+   * ParentOID is null for the root commit, where every file reads as added.
+   */
+  parent_oid: string | null;
+  /**
+   * Files is capped; FilesTruncated says the commit touched more paths
+   * than are listed. NumFiles is always the true total.
+   */
+  files: DiffFile[];
+  num_files: number /* int */;
+  files_truncated: boolean;
+  /**
+   * Additions and Deletions total the per-file counts that were computed.
+   */
+  additions: number /* int */;
+  deletions: number /* int */;
+}
+/**
  * RawFileResponse is a file's contents, cut off at the preview limit.
  */
 export interface RawFileResponse {
@@ -632,6 +788,40 @@ export interface DeleteFileRequest {
    * *pointer* blob, which is what the tree listing reports.
    */
   base_oid?: string;
+}
+/**
+ * RenameFileRequest moves one file to a new path in a single commit. Doing
+ * it as one commit is the point: the browser had to create-then-delete before
+ * this existed, which put two commits in the history for one rename and left
+ * the repository momentarily holding both copies.
+ */
+export interface RenameFileRequest {
+  /**
+   * NewPath is the destination, relative to the repository root. Its
+   * parent directories do not need to exist -- git has no empty
+   * directories, so a path is all it takes to "create" one.
+   */
+  new_path: string;
+  message?: string;
+  description?: string;
+  /**
+   * BaseOID is the blob SHA the caller last saw at the source path. When
+   * set, the rename is refused if the path has moved on since. For an LFS
+   * file this is the SHA of the *pointer* blob, as the tree listing
+   * reports it -- the object itself is untouched by a rename, which is why
+   * renaming an LFS file costs no transfer.
+   */
+  base_oid?: string;
+}
+/**
+ * RenameFileResponse reports where the rename landed.
+ */
+export interface RenameFileResponse {
+  path: string;
+  old_path: string;
+  commit_oid: string;
+  oid: string;
+  size: number /* int64 */;
 }
 /**
  * UploadFilesResponse reports the single commit one browser upload produced.
@@ -1442,9 +1632,16 @@ export const WebhookEventRepoTransferRequested = "repo.transfer_requested";
  */
 export const WebhookEventRepoArchived = "repo.archived";
 export const WebhookEventRepoUnarchived = "repo.unarchived";
+/**
+ * WebhookEventRepoRefDeleted fires when a branch or tag is removed,
+ * whether by `git push --delete` or through the API. Creation and
+ * update already arrive as repo.push; without this one a mirroring
+ * subscriber saw refs appear and never saw them go away.
+ */
+export const WebhookEventRepoRefDeleted = "repo.ref_deleted";
 export const WebhookEventRunFinished = "run.finished";
 export const WebhookEventRunFailed = "run.failed";
-export type WebhookEvent = typeof WebhookEventRepoPush | typeof WebhookEventRepoCreated | typeof WebhookEventRepoDeleted | typeof WebhookEventRepoMoved | typeof WebhookEventRepoTransferRequested | typeof WebhookEventRepoArchived | typeof WebhookEventRepoUnarchived | typeof WebhookEventRunFinished | typeof WebhookEventRunFailed;
+export type WebhookEvent = typeof WebhookEventRepoPush | typeof WebhookEventRepoCreated | typeof WebhookEventRepoDeleted | typeof WebhookEventRepoMoved | typeof WebhookEventRepoTransferRequested | typeof WebhookEventRepoArchived | typeof WebhookEventRepoUnarchived | typeof WebhookEventRepoRefDeleted | typeof WebhookEventRunFinished | typeof WebhookEventRunFailed;
 /**
  * WebhookDeliveryStatus is the lifecycle state of one delivery attempt.
  */
@@ -1582,7 +1779,27 @@ export interface AdminUser {
    */
   disabled: boolean;
   created_at: string;
+  /**
+   * LastLoginAt is when this account last authenticated with its password
+   * (a session being minted), null for one that never has. Access tokens
+   * and SSH keys carry their own last-used timestamps and deliberately do
+   * not move this one: the question it answers is "is anybody still using
+   * this account", for which an automation's token is the wrong signal.
+   */
+  last_login_at: string | null;
+  /**
+   * Approval is "pending" for an account that signed up while
+   * TF_SIGNUP_REQUIRE_APPROVAL was on and has not been approved yet. A
+   * pending account cannot authenticate on any path.
+   */
+  approval: UserApproval;
 }
+/**
+ * UserApproval is whether a self-registered account has been let in yet.
+ */
+export const UserApprovalApproved = "approved";
+export const UserApprovalPending = "pending";
+export type UserApproval = typeof UserApprovalApproved | typeof UserApprovalPending;
 /**
  * AdminUserListResponse is one page of the account directory. Total counts
  * every account matching `search`, ignoring the page window.
@@ -1633,11 +1850,62 @@ export interface AdminUserUpdateRequest {
   /**
    * Disabled suspends or restores the account. Suspending it stops every
    * identity path at once (session, password, access token, SSH key) and
-   * revokes its sessions; disabling your own account is 400, and so is
-   * disabling the last site administrator. Restoring does not bring back
-   * credentials revoked separately.
+   * revokes its sessions; disabling your own account is 400
+   * (self_disable) and disabling the last usable site administrator is
+   * 409 (last_admin). Restoring does not bring back credentials revoked
+   * separately.
    */
   disabled?: boolean;
+  /**
+   * Approval admits a pending self-registration ("approved") or puts an
+   * account back in the waiting room ("pending"). Sending "pending" for
+   * your own account is 400 (self_pending); doing it to the last usable
+   * site administrator is 409 (last_admin), the same pair of codes the
+   * Disabled field uses.
+   */
+  approval?: UserApproval;
+}
+/**
+ * AdminNamespaceUsage is one namespace as GET /api/v1/admin/namespaces lists
+ * it: what it is storing and what it is allowed to store.
+ */
+export interface AdminNamespaceUsage {
+  namespace: string;
+  kind: NamespaceKind;
+  lfs_size: number /* int64 */;
+  num_repos: number /* int64 */;
+  /**
+   * QuotaBytes is this namespace's own override; null means it has none
+   * and the instance default applies.
+   */
+  quota_bytes: number | null;
+  /**
+   * EffectiveQuotaBytes is what is actually enforced on an upload: the
+   * override when set, otherwise the instance default. Null is unlimited.
+   */
+  effective_quota_bytes: number | null;
+}
+/**
+ * AdminNamespaceListResponse is one page of the namespace directory.
+ */
+export interface AdminNamespaceListResponse {
+  items: AdminNamespaceUsage[];
+  total: number /* int64 */;
+  /**
+   * DefaultQuotaBytes is the instance-wide default every namespace without
+   * an override gets (TF_DEFAULT_STORAGE_QUOTA_BYTES). Null is unlimited.
+   * It is configuration, not data: changing it needs a redeploy.
+   */
+  default_quota_bytes: number | null;
+}
+/**
+ * AdminNamespaceQuotaRequest is the body of PATCH
+ * /api/v1/admin/namespaces/{ns}. The field is required and nullable: null
+ * clears the override so the instance default applies again, which is a
+ * different thing from setting a quota of zero.
+ */
+export interface AdminNamespaceQuotaRequest {
+  quota_bytes: number | null;
 }
 /**
  * SyncJob is one row of the post-push queue as GET /api/v1/admin/sync-jobs

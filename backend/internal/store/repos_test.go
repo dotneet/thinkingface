@@ -305,3 +305,67 @@ func TestBuildPrefixTSQueryNeverEmitsControlCharacters(t *testing.T) {
 		}
 	}
 }
+
+// --------------------------------------------------- description ownership
+
+// TestIntegrationRepoDescriptionSurvivesACardlessPush pins the split between
+// the two writers of `description`: the settings form (SetRepoDescription)
+// and the post-push indexer (UpdateRepoIndex). The indexer used to assign
+// unconditionally, so a README without a `description:` key wiped a
+// hand-written description on every push. An empty card description now means
+// "the card said nothing" and leaves the column alone, while a card that does
+// carry one still wins.
+//
+// Run against every available backend because the CASE expression reuses one
+// placeholder, and pgx and SQLite bind that differently (pgx sends $5 once for
+// both references; SQLite treats the repeated $5 as a single named parameter).
+func TestIntegrationRepoDescriptionSurvivesACardlessPush(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+		r := f.repo(t, "alice", "foo", "model", nil)
+
+		updated, err := s.SetRepoDescription(ctx, r.ID, "hand written")
+		if err != nil {
+			t.Fatalf("SetRepoDescription: %v", err)
+		}
+		if updated.Description != "hand written" {
+			t.Fatalf("description = %q, want %q", updated.Description, "hand written")
+		}
+
+		// A push whose README card has no description at all.
+		if err := s.UpdateRepoIndex(ctx, r.ID, "abc", 10, map[string]any{"tags": []any{"nlp"}}, "", false); err != nil {
+			t.Fatalf("UpdateRepoIndex: %v", err)
+		}
+		got, err := s.GetRepoByID(ctx, r.ID)
+		if err != nil {
+			t.Fatalf("reload: %v", err)
+		}
+		if got.Description != "hand written" {
+			t.Fatalf("description after a cardless push = %q, want it kept", got.Description)
+		}
+		// The rest of the index still landed.
+		if got.HeadSHA != "abc" || got.TotalSize != 10 {
+			t.Fatalf("index not applied: head_sha = %q, total_size = %d", got.HeadSHA, got.TotalSize)
+		}
+
+		// A card that does say something is still the source of truth.
+		if err := s.UpdateRepoIndex(ctx, r.ID, "def", 20, map[string]any{}, "from the card", false); err != nil {
+			t.Fatalf("UpdateRepoIndex: %v", err)
+		}
+		if got, err = s.GetRepoByID(ctx, r.ID); err != nil {
+			t.Fatalf("reload: %v", err)
+		}
+		if got.Description != "from the card" {
+			t.Fatalf("description = %q, want the card's", got.Description)
+		}
+
+		// And the settings form can still clear it afterwards.
+		if updated, err = s.SetRepoDescription(ctx, r.ID, ""); err != nil {
+			t.Fatalf("SetRepoDescription(empty): %v", err)
+		}
+		if updated.Description != "" {
+			t.Fatalf("description = %q, want it cleared", updated.Description)
+		}
+	})
+}

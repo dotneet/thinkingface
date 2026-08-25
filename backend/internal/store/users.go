@@ -27,6 +27,23 @@ type User struct {
 	// DisabledBy is the site administrator who suspended the account, nil
 	// while it is active.
 	DisabledBy *int64 `json:"-"`
+	// LastLoginAt is when a password last minted a session for this account,
+	// nil for one that never has. Access tokens and SSH keys carry their own
+	// last-used timestamps (AccessToken.LastUsedAt, SSHKey.LastUsedAt) and
+	// deliberately leave this alone: the question it answers is "is anybody
+	// still using this account", for which a nightly CI token is the wrong
+	// signal.
+	LastLoginAt *time.Time `json:"-"`
+	// ApprovalPendingAt is when a self-registration was put in the waiting
+	// room (TF_SIGNUP_REQUIRE_APPROVAL), nil once it has been admitted --
+	// and nil for every account that predates the column, which is what
+	// makes the migration a no-op for an existing instance.
+	//
+	// It records the *pending* instant rather than an approved one so that
+	// nil means approved. An approved_at would make "no value" mean "not
+	// allowed in", and every account an administrator creates, plus the
+	// seeded first one, would have to remember to set it.
+	ApprovalPendingAt *time.Time `json:"-"`
 }
 
 // Disabled reports whether the account is suspended. Read it rather than
@@ -35,11 +52,23 @@ type User struct {
 // from drifting apart.
 func (u *User) Disabled() bool { return u != nil && u.DisabledAt != nil }
 
+// PendingApproval reports whether the account is still in the sign-up waiting
+// room. Disabled()'s counterpart, and read at exactly the same places: an
+// account waiting for approval has never been let in, so like a suspended one
+// it authenticates on no path at all.
+func (u *User) PendingApproval() bool { return u != nil && u.ApprovalPendingAt != nil }
+
+// Blocked reports whether either gate is closed. It is what an identity path
+// should ask, rather than the two predicates separately -- a path that checks
+// one and forgets the other is precisely the failure this spelling exists to
+// prevent.
+func (u *User) Blocked() bool { return u.Disabled() || u.PendingApproval() }
+
 // userColumns is the SELECT list every query that materialises a User uses,
 // in the order scanUser reads them. It exists so a new column cannot be added
 // to one query and forgotten in the next -- which is exactly how an identity
 // path ends up not knowing an account is disabled.
-const userColumns = `id, username, email, password_hash, is_admin, created_at, session_epoch, disabled_at, disabled_by`
+const userColumns = `id, username, email, password_hash, is_admin, created_at, session_epoch, disabled_at, disabled_by, last_login_at, approval_pending_at`
 
 // userColumnsOn qualifies userColumns with a table alias, for the queries
 // that join users to a credential table (LookupToken, LookupSSHKey).
@@ -49,7 +78,8 @@ func userColumnsOn(alias string) string {
 
 func scanUser(row rowScanner, u *User) error {
 	return row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin,
-		&u.CreatedAt, &u.SessionEpoch, &u.DisabledAt, &u.DisabledBy)
+		&u.CreatedAt, &u.SessionEpoch, &u.DisabledAt, &u.DisabledBy,
+		&u.LastLoginAt, &u.ApprovalPendingAt)
 }
 
 type AccessToken struct {
@@ -65,17 +95,47 @@ type AccessToken struct {
 
 // CreateUser inserts the user and their personal namespace in one transaction,
 // so an account can never exist without somewhere to put repositories.
+//
+// The account is approved. Every caller of this one is a deliberate act by
+// somebody who is already trusted -- the first-boot seed, and a site
+// administrator adding a colleague -- so there is nobody left to approve it.
+// Only self-registration can land in the waiting room; see CreatePendingUser.
 func (s *Store) CreateUser(ctx context.Context, username, email, passwordHash string, isAdmin bool) (*User, error) {
+	return s.createUser(ctx, username, email, passwordHash, isAdmin, false)
+}
+
+// CreatePendingUser is CreateUser for a self-registration on an instance
+// running TF_SIGNUP_REQUIRE_APPROVAL: the account and its namespace exist,
+// and approval_pending_at is set in the *same* INSERT.
+//
+// One statement rather than a create-then-mark pair on purpose. The pair has
+// a window -- however short -- in which a brand new account is fully
+// authenticating, and an interrupted request would leave a permanently
+// approved account behind that nobody ever approved.
+//
+// It is never an administrator: an account nobody has admitted cannot be
+// handed site administrator rights on the way in.
+func (s *Store) CreatePendingUser(ctx context.Context, username, email, passwordHash string) (*User, error) {
+	return s.createUser(ctx, username, email, passwordHash, false, true)
+}
+
+func (s *Store) createUser(ctx context.Context, username, email, passwordHash string, isAdmin, pending bool) (*User, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
 
+	// now() is rewritten per dialect (dialect.go); a literal NULL is what
+	// "approved" is spelled as everywhere else in this file.
+	pendingExpr := `NULL`
+	if pending {
+		pendingExpr = `now()`
+	}
 	u := &User{}
 	err = scanUser(tx.QueryRow(ctx,
-		`INSERT INTO users (username, email, password_hash, is_admin)
-		 VALUES ($1, $2, $3, $4)
+		`INSERT INTO users (username, email, password_hash, is_admin, approval_pending_at)
+		 VALUES ($1, $2, $3, $4, `+pendingExpr+`)
 		 RETURNING `+userColumns,
 		username, email, passwordHash, isAdmin), u)
 	if s.d.isUniqueViolation(err) {
@@ -159,8 +219,16 @@ func (s *Store) ListUsers(ctx context.Context, search string, limit, offset int)
 	limitP, offsetP := bind(limit), bind(offset)
 
 	rows, err := s.db.Query(ctx,
-		`SELECT id, username, email, is_admin, created_at, disabled_at FROM users`+listWhere+
-			` ORDER BY username LIMIT `+limitP+` OFFSET `+offsetP, args...)
+		`SELECT id, username, email, is_admin, created_at, disabled_at,
+		        last_login_at, approval_pending_at FROM users`+listWhere+
+			// Accounts waiting for approval sort to the top, and only those:
+			// the waiting room is the one thing on this screen that needs
+			// acting on, and an administrator should not have to page through
+			// an alphabetical directory to discover somebody is stuck in it.
+			// Within each group the order is still the username, so the
+			// listing is stable and a page window means the same thing twice.
+			` ORDER BY CASE WHEN approval_pending_at IS NULL THEN 1 ELSE 0 END, username`+
+			` LIMIT `+limitP+` OFFSET `+offsetP, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -169,7 +237,8 @@ func (s *Store) ListUsers(ctx context.Context, search string, limit, offset int)
 	out := []User{}
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.IsAdmin, &u.CreatedAt, &u.DisabledAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.IsAdmin, &u.CreatedAt, &u.DisabledAt,
+			&u.LastLoginAt, &u.ApprovalPendingAt); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, u)
@@ -231,6 +300,16 @@ func (s *Store) UpdateUserPassword(ctx context.Context, userID int64, passwordHa
 	return epoch, norm(err)
 }
 
+// usableAdminCountQuery counts the site administrators that can actually
+// administer anything. An account that authenticates on no path is no more
+// able to recover an instance than a missing one, so neither a suspended nor
+// an unapproved administrator counts -- and every guard that asks "would this
+// leave the instance with no administrator" has to apply the *same*
+// predicate, or one of them can be walked around by going through another.
+// One string is how they are kept in step.
+const usableAdminCountQuery = `SELECT count(*) FROM users
+	 WHERE is_admin AND disabled_at IS NULL AND approval_pending_at IS NULL`
+
 // SetUserAdmin grants or revokes instance-wide administrator rights.
 // Revoking it from the last remaining administrator is ErrLastSiteAdmin: the
 // flag is the only thing that can hand it back, so an instance that loses its
@@ -254,15 +333,10 @@ func (s *Store) SetUserAdmin(ctx context.Context, userID int64, isAdmin bool) er
 		return norm(err)
 	}
 	if current && !isAdmin {
-		// Suspended administrators do not count. They cannot authenticate on
-		// any path, so leaving one as the only "remaining" administrator
-		// locks the instance out just as thoroughly as leaving none -- and
-		// SetUserDisabled applies the same predicate, so the two guards have
-		// to agree or one of them can be walked around by going through the
-		// other.
+		// Suspended and unapproved administrators do not count; see
+		// usableAdminCountQuery.
 		var admins int64
-		if err := tx.QueryRow(ctx,
-			`SELECT count(*) FROM users WHERE is_admin AND disabled_at IS NULL`).Scan(&admins); err != nil {
+		if err := tx.QueryRow(ctx, usableAdminCountQuery).Scan(&admins); err != nil {
 			return err
 		}
 		if admins <= 1 {
@@ -324,8 +398,7 @@ func (s *Store) SetUserDisabled(ctx context.Context, username string, disabled b
 	}
 	if disabled && isAdmin {
 		var admins int64
-		if err := tx.QueryRow(ctx,
-			`SELECT count(*) FROM users WHERE is_admin AND disabled_at IS NULL`).Scan(&admins); err != nil {
+		if err := tx.QueryRow(ctx, usableAdminCountQuery).Scan(&admins); err != nil {
 			return err
 		}
 		if admins <= 1 {
@@ -345,6 +418,94 @@ func (s *Store) SetUserDisabled(ctx context.Context, username string, disabled b
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// SetUserApproval admits an account from the sign-up waiting room, or puts
+// one back into it. SetUserDisabled's shape, for the same kind of switch:
+// nothing is destroyed either way, so the two directions are one method with
+// a boolean rather than two verbs.
+//
+// The two gates are deliberately independent. Suspension is "this account
+// used to be allowed in and no longer is"; pending approval is "this account
+// has never been let in". Approving does not un-suspend, and restoring does
+// not approve -- collapsing them would let one administrator's decision be
+// undone by another's unrelated one.
+//
+// Sending an account back to pending revokes its sessions in the same
+// statement, for exactly the reason suspension does: a decision that stops
+// an account authenticating has to reach the cookies already issued, or it
+// does not take effect until their TTL. Approving does not touch the epoch;
+// there is nothing outstanding to revoke, since a pending account could
+// never have been issued a cookie.
+//
+// Sending the last usable site administrator back to pending is
+// ErrLastSiteAdmin, under the same advisory lock SetUserAdmin and
+// SetUserDisabled take -- the rule is about the *count* of administrators, so
+// two concurrent changes must not both observe two.
+//
+// Setting the state an account is already in is a no-op, so a retried request
+// does not bump the epoch a second time.
+func (s *Store) SetUserApproval(ctx context.Context, username string, approved bool) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+
+	if err := s.d.advisoryXactLock(ctx, tx, "site-admins", 0); err != nil {
+		return err
+	}
+	var (
+		id        int64
+		isAdmin   bool
+		pendingAt *time.Time
+	)
+	if err := tx.QueryRow(ctx,
+		`SELECT id, is_admin, approval_pending_at FROM users WHERE LOWER(username) = LOWER($1)`,
+		username).Scan(&id, &isAdmin, &pendingAt); err != nil {
+		return norm(err)
+	}
+	if approved == (pendingAt == nil) {
+		return nil
+	}
+	if !approved && isAdmin {
+		var admins int64
+		if err := tx.QueryRow(ctx, usableAdminCountQuery).Scan(&admins); err != nil {
+			return err
+		}
+		if admins <= 1 {
+			return ErrLastSiteAdmin
+		}
+	}
+	if approved {
+		_, err = tx.Exec(ctx,
+			`UPDATE users SET approval_pending_at = NULL WHERE id = $1`, id)
+	} else {
+		_, err = tx.Exec(ctx,
+			`UPDATE users SET approval_pending_at = now(),
+			        session_epoch = session_epoch + 1
+			 WHERE id = $1`, id)
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// TouchUserLogin records that a password just minted a session for this
+// account. TouchToken's counterpart, and like it a best-effort write the
+// caller may ignore the error of: a dormancy timestamp is not worth failing
+// a sign-in over.
+//
+// Only handleLogin calls it. An access token and an SSH key each move their
+// own last-used column instead, because this one exists to answer "is anybody
+// still using this account" and an unattended CI token says nothing about
+// that. HTTP Basic with a real password does not call it either: no session
+// is minted there, and a `git fetch` loop would otherwise write to the users
+// table on every request.
+func (s *Store) TouchUserLogin(ctx context.Context, userID int64) error {
+	_, err := s.db.Exec(ctx, `UPDATE users SET last_login_at = now() WHERE id = $1`, userID)
+	return err
 }
 
 // RevokeAllTokens deletes every access token an account holds and reports how
@@ -386,13 +547,13 @@ func (s *Store) CreateToken(ctx context.Context, userID int64, name, scope, toke
 }
 
 // LookupToken resolves a hashed token to its owner, rejecting expired ones
-// and tokens belonging to a suspended account.
+// and tokens belonging to a suspended account or one still waiting for
+// approval.
 //
-// The disabled_at predicate is defence in depth, not the only check: the API
-// layer refuses a suspended user on every identity path (see
-// resolveIdentity). It lives in the statement as well because a token that
-// resolves to nothing cannot be trusted by a future caller that forgets to
-// ask.
+// The two account predicates are defence in depth, not the only check: the
+// API layer refuses both on every identity path (see resolveIdentity). They
+// live in the statement as well because a token that resolves to nothing
+// cannot be trusted by a future caller that forgets to ask.
 func (s *Store) LookupToken(ctx context.Context, tokenHash string) (*User, *AccessToken, error) {
 	u := &User{}
 	t := &AccessToken{}
@@ -401,11 +562,11 @@ func (s *Store) LookupToken(ctx context.Context, tokenHash string) (*User, *Acce
 		        `+userColumnsOn("u")+`
 		 FROM access_tokens t JOIN users u ON u.id = t.user_id
 		 WHERE t.token_hash = $1 AND (t.expires_at IS NULL OR t.expires_at > now())
-		   AND u.disabled_at IS NULL`,
+		   AND u.disabled_at IS NULL AND u.approval_pending_at IS NULL`,
 		tokenHash,
 	).Scan(&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.CreatedAt,
 		&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt, &u.SessionEpoch,
-		&u.DisabledAt, &u.DisabledBy)
+		&u.DisabledAt, &u.DisabledBy, &u.LastLoginAt, &u.ApprovalPendingAt)
 	if err != nil {
 		return nil, nil, norm(err)
 	}

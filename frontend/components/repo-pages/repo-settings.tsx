@@ -1,8 +1,10 @@
 import { Archive } from "lucide-react";
 import { DefaultBranchForm } from "@/components/repo/default-branch-form";
 import { RefsManager } from "@/components/repo/refs-manager";
+import { RenameRepoForm } from "@/components/repo/rename-repo-form";
 import { RepoBreadcrumb } from "@/components/repo/repo-breadcrumb";
 import { RepoDangerZone } from "@/components/repo/repo-danger-zone";
+import { RepoDescriptionForm } from "@/components/repo/repo-description-form";
 import { RepoNotFoundOrLogin } from "@/components/repo/repo-not-found";
 import { RepoTabs } from "@/components/repo/repo-tabs";
 import { TransferRepoForm } from "@/components/repo/transfer-repo-form";
@@ -79,6 +81,38 @@ export async function RepoSettings({
         />
       ) : (
         <>
+          {/* Rename and description come first: they are the two things
+              someone opens this page to change, and the rename in particular
+              used to be reachable only through the transfer form below --
+              a screen about giving the repository away. */}
+          <Card>
+            <CardHeader>
+              <CardTitle>{t("repo.settings.rename.title")}</CardTitle>
+            </CardHeader>
+            <p className="mt-1 text-sm text-fg-subtle">{t("repo.settings.rename.description")}</p>
+            <div className="mt-4">
+              <RenameRepoForm kind={kind} ns={ns} name={name} archived={repo.archived} />
+            </div>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>{t("repo.settings.description.title")}</CardTitle>
+            </CardHeader>
+            <p className="mt-1 text-sm text-fg-subtle">
+              {t("repo.settings.description.description")}
+            </p>
+            <div className="mt-4">
+              <RepoDescriptionForm
+                kind={kind}
+                ns={ns}
+                name={name}
+                description={repo.description}
+                archived={repo.archived}
+              />
+            </div>
+          </Card>
+
           <Card>
             <CardHeader>
               <CardTitle>{t("repo.settings.defaultBranch.title")}</CardTitle>

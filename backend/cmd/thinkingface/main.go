@@ -89,6 +89,12 @@ func run(command string) error {
 		return nil
 	case "seed":
 		return seedAdmin(ctx, db, cfg)
+	case "admin":
+		// The break-glass path (admincli.go). Nothing but the database is
+		// needed, so it runs here rather than after the storage driver, the
+		// git manager and the sync worker are built -- an instance that
+		// cannot reach its bucket must still be able to reset a password.
+		return runAdmin(ctx, db, os.Args[2:], os.Stdout)
 	case "gc":
 		obj, err := newStorage(ctx, cfg)
 		if err != nil {
@@ -121,7 +127,7 @@ func run(command string) error {
 		return runWALVerify(ctx, db, obj, cfg, os.Args[2:])
 	case "serve":
 	default:
-		return fmt.Errorf("unknown command %q (expected serve, migrate, seed, gc, resync, compact, wal-seed, wal-verify or hook)", command)
+		return fmt.Errorf("unknown command %q (expected serve, migrate, seed, admin, gc, resync, compact, wal-seed, wal-verify or hook)", command)
 	}
 
 	if err := seedAdmin(ctx, db, cfg); err != nil {

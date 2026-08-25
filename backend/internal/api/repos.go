@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -463,8 +464,11 @@ func (s *Server) deleteRepo(ctx context.Context, repo *store.Repo) error {
 // ------------------------------------------------------------------- update
 
 // handleUpdateRepo answers PATCH /api/v1/repos/{kind}/{ns}/{name}, a partial
-// update over repository configuration; today the only field is
-// default_branch (docs/dev/api-contract.md "Changing the default branch").
+// update over repository configuration: default_branch
+// (docs/dev/api-contract.md "Changing the default branch"), name and
+// description. Absent fields are left alone; present ones are applied in the
+// order below, and the response describes the repository as it stands
+// afterwards.
 //
 // Gated by canAdmin rather than canWrite -- the same namespace-admin bar as
 // archive/transfer/delete, not a plain write member -- because switching the
@@ -497,25 +501,99 @@ func (s *Server) handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, maxMetaBody, &req, "request body must be JSON") {
 		return
 	}
-	if req.DefaultBranch == nil {
-		badRequest(w, "nothing to update: send default_branch")
-		return
-	}
-	branch := strings.TrimSpace(*req.DefaultBranch)
-	if branch == "" {
-		badRequest(w, "default_branch must not be empty")
+	if req.DefaultBranch == nil && req.Name == nil && req.Description == nil {
+		badRequest(w, "nothing to update: send default_branch, name or description")
 		return
 	}
 
+	// Both free-text fields are validated before anything is written. The
+	// three updates are separate writes, so a request that is going to be
+	// refused for its name must be refused before the other two have already
+	// landed.
+	newName := ""
+	if req.Name != nil {
+		newName = strings.TrimSpace(*req.Name)
+		if verr := validateName(newName); verr != nil {
+			badRequest(w, "name "+verr.Error())
+			return
+		}
+	}
+	description := ""
+	if req.Description != nil {
+		description = strings.TrimSpace(*req.Description)
+		// The same rune ceiling the profile fields use
+		// (docs/dev/namespace-design.md §10): prose typed by a person, so
+		// counted in characters rather than bytes.
+		if utf8.RuneCountInString(description) > maxDescriptionRunes {
+			badRequest(w, fmt.Sprintf("description must be at most %d characters", maxDescriptionRunes))
+			return
+		}
+	}
+
+	updated := repo
+	if req.DefaultBranch != nil {
+		branch := strings.TrimSpace(*req.DefaultBranch)
+		if branch == "" {
+			badRequest(w, "default_branch must not be empty")
+			return
+		}
+		if updated, ok = s.setDefaultBranch(w, r, repo, branch); !ok {
+			return
+		}
+	}
+
+	if req.Description != nil {
+		var err error
+		// Overwritten by the README card's own `description` on the next
+		// push, when the card has one -- see store.UpdateRepoIndex, which
+		// keeps what is set here only while the card says nothing. The
+		// settings form says so; this is not a field that quietly wins.
+		if updated, err = s.store.SetRepoDescription(r.Context(), repo.ID, description); err != nil {
+			handleStoreError(w, "update repository", err)
+			return
+		}
+	}
+
+	// The rename runs last, so the response (and the redirect left behind)
+	// describe the repository's final location.
+	//
+	// It goes through startTransfer, the same path the transfer endpoints
+	// use, because a rename *is* a move as far as the data is concerned:
+	// repo_redirects, the lineage edges pointing at the old name, the
+	// cancelled pending transfers and the repo.moved webhook are all the same
+	// work, and writing a second implementation of it would be writing a
+	// second chance to get one of them wrong. What a rename deliberately does
+	// not inherit is the approval flow: that exists so the *destination
+	// namespace* can consent, and here the destination is the namespace the
+	// repository already lives in, so startTransfer's own destination check
+	// (write access there) is satisfied by definition and the move completes
+	// immediately.
+	if req.Name != nil && newName != updated.Name {
+		moved, _, _, err := s.startTransfer(r.Context(), currentUser(r.Context()), updated, updated.Namespace, newName)
+		if err != nil {
+			writeTransferError(w, err)
+			return
+		}
+		updated = moved
+	}
+
+	writeJSON(w, http.StatusOK, apitypes.RepoDetailResponse{Repo: s.buildDetail(r.Context(), updated)})
+}
+
+// setDefaultBranch is the default_branch half of handleUpdateRepo: it
+// repoints HEAD, writes the row and re-runs the post-push indexers for the
+// newly-default ref. It answers the request itself on failure and reports
+// ok=false; on success it returns the repository as it now stands.
+func (s *Server) setDefaultBranch(w http.ResponseWriter, r *http.Request, repo *store.Repo, branch string) (*store.Repo, bool) {
 	gitRepo, err := s.git.Open(repo.StoragePath)
 	if err != nil {
 		internalError(w, "open repository", err)
-		return
+		return nil, false
 	}
 	tip, err := gitRepo.RefTarget("refs/heads/" + branch)
 	if err != nil {
 		notFound(w, "branch "+branch+" does not exist in "+repo.FullName())
-		return
+		return nil, false
 	}
 
 	// Already the default: neither HEAD nor the row needs touching, and the
@@ -531,7 +609,7 @@ func (s *Server) handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 		// one while every listing reads the other.
 		if err := gitRepo.SetHead(r.Context(), branch); err != nil {
 			internalError(w, "update HEAD", err)
-			return
+			return nil, false
 		}
 		updated, err = s.store.SetRepoDefaultBranch(r.Context(), repo.ID, branch)
 		if err != nil {
@@ -540,7 +618,7 @@ func (s *Server) handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 					"repo", repo.FullName(), "branch", repo.DefaultBranch, "err", rbErr)
 			}
 			internalError(w, "update repository", err)
-			return
+			return nil, false
 		}
 	}
 
@@ -569,10 +647,10 @@ func (s *Server) handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 		// state than a stale index. Retrying the request repairs it instead,
 		// because the already-default path above still queues the job.
 		internalError(w, "enqueue reindex", err)
-		return
+		return nil, false
 	}
 
-	writeJSON(w, http.StatusOK, apitypes.RepoDetailResponse{Repo: s.buildDetail(r.Context(), updated)})
+	return updated, true
 }
 
 // ------------------------------------------------------------------ archive

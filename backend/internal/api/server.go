@@ -91,6 +91,7 @@ func NewServer(d Deps) *Server {
 		s.models = modelmeta.NewCache(modelmeta.DefaultCacheEntries)
 	}
 	s.lfs = lfs.New(d.Store, d.Storage, d.Config.SignedURLTTL, d.Config.SignedURLMaxTTL, d.Config.PublicURL, d.Config.SessionSecret)
+	s.lfs.EnforceNamespaceQuota(d.Store, d.Config.DefaultStorageQuotaBytes)
 	s.gitHTTP = gitserver.New(d.Git)
 	if d.Config.WALMode != "off" && d.Config.GitHooksPath != "" {
 		cfg := d.Config
@@ -181,9 +182,17 @@ func (s *Server) Handler() http.Handler {
 		// POST and the tag name on DELETE.
 		r.Post("/branch/{branch}", s.handleHFCreateBranch)
 		r.Delete("/branch/{branch}", s.handleHFDeleteBranch)
+		// HfApi.super_squash_history (squash.go): collapse a branch's history
+		// into one parentless commit. A write, and refused on an archived
+		// repository.
+		r.Post("/super-squash/{branch}", s.handleHFSuperSquash)
 		r.Post("/tag/{rev}", s.handleHFCreateTag)
 		r.Delete("/tag/{rev}", s.handleHFDeleteTag)
 		r.Get("/commits/{rev}", s.handleHFCommits)
+		// huggingface_hub.auth_check (hfcompat.go). Without a route of its
+		// own the call fell through to a bare 404, which the client reads as
+		// "no such repository" rather than as "no such endpoint".
+		r.Get("/auth-check", s.handleHFAuthCheck)
 		r.Get("/tree/{rev}/*", s.handleHFTree)
 		r.Get("/tree/{rev}", s.handleHFTree)
 		r.Post("/paths-info/{rev}", s.handleHFPathsInfo)
@@ -199,6 +208,11 @@ func (s *Server) Handler() http.Handler {
 	// HF list endpoints, used by `HfApi.list_datasets()` and friends.
 	r.Get("/api/models", s.handleHFList)
 	r.Get("/api/datasets", s.handleHFList)
+	// HfApi.get_model_tags() / get_dataset_tags() (hfcompat.go): the tag
+	// catalogue, served from the same faceted aggregation the listing sidebar
+	// uses, so it describes what is on this instance.
+	r.Get("/api/models-tags-by-type", s.handleHFModelTags)
+	r.Get("/api/datasets-tags-by-type", s.handleHFDatasetTags)
 
 	// --------------------------------------------------------- thinkingface
 	r.Route("/api/v1", func(r chi.Router) {
@@ -216,6 +230,8 @@ func (s *Server) Handler() http.Handler {
 		r.Post("/admin/users/{username}/revoke-credentials", s.handleAdminRevokeCredentials)
 		r.Get("/admin/sync-jobs", s.handleAdminListSyncJobs)
 		r.Post("/admin/sync-jobs/{id}/retry", s.handleAdminRetrySyncJob)
+		r.Get("/admin/namespaces", s.handleAdminListNamespaces)
+		r.Patch("/admin/namespaces/{ns}", s.handleAdminSetNamespaceQuota)
 
 		r.Get("/tokens", s.handleListTokens)
 		r.Post("/tokens", s.handleCreateToken)
@@ -237,6 +253,7 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/repos/{kind}/{ns}/{name}/gcs/{rev}", s.handleRepoGCS)
 		r.Get("/repos/{kind}/{ns}/{name}/refs", s.handleUIRefs)
 		r.Get("/repos/{kind}/{ns}/{name}/commits/{rev}", s.handleUICommits)
+		r.Get("/repos/{kind}/{ns}/{name}/diff/{rev}", s.handleRepoDiff)
 		r.Get("/repos/{kind}/{ns}/{name}/lineage", s.handleRepoLineage)
 		r.Post("/repos/{kind}/{ns}/{name}/archive", s.handleArchiveRepo)
 		r.Delete("/repos/{kind}/{ns}/{name}/archive", s.handleUnarchiveRepo)
@@ -265,6 +282,7 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/model-meta/{kind}/{ns}/{name}/{rev}/*", s.handleModelMeta)
 		r.Put("/edit/{kind}/{ns}/{name}/{rev}/*", s.handleEditFile)
 		r.Delete("/edit/{kind}/{ns}/{name}/{rev}/*", s.handleDeleteFile)
+		r.Post("/rename/{kind}/{ns}/{name}/{rev}/*", s.handleRenameFile)
 		// Multipart, one commit per request. Separate from /edit because the
 		// body is a stream of files rather than a JSON document.
 		r.Post("/upload/{kind}/{ns}/{name}/{rev}", s.handleUploadFiles)
