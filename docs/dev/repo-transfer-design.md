@@ -419,7 +419,10 @@ assumed; kept here as a decision record):
 
 - `thinkingface repo-info {kind}/{ns}/{name}`: displays `repo_id` / `storage_path` / the WAL
   index's generation / the list of redirect sources. Also accepts `--storage-path repos/01J…` to
-  reverse-lookup "which repository does this WAL prefix belong to" after a transfer
+  reverse-lookup "which repository does this WAL prefix belong to" after a transfer.
+  Still unimplemented (§15), and the store helper that would list a repository's redirect
+  sources was removed as dead code in the meantime — it comes back with the command that needs
+  it rather than sitting unused until then
 - The existing `thinkingface gc` gets `storage_path` support as described in §8 (the reference-
   counted GC of `lfs/` / `blobs/` itself is unrelated to `storage_path`; see
   `docs/dev/content-addressed-storage-design.md`)

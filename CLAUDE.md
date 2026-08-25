@@ -324,6 +324,11 @@ instruction, read it first before re-deriving the steps yourself.
   migration history in order) ahead of the first production release, so the next migration in
   either dialect starts at `0002_...`. The two dialects' numbering used to drift apart; from
   `0001_init.sql` on they stay 1:1.
+  **Recreate any database that stopped part-way through the old history.** `Migrate` records
+  applied files by name and checks nothing else, so a database that ran the old `0001_init.sql`
+  but not the migrations after it skips the consolidated file, starts cleanly, and then fails at
+  runtime on a column that was added later. A database that ran the whole old history is fine —
+  its schema already matches — and so is an empty one.
 - The DB backend is selected by the `DATABASE_URL` scheme (`postgres://` / `postgresql://`
   → PostgreSQL, `sqlite://` → SQLite). `backend/internal/config` validates this at startup.
 - `backend/internal/store`'s integration tests always run against SQLite (a temp file). The
