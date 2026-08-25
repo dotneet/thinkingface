@@ -29,7 +29,7 @@ export default async function AdminSyncJobsPage() {
       <ErrorState
         title={
           isUnauthorized(me)
-            ? t("settings.account.loginRequiredTitle")
+            ? t("settings.loginRequiredTitle")
             : t("settings.adminSyncJobs.loadFailed")
         }
         message={
@@ -43,7 +43,7 @@ export default async function AdminSyncJobsPage() {
               href="/login?next=/settings/admin/sync-jobs"
               className={buttonClass({ variant: "primary" })}
             >
-              {t("settings.account.login")}
+              {t("settings.login")}
             </Link>
           ) : undefined
         }

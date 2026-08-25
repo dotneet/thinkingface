@@ -39,15 +39,41 @@ const (
 	auditWebhookDeleted     = "webhook.deleted"
 )
 
-// defaultAuditPageSize is what the audit log returns without an explicit
-// limit; the UI's "load more" button pages through with `before`.
-const defaultAuditPageSize = 50
+const (
+	// defaultAuditPageSize is what the audit log returns without an explicit
+	// limit; the UI's "load more" button pages through with `before`.
+	defaultAuditPageSize = 50
+	// defaultOrgPageSize mirrors the store's own default for the org-scoped
+	// listings, so the window pageParams clamps to is the one the query then
+	// runs with. The ceiling next to it is exported (store.MaxOrgPageSize);
+	// this one is not, and one duplicated number is cheaper than widening
+	// that package's surface.
+	defaultOrgPageSize = 50
+)
 
-// audit records one administrative action against an organisation. It is
+// auditEntry writes one row of an organisation's audit log. It is
 // best-effort by design: an operation that already succeeded must not be
 // reported as failed because its audit line could not be written.
-func (s *Server) audit(ctx context.Context, nsID int64, actor *store.User, action, target string, details map[string]any) {
+//
+// target names what the action was aimed at as text (an organisation name, a
+// username, a webhook URL); targetUser, when the action was aimed at an
+// account, additionally records that account's id, so the row still says who
+// it was after the account is renamed. The two are separate parameters
+// because target is not always a username -- and when it is, it is the
+// spelling as of the time of the action, which is exactly what the id exists
+// to outlive.
+//
+// Nothing calls this directly: audit and auditMember below are the names the
+// fifteen call sites use, and each says in one word which of the two shapes
+// it means.
+func (s *Server) auditEntry(ctx context.Context, nsID int64, actor *store.User,
+	action, target string, targetUser *store.User, details map[string]any,
+) {
 	e := store.AuditEntry{Action: action, TargetName: target}
+	if targetUser != nil {
+		id := targetUser.ID
+		e.TargetUserID = &id
+	}
 	if actor != nil {
 		id := actor.ID
 		e.ActorUserID = &id
@@ -63,25 +89,15 @@ func (s *Server) audit(ctx context.Context, nsID int64, actor *store.User, actio
 	}
 }
 
+// audit records one administrative action against an organisation.
+func (s *Server) audit(ctx context.Context, nsID int64, actor *store.User, action, target string, details map[string]any) {
+	s.auditEntry(ctx, nsID, actor, action, target, nil, details)
+}
+
 // auditMember is audit with the affected account recorded on the row too, so
 // the log survives a rename of the target's account.
 func (s *Server) auditMember(ctx context.Context, nsID int64, actor *store.User, action string, target *store.User, details map[string]any) {
-	e := store.AuditEntry{Action: action, TargetName: target.Username}
-	targetID := target.ID
-	e.TargetUserID = &targetID
-	if actor != nil {
-		id := actor.ID
-		e.ActorUserID = &id
-		e.ActorName = actor.Username
-	}
-	if len(details) > 0 {
-		if raw, err := json.Marshal(details); err == nil {
-			e.Details = raw
-		}
-	}
-	if err := s.store.AppendOrgAudit(ctx, nsID, e); err != nil {
-		slog.Error("append org audit", "namespace_id", nsID, "action", action, "error", err)
-	}
+	s.auditEntry(ctx, nsID, actor, action, target.Username, target, details)
 }
 
 // auditNamespace records an action against ns only when ns is an
@@ -206,8 +222,7 @@ func applyOrgUpdate(req apitypes.OrgUpdateRequest) (store.OrgUpdate, map[string]
 func (s *Server) handleListOrgs(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
 	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	offset, _ := strconv.Atoi(q.Get("offset"))
+	limit, offset := pageParams(q, defaultOrgPageSize, store.MaxOrgPageSize)
 
 	orgs, total, err := s.store.ListOrgs(r.Context(), q.Get("search"), viewerIDOf(user), limit, offset)
 	if err != nil {
@@ -339,10 +354,7 @@ func (s *Server) orgResponse(w http.ResponseWriter, r *http.Request, org *store.
 }
 
 func (s *Server) handleUpdateOrg(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireWrite(w, r); !ok {
-		return
-	}
-	user, org, ok := s.requireOrgRole(w, r, chi.URLParam(r, "org"), RoleAdmin)
+	user, org, ok := s.requireOrgRoleWrite(w, r, chi.URLParam(r, "org"), RoleAdmin)
 	if !ok {
 		return
 	}
@@ -371,10 +383,7 @@ func (s *Server) handleUpdateOrg(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireWrite(w, r); !ok {
-		return
-	}
-	user, org, ok := s.requireOrgRole(w, r, chi.URLParam(r, "org"), RoleAdmin)
+	user, org, ok := s.requireOrgRoleWrite(w, r, chi.URLParam(r, "org"), RoleAdmin)
 	if !ok {
 		return
 	}
@@ -409,27 +418,17 @@ func (s *Server) handleListOrgMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	role, err := s.roleIn(ctx, currentUser(ctx), org.Name)
-	if err != nil {
-		internalError(w, "check organisation role", err)
+	role, ok := s.requireOrgRosterAccess(w, r, org)
+	if !ok {
 		return
 	}
-	if role < RoleRead && org.MembersVisibility != "public" {
-		forbidden(w, "the member list of "+org.Name+" is visible to its members only")
-		return
-	}
-	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	offset, _ := strconv.Atoi(q.Get("offset"))
-	// Clamped here as well as in the store, so the handler's idea of the page
-	// window is the one that was actually applied. Working from the number
-	// the client asked for instead is what broke the audit log's "is there
-	// another page?" test: with ?limit=500 a full page could never equal it,
-	// so a listing that had more behind it reported its own end
+	// pageParams clamps here as well as in the store, so the handler's idea of
+	// the page window is the one that was actually applied. Working from the
+	// number the client asked for instead is what broke the audit log's "is
+	// there another page?" test: with ?limit=500 a full page could never equal
+	// it, so a listing that had more behind it reported its own end
 	// (docs/dev/api-contract.md §1.1).
-	if limit > store.MaxOrgPageSize {
-		limit = store.MaxOrgPageSize
-	}
+	limit, offset := pageParams(r.URL.Query(), defaultOrgPageSize, store.MaxOrgPageSize)
 	members, total, err := s.store.ListOrgMembers(ctx, org.ID, limit, offset)
 	if err != nil {
 		// Same race as orgResponse: the headcount this reads first is taken
@@ -445,10 +444,7 @@ func (s *Server) handleListOrgMembers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAddOrgMember(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireWrite(w, r); !ok {
-		return
-	}
-	user, org, ok := s.requireOrgRole(w, r, chi.URLParam(r, "org"), RoleAdmin)
+	user, org, ok := s.requireOrgRoleWrite(w, r, chi.URLParam(r, "org"), RoleAdmin)
 	if !ok {
 		return
 	}
@@ -463,13 +459,8 @@ func (s *Server) handleAddOrgMember(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "role must be admin, write or read")
 		return
 	}
-	target, err := s.store.GetUserByUsername(r.Context(), req.Username)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			notFound(w, "no user named "+req.Username)
-			return
-		}
-		internalError(w, "load user", err)
+	target, ok := s.loadUserByName(w, r, req.Username, "no user named "+req.Username)
+	if !ok {
 		return
 	}
 	member, err := s.store.AddOrgMember(r.Context(), org.ID, target.ID, string(req.Role), user.ID)
@@ -488,10 +479,7 @@ func (s *Server) handleAddOrgMember(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateOrgMember(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireWrite(w, r); !ok {
-		return
-	}
-	user, org, ok := s.requireOrgRole(w, r, chi.URLParam(r, "org"), RoleAdmin)
+	user, org, ok := s.requireOrgRoleWrite(w, r, chi.URLParam(r, "org"), RoleAdmin)
 	if !ok {
 		return
 	}
@@ -589,18 +577,14 @@ func (s *Server) handleRemoveOrgMember(w http.ResponseWriter, r *http.Request) {
 // that actually belongs to the organisation, so "no such user" and "not a
 // member" both read as a 404 against the membership URL.
 func (s *Server) loadOrgMemberTarget(w http.ResponseWriter, r *http.Request, org *store.Org, username string) (*store.User, bool) {
-	target, err := s.store.GetUserByUsername(r.Context(), username)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			notFound(w, username+" is not a member of "+org.Name)
-			return nil, false
-		}
-		internalError(w, "load user", err)
+	notAMember := username + " is not a member of " + org.Name
+	target, ok := s.loadUserByName(w, r, username, notAMember)
+	if !ok {
 		return nil, false
 	}
 	if _, err := s.store.GetOrgMember(r.Context(), org.ID, target.ID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			notFound(w, username+" is not a member of "+org.Name)
+			notFound(w, notAMember)
 			return nil, false
 		}
 		internalError(w, "load organisation member", err)
@@ -734,13 +718,9 @@ func (s *Server) handleHFOrgMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	role, err := s.roleIn(ctx, currentUser(ctx), org.Name)
-	if err != nil {
-		internalError(w, "check organisation role", err)
-		return
-	}
-	if role < RoleRead && org.MembersVisibility != "public" {
-		forbidden(w, "the member list of "+org.Name+" is visible to its members only")
+	// The role itself is unused here: the HF shape carries no email address
+	// and no role, so passing the check is the whole of the authorisation.
+	if _, ok := s.requireOrgRosterAccess(w, r, org); !ok {
 		return
 	}
 	members, err := s.allOrgMembers(ctx, org.ID)

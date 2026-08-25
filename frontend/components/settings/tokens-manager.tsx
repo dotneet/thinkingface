@@ -1,17 +1,18 @@
 "use client";
 
 import { KeyRound, Trash2 } from "lucide-react";
-import Link from "next/link";
 import { useEffect, useState } from "react";
+import { LoginRequiredState } from "@/components/settings/login-required-state";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button, buttonClass } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { CopyButton } from "@/components/ui/copy-button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { Field, Input, Select } from "@/components/ui/field";
 import { SkeletonLines } from "@/components/ui/skeleton";
+import { Table, TBody, Td, THead, Th, Tr } from "@/components/ui/table";
 import { TimeText } from "@/components/ui/time-text";
 import { isUnauthorized } from "@/lib/api";
 import { errorMessage } from "@/lib/api-error-message";
@@ -182,18 +183,7 @@ export function TokensManager() {
       {tokens === null && !error ? (
         <SkeletonLines lines={3} />
       ) : tokens === null && needsLogin ? (
-        <ErrorState
-          title={t("settings.tokens.loginRequiredTitle")}
-          message={t("settings.tokens.loginRequiredMessage")}
-          action={
-            <Link
-              href="/login?next=/settings/tokens"
-              className={buttonClass({ variant: "primary" })}
-            >
-              {t("settings.tokens.login")}
-            </Link>
-          }
-        />
+        <LoginRequiredState next="/settings/tokens" />
       ) : tokens === null ? (
         <ErrorState
           title={t("settings.errorTitle")}
@@ -207,66 +197,62 @@ export function TokensManager() {
           description={t("settings.tokens.emptyDescription")}
         />
       ) : (
-        <div className="scroll-x rounded-lg border border-border">
-          <table className="w-full min-w-[720px] border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-xs font-medium text-fg-subtle">
-                <th className="px-3 py-2 font-medium">{t("settings.tokens.colName")}</th>
-                <th className="px-3 py-2 font-medium">{t("settings.tokens.colScope")}</th>
-                <th className="px-3 py-2 font-medium">{t("settings.tokens.colCreated")}</th>
-                <th className="px-3 py-2 font-medium">{t("settings.tokens.colLastUsed")}</th>
-                <th className="px-3 py-2 font-medium">{t("settings.tokens.expiry.column")}</th>
-                <th className="px-3 py-2"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {tokens.map((token) => (
-                <tr key={token.id} className="border-b border-border last:border-0">
-                  <td className="px-3 py-2 font-medium">{token.name}</td>
-                  <td className="px-3 py-2 capitalize text-fg-muted">{token.scope}</td>
-                  <td className="px-3 py-2 text-fg-subtle">
-                    <TimeText iso={token.created_at} style="dateTime" />
-                  </td>
-                  <td className="px-3 py-2 text-fg-subtle">
-                    {token.last_used_at ? (
-                      <TimeText iso={token.last_used_at} style="dateTime" />
-                    ) : (
-                      t("settings.tokens.neverUsed")
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-fg-subtle">
-                    {token.expires_at === null ? (
-                      t("settings.tokens.expiry.noExpiration")
-                    ) : (
-                      <div className="flex items-center gap-1.5">
-                        <TimeText iso={token.expires_at} style="dateTime" />
-                        {isTokenExpired(token) && (
-                          <Badge tone="negative">{t("settings.tokens.expiry.expiredBadge")}</Badge>
-                        )}
-                      </div>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-right">
-                    <Button
-                      variant="danger"
-                      size="sm"
-                      disabled={deletingId !== null}
-                      onClick={() => {
-                        setDeleteError(null);
-                        setConfirmDeleteId(token.id);
-                      }}
-                    >
-                      <Trash2 size={12} />
-                      {deletingId === token.id
-                        ? t("settings.tokens.deleting")
-                        : t("settings.tokens.delete")}
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Table minWidth={720}>
+          <THead>
+            <Th>{t("settings.tokens.colName")}</Th>
+            <Th>{t("settings.tokens.colScope")}</Th>
+            <Th>{t("settings.tokens.colCreated")}</Th>
+            <Th>{t("settings.tokens.colLastUsed")}</Th>
+            <Th>{t("settings.tokens.expiry.column")}</Th>
+            <Th />
+          </THead>
+          <TBody>
+            {tokens.map((token) => (
+              <Tr key={token.id}>
+                <Td className="font-medium">{token.name}</Td>
+                <Td className="capitalize text-fg-muted">{token.scope}</Td>
+                <Td className="text-fg-subtle">
+                  <TimeText iso={token.created_at} style="dateTime" />
+                </Td>
+                <Td className="text-fg-subtle">
+                  {token.last_used_at ? (
+                    <TimeText iso={token.last_used_at} style="dateTime" />
+                  ) : (
+                    t("settings.tokens.neverUsed")
+                  )}
+                </Td>
+                <Td className="text-fg-subtle">
+                  {token.expires_at === null ? (
+                    t("settings.tokens.expiry.noExpiration")
+                  ) : (
+                    <div className="flex items-center gap-1.5">
+                      <TimeText iso={token.expires_at} style="dateTime" />
+                      {isTokenExpired(token) && (
+                        <Badge tone="negative">{t("settings.tokens.expiry.expiredBadge")}</Badge>
+                      )}
+                    </div>
+                  )}
+                </Td>
+                <Td align="right">
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    disabled={deletingId !== null}
+                    onClick={() => {
+                      setDeleteError(null);
+                      setConfirmDeleteId(token.id);
+                    }}
+                  >
+                    <Trash2 size={12} />
+                    {deletingId === token.id
+                      ? t("settings.tokens.deleting")
+                      : t("settings.tokens.delete")}
+                  </Button>
+                </Td>
+              </Tr>
+            ))}
+          </TBody>
+        </Table>
       )}
 
       <ConfirmDialog

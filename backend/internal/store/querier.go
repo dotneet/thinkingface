@@ -62,6 +62,56 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+// collect runs a query and scans every row through scan. It is the loop this
+// package writes out by hand around forty times -- Query, defer Close, an
+// empty slice, `for rows.Next()`, `return out, rows.Err()` -- with the last
+// step the reason it is worth having: rows.Err() is the one error a
+// `for rows.Next()` loop drops silently, and a connection that dies mid-page
+// then looks exactly like a listing that ended. Once here, it cannot be left
+// out.
+//
+// The result is non-nil even when empty: several callers hand it straight to
+// a JSON encoder, where nil is `null` and an empty slice is `[]`.
+//
+// Not every loop belongs here. The ones that scan extra columns alongside a
+// shared column list (scanRepoWith, scanOrg) build their destinations per
+// call site, and threading that through a scan function buys nothing.
+func collect[T any](ctx context.Context, q executor, sql string, args []any, scan func(rowScanner) (T, error)) ([]T, error) {
+	rows, err := q.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []T{}
+	for rows.Next() {
+		v, err := scan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// collectSet is collect for a query that selects one text column and wants it
+// back as a set. The GC's reference counts (gc.go) are all this shape.
+func collectSet(ctx context.Context, q executor, sql string, args ...any) (map[string]bool, error) {
+	values, err := collect(ctx, q, sql, args, func(row rowScanner) (string, error) {
+		var v string
+		err := row.Scan(&v)
+		return v, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(values))
+	for _, v := range values {
+		out[v] = true
+	}
+	return out, nil
+}
+
 // isNoRows reports whether err is either engine's "no rows" sentinel.
 func isNoRows(err error) bool {
 	return errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows)

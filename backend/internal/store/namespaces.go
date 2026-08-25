@@ -7,6 +7,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -84,9 +85,8 @@ func scanNamespaceProfile(row rowScanner) (*NamespaceProfile, error) {
 
 // GetNamespace looks a namespace up case-insensitively: "Alice" and "alice"
 // name the same namespace (idx_namespaces_name_lower enforces this at the
-// schema level; migrations/postgres/0026_namespace_name_ci_unique.sql). The
-// returned Name is the spelling the namespace was created with, never the
-// spelling the caller looked it up by.
+// schema level, on both dialects). The returned Name is the spelling the
+// namespace was created with, never the spelling the caller looked it up by.
 func (s *Store) GetNamespace(ctx context.Context, name string) (*Namespace, error) {
 	n := &Namespace{}
 	err := s.db.QueryRow(ctx,
@@ -159,7 +159,7 @@ func (s *Store) updateNamespaceRow(ctx context.Context, id int64, u NamespaceUpd
 		where += ` AND kind = ` + bind(kind)
 	}
 
-	n, err := s.db.Exec(ctx, `UPDATE namespaces SET `+joinComma(set)+` `+where, args...)
+	n, err := s.db.Exec(ctx, `UPDATE namespaces SET `+strings.Join(set, ", ")+` `+where, args...)
 	if err != nil {
 		return err
 	}
@@ -205,15 +205,20 @@ func (s *Store) NamespacesForUser(ctx context.Context, userID int64) ([]Namespac
 	return out, rows.Err()
 }
 
-// CanWriteNamespace reports whether the user may push to repositories under ns.
-func (s *Store) CanWriteNamespace(ctx context.Context, userID int64, ns string) (bool, error) {
-	var ok bool
-	err := s.db.QueryRow(ctx,
-		`SELECT EXISTS(
-		   SELECT 1 FROM namespaces n
-		   LEFT JOIN org_members m ON m.namespace_id = n.id AND m.user_id = $1
-		   WHERE LOWER(n.name) = LOWER($2)
-		     AND (n.owner_user_id = $1 OR m.role IN ('admin', 'write'))
-		 )`, userID, ns).Scan(&ok)
-	return ok, err
+// namespaceWritable renders "the user bound to $1 may write here": they own
+// the namespace, or they are an organisation member with role admin or write.
+// idExpr names the namespace and is a column of the surrounding query
+// (t.to_namespace_id / t.from_namespace_id) -- a package constant at every
+// call site, never anything a caller supplies, which is what makes
+// interpolating it safe.
+//
+// It is the only spelling of that predicate left in this package.
+// CanWriteNamespace, its by-name twin, was the second one and had no caller
+// outside its own test; two spellings of an authorization rule is one more
+// than an authorization rule may have.
+func namespaceWritable(idExpr string) string {
+	return `EXISTS (
+		SELECT 1 FROM namespaces n
+		LEFT JOIN org_members m ON m.namespace_id = n.id AND m.user_id = $1
+		WHERE n.id = ` + idExpr + ` AND (n.owner_user_id = $1 OR m.role IN ('admin', 'write')))`
 }

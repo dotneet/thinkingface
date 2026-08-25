@@ -338,9 +338,8 @@ func (s *Server) handleLFSProxyDownload(w http.ResponseWriter, r *http.Request) 
 // is addressed by repository id because the client only knows the href we gave
 // it, not the repository's URL shape.
 func (s *Server) handleLFSVerifyByID(w http.ResponseWriter, r *http.Request) {
-	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
-	if err != nil {
-		badRequest(w, "invalid repository id")
+	repoID, ok := int64Param(w, r, "repoID", "repository")
+	if !ok {
 		return
 	}
 	repo, err := s.store.GetRepoByID(r.Context(), repoID)
@@ -374,9 +373,8 @@ func (s *Server) lfsProxyAuthorized(r *http.Request, op string, repoID int64, oi
 }
 
 func (s *Server) lfsProxyTarget(w http.ResponseWriter, r *http.Request) (int64, string, bool) {
-	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
-	if err != nil {
-		badRequest(w, "invalid repository id")
+	repoID, ok := int64Param(w, r, "repoID", "repository")
+	if !ok {
 		return 0, "", false
 	}
 	oid := chi.URLParam(r, "oid")

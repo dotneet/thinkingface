@@ -7,6 +7,7 @@
  * can be forwarded with `authHeaders()` (invariant 2).
  */
 import { type ApiResult, apiFetch } from "@/lib/api";
+import type { FailedApiResult } from "@/lib/api-error-message";
 import type { MessageKey } from "@/lib/i18n";
 import type { FetchOpts } from "@/lib/repos";
 import type {
@@ -183,7 +184,7 @@ const ERROR_KEYS: Record<string, MessageKey> = {
  * "get org" is a missing organisation.
  */
 export function orgErrorKey(
-  result: Extract<ApiResult<unknown>, { ok: false }>,
+  result: FailedApiResult,
   fallbacks: Partial<Record<401 | 403 | 404, MessageKey>> = {},
 ): MessageKey | null {
   const byType = result.type ? ERROR_KEYS[result.type] : undefined;

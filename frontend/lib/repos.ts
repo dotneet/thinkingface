@@ -205,6 +205,23 @@ export function repoListHref(
 
 export type FetchOpts = { headers?: Record<string, string> };
 
+/**
+ * The API path of one repository, optionally with a sub-resource appended.
+ *
+ * `kind` is a fixed union (`model` / `dataset` / `space`) and needs no
+ * escaping; the namespace and the name are user-chosen and always do, which is
+ * the reason this exists rather than a template literal at each call site —
+ * the encoding is applied in one place instead of nine, and a new endpoint
+ * cannot forget it.
+ *
+ * `suffix` is appended verbatim, so a caller that puts a *value* in it (a
+ * revision, a path) encodes that value itself:
+ * `repoApiPath(kind, ns, name, `/tree/${encodeURIComponent(rev)}`)`.
+ */
+export function repoApiPath(kind: RepoKind, ns: string, name: string, suffix = ""): string {
+  return `/api/v1/repos/${kind}/${encodeURIComponent(ns)}/${encodeURIComponent(name)}${suffix}`;
+}
+
 export function listRepos(
   params: RepoListParams,
   opts?: FetchOpts,
@@ -218,10 +235,7 @@ export function getRepo(
   name: string,
   opts?: FetchOpts,
 ): Promise<ApiResult<{ repo: RepoDetail }>> {
-  return apiFetch<{ repo: RepoDetail }>(
-    `/api/v1/repos/${kind}/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
-    { headers: opts?.headers },
-  );
+  return apiFetch<{ repo: RepoDetail }>(repoApiPath(kind, ns, name), { headers: opts?.headers });
 }
 
 export function getTree(
@@ -234,7 +248,7 @@ export function getTree(
 ): Promise<ApiResult<TreeResponseUI>> {
   const suffix = path.length ? `/${path.map(encodeURIComponent).join("/")}` : "";
   return apiFetch<TreeResponseUI>(
-    `/api/v1/repos/${kind}/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/tree/${encodeURIComponent(rev)}${suffix}`,
+    repoApiPath(kind, ns, name, `/tree/${encodeURIComponent(rev)}${suffix}`),
     { headers: opts?.headers },
   );
 }
@@ -245,10 +259,7 @@ export function getRefs(
   name: string,
   opts?: FetchOpts,
 ): Promise<ApiResult<RefsResponseUI>> {
-  return apiFetch<RefsResponseUI>(
-    `/api/v1/repos/${kind}/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/refs`,
-    { headers: opts?.headers },
-  );
+  return apiFetch<RefsResponseUI>(repoApiPath(kind, ns, name, "/refs"), { headers: opts?.headers });
 }
 
 export function getCommits(
@@ -260,7 +271,7 @@ export function getCommits(
   opts?: FetchOpts,
 ): Promise<ApiResult<CommitListResponse>> {
   return apiFetch<CommitListResponse>(
-    `/api/v1/repos/${kind}/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/commits/${encodeURIComponent(rev)}`,
+    repoApiPath(kind, ns, name, `/commits/${encodeURIComponent(rev)}`),
     { query: params, headers: opts?.headers },
   );
 }
@@ -281,7 +292,7 @@ export function getCommitDiff(
   opts?: FetchOpts,
 ): Promise<ApiResult<CommitDiffResponse>> {
   return apiFetch<CommitDiffResponse>(
-    `/api/v1/repos/${kind}/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/diff/${encodeURIComponent(rev)}`,
+    repoApiPath(kind, ns, name, `/diff/${encodeURIComponent(rev)}`),
     { headers: opts?.headers },
   );
 }
@@ -301,10 +312,9 @@ export function getRepoGCS(
   rev: string,
   opts?: FetchOpts,
 ): Promise<ApiResult<RepoGCSResponse>> {
-  return apiFetch<RepoGCSResponse>(
-    `/api/v1/repos/${kind}/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/gcs/${encodeURIComponent(rev)}`,
-    { headers: opts?.headers },
-  );
+  return apiFetch<RepoGCSResponse>(repoApiPath(kind, ns, name, `/gcs/${encodeURIComponent(rev)}`), {
+    headers: opts?.headers,
+  });
 }
 
 export function getRawFile(

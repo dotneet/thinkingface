@@ -1,7 +1,7 @@
 import { type ApiResult, apiFetch } from "@/lib/api";
-import { expRunHref } from "@/lib/experiments";
+import { expApiPath, expRunHref } from "@/lib/experiments";
 import { repoBase, repoTreeHref } from "@/lib/paths";
-import type { FetchOpts } from "@/lib/repos";
+import { type FetchOpts, repoApiPath } from "@/lib/repos";
 import type {
   ExpLineageResponse,
   LineageDependent,
@@ -21,10 +21,9 @@ export function getRepoLineage(
   name: string,
   opts?: FetchOpts,
 ): Promise<ApiResult<RepoLineageResponse>> {
-  return apiFetch<RepoLineageResponse>(
-    `/api/v1/repos/${kind}/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/lineage`,
-    { headers: opts?.headers },
-  );
+  return apiFetch<RepoLineageResponse>(repoApiPath(kind, ns, name, "/lineage"), {
+    headers: opts?.headers,
+  });
 }
 
 /**
@@ -39,10 +38,10 @@ export function getExperimentLineage(
   params?: { run?: string },
   opts?: FetchOpts,
 ): Promise<ApiResult<ExpLineageResponse>> {
-  return apiFetch<ExpLineageResponse>(
-    `/api/v1/experiments/${encodeURIComponent(ns)}/${encodeURIComponent(repo)}/${encodeURIComponent(project)}/lineage`,
-    { query: { run: params?.run }, headers: opts?.headers },
-  );
+  return apiFetch<ExpLineageResponse>(expApiPath(ns, repo, project, "/lineage"), {
+    query: { run: params?.run },
+    headers: opts?.headers,
+  });
 }
 
 /** Models produced by each run, keyed by run name. */
@@ -75,7 +74,7 @@ export function groupUpstream(refs: LineageRef[]): {
  * tree lists them (HuggingFace's `base_model_relation`; see
  * docs/dev/api-contract.md §12).
  */
-export const LINEAGE_RELATIONS = ["finetune", "adapter", "quantized", "merge"] as const;
+const LINEAGE_RELATIONS = ["finetune", "adapter", "quantized", "merge"] as const;
 
 export type KnownLineageRelation = (typeof LINEAGE_RELATIONS)[number];
 

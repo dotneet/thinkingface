@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -125,10 +124,26 @@ func (s *Server) requireNamespaceAdmin(w http.ResponseWriter, r *http.Request, n
 
 // loadWebhookForAdmin loads the webhook named in the URL and checks the
 // caller may administer it (same bar as its owning namespace).
+//
+// The credential check comes *before* the lookup, and has to. Webhook ids are
+// instance-wide serials rather than namespace-scoped names, so with the
+// lookup first an unauthenticated caller could tell an id that exists (401
+// from the namespace check that followed) from one that does not (404 from
+// the lookup) and walk the range to enumerate every webhook on the instance,
+// including which namespaces have any. Nothing about a webhook -- not even
+// that it is there -- is public, so a caller with no write-scoped credential
+// learns the same thing for every id: 401.
+//
+// requireWrite rather than plain authentication, because that is already the
+// bar requireNamespaceAdmin applies below: an admin holding a read-only token
+// may not reach a webhook either way, and refusing them here keeps that
+// answer from depending on whether the id happened to exist.
 func (s *Server) loadWebhookForAdmin(w http.ResponseWriter, r *http.Request) (*store.Webhook, bool) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		badRequest(w, "webhook id must be a number")
+	id, ok := int64Param(w, r, "id", "webhook")
+	if !ok {
+		return nil, false
+	}
+	if _, ok := s.requireWrite(w, r); !ok {
 		return nil, false
 	}
 	hook, err := s.store.GetWebhook(r.Context(), id)
@@ -315,9 +330,9 @@ func (s *Server) handleListWebhookDeliveries(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	offset, _ := strconv.Atoi(q.Get("offset"))
+	// Default 30, max 100, as docs/dev/api-contract.md documents the delivery
+	// history and store.ListWebhookDeliveries clamps it again.
+	limit, offset := pageParams(r.URL.Query(), 30, 100)
 	rows, total, err := s.store.ListWebhookDeliveries(r.Context(), hook.ID, limit, offset)
 	if err != nil {
 		internalError(w, "list webhook deliveries", err)
@@ -335,9 +350,8 @@ func (s *Server) handleRedeliverWebhook(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	deliveryID, err := strconv.ParseInt(chi.URLParam(r, "deliveryId"), 10, 64)
-	if err != nil {
-		badRequest(w, "delivery id must be a number")
+	deliveryID, ok := int64Param(w, r, "deliveryId", "delivery")
+	if !ok {
 		return
 	}
 	existing, err := s.store.GetWebhookDelivery(r.Context(), deliveryID)

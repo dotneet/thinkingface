@@ -76,10 +76,23 @@ func userColumnsOn(alias string) string {
 	return alias + "." + strings.ReplaceAll(userColumns, ", ", ", "+alias+".")
 }
 
-func scanUser(row rowScanner, u *User) error {
-	return row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin,
+func scanUser(row rowScanner, u *User) error { return scanUserAfter(row, u) }
+
+// scanUserAfter is scanUser for a row that selects some columns of its own
+// before userColumns -- the credential the identity was resolved through
+// (LookupToken, LookupSSHKey). leading are the destinations for those, in
+// their SELECT order; the User's own eleven follow.
+//
+// It exists for the same reason userColumns does. Those two queries used to
+// spell out the eleven destinations by hand, which is precisely how an
+// account gate ends up known to every path except the ones that authenticate:
+// a column added here and forgotten there is a compile-clean bug in the
+// credential check.
+func scanUserAfter(row rowScanner, u *User, leading ...any) error {
+	return row.Scan(append(leading,
+		&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin,
 		&u.CreatedAt, &u.SessionEpoch, &u.DisabledAt, &u.DisabledBy,
-		&u.LastLoginAt, &u.ApprovalPendingAt)
+		&u.LastLoginAt, &u.ApprovalPendingAt)...)
 }
 
 type AccessToken struct {
@@ -196,31 +209,26 @@ func (s *Store) ListUsers(ctx context.Context, search string, limit, offset int)
 	// already case-insensitive for ASCII -- the same compromise the
 	// repository and organisation listings make. The search text is a
 	// substring, not a pattern, so it goes through like.go's pair.
+	var args []any
+	bind := binder(&args)
 	where := ""
-	var countArgs []any
-	countBind := binder(&countArgs)
-	if search != "" {
-		p := countBind(likeContains(search))
-		where = ` WHERE ` + likeAnyOf(p, "username", "email")
+	if c := searchClause(bind, search, "username", "email"); c != "" {
+		where = ` WHERE ` + c
 	}
+	// The count runs on the clause's own parameters; LIMIT/OFFSET are bound
+	// after it precisely so this prefix is exactly them (see searchClause).
+	countArgs := append([]any{}, args...)
 
 	var total int64
 	if err := s.db.QueryRow(ctx, `SELECT count(*) FROM users`+where, countArgs...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
-	var args []any
-	bind := binder(&args)
-	listWhere := ""
-	if search != "" {
-		p := bind(likeContains(search))
-		listWhere = ` WHERE ` + likeAnyOf(p, "username", "email")
-	}
 	limitP, offsetP := bind(limit), bind(offset)
 
 	rows, err := s.db.Query(ctx,
 		`SELECT id, username, email, is_admin, created_at, disabled_at,
-		        last_login_at, approval_pending_at FROM users`+listWhere+
+		        last_login_at, approval_pending_at FROM users`+where+
 			// Accounts waiting for approval sort to the top, and only those:
 			// the waiting room is the one thing on this screen that needs
 			// acting on, and an administrator should not have to page through
@@ -244,32 +252,6 @@ func (s *Store) ListUsers(ctx context.Context, search string, limit, offset int)
 		out = append(out, u)
 	}
 	return out, total, rows.Err()
-}
-
-// pageLimit resolves a requested page size. Nothing (or nonsense) asked for
-// means the endpoint's default; more than the maximum is served *at* the
-// maximum. It is deliberately a clamp and not a fallback: "max 100" reads as
-// a ceiling, so answering ?limit=200 with 30 rows -- fewer than a caller who
-// asked for nothing would get -- is the opposite of what was requested.
-func pageLimit(limit, defaultSize, maxSize int) int {
-	switch {
-	case limit <= 0:
-		return defaultSize
-	case limit > maxSize:
-		return maxSize
-	default:
-		return limit
-	}
-}
-
-// pageWindow is pageLimit plus the offset half. A negative offset is the
-// first page: Postgres rejects a negative OFFSET outright, so a hand-edited
-// query string would otherwise be a 500 rather than a first page.
-func pageWindow(limit, offset, defaultSize, maxSize int) (int, int) {
-	if offset < 0 {
-		offset = 0
-	}
-	return pageLimit(limit, defaultSize, maxSize), offset
 }
 
 const (
@@ -310,6 +292,35 @@ func (s *Store) UpdateUserPassword(ctx context.Context, userID int64, passwordHa
 const usableAdminCountQuery = `SELECT count(*) FROM users
 	 WHERE is_admin AND disabled_at IS NULL AND approval_pending_at IS NULL`
 
+// guardLastSiteAdmin refuses a change that would leave the instance with no
+// administrator able to use it: ErrLastSiteAdmin. isAdmin is the account's
+// current flag, so a change to somebody who is not an administrator is never
+// the one that empties the seat.
+//
+// It is one function rather than three copies of the count for the reason
+// usableAdminCountQuery is one string: SetUserAdmin, SetUserDisabled and
+// SetUserApproval each take away a different half of "usable administrator",
+// and a guard missing from any one of them is a way round the other two.
+//
+// Every caller must already hold the "site-admins" advisory lock: the rule is
+// about the *count*, so two concurrent changes to two different accounts must
+// not both observe two.
+func guardLastSiteAdmin(ctx context.Context, ex executor, isAdmin bool) error {
+	if !isAdmin {
+		return nil
+	}
+	// Suspended and unapproved administrators do not count; see
+	// usableAdminCountQuery.
+	var admins int64
+	if err := ex.QueryRow(ctx, usableAdminCountQuery).Scan(&admins); err != nil {
+		return err
+	}
+	if admins <= 1 {
+		return ErrLastSiteAdmin
+	}
+	return nil
+}
+
 // SetUserAdmin grants or revokes instance-wide administrator rights.
 // Revoking it from the last remaining administrator is ErrLastSiteAdmin: the
 // flag is the only thing that can hand it back, so an instance that loses its
@@ -332,15 +343,9 @@ func (s *Store) SetUserAdmin(ctx context.Context, userID int64, isAdmin bool) er
 	if err := tx.QueryRow(ctx, `SELECT is_admin FROM users WHERE id = $1`, userID).Scan(&current); err != nil {
 		return norm(err)
 	}
-	if current && !isAdmin {
-		// Suspended and unapproved administrators do not count; see
-		// usableAdminCountQuery.
-		var admins int64
-		if err := tx.QueryRow(ctx, usableAdminCountQuery).Scan(&admins); err != nil {
+	if !isAdmin {
+		if err := guardLastSiteAdmin(ctx, tx, current); err != nil {
 			return err
-		}
-		if admins <= 1 {
-			return ErrLastSiteAdmin
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE users SET is_admin = $2 WHERE id = $1`, userID, isAdmin); err != nil {
@@ -374,6 +379,44 @@ func (s *Store) SetUserAdmin(ctx context.Context, userID int64, isAdmin bool) er
 // Setting the state an account is already in is a no-op, so a retried request
 // does not bump the epoch a second time.
 func (s *Store) SetUserDisabled(ctx context.Context, username string, disabled bool, actorID int64) error {
+	return s.setUserGate(ctx, username, disabled, userGate{
+		column: "disabled_at",
+		close: `UPDATE users SET disabled_at = now(), disabled_by = $2,
+		               session_epoch = session_epoch + 1
+		        WHERE id = $1`,
+		open: `UPDATE users SET disabled_at = NULL, disabled_by = NULL WHERE id = $1`,
+	}, actorID)
+}
+
+// userGate is one of the two timestamp columns that stop an account
+// authenticating: disabled_at (suspended) and approval_pending_at (never let
+// in). Non-NULL means the gate is closed.
+//
+// column is read to learn the current state and is a package constant in both
+// cases -- it is interpolated into the statement, so it must never become
+// anything a caller supplies. close and open are the two UPDATEs, each keyed
+// on $1 = users.id; close may take further parameters, which the caller
+// passes to setUserGate.
+type userGate struct {
+	column      string
+	close, open string
+}
+
+// setUserGate is the body SetUserDisabled and SetUserApproval share: take the
+// advisory lock, read the account's current state, do nothing if it is
+// already what was asked for, refuse to close the last usable administrator's
+// gate, then run one of the two statements.
+//
+// closed is what the gate should be afterwards, which is *not* the same
+// polarity as either method's argument -- suspending closes a gate and
+// approving opens one -- so each translates its own verb before calling here.
+//
+// The shape is shared rather than copied because the guard is the whole
+// point: usableAdminCountQuery's comment says the same predicate has to hold
+// on every path or one of them can be walked around, and a structure that
+// applies it once is a stronger promise than three call sites that each
+// remember to.
+func (s *Store) setUserGate(ctx context.Context, username string, closed bool, g userGate, closeArgs ...any) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -384,37 +427,27 @@ func (s *Store) SetUserDisabled(ctx context.Context, username string, disabled b
 		return err
 	}
 	var (
-		id         int64
-		isAdmin    bool
-		disabledAt *time.Time
+		id       int64
+		isAdmin  bool
+		closedAt *time.Time
 	)
 	if err := tx.QueryRow(ctx,
-		`SELECT id, is_admin, disabled_at FROM users WHERE LOWER(username) = LOWER($1)`,
-		username).Scan(&id, &isAdmin, &disabledAt); err != nil {
+		`SELECT id, is_admin, `+g.column+` FROM users WHERE LOWER(username) = LOWER($1)`,
+		username).Scan(&id, &isAdmin, &closedAt); err != nil {
 		return norm(err)
 	}
-	if disabled == (disabledAt != nil) {
+	if closed == (closedAt != nil) {
 		return nil
 	}
-	if disabled && isAdmin {
-		var admins int64
-		if err := tx.QueryRow(ctx, usableAdminCountQuery).Scan(&admins); err != nil {
+
+	stmt, args := g.open, []any{id}
+	if closed {
+		if err := guardLastSiteAdmin(ctx, tx, isAdmin); err != nil {
 			return err
 		}
-		if admins <= 1 {
-			return ErrLastSiteAdmin
-		}
+		stmt, args = g.close, append(args, closeArgs...)
 	}
-	if disabled {
-		_, err = tx.Exec(ctx,
-			`UPDATE users SET disabled_at = now(), disabled_by = $2,
-			        session_epoch = session_epoch + 1
-			 WHERE id = $1`, id, actorID)
-	} else {
-		_, err = tx.Exec(ctx,
-			`UPDATE users SET disabled_at = NULL, disabled_by = NULL WHERE id = $1`, id)
-	}
-	if err != nil {
+	if _, err := tx.Exec(ctx, stmt, args...); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -446,50 +479,15 @@ func (s *Store) SetUserDisabled(ctx context.Context, username string, disabled b
 // Setting the state an account is already in is a no-op, so a retried request
 // does not bump the epoch a second time.
 func (s *Store) SetUserApproval(ctx context.Context, username string, approved bool) error {
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
-
-	if err := s.d.advisoryXactLock(ctx, tx, "site-admins", 0); err != nil {
-		return err
-	}
-	var (
-		id        int64
-		isAdmin   bool
-		pendingAt *time.Time
-	)
-	if err := tx.QueryRow(ctx,
-		`SELECT id, is_admin, approval_pending_at FROM users WHERE LOWER(username) = LOWER($1)`,
-		username).Scan(&id, &isAdmin, &pendingAt); err != nil {
-		return norm(err)
-	}
-	if approved == (pendingAt == nil) {
-		return nil
-	}
-	if !approved && isAdmin {
-		var admins int64
-		if err := tx.QueryRow(ctx, usableAdminCountQuery).Scan(&admins); err != nil {
-			return err
-		}
-		if admins <= 1 {
-			return ErrLastSiteAdmin
-		}
-	}
-	if approved {
-		_, err = tx.Exec(ctx,
-			`UPDATE users SET approval_pending_at = NULL WHERE id = $1`, id)
-	} else {
-		_, err = tx.Exec(ctx,
-			`UPDATE users SET approval_pending_at = now(),
-			        session_epoch = session_epoch + 1
-			 WHERE id = $1`, id)
-	}
-	if err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	// Approving *opens* this gate, which is why the flag is inverted here and
+	// not in setUserGate: the shared body speaks in terms of the column.
+	return s.setUserGate(ctx, username, !approved, userGate{
+		column: "approval_pending_at",
+		close: `UPDATE users SET approval_pending_at = now(),
+		               session_epoch = session_epoch + 1
+		        WHERE id = $1`,
+		open: `UPDATE users SET approval_pending_at = NULL WHERE id = $1`,
+	})
 }
 
 // TouchUserLogin records that a password just minted a session for this
@@ -557,16 +555,15 @@ func (s *Store) CreateToken(ctx context.Context, userID int64, name, scope, toke
 func (s *Store) LookupToken(ctx context.Context, tokenHash string) (*User, *AccessToken, error) {
 	u := &User{}
 	t := &AccessToken{}
-	err := s.db.QueryRow(ctx,
+	row := s.db.QueryRow(ctx,
 		`SELECT t.id, t.user_id, t.name, t.scope, t.last_used_at, t.created_at,
 		        `+userColumnsOn("u")+`
 		 FROM access_tokens t JOIN users u ON u.id = t.user_id
 		 WHERE t.token_hash = $1 AND (t.expires_at IS NULL OR t.expires_at > now())
 		   AND u.disabled_at IS NULL AND u.approval_pending_at IS NULL`,
-		tokenHash,
-	).Scan(&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.CreatedAt,
-		&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt, &u.SessionEpoch,
-		&u.DisabledAt, &u.DisabledBy, &u.LastLoginAt, &u.ApprovalPendingAt)
+		tokenHash)
+	err := scanUserAfter(row, u,
+		&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.CreatedAt)
 	if err != nil {
 		return nil, nil, norm(err)
 	}

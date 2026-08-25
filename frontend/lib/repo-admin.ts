@@ -1,5 +1,5 @@
 import { type ApiResult, apiFetch } from "@/lib/api";
-import type { FetchOpts } from "@/lib/repos";
+import { type FetchOpts, repoApiPath } from "@/lib/repos";
 import type { RepoDetail, RepoKind, RepoUpdateRequest } from "@/types/api";
 
 /**
@@ -10,10 +10,6 @@ import type { RepoDetail, RepoKind, RepoUpdateRequest } from "@/types/api";
  * is irreversible — the UI must never reach for one of these by accident.
  */
 
-function repoPath(kind: RepoKind, ns: string, name: string): string {
-  return `/api/v1/repos/${kind}/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`;
-}
-
 /** Makes the repository read-only. Reads, clones and downloads keep working. */
 export function archiveRepo(
   kind: RepoKind,
@@ -21,7 +17,7 @@ export function archiveRepo(
   name: string,
   opts?: FetchOpts,
 ): Promise<ApiResult<{ repo: RepoDetail }>> {
-  return apiFetch<{ repo: RepoDetail }>(`${repoPath(kind, ns, name)}/archive`, {
+  return apiFetch<{ repo: RepoDetail }>(repoApiPath(kind, ns, name, "/archive"), {
     method: "POST",
     headers: opts?.headers,
   });
@@ -34,7 +30,7 @@ export function unarchiveRepo(
   name: string,
   opts?: FetchOpts,
 ): Promise<ApiResult<{ repo: RepoDetail }>> {
-  return apiFetch<{ repo: RepoDetail }>(`${repoPath(kind, ns, name)}/archive`, {
+  return apiFetch<{ repo: RepoDetail }>(repoApiPath(kind, ns, name, "/archive"), {
     method: "DELETE",
     headers: opts?.headers,
   });
@@ -52,7 +48,7 @@ export function updateRepo(
   req: RepoUpdateRequest,
   opts?: FetchOpts,
 ): Promise<ApiResult<{ repo: RepoDetail }>> {
-  return apiFetch<{ repo: RepoDetail }>(repoPath(kind, ns, name), {
+  return apiFetch<{ repo: RepoDetail }>(repoApiPath(kind, ns, name), {
     method: "PATCH",
     body: req,
     headers: opts?.headers,
@@ -70,7 +66,7 @@ export function deleteRepo(
   name: string,
   opts?: FetchOpts,
 ): Promise<ApiResult<void>> {
-  return apiFetch<void>(repoPath(kind, ns, name), {
+  return apiFetch<void>(repoApiPath(kind, ns, name), {
     method: "DELETE",
     headers: opts?.headers,
   });

@@ -1,79 +1,48 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, ArchiveRestore, LineChart, Star, Tag, Trash2 } from "lucide-react";
+import { LineChart } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import { ConfigEntryTable } from "@/components/experiments/config-entry-table";
-import { CsvDownloadButton } from "@/components/experiments/csv-download-button";
 import {
   isLiveRun,
   LIVE_REFRESH_INTERVAL_MS,
   liveRefetchInterval,
 } from "@/components/experiments/live-refresh";
 import { MetricsCharts } from "@/components/experiments/metrics-charts";
+import { MetricsChartsSkeleton } from "@/components/experiments/metrics-charts-skeleton";
+import { MetricsToolbar } from "@/components/experiments/metrics-toolbar";
 import { RunArtifactsCard } from "@/components/experiments/run-artifacts-card";
 import { csvFilename, metricSeriesCsv } from "@/components/experiments/run-csv";
+import { RunDangerZone } from "@/components/experiments/run-danger-zone";
 import { RunDeleteDialog } from "@/components/experiments/run-delete-dialog";
 import { RunEnvCard } from "@/components/experiments/run-env-card";
+import { RunHeader } from "@/components/experiments/run-header";
 import { RunModelsCard } from "@/components/experiments/run-models-card";
 import { RunNoteCard } from "@/components/experiments/run-note-card";
-import { RunStatusBadge } from "@/components/experiments/run-status-badge";
+import { Section } from "@/components/experiments/run-section";
+import { RunSummaryCards } from "@/components/experiments/run-summary-cards";
 import { RunTagsDialog } from "@/components/experiments/run-tags-dialog";
 import { Alert } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
-import { Checkbox, Select, Slider } from "@/components/ui/field";
-import { Skeleton } from "@/components/ui/skeleton";
-import { SpinnerSlot } from "@/components/ui/spinner";
-import { TimeText } from "@/components/ui/time-text";
+import { useChartOptions } from "@/hooks/use-chart-options";
 import { ApiResultError, queryErrorMessage } from "@/lib/api-error-message";
-import { colorForRun } from "@/lib/chart-utils";
-import {
-  deleteRun,
-  formatMetricValue,
-  getMetrics,
-  listRuns,
-  updateRunAnnotations,
-} from "@/lib/experiments";
-import { formatNumber } from "@/lib/format";
+import { runColorIndex } from "@/lib/chart-utils";
+import { deleteRun, getMetrics, listRuns, updateRunAnnotations } from "@/lib/experiments";
 import { useT } from "@/lib/i18n/client";
 import { splitRunConfig } from "@/lib/run-config";
 import type { ExpRun, ExpRunAnnotationRequest } from "@/types/api";
-
-/** Section wrapper: a heading, an optional blurb, and the content below it. */
-function Section({
-  title,
-  description,
-  action,
-  children,
-}: {
-  title: string;
-  description?: string;
-  action?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-col gap-0.5">
-          <h2 className="text-sm font-semibold">{title}</h2>
-          {description && <p className="text-xs font-medium text-fg-subtle">{description}</p>}
-        </div>
-        {action}
-      </div>
-      {children}
-    </section>
-  );
-}
 
 /**
  * Everything about one run: its annotations, its final metric values, its own
  * charts, the hyperparameters and TrainingArguments it was given, the
  * environment it ran in, the note someone left on it, and the delete button.
+ *
+ * This component owns the queries, the two mutations and the two dialogs; each
+ * section of the page is its own component below `Section`, so the shape of
+ * the page reads as the list of sections it is.
  *
  * The whole project's run list is passed in rather than just this run: the run
  * keeps the colour it has on the dashboard (which is assigned from the
@@ -124,11 +93,10 @@ export function RunDetail({
   const run = runs.find((r) => r.name === runName);
 
   const runOrder = useMemo(() => runs.map((r) => r.name), [runs]);
+  const colorIndex = useMemo(() => runColorIndex(runOrder), [runOrder]);
   const baseline = useMemo(() => runs.find((r) => r.is_baseline)?.name, [runs]);
 
-  const [xMode, setXMode] = useState<"step" | "time">("step");
-  const [smoothing, setSmoothing] = useState(0);
-  const [logScale, setLogScale] = useState(false);
+  const { options, setOptions } = useChartOptions();
   const [tagsOpen, setTagsOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
@@ -163,11 +131,11 @@ export function RunDetail({
   });
 
   const metrics = useQuery({
-    queryKey: ["exp-metrics", ns, repo, project, runName, xMode],
+    queryKey: ["exp-metrics", ns, repo, project, runName, options.xMode],
     queryFn: async () => {
       const result = await getMetrics(ns, repo, project, {
         runs: [runName],
-        x: xMode,
+        x: options.xMode,
         max_points: 1000,
       });
       if (!result.ok) throw new ApiResultError(result);
@@ -215,169 +183,29 @@ export function RunDetail({
         </Alert>
       )}
 
-      <header className="flex flex-col gap-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <span
-            className="h-3 w-3 shrink-0 rounded-full"
-            style={{ background: colorForRun(runOrder.indexOf(run.name)) }}
-          />
-          <h1 className="text-2xl font-semibold tracking-tight break-all">{run.name}</h1>
-          <RunStatusBadge status={run.status} updatedAt={run.updated_at} />
-          {run.is_baseline && <Badge tone="accent">{t("experiments.table.baselineBadge")}</Badge>}
-          {run.archived && <Badge>{t("experiments.table.archivedBadge")}</Badge>}
-        </div>
-
-        <dl className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm text-fg-subtle">
-          <div className="flex items-center gap-1.5">
-            <dt>{t("experiments.table.colStarted")}</dt>
-            <dd className="text-fg-muted">
-              <TimeText iso={run.started_at} style="dateTime" />
-            </dd>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <dt>{t("experiments.run.updated")}</dt>
-            <dd className="text-fg-muted">
-              <TimeText iso={run.updated_at} style="dateTime" />
-            </dd>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <dt>{t("experiments.table.colLastStep")}</dt>
-            <dd className="tabular-nums text-fg-muted">{formatNumber(run.last_step)}</dd>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <dt>{t("experiments.run.points")}</dt>
-            <dd className="tabular-nums text-fg-muted">{formatNumber(run.num_points)}</dd>
-          </div>
-          {run.group && (
-            <div className="flex items-center gap-1.5">
-              <dt>{t("experiments.run.group")}</dt>
-              <dd className="text-fg-muted">{run.group}</dd>
-            </div>
-          )}
-          {run.job_type && (
-            <div className="flex items-center gap-1.5">
-              <dt>{t("experiments.run.jobType")}</dt>
-              <dd className="text-fg-muted">{run.job_type}</dd>
-            </div>
-          )}
-        </dl>
-
-        <div className="flex flex-wrap items-center gap-2">
-          {run.tags.length === 0 ? (
-            <span className="text-sm text-fg-subtle">{t("experiments.run.noTags")}</span>
-          ) : (
-            run.tags.map((tag) => <Badge key={tag}>{tag}</Badge>)
-          )}
-          {canWrite && (
-            <div className="flex flex-wrap items-center gap-1.5">
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={annotate.isPending}
-                aria-pressed={run.is_baseline}
-                onClick={() => annotate.mutate({ is_baseline: !run.is_baseline })}
-              >
-                <Star size={14} className={run.is_baseline ? "text-accent" : undefined} />
-                {run.is_baseline
-                  ? t("experiments.table.clearBaseline")
-                  : t("experiments.table.setBaseline")}
-              </Button>
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={annotate.isPending}
-                onClick={() => setTagsOpen(true)}
-              >
-                <Tag size={14} />
-                {t("experiments.table.editTags")}
-              </Button>
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={annotate.isPending}
-                aria-pressed={run.archived}
-                onClick={() => annotate.mutate({ archived: !run.archived })}
-              >
-                {run.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}
-                {run.archived ? t("experiments.table.unarchive") : t("experiments.table.archive")}
-              </Button>
-              <SpinnerSlot
-                active={annotate.isPending}
-                size={14}
-                label={t("experiments.dashboard.savingAnnotation")}
-              />
-            </div>
-          )}
-        </div>
-      </header>
+      <RunHeader
+        run={run}
+        colorIndex={colorIndex}
+        canWrite={canWrite}
+        saving={annotate.isPending}
+        onToggleBaseline={() => annotate.mutate({ is_baseline: !run.is_baseline })}
+        onEditTags={() => setTagsOpen(true)}
+        onToggleArchived={() => annotate.mutate({ archived: !run.archived })}
+      />
 
       <Section title={t("experiments.run.summaryTitle")}>
-        {summaryEntries.length === 0 ? (
-          <p className="text-sm text-fg-subtle">{t("experiments.run.summaryEmpty")}</p>
-        ) : (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-            {summaryEntries.map(([key, value]) => (
-              <Card key={key} className="flex flex-col gap-1">
-                <span className="truncate text-xs font-medium text-fg-subtle" title={key}>
-                  {key}
-                </span>
-                <span className="tabular-nums text-lg font-semibold">
-                  {formatMetricValue(value)}
-                </span>
-              </Card>
-            ))}
-          </div>
-        )}
+        <RunSummaryCards entries={summaryEntries} />
       </Section>
 
       <Section title={t("experiments.run.metricsTitle")}>
-        <div className="flex flex-wrap items-center gap-5 rounded-lg border border-border bg-bg-sunken px-4 py-3 text-sm">
-          <label className="flex items-center gap-2">
-            <span className="text-fg-subtle">{t("experiments.dashboard.xAxis")}</span>
-            <Select
-              value={xMode}
-              onChange={(e) => setXMode(e.target.value as "step" | "time")}
-              className="w-auto bg-bg-raised px-2 py-1"
-            >
-              <option value="step">{t("experiments.dashboard.xStep")}</option>
-              <option value="time">{t("experiments.dashboard.xTime")}</option>
-            </Select>
-          </label>
-
-          <label className="flex min-w-[200px] flex-1 items-center gap-2">
-            <span className="whitespace-nowrap text-fg-subtle">
-              {t("experiments.dashboard.smoothing")}
-            </span>
-            <Slider
-              min={0}
-              max={0.95}
-              step={0.05}
-              value={smoothing}
-              onChange={(e) => setSmoothing(Number(e.target.value))}
-              aria-label={t("experiments.dashboard.smoothingAria")}
-              className="flex-1"
-            />
-            <span className="w-10 tabular-nums text-fg-subtle">{smoothing.toFixed(2)}</span>
-          </label>
-
-          <label className="flex items-center gap-2">
-            <Checkbox checked={logScale} onChange={(e) => setLogScale(e.target.checked)} />
-            <span className="text-fg-subtle">{t("experiments.dashboard.logScale")}</span>
-          </label>
-
-          <SpinnerSlot
-            active={metrics.isFetching}
-            size={14}
-            label={t("experiments.dashboard.loadingMetrics")}
-          />
-
-          <CsvDownloadButton
-            label={t("experiments.dashboard.exportMetricsCsv")}
-            filename={csvFilename([ns, repo, project, runName, "metrics"])}
-            disabled={(metrics.data?.series.length ?? 0) === 0}
-            build={() => metricSeriesCsv(metrics.data?.series ?? [], xMode === "time")}
-          />
-        </div>
+        <MetricsToolbar
+          options={options}
+          onChange={setOptions}
+          fetching={metrics.isFetching}
+          csvFilename={csvFilename([ns, repo, project, runName, "metrics"])}
+          csvDisabled={(metrics.data?.series.length ?? 0) === 0}
+          buildCsv={() => metricSeriesCsv(metrics.data?.series ?? [], options.xMode === "time")}
+        />
 
         {metrics.isError ? (
           <ErrorState
@@ -389,11 +217,7 @@ export function RunDetail({
             )}
           />
         ) : metrics.isPending ? (
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            {Array.from({ length: 2 }, (_, i) => `chart-${i}`).map((key) => (
-              <Skeleton key={key} className="h-56 w-full" />
-            ))}
-          </div>
+          <MetricsChartsSkeleton />
         ) : (metrics.data?.series.length ?? 0) === 0 ? (
           // MetricsCharts' own empty state asks the reader to select runs,
           // which makes no sense on a page that is already one run.
@@ -406,9 +230,9 @@ export function RunDetail({
           <MetricsCharts
             series={metrics.data?.series ?? []}
             runOrder={runOrder}
-            xIsTime={xMode === "time"}
-            smoothing={smoothing}
-            logScale={logScale}
+            xIsTime={options.xMode === "time"}
+            smoothing={options.smoothing}
+            logScale={options.logScale}
             baseline={baseline}
           />
         )}
@@ -477,24 +301,15 @@ export function RunDetail({
       </Section>
 
       {canWrite && (
-        <Section
-          title={t("experiments.deleteRun.dangerTitle")}
-          description={t("experiments.deleteRun.description")}
-        >
-          {deleteError && !deleteOpen && <Alert tone="negative">{deleteError}</Alert>}
-          <div>
-            <Button
-              variant="danger"
-              onClick={() => {
-                remove.reset();
-                setDeleteOpen(true);
-              }}
-            >
-              <Trash2 size={16} />
-              {t("experiments.deleteRun.button")}
-            </Button>
-          </div>
-        </Section>
+        <RunDangerZone
+          // Hidden while the dialog is up: the dialog renders the same failure
+          // in its own footer, and two copies of it read as two failures.
+          error={deleteOpen ? undefined : deleteError}
+          onRequestDelete={() => {
+            remove.reset();
+            setDeleteOpen(true);
+          }}
+        />
       )}
 
       <RunTagsDialog

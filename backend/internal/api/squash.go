@@ -11,9 +11,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
@@ -40,8 +38,7 @@ import (
 // operation, and "archived" has to mean it too: a repository frozen read-only
 // must not be able to lose its history.
 func (s *Server) handleHFSuperSquash(w http.ResponseWriter, r *http.Request) {
-	kind := kindFromURL(chi.URLParam(r, "repoType"))
-	repo, ok := s.loadRepoForWrite(w, r, kind, chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectHF)
+	repo, _, ok := s.loadHFRepoForWrite(w, r)
 	if !ok {
 		return
 	}
@@ -59,15 +56,7 @@ func (s *Server) handleHFSuperSquash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	author := gitrepo.Signature{
-		Name: "thinkingface", Email: "noreply@thinkingface.local", When: time.Now(),
-	}
-	if user := currentUser(r.Context()); user != nil {
-		author.Name = user.Username
-		if user.Email != "" {
-			author.Email = user.Email
-		}
-	}
+	author := commitAuthor(r.Context())
 
 	newHash, oldHash, err := s.squashThroughWAL(r.Context(), repo, branch, req.Message, author)
 	if err != nil {

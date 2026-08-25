@@ -13,6 +13,7 @@
  */
 import type { ApiResult } from "@/lib/api";
 import { apiFetch } from "@/lib/api";
+import type { FailedApiResult } from "@/lib/api-error-message";
 import type { MessageKey } from "@/lib/i18n";
 import type { FetchOpts } from "@/lib/repos";
 import type {
@@ -178,15 +179,26 @@ const ERROR_KEYS: Record<string, MessageKey> = {
   conflict: "settings.adminUsers.errors.usernameTaken",
 };
 
-export function adminUserErrorKey(
-  result: Extract<ApiResult<unknown>, { ok: false }>,
-): MessageKey | null {
-  const byType = result.type ? ERROR_KEYS[result.type] : undefined;
-  if (byType) return byType;
+/**
+ * The statuses every /api/v1/admin endpoint can answer with, mapped once.
+ *
+ * 401 and 403 mean the same thing whichever admin screen asked — you are
+ * signed out, or you are not a site administrator — so only the 404 differs,
+ * and that is what each caller names. The three `…ErrorKey` functions below
+ * used to spell all three lines out and had already drifted in their argument
+ * types.
+ */
+function adminStatusKey(result: FailedApiResult, notFound: MessageKey): MessageKey | null {
   if (result.status === 401) return "settings.adminUsers.errors.loginRequired";
   if (result.status === 403) return "settings.adminUsers.errors.permissionDenied";
-  if (result.status === 404) return "settings.adminUsers.errors.userNotFound";
+  if (result.status === 404) return notFound;
   return null;
+}
+
+export function adminUserErrorKey(result: FailedApiResult): MessageKey | null {
+  const byType = result.type ? ERROR_KEYS[result.type] : undefined;
+  if (byType) return byType;
+  return adminStatusKey(result, "settings.adminUsers.errors.userNotFound");
 }
 
 export type SyncJobsParams = {
@@ -233,13 +245,8 @@ export function retrySyncJob(id: number, opts?: FetchOpts): Promise<ApiResult<vo
  * no types of their own, so this is purely the status mapping. Returns null
  * when the caller should fall back to `errorMessage(t, result)`.
  */
-export function syncJobErrorKey(
-  result: Extract<ApiResult<unknown>, { ok: false }>,
-): MessageKey | null {
-  if (result.status === 401) return "settings.adminUsers.errors.loginRequired";
-  if (result.status === 403) return "settings.adminUsers.errors.permissionDenied";
-  if (result.status === 404) return "settings.adminSyncJobs.errors.jobGone";
-  return null;
+export function syncJobErrorKey(result: FailedApiResult): MessageKey | null {
+  return adminStatusKey(result, "settings.adminSyncJobs.errors.jobGone");
 }
 
 export type AdminNamespacesParams = {
@@ -300,12 +307,7 @@ export function setNamespaceQuota(
  * answer no types of their own, so this is purely the status mapping; returns
  * null when the caller should fall back to `errorMessage(t, result)`.
  */
-export function namespaceQuotaErrorKey(
-  result: Extract<ApiResult<unknown>, { ok: false }>,
-): MessageKey | null {
+export function namespaceQuotaErrorKey(result: FailedApiResult): MessageKey | null {
   if (result.type === "session_required") return "settings.adminUsers.errors.sessionRequired";
-  if (result.status === 401) return "settings.adminUsers.errors.loginRequired";
-  if (result.status === 403) return "settings.adminUsers.errors.permissionDenied";
-  if (result.status === 404) return "settings.adminQuotas.errors.namespaceGone";
-  return null;
+  return adminStatusKey(result, "settings.adminQuotas.errors.namespaceGone");
 }

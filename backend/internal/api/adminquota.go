@@ -33,8 +33,8 @@ func (s *Server) handleAdminListNamespaces(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	offset, _ := strconv.Atoi(q.Get("offset"))
+	// Default 50, max 200, matching store.ListNamespaceQuotas' own clamp.
+	limit, offset := pageParams(q, 50, 200)
 
 	rows, total, err := s.store.ListNamespaceQuotas(r.Context(), q.Get("search"), limit, offset)
 	if err != nil {

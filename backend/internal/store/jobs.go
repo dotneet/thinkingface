@@ -86,9 +86,9 @@ func (s *Store) EnqueueSync(ctx context.Context, repoID int64, ref, oldSHA, newS
 	// The trade-off is real and worth naming. Because the budget only ever
 	// runs out between pushes, a repository pushed more often than the
 	// backoff is long (30s, then 2m, 8m, 32m) can fail every single sync and
-	// never reach 'failed' -- so it stays out of ListFailedSyncJobs and
-	// FailedSyncCount, and the operator surface added alongside this shows
-	// nothing while that repository's index sits frozen. The alternative,
+	// never reach 'failed' -- so it stays out of ListFailedSyncJobs, and the
+	// operator surface added alongside this shows nothing while that
+	// repository's index sits frozen. The alternative,
 	// carrying the count across pushes, trades that for parking repositories
 	// whose next commit would have worked, which is the worse failure: a
 	// parked job needs a human, an unparked one keeps trying. The gap is
@@ -123,7 +123,8 @@ func (s *Store) EnqueueSync(ctx context.Context, repoID int64, ref, oldSHA, newS
 // exists: 'running' alone could not distinguish a live claim from one held by
 // a process that died, so the old startup sweep reset every running row and a
 // second replica booting mid-sync stole a job that was still being worked --
-// see the migration (postgres 0030) and the disjoint-blobs hazard below.
+// see the sync_jobs comment in the migration and the disjoint-blobs hazard
+// below.
 //
 // The NOT EXISTS clause serialises work per repo+ref, and both of its halves
 // are load bearing. Two jobs for one ref running at once each rebuild that
@@ -207,6 +208,9 @@ func (s *Store) HeartbeatSyncJob(ctx context.Context, id int64, attempts int, le
 //
 // A no-op update therefore means the claim was lost, which is not an error:
 // whoever holds it now is responsible for the outcome.
+//
+// FinishWebhookDelivery (webhooks.go) is the same shape over the other
+// leased queue in this package; the two are kept in step deliberately.
 func (s *Store) FinishSyncJob(ctx context.Context, id int64, attempts int, jobErr error) error {
 	if jobErr == nil {
 		_, err := s.db.Exec(ctx,
@@ -262,15 +266,7 @@ const (
 // job still retrying is not an operator's problem yet, and pending/done rows
 // are high churn.
 func (s *Store) ListFailedSyncJobs(ctx context.Context, limit, offset int) ([]FailedSyncJob, int64, error) {
-	if limit <= 0 {
-		limit = defaultSyncJobPageSize
-	}
-	if limit > maxSyncJobPageSize {
-		limit = maxSyncJobPageSize
-	}
-	if offset < 0 {
-		offset = 0
-	}
+	limit, offset = pageWindow(limit, offset, defaultSyncJobPageSize, maxSyncJobPageSize)
 
 	var total int64
 	if err := s.db.QueryRow(ctx,
@@ -320,14 +316,6 @@ func (s *Store) RetrySyncJob(ctx context.Context, id int64) (bool, error) {
 		return false, err
 	}
 	return n > 0, nil
-}
-
-// FailedSyncCount is the number of parked jobs across the instance. It exists
-// so an operator surface can show the badge without paging the listing.
-func (s *Store) FailedSyncCount(ctx context.Context) (int64, error) {
-	var n int64
-	err := s.db.QueryRow(ctx, `SELECT count(*) FROM sync_jobs WHERE status = 'failed'`).Scan(&n)
-	return n, err
 }
 
 // PendingSyncCount powers the "indexing…" hint in the UI.

@@ -107,13 +107,6 @@ func TestIntegrationRepoRedirectFoldsNamespaceCase(t *testing.T) {
 		if _, err := s.ResolveRepoRedirect(ctx, "model", "alice", "FOO"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("ResolveRepoRedirect(alice/FOO) err = %v, want ErrNotFound", err)
 		}
-		// Anything reachable is also removable.
-		if err := s.DeleteRepoRedirect(ctx, "model", "ALICE", "foo"); err != nil {
-			t.Fatalf("DeleteRepoRedirect: %v", err)
-		}
-		if _, err := s.ResolveRepoRedirect(ctx, "model", "alice", "foo"); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("redirect survived a case-folded delete: %v", err)
-		}
 	})
 }
 

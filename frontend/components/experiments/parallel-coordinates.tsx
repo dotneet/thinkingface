@@ -2,11 +2,11 @@
 
 import { GitCompareArrows } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { RunColorDot } from "@/components/experiments/run-color-dot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
-import { colorForRun } from "@/lib/chart-utils";
-import { cn } from "@/lib/cn";
+import { colorForRun, runColorIndex } from "@/lib/chart-utils";
 import { useT } from "@/lib/i18n/client";
 import {
   axisTicks,
@@ -58,6 +58,8 @@ export function ParallelCoordinates({
 }) {
   const t = useT();
   const axes = useMemo(() => parallelAxes(runs), [runs]);
+  // One lookup instead of a scan of the project per line and per legend chip.
+  const colorIndex = useMemo(() => runColorIndex(runOrder), [runOrder]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [highlight, setHighlight] = useState<string | null>(null);
   const [pinned, setPinned] = useState<string | null>(null);
@@ -177,7 +179,7 @@ export function ParallelCoordinates({
                   className="transition-[stroke-width] hover:[stroke-width:3.5]"
                   d={linePath(line, shown.length, WIDTH, HEIGHT, PAD_X)}
                   fill="none"
-                  stroke={colorForRun(runOrder.indexOf(line.run))}
+                  stroke={colorForRun(colorIndex.get(line.run) ?? -1)}
                   strokeWidth={active === line.run ? 3.5 : line.run === baseline ? 2.5 : 1.75}
                   strokeOpacity={dimmed ? 0.18 : 1}
                   strokeDasharray={line.complete ? undefined : "6 4"}
@@ -207,12 +209,10 @@ export function ParallelCoordinates({
               onClick={() => togglePinned(line.run)}
               aria-label={t("experiments.parallel.highlightAria", { name: line.run })}
             >
-              <span
-                className={cn(
-                  "h-2.5 w-2.5 shrink-0 rounded-full",
-                  on ? "opacity-100" : "opacity-70",
-                )}
-                style={{ background: colorForRun(runOrder.indexOf(line.run)) }}
+              <RunColorDot
+                run={line.run}
+                colorIndex={colorIndex}
+                className={on ? "opacity-100" : "opacity-70"}
               />
               <span className="max-w-[14rem] truncate">{line.run}</span>
               {line.run === baseline && (

@@ -12,6 +12,7 @@ package api
 import (
 	"net/http"
 	"net/url"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -50,4 +51,65 @@ func pathParam(r *http.Request, key string) (string, error) {
 		return raw, nil
 	}
 	return url.PathUnescape(raw)
+}
+
+// int64Param reads a numeric {key} out of the URL path, answering the request
+// itself when it is not a number. `what` names the thing in the message, as
+// in "sync job id must be a number".
+//
+// The eight call sites this replaced spelled the same refusal three ways --
+// "must be an integer", "must be a number" and, on the two LFS routes,
+// "invalid repository id" -- for identical input, so a client could not learn
+// the rule from one message and rely on it in another. "number" is the one
+// kept: it is what the majority already said.
+func int64Param(w http.ResponseWriter, r *http.Request, key, what string) (int64, bool) {
+	id, err := strconv.ParseInt(chi.URLParam(r, key), 10, 64)
+	if err != nil {
+		badRequest(w, what+" id must be a number")
+		return 0, false
+	}
+	return id, true
+}
+
+// pageParams reads the `limit` / `offset` window of a Web UI listing, clamped
+// to [1, maxLimit] with defLimit standing in for anything missing or
+// unusable.
+//
+// There are deliberately two ways to read a page window in this package, and
+// this is only one of them:
+//
+//   - The Web UI's own listings are lenient, which is what this function is.
+//     `?limit=abc` is a page of the default size, not a 400. These query
+//     strings are built by our own frontend, the response has to render
+//     something for a user who did not type them, and a listing that quietly
+//     falls back is a better answer than a screen-sized error for a parameter
+//     nobody chose.
+//   - The HuggingFace-compatible listing (hfListFilter) and the two
+//     commit pagers (commitPageParams) are strict: an unusable `limit` is a
+//     400. That side is not a style preference. huggingface_hub's `paginate`
+//     follows Link headers this server builds out of the very parameters it
+//     was sent, so silently answering a different window than the one asked
+//     for produces a client that pages wrongly rather than one that reports
+//     an error -- and the external protocol is the contract there (CLAUDE.md
+//     invariant 5).
+//
+// The clamp happens here rather than being left to the store because the
+// handler often has to reason about the window it actually got: a listing
+// that decides "is there another page?" by comparing the rows returned
+// against `limit` reads an unclamped one as "there is no more"
+// (docs/dev/api-contract.md §1.1). The store clamps again regardless; the two
+// agree, so the second pass is a no-op.
+func pageParams(q url.Values, defLimit, maxLimit int) (limit, offset int) {
+	limit, _ = strconv.Atoi(q.Get("limit"))
+	offset, _ = strconv.Atoi(q.Get("offset"))
+	switch {
+	case limit <= 0:
+		limit = defLimit
+	case limit > maxLimit:
+		limit = maxLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
 }

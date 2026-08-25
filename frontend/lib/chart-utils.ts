@@ -67,3 +67,26 @@ export function groupByKey(
   }
   return map;
 }
+
+/**
+ * `run name -> its position in the project's run order`, which is what
+ * `colorForRun` wants as its argument.
+ *
+ * The colour of a run is decided by where it sits in the project's full run
+ * order, so every dot next to a run name needs that index. Looked up with
+ * `runOrder.indexOf(name)` per dot it costs a scan of the whole project per
+ * row — O(n²) over a long run list, redone on every render. Build the map
+ * once instead (`useMemo(() => runColorIndex(runOrder), [runOrder])`) and
+ * hand it to `RunColorDot`.
+ *
+ * A duplicate name keeps its first position, matching `indexOf`; a name that
+ * is not in the order is absent, and callers fall back to -1 exactly as
+ * `indexOf` would.
+ */
+export function runColorIndex(runOrder: readonly string[]): ReadonlyMap<string, number> {
+  const map = new Map<string, number>();
+  runOrder.forEach((run, i) => {
+    if (!map.has(run)) map.set(run, i);
+  });
+  return map;
+}

@@ -38,20 +38,14 @@ type Streams struct {
 func (h *Handler) ServeSSH(ctx context.Context, storagePath string, service Service, gitProtocol string, s Streams) error {
 	dir := h.git.Dir(storagePath)
 
-	args := []string{}
-	env := sshEnv(gitProtocol)
-	if service == ReceivePack && h.hooksPath != "" {
-		// Same reasoning as the HTTP path: the WAL hook belongs to the image,
-		// not to the repository's mutable config. Without this an SSH push
-		// would silently bypass the WAL that an HTTP push records into.
-		args = append(args, "-c", "core.hooksPath="+h.hooksPath)
-		if h.hookEnv != nil {
-			env = append(env, h.hookEnv(storagePath)...)
-		}
-	}
-	// No --stateless-rpc: over SSH the service owns the connection for its
-	// whole lifetime.
-	args = append(args, string(service)[len("git-"):], dir)
+	// serviceArgs is shared with the HTTP transport, and the WAL hook is why:
+	// without the core.hooksPath it adds for receive-pack, an SSH push would
+	// silently bypass the WAL that an HTTP push records into.
+	//
+	// No --stateless-rpc here: over SSH the service owns the connection for
+	// its whole lifetime.
+	args, env := h.serviceArgs(service, storagePath, sshEnv(gitProtocol))
+	args = append(args, dir)
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = env

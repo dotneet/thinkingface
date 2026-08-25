@@ -585,9 +585,8 @@ func (s *Server) handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 // newly-default ref. It answers the request itself on failure and reports
 // ok=false; on success it returns the repository as it now stands.
 func (s *Server) setDefaultBranch(w http.ResponseWriter, r *http.Request, repo *store.Repo, branch string) (*store.Repo, bool) {
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open repository", err)
+	gitRepo, ok := s.openGit(w, repo)
+	if !ok {
 		return nil, false
 	}
 	tip, err := gitRepo.RefTarget("refs/heads/" + branch)
@@ -722,19 +721,7 @@ func (s *Server) handleHFCreateRepo(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, maxMetaBody, &req, "request body must be JSON") {
 		return
 	}
-	kind := "model"
-	if req.Type != "" {
-		kind = strings.TrimSuffix(req.Type, "s")
-	}
-
-	ns, name := req.Organization, req.Name
-	// huggingface_hub sends either "name" or "org/name".
-	if before, after, found := strings.Cut(req.Name, "/"); found {
-		ns, name = before, after
-	}
-	if ns == "" {
-		ns = user.Username
-	}
+	kind, ns, name := hfRepoTarget(user, req.Type, req.Name, req.Organization)
 
 	repo, err := s.createRepo(r.Context(), user, kind, ns, name, "")
 	if err != nil {
@@ -788,18 +775,7 @@ func (s *Server) handleHFDeleteRepo(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, maxMetaBody, &req, "request body must be JSON") {
 		return
 	}
-	kind := "model"
-	if req.Type != "" {
-		kind = strings.TrimSuffix(req.Type, "s")
-	}
-	ns, name := req.Organization, req.Name
-	// huggingface_hub sends either "name" or "org/name".
-	if before, after, found := strings.Cut(req.Name, "/"); found {
-		ns, name = before, after
-	}
-	if ns == "" {
-		ns = user.Username
-	}
+	kind, ns, name := hfRepoTarget(user, req.Type, req.Name, req.Organization)
 	repo, ok := s.loadRepoForDelete(w, r, kind, ns, name, redirectNone)
 	if !ok {
 		return

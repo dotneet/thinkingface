@@ -1,15 +1,11 @@
 import { type ApiResult, apiFetch } from "@/lib/api";
-import type { FetchOpts } from "@/lib/repos";
+import { type FetchOpts, repoApiPath } from "@/lib/repos";
 import type {
   MyTransfersResponse,
   RepoKind,
   RepoTransferRequest,
   RepoTransferResponse,
 } from "@/types/api";
-
-function transferPath(kind: RepoKind, ns: string, name: string): string {
-  return `/api/v1/repos/${kind}/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/transfer`;
-}
 
 /**
  * Starts a transfer (docs/dev/repo-transfer-design.md §6-7). The response's
@@ -24,7 +20,7 @@ export function transferRepo(
   req: RepoTransferRequest,
   opts?: FetchOpts,
 ): Promise<ApiResult<RepoTransferResponse>> {
-  return apiFetch<RepoTransferResponse>(transferPath(kind, ns, name), {
+  return apiFetch<RepoTransferResponse>(repoApiPath(kind, ns, name, "/transfer"), {
     method: "POST",
     body: req,
     headers: opts?.headers,
@@ -38,7 +34,7 @@ export function getPendingTransfer(
   name: string,
   opts?: FetchOpts,
 ): Promise<ApiResult<RepoTransferResponse>> {
-  return apiFetch<RepoTransferResponse>(transferPath(kind, ns, name), {
+  return apiFetch<RepoTransferResponse>(repoApiPath(kind, ns, name, "/transfer"), {
     headers: opts?.headers,
   });
 }
@@ -50,7 +46,7 @@ export function cancelTransfer(
   name: string,
   opts?: FetchOpts,
 ): Promise<ApiResult<void>> {
-  return apiFetch<void>(transferPath(kind, ns, name), {
+  return apiFetch<void>(repoApiPath(kind, ns, name, "/transfer"), {
     method: "DELETE",
     headers: opts?.headers,
   });

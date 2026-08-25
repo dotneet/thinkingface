@@ -7,6 +7,8 @@ package store
 
 import (
 	"testing"
+
+	"github.com/dotneet/thinkingface/backend/internal/repocard"
 )
 
 // lineageFixture builds a small model tree around one base model:
@@ -245,6 +247,42 @@ func TestIntegrationRepoLineageFilters(t *testing.T) {
 				t.Fatalf("license facet under base_model = %v, want only mit:1", got)
 			}
 		})
+	})
+}
+
+// TestIntegrationLineageFilterMatchesWhatTheIndexerWrote closes the loop the
+// two halves of this feature used to leave open. The rows the filter searches
+// are written by the syncer splitting the card's text, so the filter must
+// split the query string exactly the same way -- one implementation,
+// repocard.SplitRepoRef, on both sides. When each side had its own, a card
+// naming `alice/base@x@y` was indexed under one name and searched for under
+// another, and the repository never appeared in its own lineage listing.
+func TestIntegrationLineageFilterMatchesWhatTheIndexerWrote(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+
+		odd := f.repo(t, "alice", "odd", "model", nil)
+		for _, raw := range []string{"alice/base@x@y", "/alice/spaced/"} {
+			ns, name, rev, ok := repocard.SplitRepoRef(raw)
+			if !ok {
+				t.Fatalf("SplitRepoRef(%q) did not parse", raw)
+			}
+			if err := s.ReplaceRepoLineage(ctx, odd.ID, []LineageEdge{{
+				Kind: LineageKindBaseModel, Raw: raw,
+				Namespace: ns, Name: name, Rev: rev, Relation: "finetune",
+			}}); err != nil {
+				t.Fatalf("ReplaceRepoLineage: %v", err)
+			}
+
+			repos, total, _, err := s.ListRepos(ctx, RepoFilter{BaseModel: raw})
+			if err != nil {
+				t.Fatalf("ListRepos: %v", err)
+			}
+			if !equalStrings(names(repos), []string{"alice/odd"}) || total != 1 {
+				t.Fatalf("?base_model=%s = %v (total %d), want [alice/odd]", raw, names(repos), total)
+			}
+		}
 	})
 }
 

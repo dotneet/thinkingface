@@ -441,13 +441,24 @@ func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *sto
 	}
 
 	// Re-read the repository so the experiment indexer sees the flag we just
-	// wrote rather than the pre-sync value. Adopt the fresh row only on
-	// success: the repository can vanish between enqueue and here (a delete
+	// wrote rather than the pre-sync value. A vanished repository is the one
+	// tolerated outcome: it can be deleted between enqueue and here (a delete
 	// racing a push), and the old `repo, err =` form nilled repo out on that
 	// path — the webhook below then dereferenced nil and took the whole
-	// process down. The remaining steps only attribute the event, so the
-	// copy loaded at the start of this job is the right fallback.
-	if fresh, err := s.store.GetRepoByID(ctx, repo.ID); err == nil {
+	// process down. The remaining steps only attribute the event, so the copy
+	// loaded at the start of this job is the right fallback there.
+	//
+	// Every other failure is reported. Swallowing them (the `err == nil` form
+	// this replaced) meant a database blip skipped the experiment indexing
+	// entirely and still marked the job done, so the run's metrics stayed
+	// missing until somebody pushed again.
+	fresh, err := s.store.GetRepoByID(ctx, repo.ID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		// Deleted underneath us; keep the copy loaded at the start.
+	case err != nil:
+		return nil, fmt.Errorf("reload repository: %w", err)
+	default:
 		repo = fresh
 		if repo.IsExperiment && job.Ref == repo.DefaultBranch {
 			if err := s.indexer.IndexRepo(ctx, repo); err != nil {

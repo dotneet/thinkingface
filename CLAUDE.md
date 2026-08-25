@@ -22,6 +22,7 @@ docs/users/ User-facing documentation, published to GitHub Pages via mkdocs.yml
 | Package | Responsibility |
 |---|---|
 | `api` | The entire HTTP surface. Routing and handlers for HF-compatible endpoints + the Web UI-facing API |
+| `apitypes` | Single source of truth for Web UI-facing API types (invariant 1). `make gen-types` runs tygo over this package to produce `frontend/types/api.gen.ts` |
 | `auth` | Password hashing, personal access tokens, signed session cookie (`tf_session`) |
 | `config` | Runtime configuration loading from environment variables |
 | `experiments` | Indexer that converts trackio's parquet exports into runs / metric series |
@@ -31,11 +32,15 @@ docs/users/ User-facing documentation, published to GitHub Pages via mkdocs.yml
 | `lfs` | Git LFS batch API. Actual object bytes transfer directly between client and GCS via signed URLs |
 | `modelmeta` | Metadata extraction and caching that reads only the headers of safetensors / PyTorch checkpoints |
 | `repocard` | Parsing of README.md's YAML frontmatter (repo card) |
+| `sshserver` | git over SSH transport. Public key authentication against keys registered at `/settings/ssh-keys`; only `git-upload-pack` / `git-receive-pack` may run, no shell/PTY/port forwarding |
 | `storage` | Object store abstraction (real GCS / fake-gcs-server emulator) and key layout |
 | `store` | PostgreSQL / SQLite data access layer (repos / files / users / jobs / experiments; native pgx + modernc.org/sqlite; `migrations/postgres/` `migrations/sqlite/`) |
 | `syncer` | Post-push processing. Publishes non-LFS blobs under `blobs/` and updates the metadata index |
 | `tfcli` | Command layer for the `tf` CLI (`login`/`up`, etc.). `hub` = HTTP client to the server, `local` = file scanning / README card generation, `config` = credential storage/resolution (distinct from the same-named `backend/internal/config`) |
+| `ulid` | ID generation. 26-character Crockford base32 ULIDs; used for WAL pack names and repository storage paths |
 | `viewer` | Parquet reads over storage (schema, row groups, row ranges) and local caching |
+| `wal` | The write-ahead log that makes object storage — not the bare repository on disk — the source of truth for git data (`docs/dev/continuity-design.md`). Materializes bare repos from a GCS-backed index/pack history, verifies the WAL reconstructs what's on disk, and handles compaction/GC of superseded packs |
+| `webhooks` | Outbound webhook delivery worker (`repo.push` / `repo.created` / `repo.deleted` / `run.finished` / `run.failed`), same PG-table-as-queue shape as `syncer` |
 
 The entry points are `backend/cmd/thinkingface/main.go` (server) and `backend/cmd/tf/main.go` (`tf` CLI; see `docs/dev/tf-cli.md` for details).
 
@@ -314,7 +319,11 @@ instruction, read it first before re-deriving the steps yourself.
   (`make gcs-proxy`) handles this, and `make dev-api` starts it automatically.
 - Add DB migrations as sequentially numbered SQL files to both
   `backend/internal/store/migrations/postgres/` and
-  `backend/internal/store/migrations/sqlite/`.
+  `backend/internal/store/migrations/sqlite/`. Both directories were squashed to a single
+  `0001_init.sql` (the full current schema, verified schema-identical to applying the old
+  migration history in order) ahead of the first production release, so the next migration in
+  either dialect starts at `0002_...`. The two dialects' numbering used to drift apart; from
+  `0001_init.sql` on they stay 1:1.
 - The DB backend is selected by the `DATABASE_URL` scheme (`postgres://` / `postgresql://`
   → PostgreSQL, `sqlite://` → SQLite). `backend/internal/config` validates this at startup.
 - `backend/internal/store`'s integration tests always run against SQLite (a temp file). The

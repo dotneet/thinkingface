@@ -143,6 +143,8 @@ message attached to a form or a banner on an otherwise working page.
 | `Skeleton`, `SkeletonLines` | `ui/skeleton.tsx` | — |
 | `EmptyState`, `ErrorState` | `ui/empty-state.tsx`, `ui/error-state.tsx` | — |
 | `CopyButton`, `Pagination` | `ui/copy-button.tsx`, `ui/pagination.tsx` | `CopyButton`'s `value` also takes a thunk, for strings that are expensive to build |
+| `PaginationControls`, `OutOfRangeEmptyState` | `ui/pagination-controls.tsx` | the Client half of the pair: `Pagination` paginates by href from a Server Component, this one by `onOffsetChange` from state (`hooks/use-paged-list.ts`). Both render `ui.pagination.*`. `OutOfRangeEmptyState` is what a page **past the end** of a non-empty list shows instead of "nothing here" (§9) |
+| `Table`, `THead`, `TBody`, `Tr`, `Th`, `Td` | `ui/table.tsx` | the static table shell: scroll box + `<table>` (`minWidth` for the sideways-scroll threshold), the header row's own styling, `px-3 py-2` cells, `align="right"`, `THead sticky` (§8.6). For a virtualized grid of `Record<string, unknown>` rows, that is `DataTable` instead |
 | `SegmentedControl` | `ui/segmented-control.tsx` | in-page mode switch (Rows/SQL, Table/Raw); not for navigation — that is `RepoTabs` |
 | `Markdown` | `ui/markdown.tsx` | the one Markdown renderer (README card, file preview, editor preview, run notes): GFM + raw HTML through `lib/markdown-sanitize.ts`, highlighted fences with copy, heading permalinks, KaTeX, repo-relative link resolution (`linkContext`); wraps output in `.tf-markdown` |
 | `MarkdownEditor` | `ui/markdown-editor.tsx` | textarea + edit / preview / split modes (split at `lg`+), ⌘/Ctrl+Enter → `onSubmit`; `markdown={false}` for plain text files |

@@ -278,6 +278,10 @@ cleanly when neither is installed.
   the external protocol defines those.
 - **Database migrations.** Add sequentially numbered SQL files to *both*
   `backend/internal/store/migrations/postgres/` and `backend/internal/store/migrations/sqlite/`.
+  Both directories were squashed to a single `0001_init.sql` (the full current schema) ahead of
+  the first production release, so the next migration in either dialect starts at `0002_...`,
+  and the two dialects now share numbering 1:1 instead of drifting apart as they did
+  historically.
 - **Pure Go only.** Parquet goes through `parquet-go` and SQLite through `modernc.org/sqlite`.
   Do not introduce CGo dependencies (Arrow C++ bindings, `mattn/go-sqlite3`, ...) — they break
   the container build and cross-compilation.

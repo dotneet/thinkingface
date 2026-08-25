@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -189,9 +188,8 @@ func (s *Server) handleUploadFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
+	gitRepo, ok := s.openGit(w, repo)
+	if !ok {
 		return
 	}
 	// Before a single part is read: an upload to a rev that is a tag would be
@@ -278,14 +276,7 @@ func (s *Server) handleUploadFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user := currentUser(r.Context())
-	author := gitrepo.Signature{Name: "thinkingface", Email: "noreply@thinkingface.local", When: time.Now()}
-	if user != nil {
-		author.Name = user.Username
-		if user.Email != "" {
-			author.Email = user.Email
-		}
-	}
+	author := commitAuthor(r.Context())
 
 	// retryOnStale=true, like the HF commit endpoint: an upload carries no
 	// optimistic lock of its own, so rebuilding on a head that moved
@@ -294,12 +285,7 @@ func (s *Server) handleUploadFiles(w http.ResponseWriter, r *http.Request) {
 	newHash, oldHash, err := s.commitThroughWAL(r.Context(), repo, gitrepo.CommitRequest{
 		Branch: rev, Message: uploadSummary(paths, message, description), Author: author, Ops: ops,
 	}, true)
-	if errors.Is(err, errWALConflict) {
-		writeError(w, http.StatusConflict, "conflict", "branch changed concurrently; retry the upload")
-		return
-	}
-	if err != nil {
-		internalError(w, "create commit", err)
+	if writeCommitError(w, err, "upload") {
 		return
 	}
 	if err := s.sync.Enqueue(r.Context(), repo.ID, rev, oldHash.String(), newHash.String()); err != nil {

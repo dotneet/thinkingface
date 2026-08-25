@@ -7,8 +7,6 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
-
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
 	"github.com/dotneet/thinkingface/backend/internal/modelmeta"
@@ -21,24 +19,17 @@ import (
 // time a small file takes, even for a repository holding hundreds of
 // gigabytes.
 func (s *Server) handleModelMeta(w http.ResponseWriter, r *http.Request) {
-	repo, ok := s.loadRepoForRead(w, r, chi.URLParam(r, "kind"), chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectUI)
+	repo, rev, filePath, ok := s.uiFileTarget(w, r)
 	if !ok {
 		return
 	}
-	filePath := wildcardPath(r)
 	format := modelmeta.FormatFor(filePath)
 	if format == "" {
 		badRequest(w, filePath+" is not a safetensors or PyTorch checkpoint")
 		return
 	}
-
-	rev, ok := revParam(w, r, "rev", repo)
+	gitRepo, ok := s.openGit(w, repo)
 	if !ok {
-		return
-	}
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
 		return
 	}
 	entry, _, err := gitRepo.Stat(rev, filePath)

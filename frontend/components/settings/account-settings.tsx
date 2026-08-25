@@ -1,9 +1,9 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
+import { LoginRequiredState } from "@/components/settings/login-required-state";
 import { Alert } from "@/components/ui/alert";
-import { Button, buttonClass } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { ErrorState } from "@/components/ui/error-state";
 import { Field, Input } from "@/components/ui/field";
 import { SkeletonLines } from "@/components/ui/skeleton";
@@ -97,20 +97,7 @@ export function AccountSettings() {
   if (username === null && !loadError) return <SkeletonLines lines={5} />;
 
   if (needsLogin) {
-    return (
-      <ErrorState
-        title={t("settings.account.loginRequiredTitle")}
-        message={t("settings.account.loginRequiredMessage")}
-        action={
-          <Link
-            href="/login?next=/settings/account"
-            className={buttonClass({ variant: "primary" })}
-          >
-            {t("settings.account.login")}
-          </Link>
-        }
-      />
-    );
+    return <LoginRequiredState next="/settings/account" />;
   }
 
   if (username === null) {
