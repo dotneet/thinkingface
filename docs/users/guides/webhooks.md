@@ -226,14 +226,25 @@ one id means one arrival.
 ## Which URLs are allowed { #ssrf-guard }
 
 Only `http` and `https` URLs are accepted, and by default the server refuses to deliver to local
-or private addresses. That covers `localhost`, `127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16`,
-link-local ranges such as `169.254/16` (which is how cloud instance metadata is reached), the
-unspecified address, and `::1`.
+or private addresses. That covers `localhost` and anything under `.localhost`, `127.0.0.0/8`,
+`10/8`, `172.16/12`, `192.168/16`, link-local ranges such as `169.254/16` (which is how cloud
+instance metadata is reached), the unspecified address, and `::1`.
 
-The check runs twice, deliberately: once when the webhook is created or edited, and again on the
-actual TCP connection each delivery opens, against the address it really resolved to. The second
-check is what stops a hostname that only resolves to a private address later — DNS rebinding, or
-an operator's DNS changing after the webhook was created.
+It also covers several ranges that are not private but are not somewhere a webhook should be
+delivered either: `100.64.0.0/10` (carrier-grade NAT — **this is the range Tailscale hands out
+to a tailnet**, so a receiver on your tailnet is refused), `0.0.0.0/8`, `192.0.0.0/24`,
+`198.18.0.0/15`, `240.0.0.0/4`, and multicast. An IPv4 address written as IPv6 — `::ffff:10.0.0.1`,
+a NAT64 address embedding a private IPv4 — is judged by the IPv4 inside it rather than waved
+through.
+
+A delivery is not followed across a redirect. A 3xx is recorded as the failed attempt it is,
+with its status in the delivery history, rather than being chased to a host you did not configure
+and never had checked.
+
+The address check runs twice, deliberately: once when the webhook is created or edited, and again
+on the actual TCP connection each delivery opens, against the address it really resolved to. The
+second check is what stops a hostname that only resolves to a private address later — DNS
+rebinding, or an operator's DNS changing after the webhook was created.
 
 For local development, where the receiver legitimately lives on `localhost`, an operator can set
 `TF_WEBHOOKS_ALLOW_PRIVATE_TARGETS=true`, which disables both checks. Leave it off in production:

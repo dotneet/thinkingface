@@ -183,3 +183,34 @@ func TestPush_DoesNotLinkAPointerThatLiesAboutTheSize(t *testing.T) {
 		})
 	}
 }
+
+// TestPush_AWrongPointerDoesNotSpeakForARightOne is the push-path statement of
+// what LinkLFSObjects' (oid, size) keying is for. One revision can name an
+// object from two paths -- one pointer written by git-lfs, one hand-made and
+// wrong -- and if only the first declaration survived the walk, a bad pointer
+// arriving earlier in tree order would cost the good file its link and take
+// the object out of gc's reference set. Deduplicating in the syncer by oid
+// alone put that back after the store stopped doing it.
+func TestPush_AWrongPointerDoesNotSpeakForARightOne(t *testing.T) {
+	f := newPushFixture(t)
+	content := []byte("somebody else's bytes")
+	other := spareRepo(t, f.harness, "origin")
+	seedLFSObject(t, f.harness, other.ID, pointerOID, content)
+
+	// "a.bin" sorts before "model.bin", so the lie is what a first-wins
+	// deduplication would keep.
+	f.push("main",
+		gitrepo.Op{Kind: gitrepo.OpAdd, Path: "a.bin",
+			Data: gitrepo.FormatLFSPointer(pointerOID, 1)},
+		gitrepo.Op{Kind: gitrepo.OpAdd, Path: "model.bin",
+			Data: gitrepo.FormatLFSPointer(pointerOID, int64(len(content)))},
+	)
+
+	owned, err := f.st.RepoHasLFSObject(f.ctx, f.repo.ID, pointerOID)
+	if err != nil {
+		t.Fatalf("RepoHasLFSObject: %v", err)
+	}
+	if !owned {
+		t.Error("a pointer lying about the size suppressed the link a correct one earned; model.bin would 404")
+	}
+}

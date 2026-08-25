@@ -467,19 +467,29 @@ func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *sto
 // The whole tree rather than the push's own diff, for the reason publishBlobs
 // works off the index rather than the diff: a job that died, or two jobs
 // racing on one ref, must not be able to leave a file the link pass skipped.
-// Duplicates are dropped because one oid appearing under several paths is one
-// row either way, and the statement locks a parent row per element.
+//
+// Deduplication is by the whole pair, not by oid. Two paths can name one
+// object with different declared sizes -- one pointer written by git-lfs and
+// one hand-made -- and dropping all but the first would let a wrong
+// declaration stand in for a right one, which costs the correct file its link
+// and takes the object out of gc's reference set. LinkLFSObjects treats "some
+// declaration matched" as the entitlement and locks one row per object either
+// way, so there is nothing to save by deciding here which one it gets to see.
 func lfsObjectRefs(files []store.RepoFile) []store.LFSObjectRef {
-	seen := make(map[string]bool)
+	seen := make(map[store.LFSObjectRef]bool)
 	out := make([]store.LFSObjectRef, 0)
 	for _, f := range files {
-		if f.LFSOID == nil || seen[*f.LFSOID] {
+		if f.LFSOID == nil {
 			continue
 		}
-		seen[*f.LFSOID] = true
 		// RepoFile.Size is Entry.TargetSize(), which for an LFS entry is the
 		// size the pointer declares -- exactly what has to be proven.
-		out = append(out, store.LFSObjectRef{OID: *f.LFSOID, Size: f.Size})
+		ref := store.LFSObjectRef{OID: *f.LFSOID, Size: f.Size}
+		if seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		out = append(out, ref)
 	}
 	return out
 }
