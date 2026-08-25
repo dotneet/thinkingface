@@ -2,7 +2,7 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "description": [
     "Release quarantine is 7 days -- the same window frontend/bunfig.toml enforces for bun (minimumReleaseAge = 604800). Change one and change the other; docs/dev/supply-chain.md explains why.",
-    "automerge is Renovate merging the PR itself once the branch is green -- not GitHub's auto-merge feature, which platformAutomerge would hand the decision to and which is switched off on this repository anyway. It is gated on the checks having actually run: a branch with no check runs at all reports as pending, not as passing, so nothing merges until someone presses Approve and run on the PR (Renovate runs on GITHUB_TOKEN and its PRs do not start workflows by themselves -- docs/dev/supply-chain.md). merge-commit matches how main is operated. Being at the top level, it is inherited by the blocks below: lockFileMaintenance's monthly full-lockfile refresh and vulnerabilityAlerts' zero-quarantine security updates automerge on the same condition as everything else, a green branch -- and a security PR whose lockfile could not be regenerated fails `bun install --frozen-lockfile` in CI, so it stays red rather than merging half-done.",
+    "automerge is Renovate merging the PR itself once the branch is green, majors excepted (see the packageRule that keeps those in human hands) -- not GitHub's auto-merge feature, which platformAutomerge would hand the decision to and which is switched off on this repository anyway. It is gated on the checks having actually run: a branch with no check runs at all reports as pending, not as passing, so nothing merges until someone presses Approve and run on the PR (Renovate runs on GITHUB_TOKEN and its PRs do not start workflows by themselves -- docs/dev/supply-chain.md). merge-commit matches how main is operated. Being at the top level, it is inherited by the blocks below: lockFileMaintenance's monthly full-lockfile refresh and vulnerabilityAlerts' zero-quarantine security updates automerge on the same condition as everything else, a green branch -- and a security PR whose lockfile could not be regenerated fails `bun install --frozen-lockfile` in CI, so it stays red rather than merging half-done.",
     "vulnerabilityAlerts drops that wait for known CVEs. It only relaxes Renovate's own version choice: bun still refuses a version younger than 7 days when it refreshes bun.lock, so a frontend security PR for a fresh fix needs `cd frontend && bun install --minimum-release-age=0` by hand on the PR branch."
   ],
   "extends": [
@@ -50,6 +50,11 @@
       "description": "Anything inside .github/workflows/ stops at the Dependency Dashboard instead of becoming a pull request: the action SHAs, and the Renovate image pinned in renovate.yml itself. Renovate runs with the job's GITHUB_TOKEN (.github/workflows/renovate.yml), and GitHub refuses every write to a workflow file from that token -- an automatic PR here could only fail on push, every run, forever. Listing them keeps the staleness visible; apply them by hand, moving the SHA and its trailing version comment together. Ticking the checkbox will fail, so delete this rule if the workflow ever moves to a token carrying the `workflow` scope.",
       "matchFileNames": [".github/workflows/**"],
       "dependencyDashboardApproval": true
+    },
+    {
+      "description": "A major keeps needing a human to merge it. The grouping rules below split majors out for exactly one reason -- so that someone reads them -- and automerge would undo that: a green CI run says the build still builds, not that a breaking change was understood.",
+      "matchUpdateTypes": ["major"],
+      "automerge": false
     },
     {
       "description": "Go module updates travel as one PR per week unless they are major.",

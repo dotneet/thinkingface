@@ -181,7 +181,8 @@ The two files split the job cleanly:
 
 - **`renovate.json`** — *what* may be updated, grouped how, inside which
   window (`schedule`, `minimumReleaseAge`, `packageRules`), and what happens to
-  the pull request afterwards (`automerge`, with `platformAutomerge` off:
+  the pull request afterwards (`automerge` for everything but majors, with
+  `platformAutomerge` off:
   Renovate does the merging itself, as a merge commit, rather than handing the
   decision to GitHub's auto-merge — which is switched off on this repository
   and would need branch protection to mean anything).
@@ -233,9 +234,11 @@ fix:
    carries an **Approve and run** button; press it. A dependency PR without a
    green CI run has not been verified, whatever its diff looks like.
 
-   This is also the whole of the human step, because `renovate.json` sets
-   `automerge`. Approve the run and walk away: if CI comes back green, Renovate
-   merges the PR itself on one of its next runs, within three hours. If it
+   This is also the whole of the human step for most updates, because
+   `renovate.json` sets `automerge` — for everything except majors, which keep
+   needing a human to merge them, since that is the entire reason the grouping
+   rules split them out. Approve the run and walk away: if CI comes back green,
+   Renovate merges the PR itself on one of its next runs, within three hours. If it
    comes back red, nothing happens and the PR waits for you. Nothing merges
    without checks having actually run — a branch with no check runs reports as
    *pending*, not as passing, which is the behaviour this depends on.

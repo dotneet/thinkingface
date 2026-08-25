@@ -180,6 +180,7 @@ two things to know when one of its PRs shows up:
   **Approve and run** on the PR; an unchecked dependency PR is an unreviewed one. That is
   also all you normally have to do: `renovate.json` sets `automerge`, so a PR whose checks
   come back green is merged by Renovate itself (as a merge commit) within about three hours.
+  Majors are the exception — those wait for a human to read them and merge.
   A red one just sits there. Nothing merges before the checks have actually run — a branch
   with no check runs reads as pending, not as passing. If `main` moves on while the PR waits,
   Renovate rebases the branch (automerge implies `rebaseWhen=behind-base-branch`), which
