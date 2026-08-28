@@ -377,7 +377,10 @@ func (s *Server) handleRedeliverWebhook(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if existing.WebhookID != hook.ID {
-		notFound(w, "delivery not found")
+		// Same call as a missing deliveryId: webhook_deliveries.id is
+		// instance-wide, so a distinct 404 here lets a webhook admin on
+		// any namespace walk the global delivery-id space.
+		handleStoreError(w, "load delivery", store.ErrNotFound)
 		return
 	}
 	newID, err := s.store.RedeliverWebhookDelivery(r.Context(), deliveryID)
