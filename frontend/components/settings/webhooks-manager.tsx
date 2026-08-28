@@ -99,6 +99,12 @@ export function WebhooksManager({
     setWebhooks(null);
     setRepos(null);
     setReposError(false);
+    // A scope like `model/foo` selected under namespace A must not survive
+    // a switch to B: the option list is rebuilt, but a stale value is still
+    // submitted, and create then 400s for a repo that isn't in B.
+    setRepoScope("");
+    setCreateError(null);
+    setJustCreated(undefined);
     refreshWebhooks(namespace, () => cancelled);
     listRepos({ author: namespace, limit: 100 }).then((result) => {
       if (cancelled) return;
