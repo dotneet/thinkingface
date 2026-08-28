@@ -1273,10 +1273,10 @@ POST   /api/v1/transfers/{id}/reject               → 200 RepoTransferResponse
 ```
 Accept/reject require write permission on the destination namespace; cancel requires write
 permission on the source. A pending transfer expires after 7 days.
-If a user without permission calls accept / reject, the response is **404 `not_found`
-(`transfer not found`)**. Returning 403 with the destination namespace name would let someone
-brute-force numeric IDs to enumerate pending destinations, so the response is unified to be
-indistinguishable from a nonexistent ID.
+If a user without permission calls accept / reject, the response is the same **404
+`not_found`** (same body) as a nonexistent ID. Returning 403 with the destination namespace
+name, or a 404 whose message differs from a miss, would let someone brute-force numeric IDs
+to enumerate pending destinations.
 
 ### Accessing the old name (redirect)
 The old `{ns}/{name}` after a transfer or rename redirects to the new name, until a new repository
@@ -2656,7 +2656,10 @@ query: `limit` (default 30, max 100) / `offset`
 res: `{"items": WebhookDelivery[], "total": number}` (newest first)
 
 ### `POST /api/v1/webhooks/{id}/deliveries/{deliveryId}/redeliver`
-Re-enqueues a new delivery with the same event/payload as an existing one. res: `WebhookDelivery`
+Re-enqueues a new delivery with the same event/payload as an existing one. res: `WebhookDelivery`.
+A `deliveryId` that does not belong to `{id}` answers the same 404 as a nonexistent delivery:
+`webhook_deliveries.id` is instance-wide, so a distinguishable body would let a webhook admin
+on any namespace walk the global delivery-id space.
 
 ### How delivery works
 
