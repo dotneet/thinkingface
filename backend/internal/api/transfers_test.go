@@ -397,3 +397,61 @@ func TestHFDeleteRepo_AtOldName_PlainNotFound(t *testing.T) {
 		t.Fatalf("repo at new name should be untouched: %v", err)
 	}
 }
+
+// TestTransferDecide_TellsANonDestinationNothing pins that accept/reject
+// answer a caller who may not write the destination exactly as they answer
+// one who named an id that does not exist -- same status, same body.
+//
+// Transfer ids are instance-wide serials, so anything that distinguishes the
+// two lets a caller with any write-scoped credential walk the id space and
+// read off which namespaces have a pending inbound transfer. A 403 does that
+// twice over: it confirms the row, and names the destination in its message.
+// A 404 whose body differs from a miss is still two answers.
+func TestTransferDecide_TellsANonDestinationNothing(t *testing.T) {
+	f := newTransferFixture(t)
+	f.repo("alice", "foo", "model")
+	aliceTok := f.token(f.alice, "write")
+	carol := f.mustUser(context.Background(), "carol", false)
+	carolTok := f.token(carol, "write")
+
+	resp := f.do("POST", "/api/repos/move", aliceTok, map[string]any{
+		"fromRepo": "alice/foo", "toRepo": "bob/foo", "type": "model",
+	})
+	if resp.status() != 202 {
+		t.Fatalf("move status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+	var pending struct {
+		TransferID int64 `json:"transfer_id"`
+	}
+	resp.json(t, &pending)
+	if pending.TransferID == 0 {
+		t.Fatal("move returned no transfer_id")
+	}
+
+	for _, action := range []string{"accept", "reject"} {
+		path := fmt.Sprintf("/api/v1/transfers/%d/%s", pending.TransferID, action)
+		missingPath := fmt.Sprintf("/api/v1/transfers/%d/%s", pending.TransferID+9999, action)
+		real := f.do("POST", path, carolTok, nil)
+		missing := f.do("POST", missingPath, carolTok, nil)
+		if real.status() != 404 {
+			t.Fatalf("%s of an existing transfer: status = %d, want 404 (body %s)",
+				action, real.status(), real.rec.Body.String())
+		}
+		if missing.status() != 404 {
+			t.Fatalf("%s of a missing transfer: status = %d, want 404 (body %s)",
+				action, missing.status(), missing.rec.Body.String())
+		}
+		if real.rec.Body.String() != missing.rec.Body.String() {
+			t.Fatalf("%s: the two 404s differ, so the id is still distinguishable:\n existing: %s\n  missing: %s",
+				action, real.rec.Body.String(), missing.rec.Body.String())
+		}
+	}
+
+	// The refused calls must not have consumed the pending transfer: bob
+	// can still accept it.
+	bobTok := f.token(f.bob, "write")
+	if got := f.do("POST", fmt.Sprintf("/api/v1/transfers/%d/accept", pending.TransferID), bobTok, nil); got.status() != 200 {
+		t.Fatalf("destination accept after refused probes: status = %d, body = %s",
+			got.status(), got.rec.Body.String())
+	}
+}
