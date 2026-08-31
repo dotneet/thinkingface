@@ -2565,7 +2565,9 @@ an ownership model and a force-unlock permission, none of which exist here.
 When none of the three `/api/v1/lfs/{repo_id}/...` endpoints pass either the signature or the
 permission check, they return **404 `not_found` (`object not found`)** regardless of whether the
 repository ID exists. Distinguishing 401 from 404 here would let scanning numeric IDs reveal how
-many repositories the instance has.
+many repositories the instance has. The same body is used when the repository *does* link the
+oid but the bytes are not in storage — a distinct "object \<oid\> not found" would let anyone
+who can name a repo id and a sha256 tell a registered object from an unlinked one.
 
 ### git over SSH
 
