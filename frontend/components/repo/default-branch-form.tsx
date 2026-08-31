@@ -42,11 +42,22 @@ export function DefaultBranchForm({
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
+  // Deleting a branch the picker was sitting on (RefsManager + router.refresh)
+  // leaves `selected` naming something that is gone: the <select> renders
+  // blank (no matching option) while still holding the old value, so Save
+  // posts a revision the server no longer has. Same class as the tag-rev
+  // fallback in refs-manager.tsx.
+  const effective = branches.includes(selected)
+    ? selected
+    : branches.includes(defaultBranch)
+      ? defaultBranch
+      : (branches[0] ?? "");
+
   async function handleSave() {
     setSaving(true);
     setError(null);
     setSaved(false);
-    const result = await updateRepo(kind, ns, name, { default_branch: selected });
+    const result = await updateRepo(kind, ns, name, { default_branch: effective });
     setSaving(false);
     if (!result.ok) {
       setError(errorMessage(t, result));
@@ -77,7 +88,7 @@ export function DefaultBranchForm({
         hint={t("repo.settings.defaultBranch.hint")}
       >
         <Select
-          value={selected}
+          value={effective}
           onChange={(e) => {
             setSelected(e.target.value);
             setSaved(false);
