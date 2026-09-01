@@ -1000,6 +1000,10 @@ func TestDecideTransfer_HidesTheDestinationFromOutsiders(t *testing.T) {
 			if absent.Code != real.Code {
 				t.Errorf("existing transfer -> %d, absent one -> %d; the ids are distinguishable", real.Code, absent.Code)
 			}
+			if absent.Body.String() != real.Body.String() {
+				t.Errorf("bodies differ, so the transfer id is still distinguishable:\n existing: %s\n  missing: %s",
+					real.Body.String(), absent.Body.String())
+			}
 		})
 	}
 }
