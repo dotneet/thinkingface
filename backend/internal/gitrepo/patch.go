@@ -123,8 +123,11 @@ type FileDiff struct {
 	// sizes below already carry everything the preamble would repeat.
 	Patch          string
 	PatchTruncated bool
-	// OldSize and Size are the blob sizes on each side, 0 where the path did
-	// not exist there. For an LFS pointer this is the pointer's own size.
+	// OldSize and Size are the sizes on each side, 0 where the path did not
+	// exist there. For an LFS file this is the size of the object the pointer
+	// names, not the ~130 bytes of the pointer blob: these are the only
+	// measure of how much changed on a row that carries no patch, and a row
+	// with no patch is exactly what LFS produces.
 	OldSize int64
 	Size    int64
 }

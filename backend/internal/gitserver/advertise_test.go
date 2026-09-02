@@ -11,7 +11,7 @@ import (
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
 )
 
-func newAdvertiseFixture(t *testing.T) (*Handler, string) {
+func newAdvertiseFixture(t *testing.T) (*Handler, string, string) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not installed")
@@ -21,28 +21,59 @@ func newAdvertiseFixture(t *testing.T) (*Handler, string) {
 	if err := manager.Init(storagePath, "main"); err != nil {
 		t.Fatalf("init bare repo: %v", err)
 	}
-	seedCommit(t, manager.Dir(storagePath))
-	return New(manager), storagePath
+	head := seedCommit(t, manager.Dir(storagePath))
+	return New(manager), storagePath, head
 }
 
+// TestAdvertiseRefsWritesTheAdvertisement covers the version a client gets
+// when it asked for none. It used to be v2 unconditionally; it has to be v0,
+// the only framing every client can read, because a v0 client handed a v2
+// capability list finds no refs in it and calls that an empty repository.
 func TestAdvertiseRefsWritesTheAdvertisement(t *testing.T) {
-	h, storagePath := newAdvertiseFixture(t)
+	h, storagePath, head := newAdvertiseFixture(t)
 
 	rec := httptest.NewRecorder()
-	if err := h.AdvertiseRefs(context.Background(), rec, storagePath, UploadPack); err != nil {
+	if err := h.AdvertiseRefs(context.Background(), rec, storagePath, UploadPack, ""); err != nil {
 		t.Fatalf("AdvertiseRefs: %v", err)
 	}
 	body := rec.Body.String()
 	if !strings.HasPrefix(body, "001e# service=git-upload-pack\n0000") {
 		t.Errorf("advertisement does not open with the service pkt-line and flush: %q", body)
 	}
-	// gitEnv frames every request as protocol v2, whose first response is
-	// the capability list rather than the ref list.
-	if !strings.Contains(body, "version 2") || !strings.Contains(body, "ls-refs") {
-		t.Errorf("advertisement is not a protocol v2 capability list: %q", body)
+	if !strings.Contains(body, head) || !strings.Contains(body, "refs/heads/main") {
+		t.Errorf("advertisement carries no refs for a client that asked for no protocol version: %q", body)
+	}
+	if strings.Contains(body, "version 2") {
+		t.Errorf("advertisement was framed as protocol v2 for a client that never asked: %q", body)
 	}
 	if got := rec.Header().Get("Content-Type"); got != "application/x-git-upload-pack-advertisement" {
 		t.Errorf("Content-Type = %q", got)
+	}
+}
+
+// TestAdvertiseRefsHonoursTheClientProtocolHeader is the other half: a client
+// that does send Git-Protocol: version=2 must still get v2, whose first
+// response is a capability list rather than the ref list.
+func TestAdvertiseRefsHonoursTheClientProtocolHeader(t *testing.T) {
+	h, storagePath, _ := newAdvertiseFixture(t)
+
+	rec := httptest.NewRecorder()
+	if err := h.AdvertiseRefs(context.Background(), rec, storagePath, UploadPack, "version=2"); err != nil {
+		t.Fatalf("AdvertiseRefs: %v", err)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "version 2") || !strings.Contains(body, "ls-refs") {
+		t.Errorf("advertisement is not a protocol v2 capability list: %q", body)
+	}
+
+	// A header the client did not spell the way git does must not reach the
+	// service's environment, and must not be able to force v2 either.
+	rec = httptest.NewRecorder()
+	if err := h.AdvertiseRefs(context.Background(), rec, storagePath, UploadPack, "version=2; rm -rf /"); err != nil {
+		t.Fatalf("AdvertiseRefs: %v", err)
+	}
+	if strings.Contains(rec.Body.String(), "version 2") {
+		t.Errorf("a malformed Git-Protocol header still selected v2: %q", rec.Body.String())
 	}
 }
 
@@ -53,13 +84,13 @@ func TestAdvertiseRefsWritesTheAdvertisement(t *testing.T) {
 // with the repository and the number of concurrent requests both chosen by
 // whoever hung up.
 func TestAdvertiseRefsHonoursACancelledContext(t *testing.T) {
-	h, storagePath := newAdvertiseFixture(t)
+	h, storagePath, _ := newAdvertiseFixture(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	rec := httptest.NewRecorder()
-	err := h.AdvertiseRefs(ctx, rec, storagePath, UploadPack)
+	err := h.AdvertiseRefs(ctx, rec, storagePath, UploadPack, "")
 	if err == nil {
 		t.Fatalf("AdvertiseRefs ran git for a cancelled request and returned success (body %q)", rec.Body.String())
 	}
@@ -81,10 +112,10 @@ func TestAdvertiseRefsHonoursACancelledContext(t *testing.T) {
 // the caller can answer 500 instead of the empty 200 that a git client reads
 // as "this repository has no refs".
 func TestAdvertiseRefsFailureWritesNothing(t *testing.T) {
-	h, _ := newAdvertiseFixture(t)
+	h, _, _ := newAdvertiseFixture(t)
 
 	rec := httptest.NewRecorder()
-	err := h.AdvertiseRefs(context.Background(), rec, "repos/does-not-exist", UploadPack)
+	err := h.AdvertiseRefs(context.Background(), rec, "repos/does-not-exist", UploadPack, "")
 	if err == nil {
 		t.Fatalf("AdvertiseRefs on a missing repository returned success")
 	}
@@ -103,10 +134,10 @@ func TestAdvertiseRefsFailureWritesNothing(t *testing.T) {
 // the status line is out there is no status left to change, and the caller
 // must log rather than try to write a second one.
 func TestAdvertiseRefsReportsAWriteFailureAsStarted(t *testing.T) {
-	h, storagePath := newAdvertiseFixture(t)
+	h, storagePath, _ := newAdvertiseFixture(t)
 
 	w := &failingWriter{ResponseRecorder: httptest.NewRecorder()}
-	err := h.AdvertiseRefs(context.Background(), w, storagePath, UploadPack)
+	err := h.AdvertiseRefs(context.Background(), w, storagePath, UploadPack, "")
 	if err == nil {
 		t.Fatalf("AdvertiseRefs ignored a failing response writer")
 	}

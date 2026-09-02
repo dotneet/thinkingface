@@ -223,7 +223,14 @@ func (r *Repo) ResetBranch(branch string, target plumbing.Hash) error {
 func (r *Repo) Branches() ([]string, error) { return r.refNames("refs/heads/") }
 func (r *Repo) Tags() ([]string, error)     { return r.refNames("refs/tags/") }
 
-// RefTarget returns the commit a branch or tag points at.
+// RefTarget returns the object a branch or tag ref names.
+//
+// It deliberately does NOT peel an annotated tag: a tag ref names a tag
+// object, exactly as git does, and the finalized contract
+// (docs/dev/api-contract.md, "Branch and tag writes") specifies that the
+// HF-compatible /api/…/refs response reports that tag object as
+// targetCommit while every revision lookup peels it. Resolve is the peeling
+// counterpart; use it wherever a commit is what is wanted.
 func (r *Repo) RefTarget(refName string) (plumbing.Hash, error) {
 	ref, err := r.repo.Reference(plumbing.ReferenceName(refName), true)
 	if err != nil {

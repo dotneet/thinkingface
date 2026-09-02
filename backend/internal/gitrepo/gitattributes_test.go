@@ -290,3 +290,105 @@ func TestShouldUseLFS_PathologicalDoubleStarStaysLinear(t *testing.T) {
 		t.Fatalf("matching a pathological pattern %d times did not finish in 10s", 3*reps)
 	}
 }
+
+// TestShouldUseLFS_UnsetAndUnspecifiedTakeAPathOutOfLFS is the regression test
+// for the two spellings git actually uses to exclude a path -- `-filter`
+// (unset) and `!filter` (unspecified), the pair git-lfs's own documentation
+// hands out as `path !text !filter !diff !merge`. Neither was recognised, so
+// the earlier `*.bin filter=lfs` went on winning: the contributor's git-lfs
+// honoured the exclusion and pushed a plain blob, while the same file uploaded
+// through the Web or `tf` API was routed to LFS. Same repository, same path,
+// two different storage layouts depending on the client.
+func TestShouldUseLFS_UnsetAndUnspecifiedTakeAPathOutOfLFS(t *testing.T) {
+	for _, exclusion := range []string{
+		"big.bin -filter -diff -merge",
+		"big.bin !text !filter !diff !merge",
+		"big.bin -filter",
+		"big.bin !filter",
+		// Still accepted: git strips the leading sign before it looks at the
+		// "=", so the value here is discarded and this means "-filter".
+		"big.bin -filter=lfs",
+	} {
+		rules := ParseGitAttributes([]byte("*.bin filter=lfs diff=lfs merge=lfs -text\n" + exclusion + "\n"))
+		if rules.ShouldUseLFS("big.bin", 1) {
+			t.Errorf("%q did not take big.bin out of LFS", exclusion)
+		}
+		if !rules.ShouldUseLFS("other.bin", 1) {
+			t.Errorf("%q leaked past its own pattern and took other.bin out of LFS", exclusion)
+		}
+	}
+}
+
+// TestShouldUseLFS_OnlyTheFilterAttributeCounts keeps the parser from reading
+// LFS routing out of the attributes that merely keep `filter=lfs` company, and
+// from treating a bare or foreign filter as if it were lfs.
+func TestShouldUseLFS_OnlyTheFilterAttributeCounts(t *testing.T) {
+	// diff=lfs alone says nothing about storage: no rule matches, so the size
+	// threshold decides.
+	rules := ParseGitAttributes([]byte("*.bin diff=lfs merge=lfs -text\n"))
+	if rules.ShouldUseLFS("model.bin", 1) {
+		t.Errorf("diff=lfs/merge=lfs alone routed a small file to LFS")
+	}
+	if !rules.ShouldUseLFS("model.bin", LFSInlineThreshold) {
+		t.Errorf("diff=lfs/merge=lfs alone suppressed the size threshold")
+	}
+
+	for _, attr := range []string{"filter", "filter=", "filter=crypt"} {
+		rules := ParseGitAttributes([]byte("*.bin filter=lfs\n*.bin " + attr + "\n"))
+		if rules.ShouldUseLFS("model.bin", 1) {
+			t.Errorf("%q was treated as filter=lfs", attr)
+		}
+	}
+}
+
+// TestShouldUseLFS_QuotedPatterns covers the pattern form git writes whenever
+// a path contains a space. Splitting the line on whitespace tore `"my
+// data.bin" filter=lfs` into the pattern `"my` and an attribute `data.bin"`,
+// which matched nothing at all -- the rule silently did not exist.
+func TestShouldUseLFS_QuotedPatterns(t *testing.T) {
+	rules := ParseGitAttributes([]byte("\"my data.bin\" filter=lfs diff=lfs -text\n"))
+	if !rules.ShouldUseLFS("my data.bin", 1) {
+		t.Errorf("a quoted pattern did not match the path it names")
+	}
+	if rules.ShouldUseLFS("data.bin", 1) {
+		t.Errorf("a quoted pattern matched a path that is only part of it")
+	}
+
+	// The exclusion form has to survive quoting too.
+	rules = ParseGitAttributes([]byte("*.bin filter=lfs\n\"my data.bin\" !filter\n"))
+	if rules.ShouldUseLFS("my data.bin", 1) {
+		t.Errorf("a quoted exclusion did not take the path out of LFS")
+	}
+
+	// An escaped quote inside the pattern, and an unterminated one, which is
+	// not something git writes and must not take the rest of the file with it.
+	rules = ParseGitAttributes([]byte("\"od\\\"d.bin\" filter=lfs\n\"unterminated.bin filter=lfs\n*.safetensors filter=lfs\n"))
+	if !rules.ShouldUseLFS(`od"d.bin`, 1) {
+		t.Errorf("an escaped quote inside a pattern was not unquoted")
+	}
+	if !rules.ShouldUseLFS("model.safetensors", 1) {
+		t.Errorf("an unterminated quote swallowed the rules after it")
+	}
+}
+
+// TestShouldUseLFS_QuotedPatterns_OctalAndControlEscapes covers the escapes
+// git's core.quotePath default actually produces beyond \" and \\: named
+// control escapes and \NNN octal bytes for anything outside ASCII. Without
+// these, a pattern over a non-ASCII path like "café.bin" -- written by git as
+// "caf\303\251.bin" -- decoded to literal backslash-digit text and matched
+// nothing.
+func TestShouldUseLFS_QuotedPatterns_OctalAndControlEscapes(t *testing.T) {
+	// "café.bin" in UTF-8 is 63 61 66 c3 a9 2e 62 69 6e; git quotes the
+	// non-ASCII 0xc3 and 0xa9 bytes as \303 and \251.
+	rules := ParseGitAttributes([]byte("\"caf\\303\\251.bin\" filter=lfs diff=lfs -text\n"))
+	if !rules.ShouldUseLFS("café.bin", 1) {
+		t.Errorf("an octal-escaped non-ASCII pattern did not match the path it names")
+	}
+
+	// A tab inside a path pattern is written as the named escape \t, not the
+	// literal byte.
+	rules = ParseGitAttributes([]byte("\"a\\tb.bin\" filter=lfs diff=lfs -text\n"))
+	if !rules.ShouldUseLFS("a\tb.bin", 1) {
+		t.Errorf("a \\t-escaped pattern did not match the path it names")
+	}
+}
