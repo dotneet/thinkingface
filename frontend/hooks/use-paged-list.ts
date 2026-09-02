@@ -7,6 +7,19 @@ import type { FailedApiResult } from "@/lib/api-error-message";
 /** The shape every `{ items, total }` listing endpoint answers with. */
 export type PagedListResponse = { items: unknown[]; total: number };
 
+/**
+ * How many consecutive renders with a reference-typed `deps` entry changing
+ * identity count as "this is a bug, not a fast typist". React's own limit is
+ * 50; this fires early enough to be the first thing in the console, and high
+ * enough that StrictMode's double render cannot reach it on its own.
+ */
+const UNSTABLE_DEPS_RENDERS = 5;
+
+/** Object, array or function — the values that are not stable by construction. */
+function isReference(value: unknown): boolean {
+  return (typeof value === "object" && value !== null) || typeof value === "function";
+}
+
 /** Element-wise `Object.is`, since `deps` is a fresh array on every render. */
 function sameDeps(a: React.DependencyList, b: React.DependencyList): boolean {
   return a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
@@ -103,7 +116,20 @@ export function usePagedList<R extends PagedListResponse>({
   describe,
 }: {
   pageSize: number;
-  /** Inputs other than `offset` that select what is listed. */
+  /**
+   * Inputs other than `offset` that select what is listed — a search term, an
+   * organisation name, a webhook id.
+   *
+   * **Every entry has to be a stable value**: a primitive, or an object
+   * identity that survives a re-render. The array itself is rebuilt on every
+   * render and is compared element-wise with `Object.is`, so a literal
+   * (`deps: [{ org, kind }]`, `deps: [tags.filter(...)]`, `deps: [() => …]`)
+   * never compares equal to the previous one — the rewind below then fires on
+   * every render and React kills the component with "Maximum update depth
+   * exceeded". Pass the primitives out of the object, or `useMemo` the value
+   * before it gets here. A dev-only guard names the offending index if this
+   * is got wrong.
+   */
   deps: React.DependencyList;
   fetchPage: (params: { limit: number; offset: number }) => Promise<ApiResult<R>>;
   /** Turns a failed result into the message the error state shows. */
@@ -122,9 +148,42 @@ export function usePagedList<R extends PagedListResponse>({
   // and immediately abandon it. React discards this render and re-runs the
   // component with the new state instead, so only one fetch is ever committed.
   const [shownDeps, setShownDeps] = useState<React.DependencyList>(deps);
-  if (!sameDeps(shownDeps, deps)) {
+  const depsChanged = !sameDeps(shownDeps, deps);
+  if (depsChanged) {
     setShownDeps(deps);
     if (offset !== 0) setOffset(0);
+  }
+
+  // Dev-only guard for the single way `deps` can be got wrong (see its doc
+  // comment): an entry that is a fresh object/array/function every render.
+  // React's own answer to that is "Maximum update depth exceeded" with a stack
+  // that points at React, so the call site never learns which entry it was.
+  // Counted only for entries that are *reference* types on both sides — a
+  // string changing five renders running is someone typing in a search box,
+  // which is exactly what this hook is for.
+  const unstableStreak = useRef(0);
+  if (process.env.NODE_ENV !== "production") {
+    const suspects = depsChanged
+      ? deps.reduce<number[]>((acc, value, i) => {
+          const previous = shownDeps[i];
+          // The entry that *changed*, and changed between two reference
+          // values: a stable object sitting next to a search term must not be
+          // blamed for the search term's keystrokes.
+          if (!Object.is(value, previous) && isReference(value) && isReference(previous)) {
+            acc.push(i);
+          }
+          return acc;
+        }, [])
+      : [];
+    unstableStreak.current = suspects.length > 0 ? unstableStreak.current + 1 : 0;
+    if (unstableStreak.current === UNSTABLE_DEPS_RENDERS) {
+      console.error(
+        `usePagedList: deps entr${suspects.length > 1 ? "ies" : "y"} ` +
+          `[${suspects.join(", ")}] changed identity on ${UNSTABLE_DEPS_RENDERS} renders in a ` +
+          "row, so the list rewinds to page 1 on every render and will hit React's update-depth " +
+          "limit. Pass a primitive, or memoise the value at the call site.",
+      );
+    }
   }
 
   // Both callbacks are re-created on every render by their call sites, and

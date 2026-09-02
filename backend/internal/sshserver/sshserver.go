@@ -75,10 +75,21 @@ type Options struct {
 	// connection, at whatever rate it opens connections.
 	AuthRateLimitPerMinute int
 	// MaxUnauthenticatedConns caps how many connections may sit in the
-	// pre-authentication phase at once. Zero means
+	// pre-authentication phase at once across the whole process. Zero means
 	// DefaultMaxUnauthenticatedConns. The slot is released as soon as a
 	// connection authenticates, so this never limits real work.
+	//
+	// This is the backstop, not the control that matters: on its own a global
+	// cap is reachable by one host, and a host that reaches it locks out
+	// everybody else for as long as it holds the connections open (which,
+	// because gliderlabs arms IdleTimeout only on the first read or write, is
+	// the whole idle timeout for a peer that never speaks).
 	MaxUnauthenticatedConns int
+	// MaxUnauthenticatedConnsPerAddr caps the same thing per source address.
+	// Zero means DefaultMaxUnauthenticatedConnsPerAddr. This is what keeps one
+	// noisy host from consuming the global ceiling, so it is clamped to
+	// MaxUnauthenticatedConns rather than allowed to exceed it.
+	MaxUnauthenticatedConnsPerAddr int
 }
 
 type Server struct {
@@ -114,7 +125,7 @@ func New(opts Options, keys Keys, git Git) (*Server, error) {
 		keys:    keys,
 		git:     git,
 		budget:  newAuthBudget(opts.AuthRateLimitPerMinute),
-		gate:    newConnGate(opts.MaxUnauthenticatedConns),
+		gate:    newConnGate(opts.MaxUnauthenticatedConns, opts.MaxUnauthenticatedConnsPerAddr),
 		touches: make(chan struct{}, touchConcurrency),
 	}
 	s.srv = &gssh.Server{
@@ -176,10 +187,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // Returning nil makes gliderlabs close the connection immediately, which is
 // the cheapest possible refusal.
 func (s *Server) admit(ctx gssh.Context, conn net.Conn) net.Conn {
-	slot, ok := s.gate.acquire()
+	addr := addrKey(conn.RemoteAddr())
+	slot, ok := s.gate.acquire(addr)
 	if !ok {
 		slog.Warn("ssh: refused a connection, too many unauthenticated connections in flight",
-			"remote", addrKey(conn.RemoteAddr()), "limit", cap(s.gate.sem))
+			"remote", addr, "limit", s.gate.limit, "limit_per_addr", s.gate.perAddr)
 		return nil
 	}
 	ctx.SetValue(ctxKeyConnSlot, slot)

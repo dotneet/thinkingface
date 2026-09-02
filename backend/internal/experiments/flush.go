@@ -362,6 +362,21 @@ type metricsTarget struct {
 // base file in that window would write points the new shard already holds --
 // with ingest ids this flush never saw, so nothing would deduplicate them --
 // and the chart would show every one of them twice, forever.
+//
+// **A chain of continuation files is only a chain while its base file exists.**
+// That is the invariant DetectLayouts enforces at the other end -- it drops a
+// project whose shards have no base, because readers walk the shards *after*
+// the base and a shard alone has no anchor -- and the writer has to agree with
+// it or the two disagree in the worst possible direction. The base file is not
+// this package's to keep: the Web UI's delete button, huggingface_hub's
+// delete_file, `tf up --delete` and a history rewrite can all remove it while
+// the shards stay. If the walk still ended on the highest shard then, every
+// flush would append to a file no reader opens, commit it, and let the syncer
+// delete the exp_points rows it had just "saved" -- points written into a
+// black hole, permanently, with the chart showing nothing and the state never
+// healing because the walk never returns to the base again. So when the base
+// is absent the target is the base, which restores the anchor on the next
+// commit and makes the surviving shards readable again.
 func (f *Flusher) resolveMetricsTarget(ctx context.Context, repo *store.Repo, gitRepo *gitrepo.Repo,
 	ref, project string) (metricsTarget, error) {
 
@@ -382,6 +397,11 @@ func (f *Flusher) resolveMetricsTarget(ctx context.Context, repo *store.Repo, gi
 		}
 	}
 
+	baseExists, err := f.pathExists(gitRepo, ref, base)
+	if err != nil {
+		return metricsTarget{}, err
+	}
+
 	active := base
 	n := 0
 	for n < maxMetricsShards {
@@ -393,7 +413,13 @@ func (f *Flusher) resolveMetricsTarget(ctx context.Context, repo *store.Repo, gi
 		if !exists {
 			return metricsTarget{active: active, next: candidate}, nil
 		}
-		active = candidate
+		// The walk still runs to the end of the numbering when the base is
+		// gone -- next has to name a file that does not exist, or a rotation
+		// would overwrite a surviving shard -- but active stays on the base,
+		// because a chain with no anchor is not one a reader will follow.
+		if baseExists {
+			active = candidate
+		}
 		n++
 	}
 	return metricsTarget{}, fmt.Errorf("metrics parquet %s already has %d continuation files", base, maxMetricsShards)

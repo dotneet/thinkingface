@@ -35,14 +35,11 @@ const DefaultGCGracePeriod = 24 * time.Hour
 // says. For a pack a compaction folded away they do not — compaction only
 // triggers past DefaultCompactionThreshold entries, which by definition took
 // time to accumulate, so those packs are already older than minAge when the
-// CAS drops them and this sweep would collect them seconds later, while an
-// instance that read the pre-compaction index is still applying them. The
-// grace for that case therefore cannot come from age; it comes from the caller
-// never sweeping a repository in the same run that compacted it (see
-// runCompact in cmd/thinkingface/walops.go). That costs nothing to persist,
-// which is the reason it is shaped that way rather than as an
-// "unreferenced since" timestamp in the bucket that two compactors would race
-// to write.
+// CAS drops them. Age therefore cannot supply their grace, and this function
+// does not try to: the caller supplies it, by passing the pre-compaction index
+// as extra protection. That is what the unexported form below takes and what
+// CompactAndSweep passes; this exported form protects nothing extra and is for
+// callers that did not just change the index.
 //
 // index.json is structurally out of reach: it lives under neither base/ nor
 // entries/, so it is never listed as a candidate.
@@ -59,6 +56,19 @@ const DefaultGCGracePeriod = 24 * time.Hour
 // sweep — the packs already deleted are returned so the caller can log what
 // happened — but never in the sense of deleting something referenced.
 func GCOrphans(ctx context.Context, st storage.Storage, storagePath string, minAge time.Duration) ([]string, error) {
+	return gcOrphans(ctx, st, storagePath, minAge, nil)
+}
+
+// gcOrphans is GCOrphans with a set of pack keys that must survive this sweep
+// whatever the current index says.
+//
+// protected is a *union* with the current index's own references, never a
+// replacement, so passing more can only ever delete less — which is why it is
+// safe for the caller to read its copy of the index before the listing that
+// rule 1 above orders so carefully.
+func gcOrphans(ctx context.Context, st storage.Storage, storagePath string,
+	minAge time.Duration, protected map[string]bool,
+) ([]string, error) {
 	candidates, err := listPacks(ctx, st, storagePath)
 	if err != nil {
 		return nil, err
@@ -77,18 +87,12 @@ func GCOrphans(ctx context.Context, st storage.Storage, storagePath string, minA
 		return nil, fmt.Errorf("%w: %s (%d packs present, sweep skipped)",
 			ErrIndexMissing, storagePath, len(candidates))
 	}
-	referenced := make(map[string]bool, len(idx.Entries)+1)
-	if idx.Base != "" {
-		referenced[storage.WALKey(storagePath, idx.Base)] = true
-	}
-	for _, entry := range idx.Entries {
-		referenced[storage.WALKey(storagePath, entry)] = true
-	}
+	referenced := referencedKeys(storagePath, idx)
 
 	cutoff := time.Now().Add(-minAge)
 	deleted := make([]string, 0)
 	for _, obj := range candidates {
-		if referenced[obj.Key] || obj.Updated.After(cutoff) {
+		if referenced[obj.Key] || protected[obj.Key] || obj.Updated.After(cutoff) {
 			continue
 		}
 		if err := st.Delete(ctx, obj.Key); err != nil {
@@ -97,6 +101,22 @@ func GCOrphans(ctx context.Context, st storage.Storage, storagePath string, minA
 		deleted = append(deleted, obj.Key)
 	}
 	return deleted, nil
+}
+
+// referencedKeys is the set of storage keys one index revision names. Kept in
+// one place because two callers depend on the two sets meaning the same thing:
+// the sweep's "still referenced" and CompactAndSweep's "referenced one run
+// ago" have to be comparable, or protecting the second protects the wrong
+// objects.
+func referencedKeys(storagePath string, idx *Index) map[string]bool {
+	keys := make(map[string]bool, len(idx.Entries)+1)
+	if idx.Base != "" {
+		keys[storage.WALKey(storagePath, idx.Base)] = true
+	}
+	for _, entry := range idx.Entries {
+		keys[storage.WALKey(storagePath, entry)] = true
+	}
+	return keys
 }
 
 // listPacks enumerates both pack prefixes in one sorted slice, so the sweep

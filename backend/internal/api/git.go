@@ -249,9 +249,10 @@ func (s *Server) handleLFSProxyUpload(w http.ResponseWriter, r *http.Request) {
 	// does not change shape with the storage driver, and it is a 404 because
 	// that is what every other refusal on this route answers.
 	//
-	// Verify (POST /api/v1/lfs/{repoID}/verify) is deliberately not gated the
-	// same way: it runs in both modes, since a directly-signed upload still has
-	// to be recorded against the repository.
+	// handleLFSProxyDownload is gated identically, for the same reason in the
+	// other direction. Verify (POST /api/v1/lfs/{repoID}/verify) is
+	// deliberately not gated: it runs in both modes, since a directly-signed
+	// upload still has to be recorded against the repository.
 	if s.storage.SupportsSignedURL() {
 		writeLFSError(w, http.StatusNotFound,
 			"this instance transfers LFS objects directly to object storage; use the upload href from the batch response")
@@ -346,6 +347,25 @@ func (s *Server) handleLFSProxyUpload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLFSProxyDownload(w http.ResponseWriter, r *http.Request) {
 	repoID, oid, ok := s.lfsProxyTarget(w, r)
 	if !ok {
+		return
+	}
+	// Gated exactly as handleLFSProxyUpload is, and for the same reason:
+	// downloadAction mints a proxy href only when the driver cannot sign one,
+	// so in a real GCS deployment no client is ever given this URL -- the
+	// batch response names the bucket, and resolve redirects to it rather than
+	// here. Left answering anyway, it was a worse affordance than the
+	// upload half -- it takes no token at all, since the fallback below asks
+	// only that the repository link the oid, and both repoID and oid are
+	// public -- so an anonymous caller could stream whole objects through this
+	// process, repeatedly and concurrently, converting the signed-URL offload
+	// the deployment exists for back into API egress and CPU.
+	//
+	// The emulator (SupportsSignedURL() == false) is untouched: it is the only
+	// mode in which this href is minted, and the only mode `make up` and the
+	// E2E suite run in.
+	if s.storage.SupportsSignedURL() {
+		writeLFSError(w, http.StatusNotFound,
+			"this instance transfers LFS objects directly from object storage; use the download href from the batch response")
 		return
 	}
 	// The signed href is only ever handed out for an object the batch

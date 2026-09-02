@@ -23,16 +23,18 @@ deliberate design goal.
   *live* `lfs/`/`blobs/` objects get deleted is reference-counted GC
   (`thinkingface gc`), never a bucket lifecycle rule keyed on object age — but
   because the bucket has versioning enabled, *every* delete this system makes
-  only turns an object noncurrent, so three lifecycle rules prune those
-  noncurrent versions and make the deletes actually free storage:
-  `var.lfs_blobs_noncurrent_retention_days` (default 30 days, `lfs/`/`blobs/`,
-  what `thinkingface gc` deletes), `var.tmp_uploads_noncurrent_retention_days`
-  (default 1 day, `tmp/uploads/`, the LFS promote handler's staging copy of
-  every uploaded object — without it each push was billed twice forever) and
+  only turns an object noncurrent, so lifecycle rules have to prune those
+  noncurrent versions for the deletes to actually free storage. Two do it by
+  noncurrent age: `var.lfs_blobs_noncurrent_retention_days` (default 30 days,
+  `lfs/`/`blobs/`, what `thinkingface gc` deletes) and
   `var.wal_pack_noncurrent_retention_days` (default 30 days, `wal/**/*.pack`,
   the packs WAL compaction supersedes — matched by suffix precisely so
-  `index.json` generations stay untouched). Versioning and soft delete
-  otherwise stay purely as a safety net against operator error. The bucket
+  `index.json` generations stay untouched). `tmp/uploads/` is covered by its
+  own `var.tmp_uploads_retention_days` rule (default 1 day), which sets no
+  `with_state` and therefore matches live *and* archived objects: the same
+  window collects both the orphan of a failed upload and the noncurrent
+  staging copy the promote handler's delete leaves behind. Versioning and soft
+  delete otherwise stay purely as a safety net against operator error. The bucket
   also carries `lifecycle { prevent_destroy = true }`, so tearing it down on
   purpose means removing that block first
 - `google_artifact_registry_repository.images` — Docker repo for
@@ -105,7 +107,7 @@ domain strategy for your environment.
 | Concurrency | 40 (`max_instance_request_concurrency`) | The default of 80 is too many for git processes — memory is the limiting factor |
 | min/max instances | 1 / `var.api_max_instances` (default 4; always 1 when `database_backend = "sqlite"`) | min=1 keeps the cache warm and avoids cold starts; max is also pinned to 1 for sqlite since Litestream assumes a single writer |
 | Request timeout | 3600s | For large clones |
-| Health probes | startup + liveness `GET /healthz` (liveness: 30s period, 6 failures ≈ 3 min) | `min_instance_count = 1` with `cpu_idle = false` means nothing ever recycles a wedged instance on its own: 40 stuck `git-upload-pack` children exhaust concurrency while the listener stays open, and Cloud Run keeps routing to it. `/healthz` is answered in-process and touches neither the database nor the bucket, deliberately — a liveness probe that failed on a Cloud SQL blip would restart the whole service at once. The margins are wide enough that serving an hour-long clone never looks like a wedge |
+| Health probes | startup + liveness TCP on 8080 (liveness: 30s period, 6 failures ≈ 3 min) | `min_instance_count = 1` with `cpu_idle = false` means nothing ever recycles an instance that has stopped serving. These detect one thing — the listener still accepts — which catches a dead accept loop or a container that never came up, but **not** concurrency saturation (40 stuck `git-upload-pack` children leave the listener perfectly healthy; that would need a saturation metric this config does not have). TCP rather than HTTP because the port is named `h2c`, so Cloud Run runs the service HTTP/2 end-to-end and restricts HTTP probes there — an apply-time constraint `terraform validate` cannot see, whose failure mode is "no revision ever goes ready" or a restart loop. Neither probe touches the database or the bucket: a Cloud SQL blip must not restart the service. `/healthz` remains the container's Dockerfile HEALTHCHECK and the endpoint for an external uptime check |
 | `GIT_ROOT` | `/tmp/git` | tmpfs. **A warm cache, not the source of truth** — the source of truth is the WAL in GCS |
 | `TF_VIEWER_CACHE_DIR` | `/tmp/cache` | tmpfs. Scratch space for WAL compaction only — the parquet viewer no longer caches to disk (it reads via storage range requests, see `TF_VIEWER_METADATA_CACHE_BYTES`) |
 

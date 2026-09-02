@@ -24,7 +24,16 @@ import (
 //   - a cap on concurrent *unauthenticated* connections bounds what a peer can
 //     tie up before proving who it is. The slot is released the moment
 //     authentication succeeds, so a long clone never occupies it, and this
-//     limit is invisible to legitimate use.
+//     limit is invisible to legitimate use. It is two caps, not one, and the
+//     per-address half is the one that does the work: a single process-wide
+//     semaphore turns the fix into a cheaper denial of service than the
+//     problem it fixed, because gliderlabs arms IdleTimeout only on the first
+//     read or write, so one host that opens the whole ceiling's worth of TCP
+//     connections and then says nothing holds every slot for the full idle
+//     timeout and locks the entire fleet out at admit. Bounding per address
+//     means that host exhausts its own share and nobody else's; the global
+//     ceiling is then only a backstop against a distributed flood and is set
+//     high enough that one peer cannot reach it.
 //
 // Both are per process and in memory, for the same reason ratelimit.go gives:
 // a shared counter would put a database round trip on the exact path an
@@ -39,12 +48,20 @@ const (
 	// authBucketIdle bounds the map under a spray of distinct source
 	// addresses: an untouched bucket is dropped after this.
 	authBucketIdle = 10 * time.Minute
-	// DefaultMaxUnauthenticatedConns is the cap applied when Options leaves
-	// it at zero. Well above any plausible burst of real clients — a client
-	// holds a slot only for the key exchange and its first successful auth —
-	// and far below what an unbounded accept loop would let a single peer
-	// pin.
-	DefaultMaxUnauthenticatedConns = 64
+	// DefaultMaxUnauthenticatedConns is the process-wide cap applied when
+	// Options leaves it at zero. It is a backstop against a distributed
+	// flood, not the primary control, so it is deliberately far above what
+	// one address can hold (DefaultMaxUnauthenticatedConnsPerAddr): a limit a
+	// single peer can reach is a limit a single peer can use to lock everyone
+	// else out.
+	DefaultMaxUnauthenticatedConns = 512
+	// DefaultMaxUnauthenticatedConnsPerAddr is the per-source-address cap
+	// applied when Options leaves it at zero. This is the control that stops
+	// one host starving the fleet. A real client holds a slot only for the
+	// key exchange and its first successful authentication, so even a person
+	// running several clones at once stays well inside it; a host that sits
+	// on more than this is not doing anything a git client does.
+	DefaultMaxUnauthenticatedConnsPerAddr = 8
 	// touchConcurrency bounds the fire-and-forget "record this key was used"
 	// writes. Without a bound, a burst of sessions is a burst of unbounded
 	// goroutines each holding a database connection.
@@ -157,26 +174,62 @@ func (b *authBudget) sweepLocked(now time.Time) {
 }
 
 // connGate caps how many connections may be in the pre-authentication phase at
-// once. A non-blocking acquire is the point: queueing would make the queue the
-// resource being exhausted.
+// once, both per source address and across the process. A non-blocking acquire
+// is the point: queueing would make the queue the resource being exhausted.
+//
+// A counter map rather than a semaphore channel, because the per-address
+// dimension needs a count it can compare against a limit. Entries exist only
+// while an address holds a slot and are removed on the last release, so a
+// spray of distinct source addresses cannot grow the map beyond `limit`
+// entries.
 type connGate struct {
-	sem chan struct{}
+	mu      sync.Mutex
+	held    map[string]int
+	total   int
+	limit   int
+	perAddr int
 }
 
-func newConnGate(limit int) *connGate {
+func newConnGate(limit, perAddr int) *connGate {
 	if limit <= 0 {
 		limit = DefaultMaxUnauthenticatedConns
 	}
-	return &connGate{sem: make(chan struct{}, limit)}
+	if perAddr <= 0 {
+		perAddr = DefaultMaxUnauthenticatedConnsPerAddr
+	}
+	if perAddr > limit {
+		// A per-address cap above the global one is a misconfiguration that
+		// silently disables the per-address dimension; clamp rather than
+		// refuse, since SSH is optional and a bad number here must not stop
+		// the server from starting.
+		perAddr = limit
+	}
+	return &connGate{held: map[string]int{}, limit: limit, perAddr: perAddr}
 }
 
-// acquire takes a slot, or reports false immediately when the gate is full.
-func (g *connGate) acquire() (*connSlot, bool) {
-	select {
-	case g.sem <- struct{}{}:
-		return &connSlot{gate: g}, true
-	default:
+// acquire takes a slot for addr, or reports false immediately when either the
+// address's own share or the process-wide ceiling is full.
+func (g *connGate) acquire(addr string) (*connSlot, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.total >= g.limit || g.held[addr] >= g.perAddr {
 		return nil, false
+	}
+	g.total++
+	g.held[addr]++
+	return &connSlot{gate: g, addr: addr}, true
+}
+
+func (g *connGate) put(addr string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.total > 0 {
+		g.total--
+	}
+	if n := g.held[addr] - 1; n > 0 {
+		g.held[addr] = n
+	} else {
+		delete(g.held, addr)
 	}
 }
 
@@ -184,6 +237,7 @@ func (g *connGate) acquire() (*connSlot, bool) {
 // to do it: authentication succeeding, and the connection closing.
 type connSlot struct {
 	gate *connGate
+	addr string
 	once sync.Once
 }
 
@@ -191,12 +245,7 @@ func (s *connSlot) release() {
 	if s == nil {
 		return
 	}
-	s.once.Do(func() {
-		select {
-		case <-s.gate.sem:
-		default:
-		}
-	})
+	s.once.Do(func() { s.gate.put(s.addr) })
 }
 
 // guardedConn releases the connection's gate slot when the connection closes,

@@ -103,6 +103,37 @@ func shardProject(stem, dir, repoName string) (string, bool) {
 			return dir, true
 		}
 		return repoName, true
+
+	// The root-level arm adopts by name alone, and it is worth being explicit
+	// that this was chosen rather than overlooked. A dataset repository holding
+	// train.parquet and train.part0001.parquet side by side used to yield two
+	// unrelated "projects" and now yields one, whose chart scans the second
+	// file as metric rows.
+	//
+	// It is still the right trade:
+	//
+	//   - The root arm below in DetectLayouts already treats *any* root-level
+	//     .parquet that is not an aux table as a project's metrics file, so
+	//     train.parquet was being read as metric rows before shards existed.
+	//     This merges two heuristic guesses into one; it does not newly adopt a
+	//     third-party file into a domain it was outside of.
+	//   - Refusing it would cost real data. This package writes root-level
+	//     shards: a trackio local export names its metrics {project}.parquet,
+	//     that is the base resolveMetricsTarget picks, and rotation continues it
+	//     as {project}.part0001.parquet. A reader that would not follow those is
+	//     the exact silent black hole the base-file invariant below exists to
+	//     prevent, in the writer's own supported layout.
+	//   - The marker is distinctive enough to make a collision unlikely: a dot,
+	//     no dash, at least four digits. Spark writes part-00000, HF datasets
+	//     write train-00000-of-00001; neither matches.
+	//   - And the damage if one did collide is bounded: an adopted file's rows
+	//     are read like any other metrics rows, and scanMetricRows drops every
+	//     row of a file with no run column, so a table that is not metrics
+	//     contributes nothing to the chart.
+	//
+	// The name is all there is to go on -- nothing in the repository records
+	// which file continues which -- so a stricter rule would have to be a marker
+	// inside the parquet, which is a format change, not a tweak here.
 	case dir == "" && !hasAuxSuffix(strings.ToLower(stem)):
 		return stem, true
 	}
@@ -205,6 +236,16 @@ func DetectLayouts(paths []string, repoName string) []Layout {
 		// the same thing one step further along, and is dropped with it:
 		// readers walk the shards *after* the base, so a shard on its own has
 		// no anchor to be read relative to.
+		//
+		// This is half of an invariant the writer holds up too: a chain of
+		// continuation files is only a chain while its base file exists. The
+		// base can be deleted out from under the shards (the Web UI, HF's
+		// delete_file, `tf up --delete`, a history rewrite), and dropping the
+		// project here would be a silent data black hole if the flusher went
+		// on appending to the highest shard -- so flush.go's
+		// resolveMetricsTarget targets the *base* whenever it is missing,
+		// which re-anchors the chain and makes these shards readable again.
+		// Change one end and you must change the other.
 		if l.MetricsPath == "" {
 			continue
 		}

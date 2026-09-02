@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -143,7 +145,13 @@ func (m *Manager) AdoptLocal(ctx context.Context, storagePath string) error {
 //
 // The `scanning` flag is what the goroutine costs: without it a pass slower
 // than evictScanInterval would be joined by a second one walking the same
-// tree and racing it to the same RemoveAll.
+// tree and racing it to the same RemoveAll. The recover is the other thing it
+// costs: on the request goroutine this work sat under middleware.Recoverer
+// (internal/api/server.go), and a panic in it was one 500. Detached, nothing
+// is above it, so the same panic would take the process down and every
+// in-flight request with it. The work -- WalkDir, dirSize, RemoveAll -- is
+// unlikely to panic; the point is that the blast radius of it doing so must
+// not have grown just because the work moved off the request path.
 func (m *Manager) triggerEvict() {
 	w := m.wal
 	if w == nil || w.cacheBytes <= 0 {
@@ -168,8 +176,22 @@ func (m *Manager) triggerEvict() {
 			w.lastScan = time.Now()
 			w.mu.Unlock()
 		}()
+		// Innermost, so the pass is already unwound when the flag above is
+		// cleared and the next trigger finds a consistent walBackend.
+		defer recoverEvictPanic()
 		m.evictOnce()
 	}()
+}
+
+// recoverEvictPanic keeps a panic in the detached eviction pass from killing
+// the process. Dropping the pass is the right response: the byte budget it
+// enforces is a steady-state property, so the next trigger picks it up, and
+// nothing a caller is waiting on depends on it.
+func recoverEvictPanic() {
+	if r := recover(); r != nil {
+		slog.Error("gitrepo: the cache eviction pass panicked and was dropped",
+			"panic", r, "stack", string(debug.Stack()))
+	}
 }
 
 // evictOnce keeps the materialised cache under its byte budget. It only ever

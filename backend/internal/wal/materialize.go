@@ -133,7 +133,27 @@ func MaterializeWith(ctx context.Context, st storage.Storage, gitDir, storagePat
 
 	local, haveState := readLocalState(gitDir)
 	if haveState && local.Generation == gen && isBareRepo(gitDir) {
-		return nil // cache hit: generation equality is the whole check (§4)
+		// Cache hit: generation equality is the whole check (§4) for the
+		// object database and the refs, because both are derived from the
+		// index and the index is what the generation identifies.
+		//
+		// HEAD is the exception, and it is why this is not a bare `return
+		// nil`. The index does not carry the symbolic ref, so HEAD is
+		// whatever alignHEAD made of it for the *first* caller that warmed
+		// this copy — and on a cold instance that caller is almost always one
+		// that does not know the default branch: a download or a UI page
+		// load reaches gitrepo.Manager.Open, which materialises with
+		// Options{}. alignHEAD then guesses (refs/heads/main, or the
+		// alphabetically first branch), the state file is stamped at that
+		// generation, and the `git clone` that arrives afterwards *with* the
+		// configured branch returns right here and checks out the guess.
+		// Read-before-clone is the common ordering, so repairing only on the
+		// rebuild path would leave the wrong HEAD in place indefinitely.
+		//
+		// Repairing here costs one symbolic-ref read on a path that already
+		// stats the directory, and it converges no matter which caller warms
+		// the copy first.
+		return repairHEAD(ctx, gitDir, opts.DefaultBranch)
 	}
 
 	// Anything we cannot reason about precisely — missing or corrupt state,
@@ -393,6 +413,31 @@ func listRefs(ctx context.Context, gitDir string) (map[string]string, error) {
 // alphabetically first branch — and it is wrong for a repository whose default
 // branch is neither. That is tolerable there (nothing clones from a scratch
 // directory) and is why the parameter exists for the paths that serve clients.
+// repairHEAD points an already-current local copy's HEAD at the configured
+// default branch when it is not there already.
+//
+// It is a no-op when the caller does not know the branch: there is nothing
+// better to say than whatever guess alignHEAD already made, and overwriting it
+// from here would only replace one guess with another. It is also a no-op when
+// HEAD already agrees, which is the overwhelmingly common case — so the cache
+// hit stays one cheap read of a file git keeps in the repository root.
+func repairHEAD(ctx context.Context, gitDir, defaultBranch string) error {
+	if defaultBranch == "" {
+		return nil
+	}
+	want := "refs/heads/" + defaultBranch
+	// --quiet: a detached HEAD is not an error here, it is simply a HEAD that
+	// disagrees, and the fix is the same.
+	if out, err := runGit(ctx, gitDir, "symbolic-ref", "--quiet", "HEAD"); err == nil &&
+		strings.TrimSpace(out) == want {
+		return nil
+	}
+	if _, err := runGit(ctx, gitDir, "symbolic-ref", "HEAD", want); err != nil {
+		return fmt.Errorf("align HEAD of %s to %s: %w", gitDir, want, err)
+	}
+	return nil
+}
+
 func alignHEAD(ctx context.Context, gitDir string, refs map[string]string, defaultBranch string) error {
 	target := ""
 	if defaultBranch != "" {

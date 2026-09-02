@@ -80,8 +80,8 @@ func TestLoad_WALModeRequiresHooksPath(t *testing.T) {
 // that lost hooks/pre-receive, a typo in the path, or a bind mount shadowing
 // the directory would ack every push with no WAL entry and no CAS — and the
 // loss would only surface at the next Materialize, where writeRefs deletes the
-// refs those pushes created. Startup is the last honest place to catch it.
-func TestLoad_WALModeRequiresAnExecutablePreReceiveHook(t *testing.T) {
+// refs those pushes created.
+func TestCheckPreReceiveHook_RejectsAHookGitWouldSilentlySkip(t *testing.T) {
 	cases := []struct {
 		name string
 		dir  func(t *testing.T) string
@@ -102,12 +102,9 @@ func TestLoad_WALModeRequiresAnExecutablePreReceiveHook(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			setBase(t)
-			t.Setenv("TF_WAL_MODE", "authoritative")
-			t.Setenv("TF_GIT_HOOKS_PATH", tc.dir(t))
-			_, err := Load()
+			err := CheckPreReceiveHook(tc.dir(t))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("Load() err = %v, want it to mention %q", err, tc.want)
+				t.Fatalf("CheckPreReceiveHook() err = %v, want it to mention %q", err, tc.want)
 			}
 		})
 	}
@@ -115,21 +112,34 @@ func TestLoad_WALModeRequiresAnExecutablePreReceiveHook(t *testing.T) {
 
 // Owner-only 0700 is a correctly locked-down hook, not a broken one: which of
 // the three execute bits applies is a property of the deployment.
-func TestLoad_PreReceiveHookAcceptsOwnerOnlyExecute(t *testing.T) {
-	setBase(t)
-	t.Setenv("TF_WAL_MODE", "authoritative")
-	t.Setenv("TF_GIT_HOOKS_PATH", hooksDir(t, 0o700))
-	if _, err := Load(); err != nil {
-		t.Fatalf("Load: %v", err)
+func TestCheckPreReceiveHook_AcceptsOwnerOnlyExecute(t *testing.T) {
+	if err := CheckPreReceiveHook(hooksDir(t, 0o700)); err != nil {
+		t.Fatalf("CheckPreReceiveHook: %v", err)
 	}
 }
 
-// WALMode=off wires no hook at all, so the directory is never consulted.
-func TestLoad_WALModeOffDoesNotCheckTheHook(t *testing.T) {
+// The break-glass regression: this check used to run inside Load, which every
+// subcommand calls — so a bind mount shadowing the hooks directory, exactly
+// the incident an operator reaches for `thinkingface admin` to recover from,
+// made the password reset refuse to start for a reason that has nothing to do
+// with resetting a password. Load must be satisfied by the path being set; the
+// filesystem is runServe's business.
+func TestLoad_DoesNotGateEverySubcommandOnTheHookFile(t *testing.T) {
 	setBase(t)
-	t.Setenv("TF_GIT_HOOKS_PATH", filepath.Join(t.TempDir(), "does-not-exist"))
-	if _, err := Load(); err != nil {
-		t.Fatalf("Load: %v", err)
+	t.Setenv("TF_WAL_MODE", "authoritative")
+	broken := hooksDir(t, 0) // the directory is there, the hook is not
+	t.Setenv("TF_GIT_HOOKS_PATH", broken)
+
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v, the break-glass `admin` path is gated on a hook it never runs", err)
+	}
+	if c.GitHooksPath != broken {
+		t.Fatalf("GitHooksPath = %q, want %q", c.GitHooksPath, broken)
+	}
+	// And the check itself still refuses, so runServe keeps failing closed.
+	if err := CheckPreReceiveHook(c.GitHooksPath); err == nil {
+		t.Fatal("CheckPreReceiveHook accepted a hooks directory with no hook in it")
 	}
 }
 

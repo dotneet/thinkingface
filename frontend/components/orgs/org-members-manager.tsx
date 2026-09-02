@@ -40,10 +40,13 @@ export function OrgMembersManager({
   viewer: string;
 }) {
   const t = useT();
-  const [actionError, setActionError] = useState<string | null>(null);
-  // A failed removal is reported inside the confirmation dialog, which stays
-  // open until the request finishes; the page-level Alert below the table
-  // carries the failures that have no dialog (a role change).
+  // Every write on this screen (remove, role change) is started from a
+  // confirmation dialog and reported back inside it. That is the only place
+  // the message renders, so both dialogs ignore a close while their request is
+  // in flight — dismissing one mid-request would leave the failure with
+  // nowhere to appear, and the <select> silently snapping back after refresh()
+  // is not a report. There is deliberately no page-level fallback Alert: with
+  // the dialog held open, the error is always on screen.
   const [dialogError, setDialogError] = useState<string | null>(null);
   // Which member has a write in flight, and which one — the Remove button used
   // to say "Removing…" while a role change was running, because both wrote the
@@ -108,14 +111,12 @@ export function OrgMembersManager({
     // Clear the previous failure: both dialogs share the slot, and a stale
     // error under a different name reads as this change having already failed.
     setDialogError(null);
-    setActionError(null);
     setConfirmRole({ member, next });
   }
 
   async function applyRoleChange(member: OrgMember, next: OrgRole) {
     setBusy({ username: member.username, kind: "role" });
     setDialogError(null);
-    setActionError(null);
     const result = await updateMemberRole(org, member.username, next);
     setBusy(null);
     if (!result.ok) {
@@ -136,7 +137,6 @@ export function OrgMembersManager({
   async function handleRemove(member: OrgMember) {
     setBusy({ username: member.username, kind: "remove" });
     setDialogError(null);
-    setActionError(null);
     const result = await removeMember(org, member.username);
     setBusy(null);
     if (!result.ok) {
@@ -289,15 +289,13 @@ export function OrgMembersManager({
 
       <PaginationControls pager={pager} />
 
-      {/* Below the table, not above it: a failed role change or removal
-          reported here used to push every remaining row down by the Alert's
-          height, right where the next Role select or Remove button was
-          (DESIGN.md §8.1). */}
-      {actionError && <Alert tone="negative">{actionError}</Alert>}
-
       <ConfirmDialog
         open={confirmTarget !== null}
+        // Ignored while the DELETE is in flight: Escape, a backdrop click or
+        // the header × would read as a cancel for a request that is still on
+        // its way, and would take the only place its failure renders with it.
         onClose={() => {
+          if (busy) return;
           setConfirmTarget(null);
           setDialogError(null);
         }}
@@ -323,7 +321,11 @@ export function OrgMembersManager({
 
       <ConfirmDialog
         open={confirmRole !== null}
+        // Same guard as the removal dialog above: a PATCH dismissed mid-flight
+        // would 403 into a dialog that is no longer mounted, leaving the user
+        // with a <select> that quietly snaps back and no explanation.
         onClose={() => {
+          if (busy) return;
           setConfirmRole(null);
           setDialogError(null);
         }}

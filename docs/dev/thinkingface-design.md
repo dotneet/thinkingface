@@ -355,6 +355,13 @@ purely a buffer — the source of truth is always the Parquet inside the dataset
   noticing it. `_ingest_id` carries over into the new file, so a crash between the commit and the
   delete still dedupes. Rotation only ever adds files, so `metrics.parquet` always remains and
   anything keying off that name (`syncer.looksLikeExperiment`) is unaffected.
+- **A chain of continuation files is only a chain while its base exists.** `DetectLayouts` drops a
+  project whose shards have no base file — the shards are read relative to the base, so on their
+  own they have no anchor. A user can delete the base (the Web UI, `delete_file`, `tf up --delete`,
+  a history rewrite), and the writer has to agree with the reader about that or it would keep
+  appending to a file nothing reads. So `resolveMetricsTarget` checks the base first: when it is
+  gone the next flush targets the base rather than the highest shard, which re-anchors the chain
+  and makes the surviving shards readable again.
 - The commit is created server-side by `gitrepo.Repo.Commit` (there's a single write path: git).
   `*.parquet` is LFS-targeted by default, so the payload is placed in GCS and an LFS pointer is
   committed. Optimistic locking via `PathPrecondition` serializes concurrent pushes and flushes

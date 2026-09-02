@@ -92,15 +92,15 @@ func TestAuthBudget_DropsIdleBuckets(t *testing.T) {
 // ------------------------------------------------------------- conn gate
 
 func TestConnGate_RefusesBeyondItsLimitAndRecoversOnRelease(t *testing.T) {
-	g := newConnGate(2)
-	first, ok := g.acquire()
+	g := newConnGate(2, 2)
+	first, ok := g.acquire("10.0.0.1")
 	if !ok {
 		t.Fatal("the first slot was refused")
 	}
-	if _, ok := g.acquire(); !ok {
+	if _, ok := g.acquire("10.0.0.2"); !ok {
 		t.Fatal("the second slot was refused")
 	}
-	if _, ok := g.acquire(); ok {
+	if _, ok := g.acquire("10.0.0.3"); ok {
 		t.Fatal("a third slot was handed out past a limit of 2")
 	}
 
@@ -108,11 +108,75 @@ func TestConnGate_RefusesBeyondItsLimitAndRecoversOnRelease(t *testing.T) {
 	// both do it — and must free exactly one slot.
 	first.release()
 	first.release()
-	if _, ok := g.acquire(); !ok {
+	if _, ok := g.acquire("10.0.0.3"); !ok {
 		t.Fatal("releasing a slot did not free it")
 	}
-	if _, ok := g.acquire(); ok {
+	if _, ok := g.acquire("10.0.0.4"); ok {
 		t.Fatal("a double release freed two slots")
+	}
+}
+
+// The finding this pins: a gate with only a process-wide dimension is a
+// cheaper denial of service than the unbounded accept loop it replaced. One
+// host opens the whole ceiling's worth of connections and holds them — and
+// because gliderlabs arms IdleTimeout only on the first read or write, a peer
+// that never speaks holds them for the entire idle timeout — after which every
+// other client on the fleet is refused at admit. The per-address dimension is
+// what makes that impossible: a flooding address exhausts its own share.
+func TestConnGate_OneAddressCannotStarveAnother(t *testing.T) {
+	const global, perAddr = 8, 2
+	g := newConnGate(global, perAddr)
+
+	held := 0
+	for i := 0; i < global; i++ {
+		if _, ok := g.acquire("10.0.0.1"); ok {
+			held++
+		}
+	}
+	if held != perAddr {
+		t.Fatalf("one address held %d of %d slots, want at most its own share of %d",
+			held, global, perAddr)
+	}
+	// The point of all of it: somebody else can still get in.
+	if _, ok := g.acquire("10.0.0.2"); !ok {
+		t.Fatal("an unrelated address was refused after one host flooded the gate: " +
+			"the gate locks the fleet out, which is worse than the unbounded accept loop it replaced")
+	}
+}
+
+// A per-address cap above the global one would silently disable the dimension
+// that matters, so it is clamped rather than honoured.
+func TestConnGate_ClampsAPerAddressCapAboveTheGlobalOne(t *testing.T) {
+	g := newConnGate(2, 100)
+	for i := 0; i < 2; i++ {
+		if _, ok := g.acquire("10.0.0.1"); !ok {
+			t.Fatalf("slot %d was refused below the global limit", i)
+		}
+	}
+	if _, ok := g.acquire("10.0.0.1"); ok {
+		t.Fatal("one address exceeded the global limit")
+	}
+}
+
+// Slots come back, so the map that carries the per-address counts is bounded
+// by the number of connections in flight rather than by the number of distinct
+// addresses that have ever connected — which is what a spray of source
+// addresses would otherwise grow without bound.
+func TestConnGate_ForgetsAnAddressOnceItHoldsNothing(t *testing.T) {
+	g := newConnGate(8, 2)
+	slot, ok := g.acquire("10.0.0.1")
+	if !ok {
+		t.Fatal("the first slot was refused")
+	}
+	slot.release()
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.held) != 0 {
+		t.Errorf("held = %v, want an address that holds nothing to be forgotten", g.held)
+	}
+	if g.total != 0 {
+		t.Errorf("total = %d, want 0", g.total)
 	}
 }
 
@@ -204,8 +268,9 @@ func TestAuthenticate_StopsQueryingTheDatabaseOnceTheBudgetIsSpent(t *testing.T)
 // refuse everything afterwards.
 func TestAdmit_ReleasesTheSlotOnceAuthenticationSucceeds(t *testing.T) {
 	h := newHarnessWith(t, Options{
-		IdleTimeout:             30 * time.Second,
-		MaxUnauthenticatedConns: 1,
+		IdleTimeout:                    30 * time.Second,
+		MaxUnauthenticatedConns:        1,
+		MaxUnauthenticatedConnsPerAddr: 1,
 	})
 	signer, authorized, fingerprint := clientKey(t)
 	h.keys.register(1, "alice", 7, fingerprint, authorized)

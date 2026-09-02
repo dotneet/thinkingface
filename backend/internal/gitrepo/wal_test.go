@@ -158,20 +158,24 @@ func TestTriggerEvict_ScanIntervalThrottles(t *testing.T) {
 }
 
 // The scan is a WalkDir of the whole git root plus a dirSize walk per
-// repository; a request must never wait for it. The gate makes the pass block
-// on a locked repository, so a synchronous implementation would deadlock this
-// test rather than merely slow a request down.
+// repository; a request must never wait for it.
+//
+// Making that distinguishable from a synchronous implementation takes a point
+// where the pass genuinely blocks, and evictDown's TryLock is not one — it
+// skips a locked repository rather than waiting, so holding a repository's
+// lock proves nothing and a synchronous pass over a small temp tree would
+// finish in microseconds either way. The manager's lock *map* mutex is such a
+// point: evictDown has to go through lockFor to reach a candidate's lock, and
+// lockFor takes m.mu. Held here, the pass stalls inside the walk, so a
+// synchronous triggerEvict would stall its caller with it and the deadline
+// below would fire.
 func TestTriggerEvict_DoesNotRunOnTheCallersGoroutine(t *testing.T) {
 	m := evictionManager(t, 1024)
 	victim := mkRepoDir(t, m.root, "models", "acme", "victim", 4096, true)
 	m.wal.lastUse[victim] = time.Now().Add(-24 * time.Hour)
 	m.wal.lastScan = time.Now().Add(-time.Hour) // the interval has lapsed
 
-	// Hold the victim's lock: evictDown's TryLock fails, so the pass finishes
-	// without deleting anything, and the only thing being asserted is that
-	// the caller was never the one doing the walking.
-	lock := m.lockFor(victim)
-	lock.Lock()
+	m.mu.Lock() // the eviction pass cannot get past lockFor while this is held
 
 	done := make(chan struct{})
 	go func() {
@@ -181,9 +185,35 @@ func TestTriggerEvict_DoesNotRunOnTheCallersGoroutine(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("triggerEvict blocked its caller: the scan is still on the request path")
+		m.mu.Unlock()
+		t.Fatal("triggerEvict blocked its caller while the pass was stalled: " +
+			"the scan is still running on the request goroutine")
 	}
-	lock.Unlock()
+
+	m.mu.Unlock()
+	waitForEvictionIdle(t, m)
+}
+
+// The pass runs detached, so nothing is above it to catch a panic — it used to
+// run on the request goroutine under middleware.Recoverer, where the worst case
+// was one 500. Without a recover of its own the same panic now takes the whole
+// process down, so this induces a real one (a nil lock map makes lockFor's
+// assignment panic, and evictDown calls it) and asserts the process is still
+// here to finish the test.
+func TestTriggerEvict_SurvivesAPanicInThePass(t *testing.T) {
+	m := evictionManager(t, 1024)
+	victim := mkRepoDir(t, m.root, "models", "acme", "victim", 4096, true)
+	m.wal.lastUse[victim] = time.Now().Add(-24 * time.Hour)
+	m.wal.lastScan = time.Now().Add(-time.Hour)
+
+	m.mu.Lock()
+	m.locks = nil
+	m.mu.Unlock()
+
+	m.triggerEvict()
+
+	// And the pass is accounted for as finished, so the next trigger is not
+	// locked out by a `scanning` flag a panic left set.
 	waitForEvictionIdle(t, m)
 }
 

@@ -192,3 +192,60 @@ func TestSeriesCollector_FiltersBeforeAllocating(t *testing.T) {
 		t.Errorf("droppedSeries = %d, want 0: a filtered trace was not asked for, so it is not truncation", c.droppedSeries)
 	}
 }
+
+// TestSeries_ThinsRatherThanHoldingEveryRowOfTheFile pins the bound where it
+// is actually reachable: at Series(), over a real parquet, rather than at the
+// collector a test constructed itself.
+//
+// The tests above all drive seriesCollector directly, so every one of them
+// would still pass if Series() went back to accumulating into a plain
+// map[run]map[key][][2]float64 and left the collector unused -- and the older
+// Series() tests, which use a handful of points, would pass too. The bound
+// would be gone with nothing red. This test is the end of the wire: it feeds
+// Series() more rows than the budget and asks whether the answer is thinned.
+func TestSeries_ThinsRatherThanHoldingEveryRowOfTheFile(t *testing.T) {
+	// Below the 1000 points Series() downsamples to by default, so what is
+	// measured here is the scan-time budget and not downsample().
+	restore := maxSeriesScanPoints
+	maxSeriesScanPoints = 8
+	t.Cleanup(func() { maxSeriesScanPoints = restore })
+
+	h := newExpHarness(t)
+	const logged = 200
+	steps := make([]int64, 0, logged)
+	for i := range logged {
+		steps = append(steps, int64(i+1))
+	}
+	projectID := h.ingest("demo", "run-1", "running", steps, "loss")
+
+	// Move them into the parquet and drop the buffer, so the rows come back
+	// through scanParquetSeries -- the half an unauthenticated
+	// `GET .../{project}/metrics` reaches.
+	result := h.flush(projectID, "demo")
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, result.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	got := h.series("demo")
+	if len(got) != 1 {
+		t.Fatalf("series = %#v, want one trace", got)
+	}
+	points := got[0].Points
+	// finish() restores one point past the budget: the true final one.
+	if len(points) > maxSeriesScanPoints+1 {
+		t.Fatalf("Series() returned %d of %d logged points with a budget of %d: the collector's bound "+
+			"is not on the path Series() actually takes", len(points), logged, maxSeriesScanPoints)
+	}
+	if len(points) < 2 {
+		t.Fatalf("Series() returned %d points, want a usable trace", len(points))
+	}
+	// Thinning may not move the endpoints: a chart that stops short shows a
+	// run that stopped short, which is wrong rather than coarse.
+	if want := ([2]float64{1, 0.1}); points[0] != want {
+		t.Errorf("first point = %v, want the first step logged %v", points[0], want)
+	}
+	if points[len(points)-1][0] != float64(logged) {
+		t.Errorf("last point = %v, want step %d, the last one logged", points[len(points)-1], logged)
+	}
+}

@@ -45,27 +45,18 @@ variable "bucket_soft_delete_retention_days" {
 variable "tmp_uploads_retention_days" {
   description = <<-EOT
     Days before an object under tmp/uploads/ is deleted. The LFS proxy upload
-    path removes its staging object as soon as the copy succeeds, so this rule
-    exists purely to collect the orphans left by uploads that failed midway.
-  EOT
-  type        = number
-  default     = 1
-}
+    path removes its staging object as soon as the copy into lfs/ succeeds, so
+    this rule is a backstop: it collects the orphans left by uploads that
+    failed midway.
 
-variable "tmp_uploads_noncurrent_retention_days" {
-  description = <<-EOT
-    Days after a tmp/uploads/ object becomes a noncurrent version before that
-    version is deleted. Versioning is enabled on this bucket, so neither the
-    promote handler's delete nor tmp_uploads_retention_days above frees any
-    bytes on its own -- each only archives the staging copy, and a `git-lfs
-    push` stages the object's full contents. Without this, every LFS upload
-    was billed twice forever.
-
-    Short by default because a staging object is a duplicate by construction:
-    it is either already promoted into lfs/ (where the lfs/ rules protect the
-    real copy) or belongs to an upload that never completed. The bucket-wide
-    soft_delete_policy is the safety net for a delete that has to be taken
-    back.
+    The matching lifecycle_rule sets no with_state, which the provider
+    documents as matching live *and* archived objects, so this one window also
+    covers the noncurrent staging version that versioning leaves behind when
+    the promote handler deletes the live one. `git-lfs push` stages the
+    object's full contents, so without that the bucket would keep a permanent
+    second copy of every uploaded LFS object; a separate
+    days_since_noncurrent_time rule is unnecessary because it could only ever
+    fire later than this one.
   EOT
   type        = number
   default     = 1

@@ -514,20 +514,32 @@ class _Run:
             # network fault and must never be requeued, or every flush from
             # here on re-raises it and the run stops delivering metrics.
             if config is not None:
-                # The config is the likelier culprit (log() already strips the
-                # NaN/inf that metrics can carry) and the points are the part
-                # that cannot be reconstructed, so send them on their own.
+                # Either half of the body could be the unencodable one: the
+                # config is the likelier culprit (log() strips NaN/inf from
+                # metrics), but not the only one -- a numpy scalar is finite,
+                # so _finite_metrics passes it through and json chokes on the
+                # points instead. Retry with the points alone and let *that*
+                # call decide which half was at fault; the points are the part
+                # that cannot be reconstructed, so they go first either way.
+                outcome = self._post_points(points, None)
+                if outcome != "sent":
+                    # The points were the bad half (or the send failed for an
+                    # unrelated reason). The config was never transmitted, so
+                    # it stays pending and goes out with the next batch --
+                    # marking it delivered here would silence it forever.
+                    return outcome
                 warnings.warn(
                     f"thinkingface.trackio: the config for run {self.name!r} cannot be "
-                    f"encoded as JSON ({exc!r}); sending the points without it."
+                    f"encoded as JSON ({exc!r}); the points were sent without it."
                 )
                 with self._lock:
-                    # Treated as delivered so it is not re-encoded on every
+                    # Only now, on a call that really did reach the server:
+                    # treated as delivered so it is not re-encoded on every
                     # flush; a config that is later changed compares unequal
                     # again and is retried then.
                     self._config_sent = True
                     self._last_sent_config = config
-                return self._post_points(points, None)
+                return outcome
             warnings.warn(
                 f"thinkingface.trackio: dropping {len(points)} point(s) for run "
                 f"{self.name!r}: the batch cannot be encoded as JSON ({exc!r})."

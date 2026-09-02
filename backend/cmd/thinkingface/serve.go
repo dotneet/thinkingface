@@ -35,6 +35,18 @@ import (
 // fails. The database is already open and migrated; closing it is run()'s job,
 // since it owns the handle.
 func runServe(ctx context.Context, cfg *config.Config, db *store.Store) error {
+	// Fail closed on a hooks directory git would silently ignore, before
+	// anything starts listening. This is the server's check rather than
+	// config.Load's: only the process that actually serves pushes is broken
+	// by a missing hook, and Load runs for `admin` too -- the break-glass
+	// path that has to keep working during exactly the incident (a bind mount
+	// over the hooks directory) that trips this.
+	if cfg.WALMode != "off" {
+		if err := config.CheckPreReceiveHook(cfg.GitHooksPath); err != nil {
+			return fmt.Errorf("TF_WAL_MODE=%s: %w", cfg.WALMode, err)
+		}
+	}
+
 	if err := seedAdmin(ctx, db, cfg); err != nil {
 		return err
 	}
@@ -140,6 +152,15 @@ func runServe(ctx context.Context, cfg *config.Config, db *store.Store) error {
 			// over HTTP costs a bcrypt, and there is no reason for the two
 			// transports to disagree about how much of that an address gets.
 			AuthRateLimitPerMinute: cfg.AuthRateLimitPerMinute,
+			// Two caps, and the per-address one is the one that matters: a
+			// global-only cap is reachable by a single host, and because
+			// gliderlabs arms IdleTimeout only on the first read or write, a
+			// host that opens connections and then says nothing would hold
+			// the whole ceiling for TF_SSH_IDLE_TIMEOUT and every other
+			// client on the fleet would be refused at admit. Zero on either
+			// means the sshserver default.
+			MaxUnauthenticatedConns:        cfg.SSHMaxUnauthConns,
+			MaxUnauthenticatedConnsPerAddr: cfg.SSHMaxUnauthConnsPerAddr,
 		}, db, server)
 		if err != nil {
 			slog.Error("ssh server disabled: it could not be started", "error", err)

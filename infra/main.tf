@@ -51,13 +51,16 @@ resource "google_project_service" "required" {
 #
 # That does not extend to what gc deletes, though. This bucket has
 # versioning enabled, so gc deleting a live object only turns it noncurrent
-# -- the bytes are still there and still billed. Separate lifecycle rules
-# below prune those *noncurrent* versions so every delete this system makes
-# actually shrinks the bill: one for lfs/ and blobs/ (`thinkingface gc`), one
-# for tmp/uploads/ (the LFS promote handler's staging copy) and one for
-# wal/**/*.pack (WAL compaction and its gc). See each rule's comment for why
-# the cutoff is on noncurrent age rather than object age -- and, for the wal/
-# one, why it matches packs by suffix instead of the whole prefix.
+# -- the bytes are still there and still billed. Two lifecycle rules below
+# prune those *noncurrent* versions so the deletes actually shrink the bill:
+# one for lfs/ and blobs/ (`thinkingface gc`) and one for wal/**/*.pack (WAL
+# compaction and its gc). See each rule's comment for why the cutoff is on
+# noncurrent age rather than object age -- and, for the wal/ one, why it
+# matches packs by suffix instead of the whole prefix.
+#
+# tmp/uploads/ needs no such rule: its own rule below sets no `with_state`,
+# which the provider documents as matching "live and/or archived" objects, so
+# it already reaches the staging copy in both states.
 # ---------------------------------------------------------------------------
 
 resource "google_storage_bucket" "main" {
@@ -82,39 +85,29 @@ resource "google_storage_bucket" "main" {
     retention_duration_seconds = var.bucket_soft_delete_retention_days * 86400
   }
 
-  # tmp/uploads/ is the staging key for a proxied LFS upload, deleted by the
-  # handler as soon as the object is copied into place. This rule only ever
-  # catches the orphans left by an upload that failed midway.
+  # tmp/uploads/ is the staging key for a proxied LFS upload: `git-lfs push`
+  # writes the object's full bytes to tmp/uploads/lfs/{repoID}/{oid} and the
+  # promote handler copies them into lfs/ and deletes the staging key. So this
+  # rule is a backstop, for the orphans left by an upload that failed midway.
+  #
+  # Unlike the two rules below, this one deliberately carries no `with_state`.
+  # The provider documents that condition as "Match to live and/or archived
+  # objects", and unset means both -- which is exactly what is wanted here.
+  # Versioning is on, so the promote handler's own delete only *archives* the
+  # staging copy, and a 20 GB dataset push would otherwise leave a 20 GB
+  # noncurrent duplicate of content the bucket already holds under its
+  # permanent lfs/ key. With no state filter, `age` (measured from each
+  # version's creation, live or archived alike) collects both: the orphaned
+  # live object and the archived staging copy, one day after it was written.
+  #
+  # A second rule keyed on days_since_noncurrent_time would add nothing here
+  # -- a version cannot become noncurrent before it is created, so it would
+  # always fire later than this one, never sooner. There is no such rule on
+  # purpose.
   lifecycle_rule {
     condition {
       age            = var.tmp_uploads_retention_days
       matches_prefix = ["tmp/uploads/"]
-    }
-    action {
-      type = "Delete"
-    }
-  }
-
-  # ... and the same reasoning as the lfs/ and blobs/ rule below applies to what
-  # that Delete actually does here, which is why this second rule exists.
-  # Versioning is on, so *neither* the promote handler's delete nor the rule
-  # above frees anything: both just turn the staging object noncurrent. Since
-  # `git-lfs push` writes the object's full bytes to tmp/uploads/lfs/{repoID}/
-  # {oid} before promote copies them into lfs/, a 20 GB dataset push left a
-  # 20 GB noncurrent staging version that nothing in this configuration would
-  # ever delete -- roughly doubling the steady-state LFS bill for content the
-  # bucket already holds under its permanent key.
-  #
-  # The retention is short (a day by default) because a staging object is by
-  # definition a duplicate: whatever it held is either already promoted into
-  # lfs/, where the lfs/ rules protect it, or belongs to an upload that never
-  # completed and has no referent. soft_delete_policy above is the safety net
-  # for a delete an operator needs to take back.
-  lifecycle_rule {
-    condition {
-      days_since_noncurrent_time = var.tmp_uploads_noncurrent_retention_days
-      with_state                 = "ARCHIVED"
-      matches_prefix             = ["tmp/uploads/"]
     }
     action {
       type = "Delete"
@@ -664,22 +657,44 @@ resource "google_cloud_run_v2_service" "api" {
         cpu_idle = false # CPU always allocated: syncer/webhook workers run in-process outside request handling
       }
 
-      # This service has no way to recycle a wedged process without probes.
-      # min_instance_count = 1 and cpu_idle = false mean the instance is never
-      # scaled to zero and never replaced on its own, and a wedge here does
-      # not close the listener: 40 stuck `git-upload-pack` children
-      # (max_instance_request_concurrency) exhaust the instance's concurrency
-      # while the socket stays open, so Cloud Run keeps routing to it and
-      # every request queues behind processes that will never finish. The
-      # container has advertised /healthz to Docker since it was written
-      # (backend/Dockerfile HEALTHCHECK); Cloud Run just was not asking.
+      # Probes, and precisely what they are and are not worth.
       #
-      # /healthz is answered in-process with a constant and touches neither
-      # the database nor the bucket. That is deliberate for a *liveness*
-      # probe: a Cloud SQL blip or a GCS outage must not restart every
-      # instance in the service at once, turning a dependency's bad minute
-      # into an outage of our own. What this catches is the thing a restart
-      # actually fixes -- a process that can no longer serve.
+      # min_instance_count = 1 with cpu_idle = false means this service never
+      # scales to zero and never replaces an instance on its own, so without
+      # probes nothing recycles an instance that has stopped serving.
+      #
+      # What these detect is one thing: the listener still accepts a
+      # connection. That is narrower than it sounds, and narrower than the
+      # failure people reach for first -- 40 stuck `git-upload-pack` children
+      # (max_instance_request_concurrency) saturating the instance is *not*
+      # visible here. The listener is fine in that scenario and any probe
+      # short of a real saturation signal answers happily; Cloud Run keeps
+      # routing, and requests queue behind processes that will never finish.
+      # Catching that would need a metric this configuration does not have.
+      # What is left is still worth having: a process whose accept loop has
+      # died, or that never came up at all, is exactly what a restart fixes,
+      # and today nothing else would notice.
+      #
+      # tcp_socket rather than http_get, on purpose. The container answers
+      # HTTP/1.1 on this port even in h2c mode (backend/cmd/thinkingface/
+      # serve.go sets SetHTTP1(true) alongside SetUnencryptedHTTP2(true)), so
+      # an HTTP probe would work at the container end -- but the port is named
+      # "h2c", which puts Cloud Run into HTTP/2 end-to-end, and Cloud Run
+      # restricts HTTP probes for HTTP/2 services. `terraform validate` only
+      # checks against the provider schema and cannot see an apply-time
+      # constraint like that, and the blast radius of getting it wrong is the
+      # whole service: a startup probe that can never pass means no revision
+      # ever goes ready, and a liveness probe that can never pass is a restart
+      # loop. A TCP probe carries no protocol constraint at all and detects
+      # exactly the condition described above, so it costs nothing to prefer.
+      # /healthz stays as the container's own HEALTHCHECK (backend/Dockerfile)
+      # and as the endpoint an external uptime check should use, where a real
+      # HTTP response is worth having and a mistake is not catastrophic.
+      #
+      # Neither probe touches the database or the bucket, which would be the
+      # wrong trade for a *liveness* probe in any case: a Cloud SQL blip or a
+      # GCS outage must not restart every instance in the service at once,
+      # turning a dependency's bad minute into an outage of our own.
       startup_probe {
         # Startup is a listen() away (migrations aside), but the first
         # instance of a revision may be materialising repositories into its
@@ -689,8 +704,7 @@ resource "google_cloud_run_v2_service" "api" {
         timeout_seconds       = 5
         period_seconds        = 10
         failure_threshold     = 20
-        http_get {
-          path = "/healthz"
+        tcp_socket {
           port = 8080
         }
       }
@@ -699,13 +713,11 @@ resource "google_cloud_run_v2_service" "api" {
         # Three minutes of consecutive failures before a restart. Sized to be
         # slower than any hiccup a healthy instance can have under load: a
         # clone or push may occupy the instance for up to timeout = 3600s, and
-        # serving one must never look like a wedge. Nothing short of a
-        # listener that has genuinely stopped answering trips this.
+        # serving one must never look like a dead listener.
         timeout_seconds   = 5
         period_seconds    = 30
         failure_threshold = 6
-        http_get {
-          path = "/healthz"
+        tcp_socket {
           port = 8080
         }
       }

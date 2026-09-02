@@ -24,12 +24,32 @@
 // rather than for the polite one.
 //
 // One writer of links is still outside this package and outside this gate:
-// store.LinkLFSObjects, called by the HF-compatible commit handler and by the
-// syncer's post-push pipeline for a pointer pushed as a plain blob. It only
-// ever links an object the ledger already holds at the declared size, so it is
-// the same shape of charge a dedup hit is -- and it is not checked. Closing it
-// means a check in the caller (the store layer knows nothing about quotas), so
-// it is named here rather than left for the next reader to rediscover.
+// store.LinkLFSObjects. It has two callers, and only one of them is a hole.
+//
+//   - The HF-compatible commit handler is harmless. Every oid it passes came
+//     through verifyCommitLFSFile (api/commitbody.go), which refuses an
+//     lfsFile op whose oid this repository is not already linked to -- so the
+//     call can only re-link what a gated path already charged for, which is
+//     what stamps committed_at. It adds no row UsageByRepo was not already
+//     summing.
+//   - The syncer's post-push pipeline is the real bypass. It links *new* oids,
+//     for pointer files pushed as ordinary blobs by a client that never spoke
+//     the LFS protocol, and nothing on that path consults a quota. An oid and
+//     a size are public -- every LFS pointer in every readable repository
+//     carries both -- so a namespace sitting at its quota can copy an
+//     oid/size pair out of any repository it can read, commit that pointer
+//     text as a plain file, push with no git-lfs filter configured, and have
+//     the syncer link it. No new bytes enter the bucket, so this inflates the
+//     namespace's accounted usage rather than stealing storage -- but the
+//     accounting is the quota, so it defeats the limit and then refuses that
+//     namespace's own later legitimate pushes.
+//
+// Deliberately left for a separate change. Closing it means a check in the
+// caller (the store layer knows nothing about quotas), and the check has to
+// decide what happens to a push that has already been accepted: refuse the
+// link and leave the file unresolvable, which is what already happens to a
+// pointer naming an oid nobody uploaded -- or link it and over-count. That is
+// a design decision with an E2E-visible answer, not a line to add here.
 //
 // What is counted is the namespace's LFS footprint, the same number
 // GET /api/v1/usage reports, and Batch checks it against the batch as a whole:

@@ -360,6 +360,69 @@ func TestMaterializeWith_HEADFollowsTheConfiguredDefaultBranch(t *testing.T) {
 	}
 }
 
+// The ordering the fix above has to survive, and the one production actually
+// produces. A cold instance's first touch of a repository is a *read* —
+// huggingface_hub downloading a file, or a UI page load — which reaches
+// gitrepo.Manager.Open and materialises with no default branch, so alignHEAD
+// guesses and the state file is stamped at that generation. The `git clone`
+// that knows the branch arrives second, finds the generation already current,
+// and (before the fix) returned on the cache hit without ever re-running
+// alignHEAD, so it checked out the guess. Warming through the path that does
+// not know the branch and then materialising through the path that does is
+// therefore the case that matters, not the cold rebuild.
+func TestMaterializeWith_HEADIsRepairedWhenAReadWarmedTheCopyFirst(t *testing.T) {
+	fx := newMaterializeFixture(t)
+	// Both halves of the guess pick "main": it exists, and it sorts before
+	// "develop".
+	develop := commitTo(t, fx.src, "develop", "one")
+	pushToWAL(t, fx.store, fx.src, "develop", "", develop)
+	main := commitTo(t, fx.src, "main", "two")
+	pushToWAL(t, fx.store, fx.src, "main", "", main)
+
+	// First: the read that knows nothing about the repository's metadata.
+	if err := MaterializeWith(context.Background(), fx.store, fx.dst, storagePath, Options{}); err != nil {
+		t.Fatalf("warming MaterializeWith: %v", err)
+	}
+	if got := gitRun(t, fx.dst, "symbolic-ref", "HEAD"); got != "refs/heads/main" {
+		t.Fatalf("HEAD after the warming read = %s, want the guess refs/heads/main "+
+			"(the premise of this test is that the guess is what lands first)", got)
+	}
+
+	// Then the clone, on a copy the generation check already calls current.
+	if err := MaterializeWith(context.Background(), fx.store, fx.dst, storagePath,
+		Options{DefaultBranch: "develop"}); err != nil {
+		t.Fatalf("MaterializeWith: %v", err)
+	}
+	if got := gitRun(t, fx.dst, "symbolic-ref", "HEAD"); got != "refs/heads/develop" {
+		t.Errorf("HEAD = %s, want refs/heads/develop: a cache hit must still repair HEAD, "+
+			"or every clone of this repository checks out the wrong branch", got)
+	}
+}
+
+// The mirror image: a caller that does not know the branch must not undo the
+// HEAD a caller that did know it established. "Unknown" has nothing better to
+// offer than the guess, and applying the guess here would make HEAD flap
+// between a read and a clone.
+func TestMaterializeWith_ACacheHitWithoutADefaultBranchLeavesHEADAlone(t *testing.T) {
+	fx := newMaterializeFixture(t)
+	develop := commitTo(t, fx.src, "develop", "one")
+	pushToWAL(t, fx.store, fx.src, "develop", "", develop)
+	main := commitTo(t, fx.src, "main", "two")
+	pushToWAL(t, fx.store, fx.src, "main", "", main)
+
+	if err := MaterializeWith(context.Background(), fx.store, fx.dst, storagePath,
+		Options{DefaultBranch: "develop"}); err != nil {
+		t.Fatalf("MaterializeWith: %v", err)
+	}
+	if err := MaterializeWith(context.Background(), fx.store, fx.dst, storagePath, Options{}); err != nil {
+		t.Fatalf("second MaterializeWith: %v", err)
+	}
+	if got := gitRun(t, fx.dst, "symbolic-ref", "HEAD"); got != "refs/heads/develop" {
+		t.Errorf("HEAD = %s, want refs/heads/develop to survive a materialisation "+
+			"by a caller that does not know the default branch", got)
+	}
+}
+
 // A repository whose default branch has no commits yet still has to advertise
 // that branch as its unborn HEAD, or the first clone lands on "main" —
 // whatever recreateBare happened to seed.

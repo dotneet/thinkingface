@@ -219,3 +219,40 @@ class TestUnencodableBatches:
         run.log({"loss": 3.0})
         run.flush()
         assert _log_bodies(server)[2]["config"] == {"limit": 10.0}
+
+    def test_unencodable_points_do_not_mark_the_config_as_delivered(self, server):
+        """The config is only "sent" once a call that carried it succeeded.
+
+        The handler used to blame the config unconditionally: any encode error
+        raised while a config was attached warned about the config, recorded it
+        as delivered, and retried the points alone. When the *points* were the
+        unencodable half that retry failed too, so nothing was transmitted at
+        all -- and the config was now permanently marked as sent, so it never
+        reached the server again until ``run.config`` was mutated. A numpy
+        scalar reaches this path with no NaN in sight: it is finite, so
+        ``_finite_metrics`` keeps it, and ``json`` cannot encode it.
+        """
+        run = trackio.init("proj", name="r9", config={"lr": 0.1})
+        # Stands in for np.float32(0.5): finite, and not JSON-encodable.
+        run._buffer = [
+            {"step": 0, "timestamp": "2026-01-01T00:00:00.000Z", "metrics": {"loss": object()}}
+        ]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            run.flush()
+        messages = [str(w.message) for w in caught]
+
+        # Nothing went out, and the config was not blamed for it.
+        assert _log_bodies(server) == []
+        assert run._buffer == []
+        assert any("dropping 1 point(s)" in m for m in messages)
+        assert not any("config for run 'r9' cannot be encoded" in m for m in messages)
+
+        # The config was never transmitted, so it is still pending and rides
+        # out with the next batch that can be encoded.
+        assert run._config_sent is False
+        run.log({"loss": 1.0})
+        run.flush()
+        bodies = _log_bodies(server)
+        assert len(bodies) == 1
+        assert bodies[0]["config"] == {"lr": 0.1}

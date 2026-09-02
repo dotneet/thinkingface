@@ -244,14 +244,15 @@ func TestCompact_InterleavedPushAfterCASKeepsLocalStateHonest(t *testing.T) {
 	assertHealthy(t, fresh)
 }
 
-// The finding this pins: compaction and the orphan sweep used to run back to
-// back on the same repository in the same job iteration. GCOrphans measures a
-// pack's age from its *upload* time, and a WAL only reaches the compaction
-// threshold over time, so the packs the CAS had just dropped were already past
-// the grace period and were deleted seconds later — while an instance that
-// read the pre-compaction index was still fetching exactly those packs
-// (storage.ErrNotFound, and a 500 on a clone that was going fine). Invariant 3
-// of §5.
+// The first half of the finding this pins: compaction and the orphan sweep run
+// back to back on the same repository in the same job iteration, and GCOrphans
+// measures a pack's age from its *upload* time. A WAL only reaches the
+// compaction threshold over time, so the packs the CAS has just dropped are
+// already past the grace period and would be deleted seconds later — while an
+// instance that read the pre-compaction index is still fetching exactly those
+// packs (storage.ErrNotFound, and a 500 on a clone that was going fine).
+// Invariant 3 of §5. The pre-run index is what protects them, for exactly one
+// run.
 func TestCompactAndSweep_DoesNotCollectWhatItJustSuperseded(t *testing.T) {
 	fx := newMaterializeFixture(t)
 	first := commitTo(t, fx.src, "main", "one")
@@ -274,8 +275,8 @@ func TestCompactAndSweep_DoesNotCollectWhatItJustSuperseded(t *testing.T) {
 	if !res.Compacted {
 		t.Fatal("Compacted = false, want a snapshot to have been published")
 	}
-	if !res.SweepDeferred || len(res.Deleted) != 0 {
-		t.Fatalf("res = %+v, want the sweep deferred and nothing deleted", res)
+	if len(res.Deleted) != 0 {
+		t.Fatalf("deleted = %v, want nothing collected in the run that superseded it", res.Deleted)
 	}
 	for _, entry := range before.Entries {
 		if !fx.store.has(storage.WALKey(storagePath, entry)) {
@@ -289,8 +290,8 @@ func TestCompactAndSweep_DoesNotCollectWhatItJustSuperseded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second CompactAndSweep: %v", err)
 	}
-	if res.Compacted || res.SweepDeferred {
-		t.Fatalf("res = %+v, want no compaction and a sweep on the second run", res)
+	if res.Compacted {
+		t.Fatalf("res = %+v, want no compaction on the second run", res)
 	}
 	if len(res.Deleted) != len(before.Entries) {
 		t.Fatalf("deleted = %v, want the %d folded entries", res.Deleted, len(before.Entries))
@@ -304,6 +305,100 @@ func TestCompactAndSweep_DoesNotCollectWhatItJustSuperseded(t *testing.T) {
 	}
 	assertRefs(t, fresh, map[string]string{"refs/heads/main": second})
 	assertHealthy(t, fresh)
+}
+
+// The other half of the same finding, and the reason the protection is a
+// pre-run index rather than "skip the sweep whenever we compacted". Under that
+// rule a repository that crosses the threshold on *every* run was never swept
+// at all — and busy repositories routinely do, because the experiments flusher
+// commits per tick and a daily maintenance run therefore finds far more than
+// the 50-entry threshold waiting. Every run then left a base plus up to a
+// threshold's worth of entry packs in the bucket permanently: an unbounded
+// storage leak that the pre-change code, which always swept, did not have.
+func TestCompactAndSweep_CollectsAnEarlierRunsOrphansWhileCompactingAgain(t *testing.T) {
+	fx := newMaterializeFixture(t)
+	first := commitTo(t, fx.src, "main", "one")
+	pushToWAL(t, fx.store, fx.src, "main", "", first)
+	second := commitTo(t, fx.src, "main", "two")
+	pushToWAL(t, fx.store, fx.src, "main", first, second)
+	staged, _ := readIndexOrFail(t, fx.store)
+	for _, entry := range staged.Entries {
+		fx.store.age(t, storage.WALKey(storagePath, entry), 72*time.Hour)
+	}
+
+	// What a previous run left behind: unreferenced by any index, and old.
+	stale := storage.WALKey(storagePath, EntryName(9, "0123456789ABCDEFGHJKMNPQRS"))
+	if err := fx.store.Put(context.Background(), stale, stringReader("PACK"), packContentType); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	fx.store.age(t, stale, 72*time.Hour)
+
+	work := filepath.Join(t.TempDir(), "work.git")
+	res, err := CompactAndSweep(context.Background(), fx.store, work, storagePath, 1, DefaultGCGracePeriod)
+	if err != nil {
+		t.Fatalf("CompactAndSweep: %v", err)
+	}
+	if !res.Compacted {
+		t.Fatal("Compacted = false, want a snapshot to have been published")
+	}
+	if len(res.Deleted) != 1 || res.Deleted[0] != stale {
+		t.Fatalf("deleted = %v, want exactly [%s]: a run that compacts must still collect "+
+			"what earlier runs orphaned, or a repository that always compacts never gets swept",
+			res.Deleted, stale)
+	}
+}
+
+// A raced compaction is not evidence that nothing became unreferenced.
+// ErrCompactionRaced is returned for any failed precondition, so the winner may
+// have been another compactor — one that has just superseded the very packs
+// this run is about to consider orphaned, and whose readers are still applying
+// them. The pre-run index names them, so they survive.
+func TestCompactAndSweep_ARacedCompactionDoesNotCollectTheWinnersLeftovers(t *testing.T) {
+	fx := newMaterializeFixture(t)
+	first := commitTo(t, fx.src, "main", "one")
+	pushToWAL(t, fx.store, fx.src, "main", "", first)
+	second := commitTo(t, fx.src, "main", "two")
+	pushToWAL(t, fx.store, fx.src, "main", first, second)
+
+	before, _ := readIndexOrFail(t, fx.store)
+	for _, entry := range before.Entries {
+		fx.store.age(t, storage.WALKey(storagePath, entry), 72*time.Hour)
+	}
+
+	// Another compactor lands its snapshot in the window between this run's
+	// CAS being prepared and its being applied: the entries below are now
+	// superseded by *its* base, and this run's CAS is declined.
+	winnerBase := BaseName("ZZZZZZZZZZZZZZZZZZZZZZZZZZ")
+	var once bool
+	fx.store.beforePut = func(int) {
+		if once {
+			return
+		}
+		once = true
+		fx.store.writeIndexUnconditionally(t, storagePath, func(ix *Index) {
+			ix.Base = winnerBase
+			ix.Entries = nil
+		})
+	}
+
+	work := filepath.Join(t.TempDir(), "work.git")
+	res, err := CompactAndSweep(context.Background(), fx.store, work, storagePath, 1, DefaultGCGracePeriod)
+	if err != nil {
+		t.Fatalf("CompactAndSweep: %v", err)
+	}
+	if !res.Raced || res.Compacted {
+		t.Fatalf("res = %+v, want the compaction to have lost the CAS", res)
+	}
+	for _, entry := range before.Entries {
+		key := storage.WALKey(storagePath, entry)
+		if !fx.store.has(key) {
+			t.Errorf("%s was collected by the losing compactor seconds after the winner's CAS: "+
+				"instances still applying the pre-compaction index get a 404", entry)
+		}
+	}
+	if len(res.Deleted) != 0 {
+		t.Errorf("deleted = %v, want nothing", res.Deleted)
+	}
 }
 
 // A repository below the threshold is swept in the same call: nothing was
@@ -326,8 +421,8 @@ func TestCompactAndSweep_SweepsWhenNoCompactionWasNeeded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompactAndSweep: %v", err)
 	}
-	if res.Compacted || res.SweepDeferred {
-		t.Fatalf("res = %+v, want no compaction and no deferral", res)
+	if res.Compacted {
+		t.Fatalf("res = %+v, want no compaction", res)
 	}
 	if len(res.Deleted) != 1 || res.Deleted[0] != orphan {
 		t.Fatalf("deleted = %v, want [%s]", res.Deleted, orphan)

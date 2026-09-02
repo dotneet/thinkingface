@@ -151,6 +151,64 @@ func TestLFSProxyUpload_RefusedWhenTheDriverCanSignURLs(t *testing.T) {
 	}
 }
 
+// The download half is what the emulator's `git lfs pull` uses, so the gate
+// above must not become a gate on both modes: in the mode the local stack and
+// the E2E suite actually run in, this href is the only way the bytes come out.
+func TestLFSProxyDownload_ServesTheObjectInEmulatorMode(t *testing.T) {
+	f := newSecFixture(t)
+	f.user("alice", "correct horse battery")
+	repo := f.repo("alice", "weights", "model")
+
+	body := []byte("weights alice pushed")
+	oid := f.putLFSObject(body)
+	if err := f.st.RecordLFSObject(context.Background(), repo.ID, oid, int64(len(body)),
+		func(string) (bool, error) { return true, nil }); err != nil {
+		t.Fatalf("record lfs object: %v", err)
+	}
+
+	rec := f.do(secRequest{
+		method: "GET",
+		path:   "/api/v1/lfs/" + strconv.FormatInt(repo.ID, 10) + "/" + oid,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s; want 200", rec.Code, rec.Body.String())
+	}
+	if !bytes.Equal(rec.Body.Bytes(), body) {
+		t.Errorf("body = %q, want %q", rec.Body.Bytes(), body)
+	}
+}
+
+// The mirror of TestLFSProxyUpload_RefusedWhenTheDriverCanSignURLs, and the
+// half with the wider mouth: the fallback authorisation on this route asks
+// only that the repository link the oid, and both the repository id and the
+// oid are public, so while it answered in signed-URL mode an *anonymous*
+// caller could stream whole objects through the API process -- turning the
+// signed-URL offload the deployment exists for back into egress and CPU here.
+func TestLFSProxyDownload_RefusedWhenTheDriverCanSignURLs(t *testing.T) {
+	f := newSecFixture(t)
+	f.user("alice", "correct horse battery")
+	repo := f.repo("alice", "weights", "model")
+
+	body := []byte("weights alice pushed")
+	oid := f.putLFSObject(body)
+	if err := f.st.RecordLFSObject(context.Background(), repo.ID, oid, int64(len(body)),
+		func(string) (bool, error) { return true, nil }); err != nil {
+		t.Fatalf("record lfs object: %v", err)
+	}
+	f.s.storage = signingStorage{f.obj}
+
+	rec := f.do(secRequest{
+		method: "GET",
+		path:   "/api/v1/lfs/" + strconv.FormatInt(repo.ID, 10) + "/" + oid,
+	})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %s; want 404", rec.Code, rec.Body.String())
+	}
+	if bytes.Contains(rec.Body.Bytes(), body) {
+		t.Errorf("the object streamed through a route no client is ever given: %s", rec.Body.String())
+	}
+}
+
 // The body is a raw object with no declared length the server has agreed to,
 // so the only ceiling available is an explicit one. Without it this handler
 // streamed an unbounded body into the bucket -- and streamingRoute exempts the

@@ -977,6 +977,109 @@ func TestFlush_RotationDoesNotDuplicateAlreadyWrittenPoints(t *testing.T) {
 	}
 }
 
+// deleteFile removes a path from the default branch the way a user can: the
+// Web UI's delete button, huggingface_hub.delete_file, `tf up --delete`.
+func (h *expHarness) deleteFile(path string) {
+	h.t.Helper()
+	gitRepo, err := h.git.Open(h.repo.StoragePath)
+	if err != nil {
+		h.t.Fatalf("open git repo: %v", err)
+	}
+	if _, _, err := gitRepo.Commit(gitrepo.CommitRequest{
+		Branch: h.repo.DefaultBranch, Message: "delete " + path,
+		Author: gitrepo.Signature{Name: "alice", Email: "alice@example.com"},
+		Ops:    []gitrepo.Op{{Kind: gitrepo.OpDelete, Path: path}},
+	}); err != nil {
+		h.t.Fatalf("delete %s: %v", path, err)
+	}
+	h.reindex()
+}
+
+// TestFlush_ReanchorsTheChainWhenTheBaseFileIsDeleted covers the one way
+// rotation can turn into silent data loss.
+//
+// A chain of continuation files is only a chain while its base exists:
+// DetectLayouts drops a project whose shards have no base (readers walk the
+// shards *after* the base, so an orphan has no anchor). The base is not this
+// package's to keep -- a user can delete it from the Web UI, with
+// huggingface_hub.delete_file, with `tf up --delete`, or by rewriting history
+// -- so the writer has to agree with that rule or the two disagree in the
+// worst direction. A target resolution that kept walking to the highest shard
+// would append there, commit, and let the syncer delete the exp_points rows it
+// had just "saved": points written into a file no reader ever opens, for ever,
+// with the chart empty and the state unable to heal because the walk never
+// comes back to the base.
+func TestFlush_ReanchorsTheChainWhenTheBaseFileIsDeleted(t *testing.T) {
+	h := newExpHarness(t)
+	restore := maxExistingFlushRows
+	maxExistingFlushRows = 4
+	t.Cleanup(func() { maxExistingFlushRows = restore })
+
+	projectID := h.ingest("demo", "run-1", "running", []int64{1, 2, 3}, "loss")
+	first := h.flush(projectID, "demo")
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, first.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	h.ingest("demo", "run-1", "running", []int64{4, 5, 6}, "loss")
+	second := h.flush(projectID, "demo")
+	if second.Path != "demo/metrics.part0001.parquet" {
+		t.Fatalf("second flush wrote %q, want a continuation file", second.Path)
+	}
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, second.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	// The user deletes the base file. Steps 1-3 went with it -- that was their
+	// choice -- but steps 4-6 are still in the shard, unreadable until
+	// something re-anchors it.
+	h.deleteFile("demo/metrics.parquet")
+	if got := h.series("demo"); len(got) != 0 {
+		t.Fatalf("series with an orphaned shard = %#v, want none (DetectLayouts drops it)", got)
+	}
+
+	h.ingest("demo", "run-1", "running", []int64{7, 8}, "loss")
+	third := h.flush(projectID, "demo")
+	if third.Path != "demo/metrics.parquet" {
+		t.Fatalf("flush after the base was deleted wrote %q, want the base file: appending to the "+
+			"orphaned shard writes points no reader will ever open", third.Path)
+	}
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, third.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	// Re-anchored: the new points are readable, and so are the shard's, which
+	// is the half that was lost.
+	got := h.series("demo")
+	if len(got) != 1 {
+		t.Fatalf("series after re-anchoring = %#v, want one trace", got)
+	}
+	var steps []float64
+	for _, p := range got[0].Points {
+		steps = append(steps, p[0])
+	}
+	want := []float64{4, 5, 6, 7, 8}
+	if !reflect.DeepEqual(steps, want) {
+		t.Errorf("charted steps = %v, want %v (the shard's points plus the new ones)", steps, want)
+	}
+	// (num_points is not asserted: it only ever grows -- store.UpsertExpRunWith
+	// takes the MAX -- so it still reports the six points that existed before
+	// the user deleted three of them, which is a separate question from this
+	// one.)
+
+	// The chain grows from the base again rather than from the orphan: the
+	// next rotation must not overwrite the shard that is still holding data.
+	h.ingest("demo", "run-1", "running", []int64{9, 10, 11}, "loss")
+	fourth := h.flush(projectID, "demo")
+	if fourth.Path != "demo/metrics.part0002.parquet" {
+		t.Fatalf("fourth flush wrote %q, want a fresh continuation file "+
+			"(part0001 still holds steps 4-6)", fourth.Path)
+	}
+}
+
 // TestFlush_BlocksAFileWithAColumnItCannotRewrite covers the third condition
 // routed to blockFlush, and the reason it had to be.
 //
