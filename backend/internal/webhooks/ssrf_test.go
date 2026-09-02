@@ -210,3 +210,105 @@ func TestDeliveryTransportUsesTheSameVerdictAsValidateTargetURL(t *testing.T) {
 		}
 	}
 }
+
+// 6to4 (RFC 3056) carries an IPv4 address in bytes 2..5 of an IPv6 one, so
+// 2002:7f00:1:: is a route to 127.0.0.1 -- and it used to walk through both
+// layers of this guard, since only NAT64 was unwrapped. Blocking the prefix
+// outright would be wrong: 2002:0808:0808:: is a legitimate route to 8.8.8.8.
+func TestValidateTargetURL6to4UnwrapsTheEmbeddedIPv4(t *testing.T) {
+	blocked := []string{
+		"http://[2002:7f00:1::]/hook",   // 127.0.0.1
+		"http://[2002:a00:5::]/hook",    // 10.0.0.5
+		"http://[2002:c0a8:105::]/hook", // 192.168.1.5
+		"http://[2002:a9fe:101::]/hook", // 169.254.1.1
+		"http://[64:ff9b::7f00:1]/hook", // NAT64 loopback, unchanged
+	}
+	for _, u := range blocked {
+		if err := ValidateTargetURL(u, false); !errors.Is(err, ErrDisallowedTarget) {
+			t.Errorf("ValidateTargetURL(%q, false) = %v, want ErrDisallowedTarget", u, err)
+		}
+	}
+	allowed := []string{
+		"http://[2002:808:808::]/hook",   // 8.8.8.8 through a 6to4 relay
+		"http://[64:ff9b::808:808]/hook", // 8.8.8.8 through NAT64
+	}
+	for _, u := range allowed {
+		if err := ValidateTargetURL(u, false); err != nil {
+			t.Errorf("ValidateTargetURL(%q, false) = %v, want nil", u, err)
+		}
+	}
+	// The connect-time layer asks the same function, so it agrees by
+	// construction -- assert it rather than trusting that it stays that way.
+	if !isBlockedIP(net.ParseIP("2002:7f00:1::")) {
+		t.Error("isBlockedIP(2002:7f00:1::) = false, want true")
+	}
+}
+
+// Teredo (RFC 4380) and ISATAP (RFC 5214) are the other two ways an IPv4
+// address travels inside an IPv6 one, and the comment above isBlockedAddr
+// used to claim there were only two such forms in total. There are four:
+// 2001:0:509:509::80ff:fffe is 127.0.0.1 as a Teredo client (the low 32 bits
+// are the address complemented) and fe80::5efe:7f00:1 is 127.0.0.1 as an
+// ISATAP interface identifier, and both used to walk straight through this
+// guard.
+//
+// As with 6to4, the prefix itself cannot be refused: Teredo and ISATAP
+// addresses carrying a public IPv4 address are ordinary routes to ordinary
+// hosts.
+func TestIsBlockedAddrUnwrapsTeredoAndISATAP(t *testing.T) {
+	blocked := map[string]string{
+		"2001:0:509:509:0:0:80ff:fffe": "127.0.0.1 as a Teredo client behind a public server (^127.0.0.1)",
+		"2001:0:509:509:0:0:f5ff:fffe": "10.0.0.1 as a Teredo client behind a public server (^10.0.0.1)",
+		"2001:0:7f00:1:0:0:f7f7:f7f7":  "a Teredo relay server on 127.0.0.1",
+		"2001:0:c0a8:1:0:0:f7f7:f7f7":  "a Teredo relay server on 192.168.0.1",
+		"2001:db8::200:5efe:7f00:1":    "127.0.0.1 as a globally-unique ISATAP identifier",
+		"2001:db8::5efe:a00:1":         "10.0.0.1 as an ISATAP identifier",
+		"2001:db8::5efe:a9fe:1":        "169.254.0.1 (link-local) as an ISATAP identifier",
+	}
+	for addr, why := range blocked {
+		if !isBlockedIP(net.ParseIP(addr)) {
+			t.Errorf("isBlockedIP(%s) = false, want true (%s)", addr, why)
+		}
+		if err := ValidateTargetURL("http://["+addr+"]/hook", false); !errors.Is(err, ErrDisallowedTarget) {
+			t.Errorf("ValidateTargetURL(%s) = %v, want ErrDisallowedTarget (%s)", addr, err, why)
+		}
+	}
+
+	allowed := map[string]string{
+		"2001:0:509:509:0:0:f7f7:f7f7": "a Teredo client on 8.8.8.8 behind a server on 5.9.5.9",
+		"2001:db8::200:5efe:808:808":   "8.8.8.8 as an ISATAP identifier",
+		// The identifier is what marks an address as ISATAP; without it the
+		// low 32 bits are just address bits and must not be judged as IPv4.
+		"2001:db8::7f00:1": "an ordinary address whose low bits look like 127.0.0.1",
+	}
+	for addr, why := range allowed {
+		if isBlockedIP(net.ParseIP(addr)) {
+			t.Errorf("isBlockedIP(%s) = true, want false (%s)", addr, why)
+		}
+	}
+}
+
+// A target URL may not carry credentials. They would be stored in a column the
+// settings UI renders back, and "https://legitimate-host@attacker.example/"
+// reads as a URL for the wrong host to every human who reviews it. Deliveries
+// authenticate with their HMAC signature, so nothing is lost.
+// config.NormalizeEndpoint already refuses userinfo on the URL an operator
+// configures; this is the same rule on the URL a user configures.
+func TestValidateTargetURLRejectsUserinfo(t *testing.T) {
+	for _, u := range []string{
+		"https://user:pw@example.com/hook",
+		"https://user@example.com/hook",
+		"http://legit-host@203.0.113.10/hook",
+	} {
+		err := ValidateTargetURL(u, false)
+		if err == nil {
+			t.Errorf("ValidateTargetURL(%q, false) = nil, want an error", u)
+		}
+	}
+	// Still refused when private targets are allowed: this is not a
+	// reachability rule, so the local-development escape hatch does not cover
+	// it.
+	if err := ValidateTargetURL("https://user:pw@example.com/hook", true); err == nil {
+		t.Error("ValidateTargetURL(userinfo, allowPrivate=true) = nil, want an error")
+	}
+}

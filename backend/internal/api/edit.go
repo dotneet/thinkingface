@@ -72,6 +72,12 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "no file path given")
 		return
 	}
+	// The same check handleRenameFile already applies to new_path, and
+	// handleUploadFiles to every part's name: a path the commit would refuse
+	// is a 400 here rather than a 500 out of gitrepo.Commit (see checkOpPath).
+	if !checkOpPath(w, "path", path) {
+		return
+	}
 	rev, ok := revParam(w, r, "rev", repo)
 	if !ok {
 		return
@@ -282,6 +288,9 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "no file path given")
 		return
 	}
+	if !checkOpPath(w, "path", path) {
+		return
+	}
 	rev, ok := revParam(w, r, "rev", repo)
 	if !ok {
 		return
@@ -421,6 +430,9 @@ func (s *Server) handleRenameFile(w http.ResponseWriter, r *http.Request) {
 	oldPath := wildcardPath(r)
 	if oldPath == "" {
 		badRequest(w, "no file path given")
+		return
+	}
+	if !checkOpPath(w, "path", oldPath) {
 		return
 	}
 	rev, ok := revParam(w, r, "rev", repo)

@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -264,6 +265,64 @@ func TestAttachmentDisposition_NonASCIIAndQuotes(t *testing.T) {
 	}
 	if !strings.Contains(got, "filename*=UTF-8''") {
 		t.Errorf("disposition = %q, want an RFC 5987 filename*", got)
+	}
+}
+
+// Every name a git tree can hold has to come back out of the header a
+// standards-compliant parser reads. This is the case the duplicated
+// implementation got wrong: the API built filename* with url.PathEscape,
+// which keeps `=`, `:`, `@`, `'`, `(` and `)` -- none of them attr-chars --
+// so mime.ParseMediaType refused the whole header with "invalid media
+// parameter" and a browser was left with no usable name at all.
+//
+// "epoch=12-step=500.ckpt" is not a contrived example: it is the name PyTorch
+// Lightning's ModelCheckpoint writes by default, so every such checkpoint
+// downloaded from a repository hit it.
+func TestAttachmentDisposition_RoundTripsThroughAParser(t *testing.T) {
+	names := []string{
+		"model.safetensors",
+		// PyTorch Lightning's default checkpoint name.
+		"epoch=12-step=500.ckpt",
+		"a:b.bin",
+		"a@b.bin",
+		"it's (v2).bin",
+		"モデル.bin",
+		`evil".txt`,
+		"a\nb.txt",
+		"…",
+	}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			got := attachmentDisposition(name)
+			if strings.ContainsAny(got, "\r\n") {
+				t.Fatalf("disposition %q contains a line break", got)
+			}
+			disp, params, err := mime.ParseMediaType(got)
+			if err != nil {
+				t.Fatalf("ParseMediaType(%q): %v", got, err)
+			}
+			if disp != "attachment" {
+				t.Errorf("disposition = %q, want attachment", disp)
+			}
+			// filename carries the original whenever it is expressible as a
+			// quoted ASCII string; otherwise filename* does, and filename is
+			// only the sanitised fallback.
+			if params["filename"] != name && params["filename*"] != name {
+				t.Errorf("neither filename (%q) nor filename* (%q) is %q",
+					params["filename"], params["filename*"], name)
+			}
+		})
+	}
+}
+
+// The API and the signed-URL path must ask for the byte-identical header:
+// they are the same download from a client's point of view, and only one of
+// them being fixed is how the two drifted apart in the first place.
+func TestAttachmentDisposition_IsTheSignedURLHeader(t *testing.T) {
+	for _, name := range []string{"model.safetensors", "epoch=12-step=500.ckpt", "モデル.bin"} {
+		if got, want := attachmentDisposition(name), storage.ContentDisposition(name); got != want {
+			t.Errorf("attachmentDisposition(%q) = %q, storage.ContentDisposition = %q", name, got, want)
+		}
 	}
 }
 

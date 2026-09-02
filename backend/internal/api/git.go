@@ -46,7 +46,7 @@ func (s *Server) handleInfoRefs(w http.ResponseWriter, r *http.Request, kind str
 		internalError(w, "materialize repository", err)
 		return
 	}
-	if err := s.gitHTTP.AdvertiseRefs(r.Context(), w, repo.StoragePath, service); err != nil {
+	if err := s.gitHTTP.AdvertiseRefs(r.Context(), w, repo.StoragePath, service, r.Header.Get("Git-Protocol")); err != nil {
 		if errors.Is(err, gitserver.ErrResponseStarted) {
 			// The advertisement was already going out, so there is no status
 			// left to change; a log line is all this can still add.
@@ -197,8 +197,15 @@ func (s *Server) handleLFSVerify(w http.ResponseWriter, r *http.Request, kind st
 		writeLFSError(w, http.StatusNotFound, err.Error())
 		return
 	}
+	// writeRawJSON, not writeJSON: the latter sets application/json itself and
+	// so overwrote the line above, leaving this one success response as the
+	// only LFS answer on the endpoint not typed application/vnd.git-lfs+json.
+	// git-lfs accepts both, so nothing was broken by it -- but the batch
+	// response, verify-by-id and every LFS error already answer the media type
+	// the protocol names, and one of them silently not doing so is the kind of
+	// difference that is only noticed by whatever eventually depends on it.
 	w.Header().Set("Content-Type", lfs.ContentType)
-	writeJSON(w, http.StatusOK, map[string]any{"oid": req.OID, "size": req.Size})
+	writeRawJSON(w, http.StatusOK, map[string]any{"oid": req.OID, "size": req.Size})
 }
 
 // handleLFSProxyUpload receives object bytes when the storage driver cannot
@@ -283,11 +290,20 @@ func (s *Server) handleLFSProxyDownload(w http.ResponseWriter, r *http.Request) 
 	}
 	// The signed href is only ever handed out for an object the batch
 	// endpoint already found in this repository, so that path needs no
-	// further check. The fallback -- an authenticated caller hitting the URL
-	// directly -- has to prove both things separately: that it may read the
-	// repository, and that the repository actually holds this oid. LFS bytes
-	// are shared instance-wide by content hash, so "can read some repository"
-	// on its own would hand out any object whose oid the caller can name.
+	// further check. The fallback -- a caller hitting the URL directly --
+	// has to prove that the repository named in the path actually holds this
+	// oid. LFS bytes are shared instance-wide by content hash, so without that
+	// check any object whose oid a caller can name would come back through a
+	// repository of their own.
+	//
+	// It does *not* check that the caller may read that repository, and the
+	// comment here used to claim it did. There is no repository visibility on
+	// this server yet (docs/dev/thinkingface-design.md §11): every repository is
+	// readable by everyone, resolve and the batch endpoint included, so the
+	// check would be a call that always answers yes. What matters is that this
+	// is the place it has to go the moment private repositories exist -- one
+	// s.canRead(repo) beside the ownership test below -- because this route
+	// hands out object bytes without going through loadRepoForRead at all.
 	if !s.lfsProxyAuthorized(r, "download", repoID, oid) {
 		repo, err := s.store.GetRepoByID(r.Context(), repoID)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -387,8 +403,19 @@ func (s *Server) lfsProxyTarget(w http.ResponseWriter, r *http.Request) (int64, 
 	return repoID, oid, true
 }
 
+// writeLFSError answers in the shape the LFS batch protocol specifies: a
+// `message` at the top level of the body, under the protocol's own media type,
+// rather than this API's `{"error": {...}}`. git-lfs reads that field and
+// prints it.
+//
+// X-Error-Message is set as well. The body shape is the protocol's to dictate,
+// but "every error response carries X-Error-Message" is this server's own
+// promise (docs/dev/api-contract.md §0), and huggingface_hub -- which speaks the
+// LFS endpoints too, through its own uploader -- reads the header before it
+// looks at any body.
 func writeLFSError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", lfs.ContentType)
+	w.Header().Set("X-Error-Message", message)
 	writeRawJSON(w, status, map[string]string{"message": message})
 }
 

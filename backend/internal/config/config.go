@@ -18,6 +18,15 @@ const (
 	DefaultSessionSecret = "dev-insecure-session-secret"
 )
 
+// The signed-URL lifetimes a deployment gets when it sets neither variable.
+// They are named because the validation below has to be able to say "the
+// ceiling you never set is 12h" -- an upgrade that had only ever set
+// TF_SIGNED_URL_TTL is exactly the case that trips it.
+const (
+	DefaultSignedURLTTL    = time.Hour
+	DefaultSignedURLMaxTTL = 12 * time.Hour
+)
+
 // MinSessionSecretLen is the shortest session secret accepted once
 // TF_PUBLIC_URL is anything but loopback. The secret keys an HMAC-SHA256 that
 // both session cookies and LFS transfer URLs rely on, so anything shorter
@@ -203,8 +212,8 @@ func Load() (*Config, error) {
 		GitCacheBytes: e.int64("TF_GIT_CACHE_BYTES", 2<<30),
 
 		ViewerMetadataCacheBytes: e.int64("TF_VIEWER_METADATA_CACHE_BYTES", 256<<20),
-		SignedURLTTL:             e.duration("TF_SIGNED_URL_TTL", time.Hour),
-		SignedURLMaxTTL:          e.duration("TF_SIGNED_URL_MAX_TTL", 12*time.Hour),
+		SignedURLTTL:             e.duration("TF_SIGNED_URL_TTL", DefaultSignedURLTTL),
+		SignedURLMaxTTL:          e.duration("TF_SIGNED_URL_MAX_TTL", DefaultSignedURLMaxTTL),
 		DefaultStorageQuotaBytes: e.int64("TF_DEFAULT_STORAGE_QUOTA_BYTES", 0),
 		AdminUsername:            env("TF_ADMIN_USERNAME", "admin"),
 		AdminPassword:            env("TF_ADMIN_PASSWORD", DefaultAdminPassword),
@@ -316,6 +325,50 @@ func Load() (*Config, error) {
 	}
 	if c.SessionTTL <= 0 {
 		return nil, fmt.Errorf("TF_SESSION_TTL must be positive")
+	}
+	// A signed URL is minted with `now + TTL` as its expiry, and lfs.TTLFor
+	// only ever clamps the value *down* (to SignedURLMaxTTL, then to the
+	// signing limit) -- so a zero or negative base makes every URL this server
+	// issues expire at or before the moment it is handed out. Nothing would
+	// say so: the server starts, the LFS batch response looks entirely normal,
+	// and every upload and download fails against GCS with a 403 that names no
+	// cause. The proxy path (`exp` in the query) fails the same way.
+	if c.SignedURLTTL <= 0 {
+		return nil, fmt.Errorf("TF_SIGNED_URL_TTL must be positive, got %s", c.SignedURLTTL)
+	}
+	// The ceiling, on the other hand, is legitimately unset: lfs.TTLFor reads
+	// "<= 0" as "no ceiling of my own", leaving the signing limit as the only
+	// bound. Only a *negative* value is refused, since it can only be a typo
+	// -- as a ceiling it would mean "already expired", which is the same
+	// silent, unexplained 403.
+	if c.SignedURLMaxTTL < 0 {
+		return nil, fmt.Errorf("TF_SIGNED_URL_MAX_TTL must not be negative, got %s", c.SignedURLMaxTTL)
+	}
+	// A ceiling below the base is not a contradiction the server can resolve
+	// on its own -- TTLFor honours the ceiling, so the base is simply never
+	// reached -- but it does mean one of the two values is not doing what the
+	// operator set it for, and saying so at startup costs nothing.
+	//
+	// The message spells out both ways out, because the deployment most
+	// likely to hit this never wrote a contradictory pair: it set
+	// TF_SIGNED_URL_TTL alone, above the 12h ceiling it did not know it had,
+	// and the server it upgrades from was silently clamping to that ceiling
+	// all along. Refusing to start is still the right answer -- resolving it
+	// by raising the ceiling would quietly lengthen the life of every signed
+	// URL the instance hands out, which is not a decision to make on an
+	// operator's behalf during an upgrade -- but only if the error says
+	// exactly which variable to change and to what.
+	if c.SignedURLMaxTTL > 0 && c.SignedURLMaxTTL < c.SignedURLTTL {
+		hint := ""
+		if _, set := os.LookupEnv("TF_SIGNED_URL_MAX_TTL"); !set {
+			hint = fmt.Sprintf(" (TF_SIGNED_URL_MAX_TTL is not set, so it is its default %s)", DefaultSignedURLMaxTTL)
+		}
+		return nil, fmt.Errorf(
+			"TF_SIGNED_URL_MAX_TTL (%s) must not be shorter than TF_SIGNED_URL_TTL (%s)%s: "+
+				"the ceiling clamps every signed URL, so the base lifetime is never reached. "+
+				"Either raise TF_SIGNED_URL_MAX_TTL to %s or more (0 disables the ceiling, leaving GCS's 7-day signing limit), "+
+				"or lower TF_SIGNED_URL_TTL to %s or less",
+			c.SignedURLMaxTTL, c.SignedURLTTL, hint, c.SignedURLTTL, c.SignedURLMaxTTL)
 	}
 	if c.AuthRateLimitPerMinute < 0 {
 		return nil, fmt.Errorf("TF_AUTH_RATE_LIMIT_PER_MIN must not be negative")

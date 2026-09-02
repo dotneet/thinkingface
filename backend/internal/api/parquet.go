@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -114,6 +115,53 @@ func applyReadmeFeatures(cols []apitypes.ParquetColumn, feats map[string]string)
 	return out
 }
 
+// parquetInputMessage classifies a viewer failure that blames the request
+// rather than this server -- a column the file does not have, or bytes that
+// are not a readable parquet file -- and returns the sentence to answer it
+// with. Both used to come back as 500 internal_error, which reads as an
+// outage, gets retried by huggingface_hub's http_backoff, and files the
+// caller's typo under slog.Error. modelmeta.go draws the same line for the
+// same reason.
+//
+// internal/viewer returns these as plain fmt.Errorf values, so they are
+// recognised by their text. That is the weak part of this: the strings are
+// fixed at the three places viewer produces them (Reader.openParquetFile,
+// fetchTail, newRowPlan), and a wrong guess only costs the 500 this replaces,
+// never a wrong answer -- but exported sentinel errors in that package would
+// be better, and this should become errors.Is the moment they exist.
+//
+// The viewer's own text is never echoed wholesale: it names the object-storage
+// key the bytes were read from, which is an internal detail of where a file
+// lives rather than anything the caller asked about. The one part worth
+// repeating is the column name, which is the caller's own input.
+func parquetInputMessage(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	msg := err.Error()
+	if _, name, found := strings.Cut(msg, "viewer: unknown column "); found {
+		// Already quoted by the %q that produced it.
+		return "unknown column " + name + "; ask for a column this file has, or omit column= for all of them", true
+	}
+	if strings.Contains(msg, "has an encrypted footer") {
+		return "this parquet file has an encrypted footer, which the viewer cannot read", true
+	}
+	if strings.Contains(msg, "is not a parquet file") || strings.Contains(msg, "viewer: open parquet file ") {
+		return "this file is not a readable parquet file", true
+	}
+	return "", false
+}
+
+// handleViewerError maps a viewer failure onto a response: the caller's
+// mistake is a 400, everything else keeps handleStoreError's mapping.
+func handleViewerError(w http.ResponseWriter, op string, err error) {
+	if message, ok := parquetInputMessage(err); ok {
+		badRequest(w, message)
+		return
+	}
+	handleStoreError(w, op, err)
+}
+
 func (s *Server) handleParquetSchema(w http.ResponseWriter, r *http.Request) {
 	pt, ok := s.resolveParquet(w, r)
 	if !ok {
@@ -121,7 +169,7 @@ func (s *Server) handleParquetSchema(w http.ResponseWriter, r *http.Request) {
 	}
 	schema, err := s.viewer.Schema(r.Context(), pt.key)
 	if err != nil {
-		handleStoreError(w, "read parquet schema", err)
+		handleViewerError(w, "read parquet schema", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, apitypes.ParquetSchemaResponse{
@@ -132,6 +180,52 @@ func (s *Server) handleParquetSchema(w http.ResponseWriter, r *http.Request) {
 		Compression:  schema.Compression,
 		Columns:      completeFeaturesFromReadme(pt.gitRepo, pt.rev, schema.Columns),
 	})
+}
+
+// requestedColumns reads the column projection for the rows endpoint, in
+// either of the two spellings it accepts.
+//
+//   - `column=height,cm&column=age` -- repeated keys, each value one whole
+//     column name, taken exactly as sent. This is the only spelling that can
+//     name every column a parquet file may legally hold.
+//   - `columns=a,b,c` -- one comma-joined value, split and trimmed. The
+//     original, kept because links and bookmarks carry it.
+//
+// A single `column` wins outright and `columns` is then ignored, rather than
+// the two being merged: a client that knows the new spelling sends only it,
+// and merging would make a stale `columns` in the same URL silently widen the
+// projection.
+//
+// The old spelling cannot be fixed in place, only left as it is. A column
+// named "height,cm" -- which is what `pandas.to_parquet` writes for a CSV
+// header of that shape -- splits into two names, neither of which exists, so
+// the request answers 400 and the Rows tab of that file is broken for good; a
+// column named " age" is trimmed into a different name with the same result.
+// And a split fragment that happens to match another real column is worse
+// than an error, because it answers 200 with a projection nobody asked for.
+func requestedColumns(q url.Values) []string {
+	if repeated := q["column"]; len(repeated) > 0 {
+		out := make([]string, 0, len(repeated))
+		for _, c := range repeated {
+			// Only the empty value is dropped: any other string is a name the
+			// caller means literally, spaces and commas included.
+			if c != "" {
+				out = append(out, c)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	var columns []string
+	if raw := q.Get("columns"); raw != "" {
+		for _, c := range strings.Split(raw, ",") {
+			if c = strings.TrimSpace(c); c != "" {
+				columns = append(columns, c)
+			}
+		}
+	}
+	return columns
 }
 
 func (s *Server) handleParquetRows(w http.ResponseWriter, r *http.Request) {
@@ -151,18 +245,9 @@ func (s *Server) handleParquetRows(w http.ResponseWriter, r *http.Request) {
 	if limit > maxParquetRows {
 		limit = maxParquetRows
 	}
-	var columns []string
-	if raw := q.Get("columns"); raw != "" {
-		for _, c := range strings.Split(raw, ",") {
-			if c = strings.TrimSpace(c); c != "" {
-				columns = append(columns, c)
-			}
-		}
-	}
-
-	rows, err := s.viewer.Rows(r.Context(), pt.key, offset, limit, columns)
+	rows, err := s.viewer.Rows(r.Context(), pt.key, offset, limit, requestedColumns(q))
 	if err != nil {
-		handleStoreError(w, "read parquet rows", err)
+		handleViewerError(w, "read parquet rows", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, apitypes.ParquetRowsResponse{

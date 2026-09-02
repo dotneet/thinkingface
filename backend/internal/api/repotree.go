@@ -191,7 +191,19 @@ func (s *Server) handleHFTree(w http.ResponseWriter, r *http.Request) {
 	}
 	var entries []gitrepo.Entry
 	if !empty {
-		entries, _, err = gitRepo.Tree(commit.String(), wildcardPath(r), recursive)
+		treePath := wildcardPath(r)
+		entries, _, err = gitRepo.Tree(commit.String(), treePath, recursive)
+		// gitrepo.Tree only walks directories, so a path that names a *file*
+		// comes back as ErrPathNotFound -- and the endpoint answered 404
+		// EntryNotFound for a file that plainly exists. The Hub answers a
+		// one-element array there, which is what HfApi.list_repo_tree(
+		// path_in_repo=<a file>) is written against; without it that call
+		// raises instead of describing the file.
+		if err != nil && errors.Is(err, gitrepo.ErrPathNotFound) && treePath != "" {
+			if entry, _, statErr := gitRepo.Stat(commit.String(), treePath); statErr == nil && !entry.IsDir {
+				entries, err = []gitrepo.Entry{entry}, nil
+			}
+		}
 		if err != nil {
 			if errors.Is(err, gitrepo.ErrPathNotFound) {
 				// huggingface_hub only treats a 404 as "this path does not

@@ -123,20 +123,52 @@ func (s *Server) requireNamespaceAdmin(w http.ResponseWriter, r *http.Request, n
 	return user, true
 }
 
+// webhookNotFound is the single answer for "no such webhook" and "not yours",
+// and they must stay indistinguishable. Webhook ids are small sequential
+// integers in the URL, so an answer that differed between the two would let
+// anyone walk 1..N and read back the list of every webhook on the instance
+// together with the namespace that owns it -- the 403's own message named it
+// ("you do not have admin access to namespace alice"). handleDecideTransfer
+// avoids the same trap deliberately (transfers.go).
+func webhookNotFound(w http.ResponseWriter) {
+	notFound(w, "webhook not found")
+}
+
 // loadWebhookForAdmin loads the webhook named in the URL and checks the
 // caller may administer it (same bar as its owning namespace).
+//
+// The authorisation failure is folded into a 404 rather than reported as a
+// 403: see webhookNotFound. That is why this cannot simply call
+// requireNamespaceAdmin, which answers 403 with the namespace's name in it.
 func (s *Server) loadWebhookForAdmin(w http.ResponseWriter, r *http.Request) (*store.Webhook, bool) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		badRequest(w, "webhook id must be a number")
 		return nil, false
 	}
+	// Authentication still answers for itself: an anonymous or read-scoped
+	// caller gets 401/403 without any webhook being looked up, which says
+	// nothing about which ids exist.
+	user, ok := s.requireWrite(w, r)
+	if !ok {
+		return nil, false
+	}
 	hook, err := s.store.GetWebhook(r.Context(), id)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			webhookNotFound(w)
+			return nil, false
+		}
 		handleStoreError(w, "load webhook", err)
 		return nil, false
 	}
-	if _, ok := s.requireNamespaceAdmin(w, r, hook.Namespace); !ok {
+	role, err := s.roleIn(r.Context(), user, hook.Namespace)
+	if err != nil {
+		internalError(w, "check namespace access", err)
+		return nil, false
+	}
+	if role < RoleAdmin {
+		webhookNotFound(w)
 		return nil, false
 	}
 	return hook, true

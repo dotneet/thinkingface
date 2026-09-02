@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path"
 	"sort"
 	"strconv"
@@ -140,8 +141,8 @@ func (s *Server) handleExperimentMetrics(w http.ResponseWriter, r *http.Request)
 
 	series, err := s.experiments().Series(r.Context(), repo, experiments.SeriesRequest{
 		Project: chi.URLParam(r, "project"),
-		Runs:    splitCSV(q.Get("runs")),
-		Keys:    splitCSV(q.Get("keys")),
+		Runs:    selectedNames(q, "run", "runs"),
+		Keys:    selectedNames(q, "key", "keys"),
 		XAxis:   q.Get("x"),
 		Max:     maxPoints,
 	})
@@ -591,6 +592,41 @@ func numeric(v any) (float64, bool) {
 	}
 }
 
+// selectedNames reads a list of run or metric names off the query string, in
+// either of the two spellings the metrics endpoint accepts: repeated keys
+// (`run=lr=0.1,bs=32&run=baseline`), where each value is one whole name taken
+// exactly as sent, or the original comma-joined single value
+// (`runs=a,b`), which is split and trimmed.
+//
+// A single repeated key wins outright and the comma-joined one is then
+// ignored; merging them would let a stale `runs=` in the same URL silently
+// widen the selection a caller narrowed with `run=`.
+//
+// The comma-joined spelling cannot be made correct, only kept for links that
+// already exist. Nothing stops a comma in a run name -- ingest validation
+// (validateIngestName) rejects control characters and anything over 256 bytes,
+// and a sweep names its runs after the parameters it varies, so "lr=0.1,bs=32"
+// is the normal case rather than a contrived one. Split, it selects two runs
+// that do not exist, and the chart comes back empty; worse, if a fragment
+// happens to match a *different* real run, the chart quietly draws a line for
+// a run nobody selected.
+func selectedNames(q url.Values, repeatedKey, csvKey string) []string {
+	if repeated := q[repeatedKey]; len(repeated) > 0 {
+		out := make([]string, 0, len(repeated))
+		for _, v := range repeated {
+			// Only an empty value is dropped: every other string is a name
+			// the caller means literally, commas and spaces included.
+			if v != "" {
+				out = append(out, v)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return splitCSV(q.Get(csvKey))
+}
+
 func splitCSV(raw string) []string {
 	if raw == "" {
 		return nil
@@ -622,7 +658,10 @@ const (
 	// behind them are unconstrained TEXT, so the ceiling lives here.
 	maxIngestNameBytes = 256
 	// maxIngestKeys bounds how many distinct metric names one run may carry,
-	// since every key is kept in the run's metric_keys array forever.
+	// since every key is kept in the run's metric_keys array forever. It is a
+	// lifetime cap on the run, not a per-request one: the check merges the
+	// batch's names with the ones already stored, so the limit cannot be
+	// walked past a batch at a time.
 	maxIngestKeys = 1000
 )
 
@@ -784,10 +823,6 @@ func (s *Server) handleExperimentLog(w http.ResponseWriter, r *http.Request) {
 		}
 		points = append(points, store.MetricPoint{Step: p.Step, TS: ts, Metrics: p.Metrics})
 	}
-	if len(keySet) > maxIngestKeys {
-		badRequest(w, fmt.Sprintf("a run may carry at most %d distinct metrics", maxIngestKeys))
-		return
-	}
 
 	status := req.Status
 	if status == "" {
@@ -797,14 +832,7 @@ func (s *Server) handleExperimentLog(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, `status must be "running", "finished" or "failed"`)
 		return
 	}
-	// Nothing is written until every name and status has been checked, so a
-	// rejected batch never leaves an empty project row behind.
 	ctx := r.Context()
-	projectID, err := s.store.UpsertExpProject(ctx, repo.ID, project)
-	if err != nil {
-		internalError(w, "upsert experiment project", err)
-		return
-	}
 
 	// Existing metric keys *and* summary values must survive: this batch may
 	// not carry every metric the run logs. A batch of only "loss" must not
@@ -815,23 +843,65 @@ func (s *Server) handleExperimentLog(w http.ResponseWriter, r *http.Request) {
 	// The previous status is also captured here so a webhook fires only on
 	// the transition into finished/failed, not on every batch a long-running
 	// run logs at that terminal status.
-	var keys []string
+	//
+	// This read happens *before* the project is upserted, and deliberately:
+	// the merged key set is what maxIngestKeys is checked against below, and
+	// a batch rejected there must leave no empty project row behind, exactly
+	// like a batch rejected for a bad name or status.
 	prevStatus := ""
+	var storedKeys []string
 	summary := map[string]any{}
-	if existing, err := s.store.GetExpRun(ctx, projectID, req.Run); err == nil {
-		prevStatus = existing.Status
-		for _, k := range existing.MetricKeys {
-			keySet[k] = true
-		}
-		for k, v := range existing.Summary {
-			summary[k] = v
+	if proj, err := s.store.GetExpProject(ctx, repo.ID, project); err == nil {
+		if existing, err := s.store.GetExpRun(ctx, proj.ID, req.Run); err == nil {
+			prevStatus = existing.Status
+			storedKeys = existing.MetricKeys
+			for k, v := range existing.Summary {
+				summary[k] = v
+			}
 		}
 	}
 	for k, v := range batchSummary {
 		summary[k] = v
 	}
+
+	// maxIngestKeys is a ceiling on the run, not on the request: every key
+	// this batch introduces is written into metric_keys and stays there for
+	// the life of the run, so ten batches of 500 new names have to be refused
+	// exactly like one batch of 5000. Checking the batch alone let a client
+	// walk straight past the limit one batch at a time, growing the array
+	// without bound. The merged set is therefore what is measured -- the
+	// number of distinct names the run would carry once this batch is
+	// stored.
+	for _, k := range storedKeys {
+		keySet[k] = true
+	}
+	// Names already on the run are not "new", so report the two halves
+	// separately: a client that sees only the total cannot tell whether it
+	// sent too much or the run was already full.
+	added := len(keySet) - len(storedKeys)
+	// What is refused is *growth* past the ceiling, not every write to a run
+	// that is already past it. A run that grew beyond the cap while the check
+	// was still per-batch would otherwise become unwritable on upgrade --
+	// including the status ping that marks it finished, which carries no
+	// metric names at all and cannot make anything worse.
+	if added > 0 && len(keySet) > maxIngestKeys {
+		badRequest(w, fmt.Sprintf(
+			"a run may carry at most %d distinct metrics; run %q already has %d and this batch adds %d more (%d in total)",
+			maxIngestKeys, req.Run, len(storedKeys), added, len(keySet)))
+		return
+	}
+
+	var keys []string
 	for k := range keySet {
 		keys = append(keys, k)
+	}
+
+	// Nothing is written until every name, status and limit has been checked,
+	// so a rejected batch never leaves an empty project row behind.
+	projectID, err := s.store.UpsertExpProject(ctx, repo.ID, project)
+	if err != nil {
+		internalError(w, "upsert experiment project", err)
+		return
 	}
 	// Nothing known either way: keep whatever is stored rather than writing an
 	// empty object, so a status ping against a run this read could not see

@@ -36,6 +36,17 @@ func ValidateTargetURL(raw string, allowPrivate bool) error {
 	if host == "" {
 		return errors.New("URL must include a host")
 	}
+	// No userinfo. config.NormalizeEndpoint already refuses it on the URL the
+	// operator configures, and a webhook target is the same kind of value with
+	// the same two problems: the credentials are stored in a column the
+	// settings UI renders back to anyone who can administer the namespace, and
+	// "http://legitimate-host@attacker.example/" reads as a URL for
+	// legitimate-host to every human who reviews it while naming a completely
+	// different server. There is nothing it buys either -- the delivery
+	// carries its own HMAC signature (sign.go), not HTTP credentials.
+	if u.User != nil {
+		return errors.New("URL must not carry a username or password")
+	}
 	if allowPrivate {
 		return nil
 	}
@@ -94,6 +105,37 @@ var blockedPrefixes = []netip.Prefix{
 // is a route to 127.0.0.1 and has to be refused; 64:ff9b::8.8.8.8 is not.
 var nat64WellKnown = netip.MustParsePrefix("64:ff9b::/96")
 
+// sixToFour is 6to4 (RFC 3056), another prefix that carries an IPv4 address
+// inside an IPv6 one: the 32 bits after 2002:: are the IPv4 address of the
+// relay/host the packet is destined for. It is treated exactly like NAT64
+// above -- extract and judge the embedded address -- and for the same reason:
+// 2002:7f00:1:: is a route to 127.0.0.1, so without this
+// "http://[2002:7f00:1::]/hook" walked through both layers of this guard, the
+// write-time URL check and the connect-time re-check, and reached loopback.
+// Blocking the prefix outright would be wrong for the same reason it is wrong
+// for NAT64: 2002:0808:0808:: is a legitimate route to 8.8.8.8.
+var sixToFour = netip.MustParsePrefix("2002::/16")
+
+// teredo is RFC 4380's prefix. A Teredo address is a tunnel endpoint written
+// as an IPv6 one: bits 32..63 hold the relay server's IPv4 address and the
+// last 32 bits the client's, obfuscated by a bitwise NOT so it does not show
+// up in a naive scan of the address. Both are extracted and judged, for the
+// same reason 6to4 is: 2001:0:4136:e378:8000:63bf:3fff:fdd2 is a route to a
+// real host, and the shape says nothing about whether that host is local.
+// A client on 127.0.0.1 behind a relay on 5.9.5.9 is spelled
+// 2001:0:509:509:0:0:80ff:fffe -- 80ff:fffe being the complement of
+// 7f00:0001.
+var teredo = netip.MustParsePrefix("2001::/32")
+
+// isatapIID matches the interface identifier RFC 5214 gives an ISATAP
+// address: 00-00-5e-fe (or 02-00-5e-fe when the address is claimed to be
+// globally unique) followed by the IPv4 address, in the low 64 bits of *any*
+// prefix. That last part is why it is matched on the suffix rather than
+// listed as a prefix like the other translations.
+func isatapIID(b [16]byte) bool {
+	return (b[8] == 0x00 || b[8] == 0x02) && b[9] == 0x00 && b[10] == 0x5e && b[11] == 0xfe
+}
+
 // isBlockedIP is the single verdict both layers of this guard ask for: the
 // write-time URL check in ValidateTargetURL and the connect-time re-check in
 // newDeliveryTransport. Keeping one function is the point -- an address the
@@ -124,8 +166,37 @@ func isBlockedAddr(addr netip.Addr) bool {
 		addr.IsUnspecified() {
 		return true
 	}
+	// The IPv6 forms that carry an IPv4 address inside them. None can be
+	// blocked wholesale -- each is a legitimate way to reach a public IPv4
+	// host -- so the embedded address is pulled out and judged on its own.
+	// Where it sits, and how it is encoded, differs in every one of them.
+	//
+	// These four (plus the IPv4-mapped form unwrapped above) are the
+	// translations that can be recognised from the address alone. A NAT64
+	// deployed on a network-specific prefix (RFC 6052 §3.1 allows /32, /40,
+	// /48, /56 and /64 prefixes chosen by the operator) is *not* among them:
+	// nothing in such an address distinguishes it from any other global
+	// unicast address, so on a network that runs one, this guard sees only
+	// the outer address. That is a known limit, not an oversight -- an
+	// operator in that position wants the prefix in a deny list of their own.
 	if nat64WellKnown.Contains(addr) {
 		b := addr.As16()
+		return isBlockedAddr(netip.AddrFrom4([4]byte(b[12:16])))
+	}
+	if sixToFour.Contains(addr) {
+		b := addr.As16()
+		return isBlockedAddr(netip.AddrFrom4([4]byte(b[2:6])))
+	}
+	if teredo.Contains(addr) {
+		b := addr.As16()
+		// Either endpoint being local is enough to refuse: a packet to a
+		// Teredo client is delivered through its server, so a local server
+		// address is as much a route inwards as a local client address is.
+		server := netip.AddrFrom4([4]byte(b[4:8]))
+		client := netip.AddrFrom4([4]byte{^b[12], ^b[13], ^b[14], ^b[15]})
+		return isBlockedAddr(server) || isBlockedAddr(client)
+	}
+	if b := addr.As16(); addr.Is6() && isatapIID(b) {
 		return isBlockedAddr(netip.AddrFrom4([4]byte(b[12:16])))
 	}
 	for _, p := range blockedPrefixes {
