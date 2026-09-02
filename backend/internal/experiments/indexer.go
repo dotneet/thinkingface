@@ -74,10 +74,12 @@ func (ix *Indexer) IndexRepo(ctx context.Context, repo *store.Repo) error {
 
 func (ix *Indexer) indexProject(ctx context.Context, repo *store.Repo, gitRepo *gitrepo.Repo, layout Layout) error {
 	aggregates := map[string]*runAggregate{}
-	// Every file the project's rows live in, base first: a rotated project
+	// Every file the project's rows live in, oldest first: a rotated project
 	// whose newest points are in a continuation file would otherwise be
 	// indexed as if it had stopped logging at the rotation point, and its
-	// summary would freeze at whatever value it held then.
+	// summary would freeze at whatever value it held then. The order is
+	// load-bearing beyond that -- lastValues below keeps the last value it
+	// sees -- and layout.MetricsFiles is what guarantees it is chronological.
 	for _, metricsPath := range layout.MetricsFiles() {
 		err := ix.scanMetricRows(ctx, repo, gitRepo, repo.DefaultBranch, metricsPath, viewer.ScanRequest{},
 			func(run string, row map[string]any, cols map[string]bool) error {

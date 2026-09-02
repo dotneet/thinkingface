@@ -18,6 +18,11 @@ export async function SiteHeader() {
   // Only queried for signed-in visitors: the endpoint requires auth, and
   // this header renders on every page, so skip it entirely for the common
   // anonymous case. Any failure degrades silently to no badge.
+  //
+  // `incoming` is scoped server-side to namespaces this user actually writes
+  // and capped per side (docs/dev/api-contract.md, "Transfer (for the Web
+  // UI)"), so the badge means "waiting for you" — not "pending somewhere on
+  // this server" — and one page render cannot pull an unbounded list.
   const pendingTransfersCount = user
     ? await listMyTransfers({ headers: await authHeaders() }).then((r) =>
         r.ok ? r.data.incoming.length : undefined,

@@ -194,15 +194,65 @@ func TestDetectLayouts_RootMetricsShardsUseTheRepoName(t *testing.T) {
 	}
 }
 
-// TestDetectLayouts_ShardWithoutItsBaseIsNotAProject: readers walk the shards
-// after the base file, so a shard with nothing to be read relative to is
-// dropped the same way a stray configs file is.
-func TestDetectLayouts_ShardWithoutItsBaseIsNotAProject(t *testing.T) {
-	if got := DetectLayouts([]string{"demo/metrics.part0001.parquet"}, "repo"); len(got) != 0 {
-		t.Errorf("DetectLayouts(orphan shard) = %+v, want none", got)
+// TestDetectLayouts_ChainIsAnchoredOnItsOldestSurvivingFile covers the base
+// file being deleted out from under a rotated project, which is something any
+// user can do (the Web UI, huggingface_hub.delete_file, `tf up --delete`, a
+// history rewrite).
+//
+// Dropping the project used to be the answer, and it cost the surviving
+// shards' rows for no reason: the chain's order comes from the part numbers in
+// the names, not from the base being present. What must not happen is the
+// other repair -- letting the writer re-anchor onto the base -- because that
+// puts the newest points in the file every reader scans first
+// (TestFlush_ChainStaysInOrderWhenTheBaseFileIsDeleted).
+func TestDetectLayouts_ChainIsAnchoredOnItsOldestSurvivingFile(t *testing.T) {
+	got := DetectLayouts([]string{
+		"demo/metrics.part0002.parquet",
+		"demo/metrics.part0001.parquet",
+	}, "repo")
+	want := []Layout{{
+		Project:       "demo",
+		MetricsPath:   "demo/metrics.part0001.parquet",
+		MetricsShards: []string{"demo/metrics.part0002.parquet"},
+	}}
+	if !reflect.DeepEqual(sortedLayouts(got), want) {
+		t.Errorf("DetectLayouts(chain with no base) = %+v, want %+v", got, want)
 	}
-	if got := DetectLayouts([]string{"myproj.part0001.parquet"}, "repo"); len(got) != 0 {
-		t.Errorf("DetectLayouts(orphan root shard) = %+v, want none", got)
+
+	// The same for a local export's root-level chain, and with the lowest
+	// surviving part deleted too: whichever files are left keep their order.
+	got = DetectLayouts([]string{"myproj.part0003.parquet"}, "repo")
+	want = []Layout{{Project: "myproj", MetricsPath: "myproj.part0003.parquet"}}
+	if !reflect.DeepEqual(sortedLayouts(got), want) {
+		t.Errorf("DetectLayouts(orphan root shard) = %+v, want %+v", got, want)
+	}
+
+	// A stray configs file is still not a project: this loosens the rule for
+	// files that hold metric rows, not for everything.
+	if got := DetectLayouts([]string{"myproj_configs.parquet"}, "repo"); len(got) != 0 {
+		t.Errorf("DetectLayouts(configs only) = %+v, want none", got)
+	}
+}
+
+// TestMetricsChainFile pins the inverse of MetricsShardPath, which is how the
+// writer keeps numbering from the right stem once the base file is gone.
+func TestMetricsChainFile(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		base string
+		part int
+	}{
+		{"demo/metrics.parquet", "demo/metrics.parquet", 0},
+		{"demo/metrics.part0001.parquet", "demo/metrics.parquet", 1},
+		{"myproj.part0042.PARQUET", "myproj.PARQUET", 42},
+		// Not a continuation file: fewer than four digits (see
+		// metricsShardPattern), so it is somebody's own filename.
+		{"demo.part1.parquet", "demo.part1.parquet", 0},
+	} {
+		base, part := MetricsChainFile(tc.path)
+		if base != tc.base || part != tc.part {
+			t.Errorf("MetricsChainFile(%q) = %q, %d, want %q, %d", tc.path, base, part, tc.base, tc.part)
+		}
 	}
 }
 

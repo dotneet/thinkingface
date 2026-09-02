@@ -2002,10 +2002,9 @@ func TestIntegrationRepoTransferRequests(t *testing.T) {
 		// role) vs outgoing (write access to the source namespace).
 		//
 		// The org write member is a fresh ordinary account rather than
-		// f.admin: a site administrator has write access everywhere, so using
-		// one here would pass whether or not the org-membership arm of the
-		// predicate worked at all. The administrator's own case is
-		// TestIntegrationSiteAdminSeesEveryPendingTransfer.
+		// f.admin: being a site administrator grants no listing of its own
+		// (TestIntegrationSiteAdminIsNotShownStrangersTransfers), so using one
+		// here would test the org-membership arm by removing it.
 		org, err := s.CreateOrg(ctx, "acme", f.bob.ID, OrgUpdate{})
 		if err != nil {
 			t.Fatal(err)

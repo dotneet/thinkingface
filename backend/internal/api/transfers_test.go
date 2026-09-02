@@ -442,27 +442,51 @@ func TestTransfer_ExpiredRequestDoesNotBlockANewOne(t *testing.T) {
 	}
 }
 
-// A site admin may accept or reject any pending transfer by id (roleIn
-// answers RoleAdmin in every namespace), so /me/transfers has to show them
-// the ones they may act on. It used to show them nothing, which left the
-// power reachable only by guessing numeric ids.
-func TestMyTransfers_ListsPendingTransfersForASiteAdmin(t *testing.T) {
+// A site admin may accept or reject any pending transfer by id -- roleIn
+// answers RoleAdmin in every namespace -- but /me/transfers is an inbox, not
+// a list of everything they are permitted to do. While the two shared one
+// rule, an administrator's header badge counted every pending transfer on the
+// instance, twice over, none of it addressed to them.
+func TestMyTransfers_OmitsTransfersBetweenStrangersForASiteAdmin(t *testing.T) {
 	f := newTransferFixture(t)
 	f.repo("alice", "foo", "model")
 
 	aliceTok := f.token(f.alice, "write")
-	if got := f.do("POST", "/api/repos/move", aliceTok, map[string]any{
+	resp := f.do("POST", "/api/repos/move", aliceTok, map[string]any{
 		"fromRepo": "alice/foo", "toRepo": "bob/foo", "type": "model",
-	}).status(); got != 202 {
-		t.Fatalf("move status = %d, want 202 (pending)", got)
+	})
+	if resp.status() != 202 {
+		t.Fatalf("move status = %d, want 202 (pending)", resp.status())
+	}
+	var move struct {
+		TransferID int64 `json:"transfer_id"`
+	}
+	resp.json(t, &move)
+
+	adminTok := f.token(f.admin, "write")
+	var mine apitypes.MyTransfersResponse
+	f.do("GET", "/api/v1/me/transfers", adminTok, nil).json(t, &mine)
+	if len(mine.Incoming) != 0 || len(mine.Outgoing) != 0 {
+		t.Fatalf("site admin /me/transfers = %+v, want a stranger's transfer listed on neither side", mine)
 	}
 
-	var mine apitypes.MyTransfersResponse
-	f.do("GET", "/api/v1/me/transfers", f.token(f.admin, "write"), nil).json(t, &mine)
-	if len(mine.Incoming) != 1 || len(mine.Outgoing) != 1 {
-		t.Fatalf("site admin /me/transfers = %+v, want the pending transfer on both sides", mine)
+	// bob, who was actually asked, still gets it -- the endpoint works, it
+	// just is not addressed to the administrator.
+	var bobs apitypes.MyTransfersResponse
+	f.do("GET", "/api/v1/me/transfers", f.token(f.bob, "write"), nil).json(t, &bobs)
+	if len(bobs.Incoming) != 1 || len(bobs.Outgoing) != 0 {
+		t.Fatalf("bob /me/transfers = %+v, want the one pending transfer incoming", bobs)
 	}
-	if mine.Incoming[0].ToNamespace != "bob" || mine.Incoming[0].FromNamespace != "alice" {
-		t.Fatalf("incoming[0] = %+v, want alice -> bob", mine.Incoming[0])
+
+	// And the power the listing no longer advertises is still there: the
+	// administrator decides it by id, which is how an unresponsive
+	// destination gets unstuck.
+	if got := f.do("POST", fmt.Sprintf("/api/v1/transfers/%d/accept", move.TransferID), adminTok, nil).status(); got != 200 {
+		t.Fatalf("site admin accepting transfer %d = %d, want 200", move.TransferID, got)
+	}
+	if r, err := f.st.GetRepo(context.Background(), "model", "bob", "foo"); err != nil {
+		t.Fatalf("repository after the admin accepted: %v", err)
+	} else if r.Namespace != "bob" {
+		t.Fatalf("repository namespace = %q, want bob", r.Namespace)
 	}
 }

@@ -995,21 +995,49 @@ func (h *expHarness) deleteFile(path string) {
 	h.reindex()
 }
 
-// TestFlush_ReanchorsTheChainWhenTheBaseFileIsDeleted covers the one way
-// rotation can turn into silent data loss.
+// fileExists reports whether the default branch still carries a path.
+func (h *expHarness) fileExists(path string) bool {
+	h.t.Helper()
+	gitRepo, err := h.git.Open(h.repo.StoragePath)
+	if err != nil {
+		h.t.Fatalf("open git repo: %v", err)
+	}
+	_, _, err = gitRepo.Stat(h.repo.DefaultBranch, path)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, gitrepo.ErrPathNotFound):
+		return false
+	default:
+		h.t.Fatalf("stat %s: %v", path, err)
+		return false
+	}
+}
+
+// TestFlush_ChainStaysInOrderWhenTheBaseFileIsDeleted covers the two ways
+// rotation can turn into silent data loss, which are two halves of one
+// invariant: **part-number order is chronological order.**
 //
-// A chain of continuation files is only a chain while its base exists:
-// DetectLayouts drops a project whose shards have no base (readers walk the
-// shards *after* the base, so an orphan has no anchor). The base is not this
-// package's to keep -- a user can delete it from the Web UI, with
-// huggingface_hub.delete_file, with `tf up --delete`, or by rewriting history
-// -- so the writer has to agree with that rule or the two disagree in the
-// worst direction. A target resolution that kept walking to the highest shard
-// would append there, commit, and let the syncer delete the exp_points rows it
-// had just "saved": points written into a file no reader ever opens, for ever,
-// with the chart empty and the state unable to heal because the walk never
-// comes back to the base.
-func TestFlush_ReanchorsTheChainWhenTheBaseFileIsDeleted(t *testing.T) {
+// The files are not this package's to keep -- a user can delete any of them
+// from the Web UI, with huggingface_hub.delete_file, with `tf up --delete`, or
+// by rewriting history -- and the base file is the one whose loss used to
+// break both halves at once:
+//
+//   - Readers dropped a project whose shards had no base, so deleting it hid
+//     rows that were still there (and, if the writer had gone on appending to
+//     the highest shard, would have gone on hiding every point flushed after
+//     it: a black hole with no way to heal).
+//   - Answering that by re-anchoring the writer onto the base put the *newest*
+//     points in the file both readers scan *first*. Series() breaks a tie at
+//     one step by taking the later value in scan order and indexProject
+//     overwrites a run's summary as it goes, so a rotated project whose base
+//     had been deleted reported the chart point and the summary from before
+//     the rotation -- silently, and for good.
+//
+// So the chain is append-only at the writing end and anchored on its oldest
+// *surviving* member at the reading end, and the deleted anchor comes back
+// empty for the sake of the name alone (syncer.looksLikeExperiment).
+func TestFlush_ChainStaysInOrderWhenTheBaseFileIsDeleted(t *testing.T) {
 	h := newExpHarness(t)
 	restore := maxExistingFlushRows
 	maxExistingFlushRows = 4
@@ -1033,50 +1061,78 @@ func TestFlush_ReanchorsTheChainWhenTheBaseFileIsDeleted(t *testing.T) {
 	}
 
 	// The user deletes the base file. Steps 1-3 went with it -- that was their
-	// choice -- but steps 4-6 are still in the shard, unreadable until
-	// something re-anchors it.
+	// choice -- but steps 4-6 are in the shard and stay readable: an orphaned
+	// chain is anchored on its lowest surviving part.
 	h.deleteFile("demo/metrics.parquet")
-	if got := h.series("demo"); len(got) != 0 {
-		t.Fatalf("series with an orphaned shard = %#v, want none (DetectLayouts drops it)", got)
+	if got := h.series("demo"); len(got) != 1 || len(got[0].Points) != 3 {
+		t.Fatalf("series with the base deleted = %#v, want the shard's 3 points", got)
 	}
 
-	h.ingest("demo", "run-1", "running", []int64{7, 8}, "loss")
+	// The run resumes and re-logs step 6 with a different value, then goes on
+	// to step 7. Two measurements at one step, both real, and the chart must
+	// show the one logged later (docs/dev/thinkingface-design.md §8).
+	h.ingestPoints("demo", "run-1", []metricPoint{
+		{step: 6, values: map[string]float64{"loss": 9.9}},
+		{step: 7, values: map[string]float64{"loss": 0.7}},
+	})
 	third := h.flush(projectID, "demo")
-	if third.Path != "demo/metrics.parquet" {
-		t.Fatalf("flush after the base was deleted wrote %q, want the base file: appending to the "+
-			"orphaned shard writes points no reader will ever open", third.Path)
+	if third.Path == "demo/metrics.parquet" {
+		t.Fatalf("flush after the base was deleted wrote %q: re-anchoring onto the base puts the "+
+			"newest points in the file every reader scans first", third.Path)
+	}
+	if third.Path != "demo/metrics.part0002.parquet" {
+		t.Fatalf("third flush wrote %q, want the next continuation file "+
+			"(part0001 holds 3 of the 4 rows a file may have here)", third.Path)
 	}
 	h.reindex()
 	if err := h.st.DeletePoints(h.ctx, third.PointIDs); err != nil {
 		t.Fatalf("delete points: %v", err)
 	}
 
-	// Re-anchored: the new points are readable, and so are the shard's, which
-	// is the half that was lost.
+	// Nothing is stranded: the surviving shard's points and the new ones are
+	// all charted...
 	got := h.series("demo")
 	if len(got) != 1 {
-		t.Fatalf("series after re-anchoring = %#v, want one trace", got)
+		t.Fatalf("series after the deletion = %#v, want one trace", got)
 	}
 	var steps []float64
 	for _, p := range got[0].Points {
 		steps = append(steps, p[0])
 	}
-	want := []float64{4, 5, 6, 7, 8}
-	if !reflect.DeepEqual(steps, want) {
-		t.Errorf("charted steps = %v, want %v (the shard's points plus the new ones)", steps, want)
+	if want := []float64{4, 5, 6, 7}; !reflect.DeepEqual(steps, want) {
+		t.Fatalf("charted steps = %v, want %v (the shard's points plus the new ones)", steps, want)
+	}
+	// ... and the contested step reads the value logged after the rotation,
+	// not the one from before it.
+	if got[0].Points[2][1] != 9.9 {
+		t.Errorf("charted value at step 6 = %v, want 9.9 (logged after the rotation, not 0.6 from before it)",
+			got[0].Points[2][1])
+	}
+	// The run summary is the same question asked of the indexer: it keeps the
+	// last value it sees, file by file, in the same order.
+	summary, ok := toFloat(h.run("demo", "run-1").Summary["loss"])
+	if !ok || summary != 0.7 {
+		t.Errorf("run summary loss = %v, want 0.7 (the newest file's last row)", h.run("demo", "run-1").Summary["loss"])
 	}
 	// (num_points is not asserted: it only ever grows -- store.UpsertExpRunWith
-	// takes the MAX -- so it still reports the six points that existed before
-	// the user deleted three of them, which is a separate question from this
-	// one.)
+	// takes the MAX -- so it still reports the points that existed before the
+	// user deleted three of them, which is a separate question from this one.)
 
-	// The chain grows from the base again rather than from the orphan: the
-	// next rotation must not overwrite the shard that is still holding data.
-	h.ingest("demo", "run-1", "running", []int64{9, 10, 11}, "loss")
+	// The anchor is back, and empty: it exists for syncer.looksLikeExperiment,
+	// which reads "metrics.parquet is in the tree" as "this dataset is an
+	// experiment" and decides whether the project is indexed at all. Holding
+	// rows there instead is what the ordering assertions above forbid.
+	if !h.fileExists("demo/metrics.parquet") {
+		t.Errorf("the chain's anchor was not restored; repo.is_experiment goes false on the next push")
+	}
+
+	// And the chain still only grows: the next rotation must not overwrite a
+	// part that is holding data.
+	h.ingest("demo", "run-1", "running", []int64{8, 9, 10}, "loss")
 	fourth := h.flush(projectID, "demo")
-	if fourth.Path != "demo/metrics.part0002.parquet" {
+	if fourth.Path != "demo/metrics.part0003.parquet" {
 		t.Fatalf("fourth flush wrote %q, want a fresh continuation file "+
-			"(part0001 still holds steps 4-6)", fourth.Path)
+			"(part0001 and part0002 still hold data)", fourth.Path)
 	}
 }
 

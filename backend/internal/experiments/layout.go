@@ -25,15 +25,18 @@ const SystemMetricPrefix = "system/"
 type Layout struct {
 	Project string
 	// MetricsPath is the file every reader requires; a project without one is
-	// not a project (see the filter at the end of DetectLayouts).
+	// not a project (see the filter at the end of DetectLayouts). It is the
+	// oldest surviving member of the chain described below: the base parquet
+	// normally, and the lowest-numbered continuation file when the base has
+	// been deleted.
 	MetricsPath string
-	// MetricsShards are the continuation files a flush created when appending
-	// to MetricsPath would have produced a file too large to read back
-	// (flush.go's maxExistingFlushRows), in part-number order. They have
-	// exactly the shape of MetricsPath -- one row per point, the same
-	// structural columns -- so every reader that scans MetricsPath must scan
-	// these straight after it, in this order, or a long project's chart simply
-	// stops at the rotation point.
+	// MetricsShards are the rest of the continuation files a flush created
+	// when appending to the file before them would have produced a file too
+	// large to read back (flush.go's maxExistingFlushRows), in part-number
+	// order. They have exactly the shape of MetricsPath -- one row per point,
+	// the same structural columns -- so every reader that scans MetricsPath
+	// must scan these straight after it, in this order, or a long project's
+	// chart simply stops at the rotation point.
 	//
 	// Nil for the overwhelmingly common project that never crossed the bound.
 	MetricsShards []string
@@ -73,6 +76,23 @@ var metricsShardPattern = regexp.MustCompile(`^(.+)\.part(\d{4,})$`)
 func MetricsShardPath(base string, n int) string {
 	ext := path.Ext(base)
 	return fmt.Sprintf("%s.part%04d%s", strings.TrimSuffix(base, ext), n, ext)
+}
+
+// MetricsChainFile is the inverse of MetricsShardPath: it splits a member of a
+// metrics chain into the base file the numbering is derived from and its part
+// number, which is 0 for the base itself.
+//
+// The name is the only place the chain is recorded -- nothing inside the
+// parquet says which file continues which -- so this is what lets the writer
+// keep numbering from the right stem after the base file has been deleted out
+// from under it (flush.go's resolveMetricsTarget). Passing a path that is not
+// a continuation file returns it unchanged with part 0.
+func MetricsChainFile(p string) (base string, part int) {
+	ext := path.Ext(p)
+	if stem, n, ok := parseMetricsShard(strings.TrimSuffix(p, ext)); ok {
+		return stem + ext, n
+	}
+	return p, 0
 }
 
 // parseMetricsShard splits a file stem (the name with its extension already
@@ -229,33 +249,43 @@ func DetectLayouts(paths []string, repoName string) []Layout {
 		}
 	}
 
+	// Continuation files whose project has no other file of its own still make
+	// a project: the base file can be deleted out from under them (the Web UI,
+	// HF's delete_file, `tf up --delete`, a history rewrite) and the rows in
+	// them are no less real for it. Dropping them here is what used to make
+	// that deletion a silent black hole -- see the anchoring comment below.
+	for project := range shards {
+		get(project)
+	}
+
 	out := make([]Layout, 0, len(byProject))
 	for _, l := range byProject {
-		// A project without metrics is not a project; a stray configs file on
-		// its own tells us nothing to chart. A shard without its base file is
-		// the same thing one step further along, and is dropped with it:
-		// readers walk the shards *after* the base, so a shard on its own has
-		// no anchor to be read relative to.
-		//
-		// This is half of an invariant the writer holds up too: a chain of
-		// continuation files is only a chain while its base file exists. The
-		// base can be deleted out from under the shards (the Web UI, HF's
-		// delete_file, `tf up --delete`, a history rewrite), and dropping the
-		// project here would be a silent data black hole if the flusher went
-		// on appending to the highest shard -- so flush.go's
-		// resolveMetricsTarget targets the *base* whenever it is missing,
-		// which re-anchors the chain and makes these shards readable again.
+		// Part-number order is the reading order, and the reading order is
+		// chronological, because the writer only ever appends to the
+		// highest-numbered file of the chain or starts a higher-numbered one
+		// (flush.go's resolveMetricsTarget). Series() resolves two values at
+		// one step by taking the later one in scan order and indexProject
+		// overwrites a run's summary as it goes, so getting this backwards
+		// would chart -- and summarise -- a resumed run's *older* value.
+		found := shards[l.Project]
+		sort.Slice(found, func(i, j int) bool { return found[i].n < found[j].n })
+
+		// The chain is anchored on its oldest surviving member rather than on
+		// the base file, so a deleted base costs its own rows and nothing
+		// else. This is the reader's half of the invariant above: the writer
+		// never re-anchors onto a file it has already written past, precisely
+		// so that "later in this list" can keep meaning "logged later".
 		// Change one end and you must change the other.
 		if l.MetricsPath == "" {
-			continue
+			if len(found) == 0 {
+				// A project without metrics is not a project; a stray configs
+				// file on its own tells us nothing to chart.
+				continue
+			}
+			l.MetricsPath = found[0].path
+			found = found[1:]
 		}
-		if found := shards[l.Project]; len(found) > 0 {
-			// Part-number order is the reading order, and the reading order is
-			// chronological: a shard only ever exists because the file before
-			// it was full. Series() resolves two values at one step by taking
-			// the later one in scan order, so getting this backwards would
-			// chart a resumed run's *older* value.
-			sort.Slice(found, func(i, j int) bool { return found[i].n < found[j].n })
+		if len(found) > 0 {
 			l.MetricsShards = make([]string, 0, len(found))
 			for _, s := range found {
 				l.MetricsShards = append(l.MetricsShards, s.path)
@@ -267,9 +297,11 @@ func DetectLayouts(paths []string, repoName string) []Layout {
 }
 
 // MetricsFiles is every file holding this project's metric rows, in reading
-// order: the base parquet followed by its continuation files. Readers that
-// scan the whole project use this rather than MetricsPath, so adding a shard
-// never means remembering to update a second loop.
+// order: the oldest surviving member of the chain followed by the rest, by
+// part number. That order is chronological (see DetectLayouts), so the last
+// file is the one the newest points are in. Readers that scan the whole
+// project use this rather than MetricsPath, so adding a shard never means
+// remembering to update a second loop.
 func (l Layout) MetricsFiles() []string {
 	if l.MetricsPath == "" {
 		return nil

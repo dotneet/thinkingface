@@ -426,11 +426,20 @@ func repairHEAD(ctx context.Context, gitDir, defaultBranch string) error {
 		return nil
 	}
 	want := "refs/heads/" + defaultBranch
-	// --quiet: a detached HEAD is not an error here, it is simply a HEAD that
-	// disagrees, and the fix is the same.
-	if out, err := runGit(ctx, gitDir, "symbolic-ref", "--quiet", "HEAD"); err == nil &&
-		strings.TrimSpace(out) == want {
-		return nil
+	// Read the HEAD file rather than asking git for it. This runs on the
+	// generation cache hit, which is every git smart-HTTP request and every
+	// flush once the local copy is warm, so a `git symbolic-ref` here would
+	// add one fork+exec per request to the hottest path in the server for an
+	// answer that is a single line of text in the repository root.
+	//
+	// A symref HEAD is "ref: <target>\n"; anything else (a raw sha, i.e. a
+	// detached HEAD, or an unreadable file) simply does not agree, and the fix
+	// is the same in every one of those cases, so they share one branch.
+	if head, err := os.ReadFile(filepath.Join(gitDir, "HEAD")); err == nil {
+		if target, ok := strings.CutPrefix(strings.TrimSpace(string(head)), "ref: "); ok &&
+			strings.TrimSpace(target) == want {
+			return nil
+		}
 	}
 	if _, err := runGit(ctx, gitDir, "symbolic-ref", "HEAD", want); err != nil {
 		return fmt.Errorf("align HEAD of %s to %s: %w", gitDir, want, err)

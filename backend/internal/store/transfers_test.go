@@ -7,6 +7,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -245,19 +246,18 @@ func TestIntegrationExpiredTransferDoesNotWedgeTheNextRequest(t *testing.T) {
 }
 
 // A site administrator is RoleAdmin in every namespace as far as the API
-// layer is concerned (api.roleIn, docs/dev/repo-transfer-design.md §5), which
-// is what lets them accept, reject or cancel any pending transfer by id. The
-// listing has to agree, or the one endpoint that could act on a stuck
-// transfer is the one nothing in the UI ever points at.
-func TestIntegrationSiteAdminSeesEveryPendingTransfer(t *testing.T) {
+// layer is concerned (api.roleIn, docs/dev/repo-transfer-design.md §5), so
+// they may accept, reject or cancel any pending transfer by id. This listing
+// deliberately does not follow that rule: it answers "what is waiting for
+// me", and a request between two strangers is waiting for neither of them.
+// While it did follow it, every pending transfer on the instance was listed
+// at every administrator -- once as incoming and again as outgoing, since the
+// same predicate is applied to both ends of the row -- and the header badge,
+// which counts the incoming side on every page render, never went out.
+func TestIntegrationSiteAdminIsNotShownStrangersTransfers(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s *Store) {
 		f := newFixture(t, s)
 		ctx := f.ctx
-
-		carol, err := s.CreateUser(ctx, "carol", "carol@example.com", "hash", false)
-		if err != nil {
-			t.Fatalf("create carol: %v", err)
-		}
 
 		r := f.repo(t, "alice", "foo", "model", nil)
 		created, err := s.CreateRepoTransfer(ctx, TransferSpec{
@@ -267,29 +267,87 @@ func TestIntegrationSiteAdminSeesEveryPendingTransfer(t *testing.T) {
 			t.Fatalf("CreateRepoTransfer: %v", err)
 		}
 
-		// The admin is neither namespace's owner nor a member of anything,
-		// and still sees it from both sides: they may accept it (destination)
-		// and they may cancel it (source).
+		// The admin owns neither namespace and is a member of nothing, so
+		// alice's offer to bob is none of their inbox's business.
 		in, out, err := s.ListRepoTransfersForUser(ctx, f.admin.ID)
 		if err != nil {
 			t.Fatalf("ListRepoTransfersForUser(admin): %v", err)
 		}
-		if len(in) != 1 || in[0].ID != created.ID {
-			t.Errorf("admin incoming = %+v, want the pending transfer %d", in, created.ID)
-		}
-		if len(out) != 1 || out[0].ID != created.ID {
-			t.Errorf("admin outgoing = %+v, want the pending transfer %d", out, created.ID)
+		if len(in) != 0 || len(out) != 0 {
+			t.Errorf("site admin sees %d incoming / %d outgoing, want none of either", len(in), len(out))
 		}
 
-		// An ordinary account with no relationship to either side still sees
-		// nothing: the admin arm widens the predicate for administrators
-		// only.
-		in, out, err = s.ListRepoTransfersForUser(ctx, carol.ID)
+		// The two people it *is* waiting on still see it, each on one side
+		// only -- proving the rows are listed at all and it is the
+		// administrator arm that is gone.
+		in, out, err = s.ListRepoTransfersForUser(ctx, f.bob.ID)
 		if err != nil {
-			t.Fatalf("ListRepoTransfersForUser(carol): %v", err)
+			t.Fatalf("ListRepoTransfersForUser(bob): %v", err)
 		}
-		if len(in) != 0 || len(out) != 0 {
-			t.Errorf("carol sees %d incoming / %d outgoing, want none", len(in), len(out))
+		if len(in) != 1 || in[0].ID != created.ID || len(out) != 0 {
+			t.Errorf("bob (the destination) = %d incoming / %d outgoing, want just the transfer incoming", len(in), len(out))
+		}
+		in, out, err = s.ListRepoTransfersForUser(ctx, f.alice.ID)
+		if err != nil {
+			t.Fatalf("ListRepoTransfersForUser(alice): %v", err)
+		}
+		if len(out) != 1 || out[0].ID != created.ID || len(in) != 0 {
+			t.Errorf("alice (the source) = %d incoming / %d outgoing, want just the transfer outgoing", len(in), len(out))
+		}
+	})
+}
+
+// Anybody may aim a transfer request at anybody's namespace, so the size of
+// an inbox is not something its owner controls -- and the header badge reads
+// it on every page render. Each side is capped; the newest survive.
+func TestIntegrationTransferListingIsCapped(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+		bobNS := f.ns(t, "bob")
+
+		// Shrunk rather than filing 200 requests: the cap is the behaviour
+		// under test, not the number.
+		defer func(orig int) { maxTransfersListed = orig }(maxTransfersListed)
+		maxTransfersListed = 2
+
+		var last int64
+		for i := range 3 {
+			r := f.repo(t, "alice", fmt.Sprintf("flood-%d", i), "model", nil)
+			// created_at orders the listing and comes from time.Now(), whose
+			// resolution the SQLite text encoding truncates; spacing the rows
+			// keeps "newest first" from being a coin toss.
+			time.Sleep(2 * time.Millisecond)
+			ct, err := s.CreateRepoTransfer(ctx, TransferSpec{
+				RepoID: r.ID, ToNamespaceID: bobNS.ID, ActorID: f.alice.ID,
+			}, time.Hour)
+			if err != nil {
+				t.Fatalf("CreateRepoTransfer %d: %v", i, err)
+			}
+			last = ct.ID
+		}
+
+		in, out, err := s.ListRepoTransfersForUser(ctx, f.bob.ID)
+		if err != nil {
+			t.Fatalf("ListRepoTransfersForUser(bob): %v", err)
+		}
+		if len(in) != 2 {
+			t.Fatalf("bob incoming = %d, want the cap of %d", len(in), maxTransfersListed)
+		}
+		if in[0].ID != last {
+			t.Errorf("incoming[0].ID = %d, want the newest request %d", in[0].ID, last)
+		}
+		if len(out) != 0 {
+			t.Errorf("bob outgoing = %d, want none", len(out))
+		}
+
+		// The source side is capped by the same query.
+		inAlice, outAlice, err := s.ListRepoTransfersForUser(ctx, f.alice.ID)
+		if err != nil {
+			t.Fatalf("ListRepoTransfersForUser(alice): %v", err)
+		}
+		if len(outAlice) != 2 || len(inAlice) != 0 {
+			t.Errorf("alice = %d incoming / %d outgoing, want 0 / the cap of %d", len(inAlice), len(outAlice), maxTransfersListed)
 		}
 	})
 }

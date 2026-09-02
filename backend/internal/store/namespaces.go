@@ -206,28 +206,34 @@ func (s *Store) NamespacesForUser(ctx context.Context, userID int64) ([]Namespac
 }
 
 // namespaceWritable renders "the user bound to $1 may write here": they own
-// the namespace, they are an organisation member with role admin or write, or
-// they are a site administrator. idExpr names the namespace and is a column of
-// the surrounding query (t.to_namespace_id / t.from_namespace_id) -- a package
-// constant at every call site, never anything a caller supplies, which is what
-// makes interpolating it safe. The whole thing is parenthesised so a caller
-// may AND it onto other conditions without the trailing OR swallowing them.
+// the namespace, or they are an organisation member with role admin or write.
+// idExpr names the namespace and is a column of the surrounding query
+// (t.to_namespace_id / t.from_namespace_id) -- a package constant at every
+// call site, never anything a caller supplies, which is what makes
+// interpolating it safe.
 //
 // It is the only spelling of that predicate left in this package.
 // CanWriteNamespace, its by-name twin, was the second one and had no caller
 // outside its own test; two spellings of an authorization rule is one more
 // than an authorization rule may have.
 //
-// The users.is_admin arm exists because the API layer's roleIn answers
-// RoleAdmin for a site administrator in *every* namespace
-// (docs/dev/repo-transfer-design.md §5 "permissions" puts a server admin on the
-// same footing as write access at the destination), and the two must not
-// disagree: without it a site admin could accept or cancel any pending
-// transfer by id while /api/v1/me/transfers listed them nothing to act on.
+// A site administrator is deliberately *not* an arm of this predicate, even
+// though the API layer's roleIn answers RoleAdmin for one in every namespace.
+// The two are asked different questions and are allowed to differ: roleIn
+// authorises an actor against a namespace it was handed ("may this actor do
+// this?"), while this one drives a listing ("what is waiting for me?"). An
+// is_admin arm here answered the second question with the first one's answer,
+// and every consequence of that was wrong -- ListRepoTransfersForUser applies
+// this to the source and the destination of the same rows, so an
+// administrator got every pending transfer on the instance, listed twice, and
+// the header badge (which counts the incoming side on every page render)
+// became a permanent unread marker for requests between two strangers that
+// nobody had asked them to decide. A site administrator may still accept,
+// reject or cancel any of those by id (docs/dev/repo-transfer-design.md §5);
+// what they no longer get is somebody else's inbox.
 func namespaceWritable(idExpr string) string {
-	return `(EXISTS (
+	return `EXISTS (
 		SELECT 1 FROM namespaces n
 		LEFT JOIN org_members m ON m.namespace_id = n.id AND m.user_id = $1
-		WHERE n.id = ` + idExpr + ` AND (n.owner_user_id = $1 OR m.role IN ('admin', 'write')))
-	 OR EXISTS (SELECT 1 FROM users au WHERE au.id = $1 AND au.is_admin))`
+		WHERE n.id = ` + idExpr + ` AND (n.owner_user_id = $1 OR m.role IN ('admin', 'write')))`
 }

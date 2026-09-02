@@ -283,9 +283,9 @@ func (ix *Indexer) scanParquetSeries(ctx context.Context, repo *store.Repo, req 
 		return fmt.Errorf("open git repository: %w", err)
 	}
 
-	// Base file first, then its continuation files in part order: that is
-	// chronological, which is what the "later value wins" tie-break in
-	// Series() depends on.
+	// The chain in part order, oldest file first: that is chronological (the
+	// writer only ever appends to its newest file, layout.MetricsFiles), which
+	// is what the "later value wins" tie-break below depends on.
 	for _, metricsPath := range layout.MetricsFiles() {
 		if err := ix.scanSeriesFile(ctx, gitRepo, repo, metricsPath, "", req, flushed, appendPoint); err != nil {
 			return err

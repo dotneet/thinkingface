@@ -1358,11 +1358,28 @@ POST   /api/v1/transfers/{id}/accept               → 200 RepoTransferResponse 
 POST   /api/v1/transfers/{id}/reject               → 200 RepoTransferResponse
 ```
 Accept/reject require write permission on the destination namespace; cancel requires write
-permission on the source. A site admin has write permission everywhere, so `GET
-/api/v1/me/transfers` lists every pending transfer on the server for them — the same set they are
-allowed to accept, reject or cancel by ID. A pending transfer expires after 7 days; once it has,
-it is listed by neither side and the next transfer request for that repository takes its place
-(it does not collide with it).
+permission on the source. A site admin has write permission everywhere and may therefore decide
+**any** transfer by ID — that is what unsticks a request whose destination has gone unresponsive.
+
+`GET /api/v1/me/transfers` deliberately does **not** follow that rule. It is an inbox, not a list
+of everything the caller is permitted to do: it returns only the pending transfers aimed at
+(`incoming`) or leaving (`outgoing`) a namespace the caller *personally* owns or holds an org
+`admin`/`write` role in. A site admin is therefore shown their own transfers and nothing else,
+and the header's count badge — which counts `incoming` on every page render — means "waiting for
+you" rather than "exists on this server". Answering it with the by-ID permission listed every
+pending transfer on the instance at every admin, each row appearing in `incoming` *and*
+`outgoing` (the same account matches both ends), and left a permanent badge for requests between
+two strangers.
+
+Each side is capped at **200 entries, newest (`created_at`) first**. Nobody controls how many
+requests are aimed at their namespace — any account may file one at any destination — so the
+listing the header runs on every page view is bounded. The cap sits far above any queue a person
+would work through, so the badge is the true count in practice; past it, the 200 newest are
+listed and the badge reads 200. The remainder become visible as those are decided, and expire on
+their own.
+
+A pending transfer expires after 7 days; once it has, it is listed by neither side and the next
+transfer request for that repository takes its place (it does not collide with it).
 If a user without permission calls accept / reject, the response is **404 `not_found`
 (`transfer not found`)**. Returning 403 with the destination namespace name would let someone
 brute-force numeric IDs to enumerate pending destinations, so the response is unified to be

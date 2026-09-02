@@ -238,15 +238,37 @@ func (f *Flusher) Flush(ctx context.Context, repo *store.Repo, projectID int64, 
 		return nil, err
 	}
 
+	ops := []gitrepo.Op{{Kind: gitrepo.OpAdd, Path: path, Data: blob}}
+	// The optimistic lock is evaluated against the parent commit under the
+	// mutex that picks it, so a push landing between readExisting and here
+	// loses the race instead of being silently overwritten.
+	preconditions := []gitrepo.PathPrecondition{{Path: path, OID: baseOID}}
+	if !target.baseExists && path != target.base {
+		// The points went into a continuation file, and the base file the
+		// chain is named after is gone -- deleted by whoever owns the
+		// repository. The rows do not need it back (DetectLayouts anchors on
+		// the oldest surviving file), but two name-based signals do:
+		// syncer.looksLikeExperiment reads "metrics.parquet is in the tree" as
+		// "this dataset is an experiment", and repo.is_experiment is
+		// recomputed from it on every push -- so without the file a project
+		// whose card carries no trackio tag stops being indexed at all, while
+		// its flushes go on succeeding. Restoring it *empty* is what keeps the
+		// chain append-only: putting the points here instead would make the
+		// file both readers scan first the one holding the newest rows.
+		anchor, err := f.emptyMetricsBlob(ctx, gitRepo, repo, ref, target.base)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, gitrepo.Op{Kind: gitrepo.OpAdd, Path: target.base, Data: anchor})
+		preconditions = append(preconditions, gitrepo.PathPrecondition{Path: target.base, OID: ""})
+	}
+
 	newHash, oldHash, err := f.commit(ctx, repo, gitrepo.CommitRequest{
-		Branch:  ref,
-		Message: fmt.Sprintf("chore(trackio): flush %s metrics", project),
-		Author:  gitrepo.Signature{Name: flushAuthor.Name, Email: flushAuthor.Email, When: time.Now()},
-		Ops:     []gitrepo.Op{{Kind: gitrepo.OpAdd, Path: path, Data: blob}},
-		// The optimistic lock is evaluated against the parent commit under the
-		// mutex that picks it, so a push landing between readExisting and here
-		// loses the race instead of being silently overwritten.
-		Preconditions: []gitrepo.PathPrecondition{{Path: path, OID: baseOID}},
+		Branch:        ref,
+		Message:       fmt.Sprintf("chore(trackio): flush %s metrics", project),
+		Author:        gitrepo.Signature{Name: flushAuthor.Name, Email: flushAuthor.Email, When: time.Now()},
+		Ops:           ops,
+		Preconditions: preconditions,
 	})
 	if err != nil {
 		return nil, err
@@ -340,6 +362,12 @@ func (f *Flusher) blockFlush(ctx context.Context, projectID int64, project strin
 // metricsTarget is where a flush may write: the file it appends to, and the
 // name it would rotate into if appending would make that file unreadable.
 type metricsTarget struct {
+	// base is the chain's anchor -- the file its continuations are numbered
+	// from ("{project}/metrics.parquet" and "{project}/metrics.partNNNN.parquet").
+	// It is a name, not necessarily a file: baseExists says whether the ref
+	// still carries it.
+	base       string
+	baseExists bool
 	// active is the newest of the project's metrics files -- the base parquet
 	// when nothing has rotated yet, otherwise its highest-numbered
 	// continuation file.
@@ -363,20 +391,29 @@ type metricsTarget struct {
 // with ingest ids this flush never saw, so nothing would deduplicate them --
 // and the chart would show every one of them twice, forever.
 //
-// **A chain of continuation files is only a chain while its base file exists.**
-// That is the invariant DetectLayouts enforces at the other end -- it drops a
-// project whose shards have no base, because readers walk the shards *after*
-// the base and a shard alone has no anchor -- and the writer has to agree with
-// it or the two disagree in the worst possible direction. The base file is not
-// this package's to keep: the Web UI's delete button, huggingface_hub's
-// delete_file, `tf up --delete` and a history rewrite can all remove it while
-// the shards stay. If the walk still ended on the highest shard then, every
-// flush would append to a file no reader opens, commit it, and let the syncer
-// delete the exp_points rows it had just "saved" -- points written into a
-// black hole, permanently, with the chart showing nothing and the state never
-// healing because the walk never returns to the base again. So when the base
-// is absent the target is the base, which restores the anchor on the next
-// commit and makes the surviving shards readable again.
+// **The chain is append-only: a flush writes its highest-numbered surviving
+// file, or a higher-numbered one, and never anything below that.** That is
+// what makes part-number order chronological, which is the property both
+// readers rely on -- Series() resolves two values at one step by taking the
+// later one in scan order, and indexProject overwrites a run's summary as it
+// goes, so a file written out of order reports measurements from before the
+// rotation and does it silently and permanently.
+//
+// The rule has to hold even though the files are not this package's to keep:
+// the Web UI's delete button, huggingface_hub's delete_file, `tf up --delete`
+// and a history rewrite can remove any of them, the base file included. So the
+// walk starts at the highest number the chain still has rather than at the
+// base, and a deleted base is simply a chain that starts later -- DetectLayouts
+// anchors on the oldest *surviving* member for exactly this reason, which is
+// the reader's half of the same invariant. Re-anchoring onto the base instead
+// would put the newest points in the file both readers scan first.
+//
+// The one thing the base file's absence does cost is the name: syncer's
+// looksLikeExperiment recognises a trackio dataset by "metrics.parquet" being
+// in the tree, and repo.is_experiment -- which decides whether the project is
+// indexed at all -- is recomputed from it on every push. So Flush restores the
+// anchor as an empty table alongside the points it writes. Empty is what keeps
+// it honest: a file with no rows cannot be read out of order.
 func (f *Flusher) resolveMetricsTarget(ctx context.Context, repo *store.Repo, gitRepo *gitrepo.Repo,
 	ref, project string) (metricsTarget, error) {
 
@@ -389,12 +426,24 @@ func (f *Flusher) resolveMetricsTarget(ctx context.Context, repo *store.Repo, gi
 		paths = append(paths, file.Path)
 	}
 
+	// The index gives the chain's shape in one query: its anchor name (which
+	// outlives the base file, since the shards are named after it) and the
+	// highest part it has reached. The walk below starts from there instead of
+	// from zero, so a project that rotated a hundred times does not cost a
+	// hundred stats per flush.
 	base := project + "/metrics.parquet"
+	highest := 0
 	for _, layout := range DetectLayouts(paths, repo.Name) {
-		if layout.Project == project && layout.MetricsPath != "" {
-			base = layout.MetricsPath
-			break
+		if layout.Project != project {
+			continue
 		}
+		chain := layout.MetricsFiles()
+		if len(chain) == 0 {
+			continue
+		}
+		base, _ = MetricsChainFile(chain[0])
+		_, highest = MetricsChainFile(chain[len(chain)-1])
+		break
 	}
 
 	baseExists, err := f.pathExists(gitRepo, ref, base)
@@ -403,24 +452,23 @@ func (f *Flusher) resolveMetricsTarget(ctx context.Context, repo *store.Repo, gi
 	}
 
 	active := base
-	n := 0
-	for n < maxMetricsShards {
+	if highest > 0 {
+		active = MetricsShardPath(base, highest)
+	}
+	// The walk goes past what the index knows because the index is refreshed
+	// after the commit lands: a crash in between leaves a continuation file
+	// that is in the tree and not in the index. It normally probes once and
+	// stops.
+	for n := highest; n < maxMetricsShards; n++ {
 		candidate := MetricsShardPath(base, n+1)
 		exists, err := f.pathExists(gitRepo, ref, candidate)
 		if err != nil {
 			return metricsTarget{}, err
 		}
 		if !exists {
-			return metricsTarget{active: active, next: candidate}, nil
+			return metricsTarget{base: base, baseExists: baseExists, active: active, next: candidate}, nil
 		}
-		// The walk still runs to the end of the numbering when the base is
-		// gone -- next has to name a file that does not exist, or a rotation
-		// would overwrite a surviving shard -- but active stays on the base,
-		// because a chain with no anchor is not one a reader will follow.
-		if baseExists {
-			active = candidate
-		}
-		n++
+		active = candidate
 	}
 	return metricsTarget{}, fmt.Errorf("metrics parquet %s already has %d continuation files", base, maxMetricsShards)
 }
@@ -663,6 +711,23 @@ func mergePoints(existing *existingTable, points []store.PendingPoint) ([]flushC
 		columns = append(columns, byName[name])
 	}
 	return columns, rows, appended
+}
+
+// emptyMetricsBlob renders a metrics parquet with this package's structural
+// columns and no rows, ready to be committed at path. It is only ever used to
+// put a deleted chain anchor back (see Flush): every reader opens it like any
+// other metrics file and gets nothing out of it, which is the point -- a file
+// with no rows carries no measurement whose position in the chain could
+// contradict when it was logged.
+func (f *Flusher) emptyMetricsBlob(ctx context.Context, gitRepo *gitrepo.Repo, repo *store.Repo,
+	ref, path string) ([]byte, error) {
+
+	columns, rows, _ := mergePoints(&existingTable{ingestIDs: map[int64]bool{}}, nil)
+	data, err := writeMetricsParquet(columns, rows)
+	if err != nil {
+		return nil, fmt.Errorf("render empty metrics parquet: %w", err)
+	}
+	return f.blobFor(ctx, gitRepo, repo, ref, path, data)
 }
 
 // blobFor turns the rendered parquet into the bytes the commit carries: an LFS
