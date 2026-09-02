@@ -198,6 +198,45 @@ class TestStage:
         with pytest.raises(ValueError, match="more than the 2"):
             _artifacts.stage(root)
 
+    def test_over_the_limit_says_that_nothing_is_uploaded(self, tmp_path, monkeypatch):
+        """The message has to be unmistakable: this is not a truncation to the
+        first N files, it is a refusal to upload any of them -- which is how a
+        sharded checkpoint directory ended up silently absent."""
+        monkeypatch.setattr(_artifacts, "MAX_FILES_PER_ARTIFACT", 2)
+        root = tmp_path / "checkpoint"
+        root.mkdir()
+        for i in range(3):
+            (root / f"shard-{i}.safetensors").write_text("x")
+        with pytest.raises(ValueError, match="none of them are uploaded"):
+            _artifacts.stage(root)
+
+    def test_symlinked_files_are_followed(self, tmp_path):
+        """The documented behaviour ("symlinks are followed for files"), which
+        the implementation used to contradict by skipping every symlink."""
+        real = tmp_path / "real.bin"
+        real.write_bytes(b"weights")
+        root = tmp_path / "ckpt"
+        root.mkdir()
+        (root / "plain.txt").write_text("x")
+        (root / "linked.bin").symlink_to(real)
+
+        staged = _artifacts.stage(root)
+        assert sorted(name for _, name in staged) == ["ckpt/linked.bin", "ckpt/plain.txt"]
+
+    def test_symlinked_directories_and_dangling_links_are_skipped_loudly(self, tmp_path):
+        other = tmp_path / "other"
+        other.mkdir()
+        (other / "deep.txt").write_text("x")
+        root = tmp_path / "ckpt"
+        root.mkdir()
+        (root / "plain.txt").write_text("x")
+        (root / "loop").symlink_to(other, target_is_directory=True)
+        (root / "dangling.bin").symlink_to(tmp_path / "gone.bin")
+
+        with pytest.warns(UserWarning, match="not uploading 2 symlink"):
+            staged = _artifacts.stage(root)
+        assert [name for _, name in staged] == ["ckpt/plain.txt"]
+
 
 class TestLogArtifact:
     def test_nothing_is_uploaded_before_finish(self, server, tmp_path):
@@ -234,7 +273,7 @@ class TestLogArtifact:
         f = tmp_path / "cm.png"
         f.write_bytes(b"x")
         trackio.init("proj", name="run-1")
-        with pytest.warns(UserWarning, match="ignored"):
+        with pytest.warns(UserWarning, match="uploaded nothing"):
             trackio.log_artifact(f, name="../escape.png")
         trackio.finish()
         assert server["commits"] == []

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
@@ -40,6 +41,15 @@ type Plan struct {
 	// mistaken for "gone locally" and deleted from the remote.
 	LocalPaths []string
 
+	// LocalUnknownDirs lists repo-relative directories the caller could not
+	// enumerate, so LocalPaths says nothing about what is inside them (the
+	// scanner refusing to follow a symlinked directory is the usual case).
+	// DeleteMissing never removes a remote path inside one of these: "we
+	// did not look" is not "it is gone", and a directory that turned into a
+	// symlink between two uploads must not take its whole remote subtree
+	// with it.
+	LocalUnknownDirs []string
+
 	// DeleteMissing removes remote files that are not in Files or
 	// LocalPaths (like `hf upload --delete "*"`). Two root files are never
 	// deleted: the server seeds .gitattributes and it decides which paths
@@ -47,7 +57,8 @@ type Plan struct {
 	// uploads; and README.md is the repository card, which `tf up
 	// --license/--tag` generates server-side without a local copy, so a
 	// later mirror run must not take it away. Both are simply left alone
-	// when absent locally.
+	// when absent locally. Anything under LocalUnknownDirs is likewise
+	// left alone.
 	DeleteMissing bool
 
 	Summary     string // commit title; "" -> "Upload <n> files with tf"
@@ -141,6 +152,21 @@ var protectedPaths = map[string]bool{".gitattributes": true, "README.md": true}
 
 // defaultRev is the branch an upload targets when the plan names none.
 const defaultRev = "main"
+
+// underUnknownDir reports whether repoPath is one of dirs or sits beneath it.
+// A remote path inside a directory the caller never enumerated is not known
+// to be missing locally, so DeleteMissing leaves it alone.
+func underUnknownDir(repoPath string, dirs []string) bool {
+	for _, d := range dirs {
+		if d == "" {
+			continue
+		}
+		if repoPath == d || strings.HasPrefix(repoPath, d+"/") {
+			return true
+		}
+	}
+	return false
+}
 
 // Upload performs the whole "hf upload" dance against an existing repository:
 //
@@ -265,6 +291,9 @@ func Upload(ctx context.Context, c *Client, plan Plan, report func(Event)) (*Res
 				continue
 			}
 			if _, ok := onDisk[e.Path]; ok {
+				continue
+			}
+			if underUnknownDir(e.Path, plan.LocalUnknownDirs) {
 				continue
 			}
 			res.Deleted = append(res.Deleted, e.Path)

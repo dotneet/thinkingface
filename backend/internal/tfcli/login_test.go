@@ -221,3 +221,63 @@ func TestLoginPasswordFlowNonInteractiveWithoutFlagsIsUsageError(t *testing.T) {
 		t.Fatalf("exit code = %d, want 2; stderr=%s", code, errOut)
 	}
 }
+
+// TestLoginUsesEndpointFromEnvironment is the regression test for `tf login`
+// being the one command that ignored THINKINGFACE_ENDPOINT: docs/dev/tf-cli.md
+// promises the same endpoint precedence for every subcommand, and a CI job
+// that exports the endpoint should not have to repeat it as an argument.
+func TestLoginUsesEndpointFromEnvironment(t *testing.T) {
+	configPath := isolateEnv(t)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/whoami-v2", whoamiHandler(t, "alice", "write"))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	t.Setenv("THINKINGFACE_ENDPOINT", srv.URL)
+
+	var out, errOut bytes.Buffer
+	code := Main([]string{"login", "--token", "secrettoken", "--verbose"}, strings.NewReader(""), &out, &errOut)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "env THINKINGFACE_ENDPOINT") {
+		t.Errorf("stderr = %q, want --verbose to name the environment variable the endpoint came from", errOut.String())
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("config file was not written: %v", err)
+	}
+	var f config.File
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatalf("config file is not valid JSON: %v", err)
+	}
+	normalized, err := config.NormalizeEndpoint(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.Get(normalized); !ok {
+		t.Fatalf("no credential saved for %s (have %v)", normalized, f.Credentials)
+	}
+}
+
+// TestLoginArgumentBeatsEnvironment keeps the precedence right: an explicit
+// ENDPOINT still wins over the environment.
+func TestLoginArgumentBeatsEnvironment(t *testing.T) {
+	isolateEnv(t)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/whoami-v2", whoamiHandler(t, "alice", "write"))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	t.Setenv("THINKINGFACE_ENDPOINT", "http://never-contacted.invalid")
+
+	var out, errOut bytes.Buffer
+	code := Main([]string{"login", srv.URL, "--token", "secrettoken"}, strings.NewReader(""), &out, &errOut)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "Logged in to") {
+		t.Errorf("stdout = %q, want a confirmation", out.String())
+	}
+}

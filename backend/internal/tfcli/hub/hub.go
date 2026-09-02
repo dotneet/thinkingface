@@ -25,6 +25,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Kind is a repository type as the HF API spells it in JSON ("dataset" / "model").
@@ -91,13 +93,98 @@ func New(endpoint, token string, opts ...Option) *Client {
 	c := &Client{
 		endpoint:  strings.TrimRight(endpoint, "/"),
 		token:     token,
-		http:      http.DefaultClient,
+		http:      newHTTPClient(),
 		userAgent: "thinkingface-tf",
 	}
 	for _, o := range opts {
 		o(c)
 	}
 	return c
+}
+
+// maxRedirects bounds how many hops one request may follow. The server itself
+// redirects at most once (a resolve pointing at object storage), so anything
+// past a handful is a loop or a misconfigured proxy.
+const maxRedirects = 5
+
+// responseHeaderTimeout bounds the wait for response headers *after* the
+// request body has been written, so it never cuts a slow upload short -- only
+// a server that accepted the bytes and then went silent.
+const responseHeaderTimeout = 2 * time.Minute
+
+// sharedTransport is created once and reused by every Client so connections
+// (and TLS sessions) are pooled across the calls one `tf up` makes. It is
+// http.DefaultTransport's settings -- proxy support, the 30s dial and 10s TLS
+// handshake deadlines -- plus a header timeout.
+var sharedTransport = sync.OnceValue(func() http.RoundTripper {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = responseHeaderTimeout
+	return t
+})
+
+// newHTTPClient is the client New uses when the caller supplies none.
+//
+// Deliberately not http.DefaultClient: that follows up to ten redirects and
+// has no timeout whatsoever. Redirects matter because this client carries a
+// write-scoped personal access token, and net/http only strips Authorization
+// when the *hostname* changes -- a redirect to a different port on the same
+// host, or an https -> http downgrade, would hand the token over. checkRedirect
+// closes that gap.
+//
+// There is no Client.Timeout on purpose: a single LFS PUT of a multi-gigabyte
+// checkpoint is one request that legitimately runs for a long time, and a
+// whole-request deadline would abort exactly the transfers that are hardest to
+// restart. The bounds live on the phases that should never be slow (connect,
+// TLS handshake, waiting for response headers); cancellation of the whole
+// operation is the caller's ctx.
+func newHTTPClient() *http.Client {
+	return &http.Client{
+		Transport:     sharedTransport(),
+		CheckRedirect: checkRedirect,
+	}
+}
+
+// checkRedirect bounds the redirect chain and keeps credentials from crossing
+// an origin. net/http's own rule compares host names only, so it happily
+// forwards Authorization from https://hub:443 to http://hub:9999; this one
+// compares scheme, host and port, and drops the Authorization and Cookie
+// headers the moment any of them changes. That covers the LFS action's own
+// credentials too, not just the client's bearer token: the server only ever
+// hands those back under the Authorization key (internal/lfs/lfs.go's
+// authHeader), never a differently-named header, so there is nothing else to
+// strip today -- but a header this function does not know to name would cross
+// origins unstripped, so a server that started returning LFS credentials
+// under some other header would need this list extended to match. The
+// redirect is still followed -- an LFS batch answer legitimately points at
+// object storage on another origin, and a signed URL needs no header of ours.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	prev := via[len(via)-1]
+	if !sameOrigin(prev.URL, req.URL) {
+		req.Header.Del("Authorization")
+		req.Header.Del("Cookie")
+	}
+	return nil
+}
+
+// sameOrigin compares scheme, hostname and effective port.
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		portOrDefault(a) == portOrDefault(b)
+}
+
+// portOrDefault is u's explicit port, or the scheme's default.
+func portOrDefault(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	return "80"
 }
 
 // Endpoint returns the normalised base URL.
@@ -753,14 +840,36 @@ func retryablePut(ctx context.Context, err error) bool {
 	return true
 }
 
-// redactedURL strips the query string, which on a signed URL is the credential.
+// redactedURL strips the query string, which on a signed URL *is* the
+// credential: GCS puts X-Goog-Credential / X-Goog-Signature there, and the
+// emulator proxy an op/exp/sig triple. These URLs are interpolated into
+// transfer errors, which `tf up` prints to stderr and CI keeps forever, so
+// nothing past the path may survive. url.URL.Redacted() is not enough on its
+// own -- it only masks userinfo -- so the query goes first and Redacted()
+// handles the rest.
 func redactedURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
+		// Unparseable, but it may still carry a signature: keep only the
+		// part before the first "?".
+		if i := strings.IndexByte(raw, '?'); i >= 0 {
+			return raw[:i] + "?" + redactedMarker
+		}
 		return raw
 	}
-	return u.Redacted()
+	hadQuery := u.RawQuery != "" || u.ForceQuery
+	u.RawQuery = ""
+	u.ForceQuery = false
+	out := u.Redacted()
+	if hadQuery {
+		out += "?" + redactedMarker
+	}
+	return out
 }
+
+// redactedMarker stands in for a removed query string, so an error still says
+// that there was one.
+const redactedMarker = "[redacted]"
 
 // VerifyLFSObject POSTs {"oid","size"} to action.Href with action.Header
 // (Content-Type application/vnd.git-lfs+json).

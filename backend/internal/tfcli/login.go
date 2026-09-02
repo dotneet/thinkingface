@@ -2,6 +2,7 @@ package tfcli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,8 +17,9 @@ const loginUsage = `usage: tf login [ENDPOINT] [flags]
 
 Log in to a thinkingface server and save a token to the config file.
 
-ENDPOINT defaults to the configured default endpoint; if there is none and
-stdin is a terminal, tf prompts for it.
+ENDPOINT defaults to the endpoint environment variables (TF_ENDPOINT /
+THINKINGFACE_ENDPOINT / HF_ENDPOINT) and then to the configured default
+endpoint; if there is none and stdin is a terminal, tf prompts for it.
 
 With --token, the given token is verified (whoami) and saved as-is. Without
 --token, tf signs in with a username and password and mints a new write-scoped
@@ -64,31 +66,35 @@ func runLogin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitError
 	}
 
-	endpoint := cf.endpoint
+	flagEndpoint := cf.endpoint
 	if len(positionals) == 1 {
-		endpoint = positionals[0]
+		flagEndpoint = positionals[0]
 	}
-	if endpoint == "" {
-		endpoint = file.DefaultEndpoint
-	}
-	if endpoint == "" {
+	// ENDPOINT / --endpoint, then the endpoint environment variables, then
+	// the config file's default -- the same order every other command uses.
+	// Prompting is the last resort, not the first alternative to a flag.
+	endpoint, rerr := resolveEndpoint(flagEndpoint, file, cf.verbose, stderr)
+	switch {
+	case rerr == nil:
+	case errors.Is(rerr, config.ErrNoEndpoint):
 		if !isTerminalReader(stdin) {
-			fmt.Fprintln(stderr, "tf: no endpoint given; pass ENDPOINT, --endpoint, or run interactively")
+			fmt.Fprintln(stderr, "tf: no endpoint given; pass ENDPOINT, --endpoint, set THINKINGFACE_ENDPOINT, or run interactively")
 			fmt.Fprint(stderr, loginUsage)
 			return exitUsage
 		}
 		fmt.Fprint(stderr, "Endpoint URL: ")
-		line, rerr := readLine(stdin)
-		if rerr != nil {
-			fmt.Fprintf(stderr, "tf: reading endpoint: %s\n", rerr)
+		line, lerr := readLine(stdin)
+		if lerr != nil {
+			fmt.Fprintf(stderr, "tf: reading endpoint: %s\n", lerr)
 			return exitError
 		}
-		endpoint = line
-	}
-
-	endpoint, err = config.NormalizeEndpoint(endpoint)
-	if err != nil {
-		fmt.Fprintf(stderr, "tf: %s\n", err)
+		endpoint, err = config.NormalizeEndpoint(line)
+		if err != nil {
+			fmt.Fprintf(stderr, "tf: %s\n", err)
+			return exitError
+		}
+	default:
+		fmt.Fprintf(stderr, "tf: %s\n", rerr)
 		return exitError
 	}
 

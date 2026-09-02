@@ -121,3 +121,41 @@ func TestLogoutDefaultEndpoint(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut)
 	}
 }
+
+// TestLogoutUsesEndpointFromEnvironment is the regression test for `tf logout`
+// ignoring THINKINGFACE_ENDPOINT: with the endpoint in the environment, `tf
+// status` resolved it while `tf logout` failed with "no endpoint given".
+func TestLogoutUsesEndpointFromEnvironment(t *testing.T) {
+	isolateEnv(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("logout should not call the server for a pasted credential, got %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	normalized, err := config.NormalizeEndpoint(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveCredential(t, config.Credential{Endpoint: normalized, Token: "tok", CreatedAt: time.Now()})
+	t.Setenv("THINKINGFACE_ENDPOINT", srv.URL)
+
+	code, out, errOut := runMain(t, []string{"logout", "--verbose"}, "")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut)
+	}
+	if !strings.Contains(out, "Logged out of "+normalized) {
+		t.Errorf("stdout = %q, want it to name %s", out, normalized)
+	}
+	if !strings.Contains(errOut, "env THINKINGFACE_ENDPOINT") {
+		t.Errorf("stderr = %q, want --verbose to name the environment variable the endpoint came from", errOut)
+	}
+
+	f, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.Get(normalized); ok {
+		t.Errorf("credential for %s survived logout", normalized)
+	}
+}

@@ -12,9 +12,15 @@ import (
 
 const logoutUsage = `usage: tf logout [ENDPOINT] [flags]
 
-Forget the saved credentials for a server (default: the configured default
-endpoint). If the saved token was minted by 'tf login' (not pasted with
---token), it is also revoked on the server on a best-effort basis.
+Forget the saved credentials for a server. ENDPOINT defaults to the endpoint
+environment variables (TF_ENDPOINT / THINKINGFACE_ENDPOINT / HF_ENDPOINT) and
+then to the configured default endpoint. If the saved token was minted by
+'tf login' (not pasted with --token), it is also revoked on the server on a
+best-effort basis.
+
+Flags:
+  --endpoint URL         same as passing ENDPOINT
+  --verbose              print how the endpoint was resolved to stderr
 `
 
 func runLogout(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -43,19 +49,14 @@ func runLogout(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitError
 	}
 
-	endpoint := cf.endpoint
+	flagEndpoint := cf.endpoint
 	if len(positionals) == 1 {
-		endpoint = positionals[0]
+		flagEndpoint = positionals[0]
 	}
-	if endpoint == "" {
-		endpoint = file.DefaultEndpoint
-	}
-	if endpoint == "" {
-		fmt.Fprintln(stderr, "tf: no endpoint given and no default configured")
-		return exitError
-	}
-
-	normalized, err := config.NormalizeEndpoint(endpoint)
+	// ENDPOINT / --endpoint, then the endpoint environment variables, then
+	// the config file's default: an endpoint set in the environment is what
+	// every other command talks to, so it is also the one logout forgets.
+	normalized, err := resolveEndpoint(flagEndpoint, file, cf.verbose, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "tf: %s\n", err)
 		return exitError

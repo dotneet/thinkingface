@@ -105,6 +105,18 @@ _REQUEST_TIMEOUT_SECONDS = 10.0
 # this many points the oldest are dropped (with a warning) so logging can never
 # be the thing that OOMs the run.
 _BUFFER_MAX_POINTS = 10_000
+# How many points one request may carry, matching the server's own ceiling
+# (maxIngestPoints in internal/api/experiments.go, which rejects *more* than
+# this with a 400). It is deliberately independent of _BUFFER_MAX_POINTS: the
+# buffer is a memory bound and a full one plus a single further log() call is
+# an ordinary situation, so flush() splits whatever it holds into requests of
+# this size rather than betting that the two limits line up.
+_MAX_POINTS_PER_REQUEST = 10_000
+# Ceiling on how many distinct metric names one run may carry (maxIngestKeys,
+# same file). The server keeps every key on the run forever, so once a run is
+# over the line every later batch is rejected -- worth saying out loud on the
+# client, where the offending name is still in view.
+_MAX_METRIC_KEYS = 1000
 # Ceiling on `group=` / `job_type=`, matching the server's own limit on the
 # free-text ingest names (maxIngestNameBytes in internal/api/experiments.go).
 _MAX_GROUPING_BYTES = 256
@@ -194,6 +206,13 @@ class _Run:
         self._buffer: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self._finished = False
+        # Every distinct metric name this run has logged. The server keeps a
+        # run's keys forever and refuses a batch once there are more than
+        # _MAX_METRIC_KEYS of them, at which point the run is permanently
+        # un-loggable -- so the warning is raised here, once, while the name
+        # that pushed it over is still the one in the caller's hand.
+        self._metric_keys: set[str] = set()
+        self._key_limit_warned = False
         # Whether the config has ever been sent, and (once it has) a snapshot
         # of exactly what was last sent -- so a later change to `self.config`
         # (e.g. `run.config.update(...)` from ThinkingFaceLightningLogger) is
@@ -309,6 +328,10 @@ class _Run:
                     "metrics": metrics,
                 }
             )
+            # Counted towards the server's per-run key ceiling like any other
+            # name, but never warned about: this set is fixed and small, and
+            # the caller did not choose it.
+            self._metric_keys.update(metrics)
 
     # -- public API ---------------------------------------------------------
 
@@ -328,8 +351,31 @@ class _Run:
                 }
             )
             should_flush = len(self._buffer) >= _FLUSH_MAX_POINTS
+            over_key_limit = self._note_metric_keys(metrics)
+        if over_key_limit:
+            warnings.warn(
+                f"thinkingface.trackio: run {self.name!r} has logged more than "
+                f"{_MAX_METRIC_KEYS} distinct metric names, which is the most the "
+                "server accepts; further batches for this run will be rejected with "
+                "400. Metric names are meant to be a fixed set -- if one is built "
+                "from a step number, an id or a filename, move that part into the "
+                "value or the run name."
+            )
         if should_flush:
             self.flush()
+
+    def _note_metric_keys(self, metrics: Any) -> bool:
+        """Record the batch's metric names; True the first time the run goes
+        over the server's ceiling. The caller holds _lock and warns outside it.
+        """
+        try:
+            self._metric_keys.update(metrics)
+        except TypeError:  # not a mapping; the server will say so
+            return False
+        if self._key_limit_warned or len(self._metric_keys) <= _MAX_METRIC_KEYS:
+            return False
+        self._key_limit_warned = True
+        return True
 
     def flush(self) -> None:
         with self._lock:
@@ -341,7 +387,42 @@ class _Run:
             # requeued.
             config = self._config_to_send()
             points, self._buffer = self._buffer, []
+        self._send(points, config)
 
+    def _send(self, points: list[dict[str, Any]], config: dict[str, Any] | None) -> None:
+        """POST ``points`` in batches the server will accept.
+
+        The buffer can legitimately hold more than one request's worth: after a
+        disconnection _requeue() puts back up to _BUFFER_MAX_POINTS and log()
+        keeps adding on top of that. Sent as a single body, one point past
+        maxIngestPoints earned a 400 -- which is not retryable, so the whole
+        buffer was thrown away for being one point too long. Splitting here
+        keeps every request inside the server's limit, leaving only the 400s
+        that really are about the payload.
+        """
+        for start in range(0, len(points), _MAX_POINTS_PER_REQUEST):
+            chunk = points[start : start + _MAX_POINTS_PER_REQUEST]
+            outcome = self._post_points(chunk, config)
+            if outcome == "sent":
+                # Accepted, so later chunks need not repeat it.
+                config = None
+                continue
+            if outcome == "retry":
+                # This chunk and everything after it is still unsent.
+                self._requeue(points[start:])
+                return
+            # "drop": the request itself was refused (bad token, unknown
+            # repo, ...), which the remaining chunks would hit identically.
+            abandoned = len(points) - start - len(chunk)
+            if abandoned > 0:
+                warnings.warn(
+                    f"thinkingface.trackio: also dropping the remaining {abandoned} "
+                    f"buffered point(s) for run {self.name!r}."
+                )
+            return
+
+    def _post_points(self, points: list[dict[str, Any]], config: dict[str, Any] | None) -> str:
+        """Send one batch. Returns "sent", "retry" (requeue) or "drop"."""
         payload: dict[str, Any] = {
             "run": self.name,
             "status": "running",
@@ -366,15 +447,14 @@ class _Run:
                 f"thinkingface.trackio: failed to send {len(points)} point(s) "
                 f"for run {self.name!r} ({exc!r}); will retry on next flush."
             )
-            self._requeue(points)
-            return
+            return "retry"
 
         if resp.ok:
             with self._lock:
                 self._config_sent = True
                 if config is not None:
                     self._last_sent_config = config
-            return
+            return "sent"
 
         # A 4xx (bad token, unknown repo, malformed payload) will not fix itself
         # by being retried: keeping the points would grow the buffer forever and
@@ -387,13 +467,13 @@ class _Run:
                 f"thinkingface.trackio: server returned {resp.status_code} for run "
                 f"{self.name!r} ({detail!r}); will retry on next flush."
             )
-            self._requeue(points)
-        else:
-            warnings.warn(
-                f"thinkingface.trackio: dropping {len(points)} point(s) for run "
-                f"{self.name!r}: server returned {resp.status_code} ({detail!r}). "
-                "Check THINKINGFACE_TOKEN / THINKINGFACE_REPO."
-            )
+            return "retry"
+        warnings.warn(
+            f"thinkingface.trackio: dropping {len(points)} point(s) for run "
+            f"{self.name!r}: server returned {resp.status_code} ({detail!r}). "
+            "Check THINKINGFACE_TOKEN / THINKINGFACE_REPO."
+        )
+        return "drop"
 
     def _config_to_send(self) -> dict[str, Any] | None:
         """The config for the next flush, or None to leave it out.
@@ -448,8 +528,11 @@ class _Run:
             staged = _artifacts.stage(path, name)
         except (ValueError, OSError) as exc:
             # A bad name or an unreadable path is the caller's mistake, but
-            # this shim never aborts a training script over bookkeeping.
-            warnings.warn(f"thinkingface.trackio: log_artifact({path!r}) ignored: {exc}")
+            # this shim never aborts a training script over bookkeeping. The
+            # wording is emphatic on purpose: "ignored" alone reads like a
+            # partial upload, and the common cause -- a checkpoint directory
+            # over the per-call file limit -- uploads nothing at all.
+            warnings.warn(f"thinkingface.trackio: log_artifact({path!r}) uploaded nothing: {exc}")
             return
         with self._lock:
             self._artifacts.extend(staged)
@@ -764,10 +847,19 @@ def init(
     the first flush, and ``config`` is merged with the previous attempt's
     (new values win; the differences are recorded under ``_resume``).
 
-    Extra keyword arguments are accepted and ignored, so call sites written
-    against trackio/wandb (e.g. passing ``tags=``) keep working.
+    Extra keyword arguments are accepted and ignored -- so a call site written
+    against trackio/wandb (e.g. passing ``tags=``) keeps working -- but each
+    one is reported with a warning: silently dropping ``tags=`` means a script
+    ported from wandb loses its tags with nothing at all to show for it.
     """
     global _current_run
+
+    if kwargs:
+        warnings.warn(
+            "thinkingface.trackio: init() ignored unsupported argument(s): "
+            f"{', '.join(sorted(kwargs))}. They are accepted for wandb/trackio "
+            "compatibility but have no effect here."
+        )
 
     mode = _normalize_resume(resume)
     group_name = _normalize_grouping("group", group)

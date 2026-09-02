@@ -19,6 +19,7 @@ See docs/dev/api-contract.md §7 for the naming convention this file fixes.
 from __future__ import annotations
 
 import os
+import warnings
 from pathlib import Path
 
 # The directory segment that separates artifacts from the parquet layout the
@@ -76,24 +77,57 @@ def stage(path: str | os.PathLike[str], name: str | None = None) -> list[tuple[P
     the relative layout under ``name`` (which defaults to the directory's own
     name, as wandb's ``log_artifact`` does). Symlinks are followed for files
     but never walked into as directories, so a link pointing back up the tree
-    cannot turn into an unbounded upload.
+    cannot turn into an unbounded upload; a symlink that resolves to neither
+    (a dangling one) is skipped with a warning rather than staged as a file
+    that cannot be read at upload time.
+
+    Raises ``ValueError`` when nothing can be staged -- including when the
+    directory holds more than MAX_FILES_PER_ARTIFACT files. That is an
+    all-or-nothing refusal: the caller gets *no* files, which the message
+    says outright, because it is otherwise easy to read as a truncation.
     """
     source = Path(path)
     base = normalize_artifact_name(name if name is not None else source.name)
 
     if source.is_dir():
         out: list[tuple[Path, str]] = []
+        skipped_links: list[str] = []
         for child in sorted(source.rglob("*")):
-            if child.is_dir() or child.is_symlink():
+            if child.is_symlink():
+                # is_dir()/is_file() follow the link, so this classifies the
+                # target: a linked file is staged, a linked directory is not
+                # descended into, and a dangling link is neither.
+                if child.is_file():
+                    out.append(
+                        (
+                            child,
+                            normalize_artifact_name(
+                                f"{base}/{child.relative_to(source).as_posix()}"
+                            ),
+                        )
+                    )
+                    continue
+                skipped_links.append(child.relative_to(source).as_posix())
+                continue
+            if child.is_dir():
                 continue
             relative = child.relative_to(source).as_posix()
             out.append((child, normalize_artifact_name(f"{base}/{relative}")))
+        if skipped_links:
+            warnings.warn(
+                f"thinkingface.trackio: artifact directory {source}: not uploading "
+                f"{len(skipped_links)} symlink(s) that do not point at a file "
+                f"({', '.join(skipped_links[:5])}"
+                f"{', ...' if len(skipped_links) > 5 else ''})."
+            )
         if not out:
             raise ValueError(f"artifact directory {source}: no files to upload")
         if len(out) > MAX_FILES_PER_ARTIFACT:
             raise ValueError(
                 f"artifact directory {source} holds {len(out)} files, more than the "
-                f"{MAX_FILES_PER_ARTIFACT} one log_artifact() call uploads"
+                f"{MAX_FILES_PER_ARTIFACT} one log_artifact() call can upload, so none "
+                "of them are uploaded. Log the files you need individually, or push a "
+                "model repository instead of attaching the checkpoint directory."
             )
         return out
 
