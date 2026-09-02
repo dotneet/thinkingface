@@ -1,13 +1,38 @@
-// Storage quotas, enforced where the bytes actually arrive.
+// Storage quotas, enforced where the bytes are actually charged.
 //
-// The batch API is the only place on this server that authorises a write into
-// the bucket: a signed PUT URL (or, on the emulator, a proxy href) is minted
-// here and nowhere else, and git-lfs, huggingface_hub and the web UI all pass
-// through it. Checking anywhere earlier -- at commit, say -- would be
-// checking after the bytes are already paid for.
+// What a namespace is charged for is its rows in repo_lfs_objects -- the links
+// store.UsageByRepo sums -- so the gate belongs wherever a link is about to be
+// written. This package writes them in two places, and both are gated:
+//
+//   - Batch, which decides a whole push before it mints a single transfer URL.
+//     It is the only check that can refuse before a byte moves, which is why
+//     it exists: telling a client its 80 GiB is over the limit after the
+//     transfer is a far worse answer than telling it before.
+//   - promotion (promoteFrom), which is what *every* upload path runs to
+//     publish an object and link it: the signed-URL verify, the emulator's
+//     transfer proxy (PUT /api/v1/lfs/{repoID}/{oid}) and the browser's
+//     multipart upload endpoint (POST /api/v1/upload/...).
+//
+// The batch check used to be the only one, on the stated grounds that the
+// batch API was the only place on this server authorising a write into the
+// bucket. That was false: the latter two routes call PromoteStagedFrom
+// directly and never pass through Batch, so a namespace pinned at its quota
+// took a 507 on `git push` and then uploaded the same weights through the web
+// UI's dialog -- 64 files and up to 10 GiB per request -- with usage growing
+// without limit and every later batch refused for the legitimate pusher. The
+// promotion check is what makes the invariant above true for all three paths
+// rather than for the polite one.
+//
+// One writer of links is still outside this package and outside this gate:
+// store.LinkLFSObjects, called by the HF-compatible commit handler and by the
+// syncer's post-push pipeline for a pointer pushed as a plain blob. It only
+// ever links an object the ledger already holds at the declared size, so it is
+// the same shape of charge a dedup hit is -- and it is not checked. Closing it
+// means a check in the caller (the store layer knows nothing about quotas), so
+// it is named here rather than left for the next reader to rediscover.
 //
 // What is counted is the namespace's LFS footprint, the same number
-// GET /api/v1/usage reports, and the check is against the batch as a whole:
+// GET /api/v1/usage reports, and Batch checks it against the batch as a whole:
 // one object at a time would let a push of a hundred files land a hundred
 // times the remaining allowance, since every one of them fits on its own.
 //
@@ -24,13 +49,15 @@
 //
 // Known limitation, deliberate: this reads usage and compares, without
 // reserving anything and without locking the namespace. Usage only moves when
-// a transfer completes (verify -> promote -> link), so the window between a
-// batch being allowed and its bytes being counted is as long as the transfer
-// -- two concurrent pushes of 80 GiB each are both admitted under a 100 GiB
-// quota. Closing it properly means a reservation ledger with expiry, since a
-// batch that is never transferred must not hold its bytes for ever; that is a
-// larger change than this file, and the overshoot is bounded by how much one
-// client can push at once.
+// a link is written, so two promotions racing each other can both read the
+// same usage and both be admitted. The promotion check narrows what that
+// costs -- each object is now measured against the usage its predecessors have
+// already added, so a batch admitted as a whole no longer lands as a whole
+// once the namespace has filled up in between -- but it does not close it:
+// concurrent transfers still overshoot by whatever is in flight at once.
+// Closing it properly means a reservation ledger with expiry, since a batch
+// that is never transferred must not hold its bytes for ever; that is a larger
+// change than this file.
 
 package lfs
 
@@ -88,11 +115,10 @@ func (h *Handler) withinQuota(ctx context.Context, repoID int64, resp *BatchResp
 	if h.quota == nil || len(transfer)+len(dedup) == 0 {
 		return true, nil
 	}
-	q, err := h.quota.NamespaceQuotaForRepo(ctx, repoID, h.defaultQuota)
+	q, limit, err := h.effectiveQuota(ctx, repoID)
 	if err != nil {
-		return false, fmt.Errorf("read namespace storage quota: %w", err)
+		return false, err
 	}
-	limit := store.EffectiveQuota(q.QuotaBytes, h.defaultQuota)
 	if limit == nil {
 		return true, nil
 	}
@@ -117,6 +143,72 @@ func (h *Handler) withinQuota(ctx context.Context, repoID int64, resp *BatchResp
 		resp.Objects[p.index].Error = &ObjectError{Code: http.StatusInsufficientStorage, Message: msg}
 	}
 	return false, nil
+}
+
+// effectiveQuota reads the allowance for the namespace owning repoID. A nil
+// limit means nothing is enforced -- enforcement switched off, or a namespace
+// with no ceiling once the instance default is folded in -- and it is the
+// common case, so it is answered before any caller does further work on the
+// strength of a limit that does not exist.
+func (h *Handler) effectiveQuota(ctx context.Context, repoID int64) (store.NamespaceQuota, *int64, error) {
+	if h.quota == nil {
+		return store.NamespaceQuota{}, nil, nil
+	}
+	q, err := h.quota.NamespaceQuotaForRepo(ctx, repoID, h.defaultQuota)
+	if err != nil {
+		return store.NamespaceQuota{}, nil, fmt.Errorf("read namespace storage quota: %w", err)
+	}
+	return q, store.EffectiveQuota(q.QuotaBytes, h.defaultQuota), nil
+}
+
+// QuotaExceededError reports a write refused because the namespace has no room
+// for it. It is a distinct type rather than a plain error because the three
+// upload handlers have to answer it with 507 Insufficient Storage and its
+// sentence verbatim -- everything else promotion can fail with is either the
+// client's own bytes being wrong (400) or the server's business (500).
+type QuotaExceededError struct {
+	Namespace string
+	Message   string
+}
+
+func (e *QuotaExceededError) Error() string { return e.Message }
+
+// chargeQuota gates the one link a promotion is about to write. It is the
+// promotion-side half of the rule stated at the top of this file, and it runs
+// on every path -- including the batch/verify one, where it is a second look
+// at a decision Batch already made. That repetition is deliberate: making the
+// check a property of "a link is being written" rather than of "the client
+// asked politely via Batch" is the only shape that cannot be routed around,
+// and the extra cost is one row read per object on an instance that enforces
+// quotas at all.
+//
+// An object this repository is already linked to is free, exactly as it is in
+// Batch: relinking adds nothing to what UsageByRepo sums. The ownership lookup
+// is deliberately after the limit read, so a namespace with no ceiling -- the
+// common case -- pays for neither.
+func (h *Handler) chargeQuota(ctx context.Context, repoID int64, oid string, size int64) error {
+	q, limit, err := h.effectiveQuota(ctx, repoID)
+	if err != nil {
+		return err
+	}
+	if limit == nil {
+		return nil
+	}
+	linked, err := h.store.RepoHasLFSObject(ctx, repoID, oid)
+	if err != nil {
+		return fmt.Errorf("check lfs object ownership: %w", err)
+	}
+	if linked {
+		return nil
+	}
+	want := addSaturating(q.UsedBytes, size)
+	if want <= *limit {
+		return nil
+	}
+	return &QuotaExceededError{
+		Namespace: q.Namespace,
+		Message:   quotaMessage(q.Namespace, q.UsedBytes, *limit, size, want-*limit),
+	}
 }
 
 // quotaMessage is what the person running `git push` reads. It names the

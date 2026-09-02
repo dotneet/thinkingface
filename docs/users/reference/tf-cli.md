@@ -139,7 +139,8 @@ single commit, creating the repository first if it does not exist.
 ```text
 tf up PATH [--to NS/NAME|NAME] [--kind dataset|model] [--rev BRANCH]
            [-m/--message MSG] [--license L] [--tag T ...] [--desc TEXT]
-           [--include GLOB ...] [--exclude GLOB ...] [--delete] [--dry-run]
+           [--include GLOB ...] [--exclude GLOB ...] [--hidden]
+           [--delete] [--dry-run]
            [--workers N] [--quiet] [--json]
 ```
 
@@ -154,6 +155,7 @@ tf up PATH [--to NS/NAME|NAME] [--kind dataset|model] [--rev BRANCH]
 | `--desc` | (unset) | The repository card's `description`, also used as the opening paragraph of a generated README |
 | `--include` | include everything | Only include files matching this glob (repeatable). Not a shell glob run through the shell — `tf` matches it itself, with `**` matching any number of path segments (`data/**`, `**/*.parquet`) and, for a pattern with no `/` at all, also tried against just the file's base name (`*.parquet` matches `data/train.parquet` too) |
 | `--exclude` | (none) | Exclude files matching this glob (repeatable). Same matching rules as `--include` |
+| `--hidden` | off | Also upload dot-files and dot-directories found under PATH. They are skipped by default (see below); `.gitattributes` and `.gitignore` are always uploaded either way |
 | `--delete` | off | Delete remote files that are not present anywhere on disk under PATH, regardless of `--include`/`--exclude` — a file those flags kept out of this run's upload but that still exists on disk is never deleted |
 | `--dry-run` | off | Show what would happen without changing anything |
 | `--workers` | `4` | Number of parallel LFS transfers |
@@ -169,6 +171,25 @@ kind, and no repository is found under the inferred kind, `tf up` also checks fo
 repository under the *other* kind before creating a new one (for example, inference says
 dataset, but a model repository of the same name already exists — that one is used instead).
 
+!!! warning "Dot-files are not uploaded by default"
+    A repository here is readable by anyone who can reach the server, and a project
+    directory usually holds more than the data: `.env`, `.envrc`, `.aws/credentials`,
+    `.ssh/`, an editor's `.idea/`. So `tf up` leaves every dot-file and dot-directory it
+    finds *inside* PATH out of the upload and prints one line on stderr naming what it
+    skipped — a warning `--quiet` does not suppress. Two names are always uploaded, since
+    they are repository content rather than machine state: `.gitattributes` (which carries
+    the LFS routing rules) and `.gitignore`.
+
+    Two things this rule does *not* cover. A path you name yourself is a choice you made,
+    so `tf up ./.config` and `tf up ./.env` still upload it. And a dot-file that was
+    uploaded by an earlier run stays on the remote: it is still on disk, so `--delete` does
+    not read "not part of this upload" as "deleted locally" (see below). Remove such a file
+    from the remote deliberately — from the Web UI, or with a `git push` — rather than
+    expecting this flag to retract it.
+
+    Pass `--hidden` to upload them anyway. `--include` does not override the rule on its
+    own: a dot-file needs `--hidden` even when a pattern names it.
+
 !!! warning "`--delete` protects two files"
     `--delete` never removes the root `.gitattributes` or `README.md`, even if they are
     absent locally. `.gitattributes` is server-generated and decides LFS routing for later
@@ -178,7 +199,8 @@ dataset, but a model repository of the same name already exists — that one is 
 !!! note "`--delete` and `--include`/`--exclude` together"
     A file kept out of the upload by `--include`/`--exclude` is still checked against disk,
     not against the upload set: as long as it exists somewhere under PATH, it survives
-    `--delete`. Only files genuinely absent from PATH are removed.
+    `--delete`. Only files genuinely absent from PATH are removed. The same holds for a
+    dot-file skipped by the rule above, and for everything under a skipped dot-directory.
 
 !!! note "`--delete` and symlinked directories: blind spots are left alone"
     The local scan does not follow a symlink that points at a directory (following it could

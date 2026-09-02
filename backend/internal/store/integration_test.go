@@ -1317,6 +1317,25 @@ func TestIntegrationExperiments(t *testing.T) {
 		if n, err := s.CountPoints(ctx, runID); err != nil || n != 3 {
 			t.Fatalf("CountPoints = %d, %v", n, err)
 		}
+		// Pruning only ever touches runs the indexer owns, so run-b and run-c
+		// have to look like runs it produced: it creates a run from the rows
+		// it scanned, which means num_points > 0.
+		for _, name := range []string{"run-b", "run-c"} {
+			if _, err := s.UpsertExpRun(ctx, pid, name, "", nil, nil, nil, 0, 7, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// run-d is the shape the prune used to destroy: a run created through
+		// the API alone (`POST .../finish`, or a log call carrying no points),
+		// which is in no parquet and holds no buffered points. It survives
+		// every prune below.
+		if _, err := s.UpsertExpRun(ctx, pid, "run-d", "finished", nil, nil, nil, 0, 0, nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.UpdateExpRunAnnotation(ctx, pid, "run-d", RunAnnotation{Note: ptr("crashed before the first step")}); err != nil {
+			t.Fatal(err)
+		}
+
 		// Prune runs missing from the export, except ones that still hold
 		// live points.
 		if err := s.DeleteProjectRunsNotIn(ctx, pid, []string{"run-c"}); err != nil {
@@ -1327,7 +1346,7 @@ func TestIntegrationExperiments(t *testing.T) {
 		for _, r := range runs {
 			runNames = append(runNames, r.Name)
 		}
-		if !equalStrings(runNames, []string{"run-a", "run-c"}) {
+		if !equalStrings(runNames, []string{"run-a", "run-c", "run-d"}) {
 			t.Fatalf("runs after prune = %v", runNames)
 		}
 		// A nil keep set is not an empty one: it is what a failed export
@@ -1342,15 +1361,26 @@ func TestIntegrationExperiments(t *testing.T) {
 		for _, r := range runs {
 			runNames = append(runNames, r.Name)
 		}
-		if !equalStrings(runNames, []string{"run-a", "run-c"}) {
+		if !equalStrings(runNames, []string{"run-a", "run-c", "run-d"}) {
 			t.Fatalf("a nil keep set pruned runs = %v", runNames)
 		}
-		// An empty slice really does say "the export lists no runs".
+		// An empty slice really does say "the export lists no runs". run-a
+		// still holds buffered points and run-d never had any, so what goes is
+		// run-c: in the export before, absent from it now.
 		if err := s.DeleteProjectRunsNotIn(ctx, pid, []string{}); err != nil {
 			t.Fatal(err)
 		}
-		if runs, _ = s.ListExpRuns(ctx, pid); len(runs) != 1 || runs[0].Name != "run-a" {
-			t.Fatalf("runs after prune all = %+v", runs)
+		runs, _ = s.ListExpRuns(ctx, pid)
+		runNames = runNames[:0]
+		for _, r := range runs {
+			runNames = append(runNames, r.Name)
+		}
+		if !equalStrings(runNames, []string{"run-a", "run-d"}) {
+			t.Fatalf("runs after prune all = %v", runNames)
+		}
+		// And the annotation the cascade used to take with it is still there.
+		if d, err := s.GetExpRun(ctx, pid, "run-d"); err != nil || d.Note != "crashed before the first step" {
+			t.Fatalf("run-d after the prune = %+v, %v", d, err)
 		}
 	})
 }
@@ -1970,7 +2000,17 @@ func TestIntegrationRepoTransferRequests(t *testing.T) {
 		// ListRepoTransfersForUser: incoming (write access to the target
 		// namespace -- its owner, or an org member with an admin/write
 		// role) vs outgoing (write access to the source namespace).
+		//
+		// The org write member is a fresh ordinary account rather than
+		// f.admin: a site administrator has write access everywhere, so using
+		// one here would pass whether or not the org-membership arm of the
+		// predicate worked at all. The administrator's own case is
+		// TestIntegrationSiteAdminSeesEveryPendingTransfer.
 		org, err := s.CreateOrg(ctx, "acme", f.bob.ID, OrgUpdate{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		member, err := s.CreateUser(ctx, "acme-writer", "acme-writer@example.com", "hash", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1980,7 +2020,7 @@ func TestIntegrationRepoTransferRequests(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := s.db.Exec(ctx,
-			`INSERT INTO org_members (namespace_id, user_id, role) VALUES ($1, $2, 'write')`, org.ID, f.admin.ID); err != nil {
+			`INSERT INTO org_members (namespace_id, user_id, role) VALUES ($1, $2, 'write')`, org.ID, member.ID); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1995,15 +2035,15 @@ func TestIntegrationRepoTransferRequests(t *testing.T) {
 			t.Fatalf("alice outgoing = %v, want [%d]", ids, pt5.ID)
 		}
 
-		inAdmin, outAdmin, err := s.ListRepoTransfersForUser(ctx, f.admin.ID)
+		inMember, outMember, err := s.ListRepoTransfersForUser(ctx, member.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if ids := transferIDs(inAdmin); !equalInt64s(ids, []int64{pt5.ID}) {
-			t.Fatalf("admin (acme write member) incoming = %v, want [%d]", ids, pt5.ID)
+		if ids := transferIDs(inMember); !equalInt64s(ids, []int64{pt5.ID}) {
+			t.Fatalf("acme write member incoming = %v, want [%d]", ids, pt5.ID)
 		}
-		if len(outAdmin) != 0 {
-			t.Fatalf("admin has no outgoing transfers, got %+v", outAdmin)
+		if len(outMember) != 0 {
+			t.Fatalf("acme write member has no outgoing transfers, got %+v", outMember)
 		}
 
 		inBob, outBob, err := s.ListRepoTransfersForUser(ctx, f.bob.ID)

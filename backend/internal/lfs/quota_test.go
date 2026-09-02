@@ -371,3 +371,105 @@ func TestBatchFailsWhenTheQuotaCannotBeRead(t *testing.T) {
 }
 
 func ptrInt64(v int64) *int64 { return &v }
+
+// ------------------------------------------------- the promotion-side check
+
+// The finding this closes: withinQuota was reached only from Batch, while
+// PromoteStagedFrom is reached from the browser upload endpoint and the
+// emulator's transfer proxy without passing through Batch at all. A namespace
+// at its limit took a 507 on `git push` and then uploaded the same weights
+// through the web UI.
+func TestPromoteRefusesAnObjectTheNamespaceHasNoRoomFor(t *testing.T) {
+	rec := &fakeRecorder{}
+	// The staged object is present and is the length the caller declares, so
+	// nothing but the quota can refuse this.
+	st := &stubStorage{presentFor: 4, size: goodSize, content: goodBody}
+	q := &fakeQuota{q: store.NamespaceQuota{
+		Namespace: "acme", QuotaBytes: ptrInt64(1), UsedBytes: 0,
+	}}
+	h := quotaHandler(rec, st, q, 0)
+
+	err := h.PromoteStagedFrom(context.Background(), 1, goodOID, goodSize, "tmp/uploads/1/abc")
+	var overQuota *QuotaExceededError
+	if !errors.As(err, &overQuota) {
+		t.Fatalf("PromoteStagedFrom error = %v, want a QuotaExceededError", err)
+	}
+	if !strings.Contains(overQuota.Error(), `"acme"`) {
+		t.Errorf("message %q does not name the namespace", overQuota.Error())
+	}
+	if rec.calls != 0 {
+		t.Errorf("RecordLFSObject calls = %d, want 0 -- a refused upload must not be linked", rec.calls)
+	}
+}
+
+// The same gate on the signed-URL path. Verify passes the refusal through
+// rather than folding it into "object could not be verified", so `git push`
+// reports something the operator can act on.
+func TestVerifyRefusesAnObjectTheNamespaceHasNoRoomFor(t *testing.T) {
+	rec := &fakeRecorder{}
+	st := &stubStorage{presentFor: 4, size: goodSize, content: goodBody}
+	q := &fakeQuota{q: store.NamespaceQuota{
+		Namespace: "acme", QuotaBytes: ptrInt64(1), UsedBytes: 0,
+	}}
+	h := quotaHandler(rec, st, q, 0)
+
+	err := h.Verify(context.Background(), 1, goodOID, goodSize)
+	var overQuota *QuotaExceededError
+	if !errors.As(err, &overQuota) {
+		t.Fatalf("Verify error = %v, want a QuotaExceededError", err)
+	}
+	if rec.calls != 0 {
+		t.Errorf("RecordLFSObject calls = %d, want 0", rec.calls)
+	}
+}
+
+// Re-publishing an object this repository is already linked to adds nothing to
+// what UsageByRepo sums, so it stays possible at any quota -- the same rule
+// Batch applies to a dedup hit. Without it a repository at its limit could not
+// re-upload a file it already holds.
+func TestPromoteDoesNotChargeAnObjectTheRepositoryAlreadyHolds(t *testing.T) {
+	rec := &fakeRecorder{owned: ownedBy(1, goodOID)}
+	st := &stubStorage{presentFor: 4, size: goodSize, content: goodBody}
+	q := &fakeQuota{q: store.NamespaceQuota{
+		Namespace: "acme", QuotaBytes: ptrInt64(0), UsedBytes: 1 << 40,
+	}}
+	h := quotaHandler(rec, st, q, 0)
+
+	if err := h.PromoteStagedFrom(context.Background(), 1, goodOID, goodSize, "tmp/uploads/1/abc"); err != nil {
+		t.Fatalf("PromoteStagedFrom: %v", err)
+	}
+}
+
+// An unlimited namespace pays for the quota read and nothing else: no
+// ownership lookup, since there is no ceiling for it to inform.
+func TestPromoteSkipsTheOwnershipLookupWhenNothingIsEnforced(t *testing.T) {
+	rec := &fakeRecorder{}
+	st := &stubStorage{presentFor: 4, size: goodSize, content: goodBody}
+	q := &fakeQuota{q: store.NamespaceQuota{Namespace: "acme", UsedBytes: 1 << 40}}
+	h := quotaHandler(rec, st, q, 0)
+
+	if err := h.PromoteStagedFrom(context.Background(), 1, goodOID, goodSize, "tmp/uploads/1/abc"); err != nil {
+		t.Fatalf("PromoteStagedFrom: %v", err)
+	}
+	// RepoHasLFSObject is called once by promoteAlreadyDone's sibling paths
+	// only; here the object is staged, so the charge is the only thing that
+	// would have asked -- and it did not.
+	if rec.ownCalls != 0 {
+		t.Errorf("RepoHasLFSObject calls = %d, want 0 for a namespace with no limit", rec.ownCalls)
+	}
+}
+
+// Enforcement switched off asks the database nothing at all on this path
+// either, which is the state an instance that configures no quotas is in.
+func TestPromoteWithoutAQuotaSourceEnforcesNothing(t *testing.T) {
+	rec := &fakeRecorder{}
+	st := &stubStorage{presentFor: 4, size: goodSize, content: goodBody}
+	h := testHandler(rec, st)
+
+	if err := h.PromoteStagedFrom(context.Background(), 1, goodOID, goodSize, "tmp/uploads/1/abc"); err != nil {
+		t.Fatalf("PromoteStagedFrom: %v", err)
+	}
+	if rec.calls != 1 {
+		t.Errorf("RecordLFSObject calls = %d, want the object linked", rec.calls)
+	}
+}

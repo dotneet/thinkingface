@@ -1,6 +1,6 @@
 "use client";
 
-import { KeyRound, Trash2 } from "lucide-react";
+import { KeyRound, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { LoginRequiredState } from "@/components/settings/login-required-state";
 import { Alert } from "@/components/ui/alert";
@@ -85,6 +85,10 @@ export function TokensManager() {
     if (!newName.trim()) return;
     setCreating(true);
     setError(null);
+    // Drop the previous token before asking for a new one: a failed create
+    // would otherwise leave the old banner standing where it reads as the
+    // result of the attempt that just failed.
+    setJustCreated(null);
     const result = await createToken(newName.trim(), newScope, newExpiryDays);
     setCreating(false);
     if (!result.ok) {
@@ -177,7 +181,20 @@ export function TokensManager() {
           <p className="text-xs font-medium text-fg-subtle">{t("settings.tokens.copyNow")}</p>
           <div className="mt-1.5 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-raised p-2.5">
             <code className="scroll-x whitespace-pre font-mono text-xs">{justCreated.token}</code>
-            <CopyButton value={justCreated.token} />
+            <div className="flex shrink-0 items-center gap-1">
+              <CopyButton value={justCreated.token} />
+              {/* A one-time secret needs a way off the screen that is not
+                  "reload the page and hope": once it has been copied, leaving
+                  it rendered is the only remaining exposure. */}
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label={t("settings.tokens.dismissToken")}
+                onClick={() => setJustCreated(null)}
+              >
+                <X size={14} />
+              </Button>
+            </div>
           </div>
         </Alert>
       )}

@@ -8,6 +8,11 @@ export const newRepo = {
     link: "ログイン",
     suffix: "してください。",
   },
+  // バックエンドがエラーを返した／応答しない場合は、未ログインとは別の状態
+  // （DESIGN.md §9）。上のログイン案内の代わりにこちらを表示する。
+  accountLoadFailed: "作成先に指定できるネームスペースを確認できませんでした。",
+  accountLoadFailedHint:
+    "バックエンド API に接続できない可能性があります。ページを再読み込みしてください。",
   kind: {
     dataset: "データセット",
     model: "モデル",

@@ -971,6 +971,17 @@ func (c *Client) Commit(ctx context.Context, ref Ref, rev, summary, description 
 	if err := decodeBody(resp, &answer, http.MethodPost, rawURL); err != nil {
 		return nil, err
 	}
+	// A 2xx is not by itself a commit. The HF-compatible answer carries
+	// success and the new commit's oid (internal/api/commit.go), and without
+	// them there is nothing to print, link to or verify -- so a body that
+	// omits them is a failure, not a commit whose id happens to be "".
+	// Returning it as a success is how `tf up` printed a green tick with an
+	// empty short oid, wrote "commit": "" in --json, and exited 0.
+	if !answer.Success || answer.CommitOID == "" {
+		return nil, fmt.Errorf(
+			"commit %s: the server accepted the request but reported no commit (success=%t, commitOid=%q, commitUrl=%q)",
+			ref.ID(), answer.Success, answer.CommitOID, answer.CommitURL)
+	}
 	return &CommitResult{OID: answer.CommitOID, URL: answer.CommitURL}, nil
 }
 

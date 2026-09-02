@@ -31,6 +31,10 @@ type fakeKeys struct {
 		key  *store.SSHKey
 	}
 	touched []int64
+	// touchDeadline records whether the last TouchSSHKey call arrived with a
+	// deadline. The write is detached from the session, so nothing else would
+	// ever notice it running unbounded.
+	touchDeadline bool
 }
 
 func newFakeKeys() *fakeKeys {
@@ -62,11 +66,19 @@ func (f *fakeKeys) LookupSSHKey(_ context.Context, fingerprint string) (*store.U
 	return row.user, row.key, nil
 }
 
-func (f *fakeKeys) TouchSSHKey(_ context.Context, id int64) error {
+func (f *fakeKeys) TouchSSHKey(ctx context.Context, id int64) error {
+	_, hasDeadline := ctx.Deadline()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.touched = append(f.touched, id)
+	f.touchDeadline = hasDeadline
 	return nil
+}
+
+func (f *fakeKeys) touchHadDeadline() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.touchDeadline
 }
 
 func (f *fakeKeys) touchedIDs() []int64 {
@@ -124,15 +136,24 @@ type harness struct {
 	addr string
 	keys *fakeKeys
 	git  *fakeGit
+	srv  *Server
 }
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	// No auth budget by default: the tests below are about the transport, and
+	// limits_test.go opts into it where the limit is the subject.
+	return newHarnessWith(t, Options{IdleTimeout: 30 * time.Second})
+}
+
+// newHarnessWith is newHarness for a test that cares about Options. It fills
+// in only what every harness needs (a host key path), so a test states just
+// the setting it is exercising.
+func newHarnessWith(t *testing.T, opts Options) *harness {
+	t.Helper()
 	keys, git := newFakeKeys(), &fakeGit{reply: "PACK"}
-	srv, err := New(Options{
-		HostKeyPath: filepath.Join(t.TempDir(), "host_ed25519"),
-		IdleTimeout: 30 * time.Second,
-	}, keys, git)
+	opts.HostKeyPath = filepath.Join(t.TempDir(), "host_ed25519")
+	srv, err := New(opts, keys, git)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -146,7 +167,7 @@ func newHarness(t *testing.T) *harness {
 		defer cancel()
 		_ = srv.Shutdown(ctx)
 	})
-	return &harness{addr: l.Addr().String(), keys: keys, git: git}
+	return &harness{addr: l.Addr().String(), keys: keys, git: git, srv: srv}
 }
 
 // clientKey generates a fresh keypair and returns the signer plus the

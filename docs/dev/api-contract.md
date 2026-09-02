@@ -384,9 +384,16 @@ type NamespaceProfile = {
   num_members: number             // Organizations only. 0 for a user namespace
   members_visibility: MembersVisibility | ""   // Organizations only. "" for a user namespace
   viewer_role: OrgRole            // "admin" for a site admin and for one's own namespace, "" when not logged in
-  can_edit: boolean               // viewer_role === "admin"
+  can_edit: boolean               // Whether an editor is actually reachable (see below)
 }
 ```
+
+`can_edit` is **not** simply `viewer_role === "admin"`. For `kind: "org"` it is, but for
+`kind: "user"` it is true only for the namespace's own owner: the sole editor of a user profile
+is `PATCH /api/v1/me/profile`, which edits the caller's own namespace and has no
+edit-somebody-else path (`namespace-design.md` §10). So a site admin looking at another user's
+namespace gets `viewer_role: "admin"` with `can_edit: false`, and the UI is right to hide the
+edit affordance there — there is nothing behind it.
 
 | Endpoint | Permission | req | res |
 |---|---|---|---|
@@ -1252,9 +1259,13 @@ PATCH /api/v1/repos/{kind}/{ns}/{name}   req RepoUpdateRequest {name?: string, d
 
 Present fields are applied in the order `default_branch`, `description`, `name`, and the response
 describes the repository as it stands afterwards. They are separate writes with no transaction
-spanning them: a request carrying several fields can therefore leave the earlier ones applied if a
-later one fails. Both names are validated before anything is written, so the common case of a bad
-name is refused before the other fields land.
+spanning them — one of them repoints git's `HEAD`, which no database transaction could roll back
+— so every reason the request has to fail is checked up front instead: the new name's syntax, the
+description's length, and whether `{ns}/{new name}` is already taken (409 `conflict`). A request
+that is going to be refused is therefore refused before any of the three writes lands. The
+remaining window is a genuine race — a repository created at the new name after the check and
+before the rename still answers 409 with the earlier fields applied, caught by the store's unique
+constraint.
 
 - **`name`** renames the repository inside the namespace it already lives in. It goes through
   exactly the same path a transfer does (`startTransfer` → `store.TransferRepo`), so everything a
@@ -1311,7 +1322,11 @@ POST   /api/v1/transfers/{id}/accept               → 200 RepoTransferResponse 
 POST   /api/v1/transfers/{id}/reject               → 200 RepoTransferResponse
 ```
 Accept/reject require write permission on the destination namespace; cancel requires write
-permission on the source. A pending transfer expires after 7 days.
+permission on the source. A site admin has write permission everywhere, so `GET
+/api/v1/me/transfers` lists every pending transfer on the server for them — the same set they are
+allowed to accept, reject or cancel by ID. A pending transfer expires after 7 days; once it has,
+it is listed by neither side and the next transfer request for that repository takes its place
+(it does not collide with it).
 If a user without permission calls accept / reject, the response is **404 `not_found`
 (`transfer not found`)**. Returning 403 with the destination namespace name would let someone
 brute-force numeric IDs to enumerate pending destinations, so the response is unified to be

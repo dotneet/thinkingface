@@ -81,6 +81,35 @@ func (s *Server) handlePreupload(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, maxBatchBody, &req, "request body must be JSON with a files array") {
 		return
 	}
+	// The same three bounds paths-info applies, and reusing its constants
+	// rather than inventing a second pair: the two endpoints are the same
+	// shape (one small record per file, one tree lookup per record) and had no
+	// reason to disagree about how many records that may be.
+	//
+	// maxBatchBody alone is not a bound on the work: 8 MiB of minimal records
+	// is roughly 380k of them, and each costs a rules.ShouldUseLFS pass over
+	// every .gitattributes pattern plus a FindEntry inside StatMany. A write
+	// token and the handler deadline keep that amplification rather than an
+	// outage, which is why this is a tightening and not a fix for a hole.
+	//
+	// checkOpPath is the same validation the commit endpoint runs on every path
+	// in its body. preupload is the step immediately before that commit, so a
+	// path it answers happily and the commit then refuses is a round trip --
+	// and, for an LFS-routed path, a whole transfer -- spent to learn something
+	// this could have said first.
+	if len(req.Files) > maxPathsInfoPaths {
+		badRequest(w, fmt.Sprintf("files may contain at most %d entries", maxPathsInfoPaths))
+		return
+	}
+	for _, f := range req.Files {
+		if len(f.Path) > maxPathBytes {
+			badRequest(w, fmt.Sprintf("each path must be at most %d bytes", maxPathBytes))
+			return
+		}
+		if !checkOpPath(w, "file", f.Path) {
+			return
+		}
+	}
 	gitRepo, ok := s.openGit(w, repo)
 	if !ok {
 		return

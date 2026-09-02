@@ -141,7 +141,8 @@ config:     /home/admin/.config/thinkingface/config.json (no saved logins)
 ```text
 tf up PATH [--to NS/NAME|NAME] [--kind dataset|model] [--rev BRANCH]
            [-m/--message MSG] [--license L] [--tag T ...] [--desc TEXT]
-           [--include GLOB ...] [--exclude GLOB ...] [--delete] [--dry-run]
+           [--include GLOB ...] [--exclude GLOB ...] [--hidden]
+           [--delete] [--dry-run]
            [--workers N] [--quiet] [--json]
 ```
 
@@ -156,6 +157,7 @@ tf up PATH [--to NS/NAME|NAME] [--kind dataset|model] [--rev BRANCH]
 | `--desc` | （未設定） | リポジトリカードの `description`。生成される README の冒頭の段落としても使われます |
 | `--include` | すべて含める | この glob に一致するファイルだけを含めます（繰り返し指定可）。シェルを通した glob ではなく `tf` 自身が照合します。`**` は任意個数のパスセグメントに一致し（`data/**`、`**/*.parquet`）、`/` を含まないパターンはファイルのベース名に対しても試されます（`*.parquet` は `data/train.parquet` にも一致します） |
 | `--exclude` | （なし） | この glob に一致するファイルを除外します（繰り返し指定可）。マッチングの規則は `--include` と同じです |
+| `--hidden` | off | PATH 以下で見つかったドットファイル・ドットディレクトリもアップロードします。既定ではスキップされます（下記参照）。`.gitattributes` と `.gitignore` はどちらの場合も常にアップロードされます |
 | `--delete` | off | PATH 以下のディスク上のどこにも存在しないリモートのファイルを削除します。`--include`/`--exclude` とは独立していて、それらのフラグが今回のアップロード対象から外したファイルでも、ディスク上に存在する限り削除されません |
 | `--dry-run` | off | 何も変更せずに、何が起きるかを表示します |
 | `--workers` | `4` | LFS の並列転送数 |
@@ -171,6 +173,25 @@ tf up PATH [--to NS/NAME|NAME] [--kind dataset|model] [--rev BRANCH]
 リポジトリがないかも確認します（例えば、推測ではデータセットだが同じ名前のモデルリポジトリが
 すでにある場合、そちらが使われます）。
 
+!!! warning "ドットファイルは既定でアップロードされません"
+    ここでのリポジトリはサーバーに到達できる誰からも読めます。そしてプロジェクトのディレクトリ
+    には、データ以外のものも大抵置かれています — `.env`、`.envrc`、`.aws/credentials`、`.ssh/`、
+    エディタの `.idea/` など。そのため `tf up` は、PATH の *内側* で見つけたドットファイルと
+    ドットディレクトリをアップロードから外し、何をスキップしたかを stderr に 1 行で表示します
+    （この警告は `--quiet` でも抑制されません）。ただし 2 つの名前は常にアップロードされます。
+    マシン側の状態ではなくリポジトリの内容だからです: `.gitattributes`（LFS の振り分け規則を
+    持ちます）と `.gitignore` です。
+
+    この規則が扱わないことが 2 つあります。自分で指定したパスは自分で選んだものなので、
+    `tf up ./.config` や `tf up ./.env` は今までどおりアップロードされます。そして、以前の実行で
+    アップロード済みのドットファイルはリモートに残ります — ディスク上には存在しているので、
+    `--delete` は「今回のアップロードに含まれない」ことを「ローカルから消えた」とは解釈しません
+    （下記参照）。そうしたファイルをリモートから消したい場合は、このフラグに期待するのではなく、
+    Web UI か `git push` で明示的に削除してください。
+
+    アップロードしたい場合は `--hidden` を付けてください。`--include` だけでは上書きできません。
+    パターンで名指ししたドットファイルであっても `--hidden` が必要です。
+
 !!! warning "`--delete` が保護する 2 つのファイル"
     `--delete` は、ローカルに存在しなくても、ルートの `.gitattributes` と `README.md` を削除
     することはありません。`.gitattributes` はサーバーが生成するもので、以後のアップロードでの
@@ -180,7 +201,8 @@ tf up PATH [--to NS/NAME|NAME] [--kind dataset|model] [--rev BRANCH]
 !!! note "`--delete` と `--include`/`--exclude` の組み合わせ"
     `--include`/`--exclude` でアップロード対象から外れたファイルも、アップロード対象かどうかで
     はなくディスク上の存在で判定されます。PATH 以下のどこかに存在する限り `--delete` の対象には
-    なりません。実際に PATH 以下から消えたファイルだけが削除されます。
+    なりません。実際に PATH 以下から消えたファイルだけが削除されます。上記の規則でスキップされた
+    ドットファイル、およびスキップされたドットディレクトリ配下のすべてについても同じです。
 
 !!! note "`--delete` と symlink ディレクトリ: 死角は触れられない"
     ローカルのスキャンは、ディレクトリを指す symlink（たどるとループしうるため）、壊れた symlink、

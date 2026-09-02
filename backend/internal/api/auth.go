@@ -657,6 +657,54 @@ func (s *Server) hashNewPassword(w http.ResponseWriter, r *http.Request, passwor
 	return hash, true
 }
 
+// refusePasswordChange answers a current-password check that did not come
+// back passwordOK, and reports whether it answered. Only passwordOK returns
+// false; everything else -- including a value this function has never heard
+// of -- is refused, because "fell out of the switch" and "the password was
+// correct" must never be the same thing here. Its own function rather than a
+// switch inline in the handler so a test can hold it to that for every
+// outcome, including the two that are unreachable through the router
+// (TestRefusePasswordChange_NoOutcomeFallsThrough).
+//
+// addrKey is the caller's address bucket, already charged by checkPassword.
+func (s *Server) refusePasswordChange(w http.ResponseWriter, r *http.Request, addrKey string, user *store.User, outcome passwordOutcome) bool {
+	switch outcome {
+	case passwordOK:
+		return false
+	case passwordThrottled:
+		tooManyAttempts(w, s.authGuard.retryAfter(addrKey, usernameKey(user.Username)))
+	case passwordOverloaded:
+		serviceOverloaded(w, bcryptWait)
+	case passwordWrong:
+		slog.Warn("password change failed", "username", user.Username, "user_id", user.ID,
+			"client_ip", s.clientIP(r), "reason", "invalid_credentials")
+		// writeError rather than unauthorized(): this is a form submitted by
+		// the web UI, and the WWW-Authenticate header the latter sets can
+		// make a browser pop its own credential dialog over the page.
+		// handleLogin answers a wrong password the same way.
+		writeError(w, http.StatusUnauthorized, "unauthorized", "current password is incorrect")
+	case passwordDisabled:
+		// Unreachable: identify() already refuses a suspended account, so the
+		// caller could not have got this far. Handled anyway, for the reason
+		// above.
+		writeError(w, http.StatusForbidden, "account_disabled", "this account has been disabled")
+	case passwordPending:
+		// Unreachable for passwordDisabled's reason -- identify() refuses an
+		// unapproved account too. The gap it closes is the one between
+		// identify() reading the account and checkPassword re-reading it: an
+		// account sent back to the waiting room in between must not still get
+		// to change its password. The wording matches handleLogin's
+		// account_pending.
+		writeError(w, http.StatusForbidden, "account_pending",
+			"this account is waiting for a site administrator to approve it")
+	default:
+		// A future outcome nobody wired in here. Refusing is the only safe
+		// reading of a value this function does not understand.
+		internalError(w, "check current password", fmt.Errorf("unhandled password outcome %d", outcome))
+	}
+	return true
+}
+
 // handleChangeMyPassword answers PATCH /api/v1/me/password: the caller
 // replaces their own password, proving they hold the current one first.
 //
@@ -692,28 +740,7 @@ func (s *Server) handleChangeMyPassword(w http.ResponseWriter, r *http.Request) 
 	// as the login form does -- holding a session is not a reason to let
 	// someone brute-force the current password for free. It charges the
 	// address bucket itself, so this handler must not charge it again.
-	switch _, outcome := s.checkPassword(r.Context(), addrKey, user.Username, req.CurrentPassword); outcome {
-	case passwordThrottled:
-		tooManyAttempts(w, s.authGuard.retryAfter(addrKey, usernameKey(user.Username)))
-		return
-	case passwordOverloaded:
-		serviceOverloaded(w, bcryptWait)
-		return
-	case passwordWrong:
-		slog.Warn("password change failed", "username", user.Username, "user_id", user.ID,
-			"client_ip", s.clientIP(r), "reason", "invalid_credentials")
-		// writeError rather than unauthorized(): this is a form submitted by
-		// the web UI, and the WWW-Authenticate header the latter sets can
-		// make a browser pop its own credential dialog over the page.
-		// handleLogin answers a wrong password the same way.
-		writeError(w, http.StatusUnauthorized, "unauthorized", "current password is incorrect")
-		return
-	case passwordDisabled:
-		// Unreachable: identify() already refuses a suspended account, so the
-		// caller could not have got this far. Handled anyway rather than
-		// falling through the switch into the success path, which is what an
-		// unhandled outcome would do.
-		writeError(w, http.StatusForbidden, "account_disabled", "this account has been disabled")
+	if _, outcome := s.checkPassword(r.Context(), addrKey, user.Username, req.CurrentPassword); s.refusePasswordChange(w, r, addrKey, user, outcome) {
 		return
 	}
 	// Proving the current password clears the address budget, exactly as

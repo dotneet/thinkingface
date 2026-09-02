@@ -174,7 +174,10 @@ export function RunDetail({
 
   return (
     <div className="flex flex-col gap-8">
-      {annotateError && (
+      {/* Suppressed while the tags dialog is up: it renders the same failure in
+          its own footer, and two copies read as two failures (the danger zone
+          below does the same with the delete error). */}
+      {annotateError && !tagsOpen && (
         <Alert tone="negative" title={t("experiments.dashboard.annotateErrorTitle")}>
           {annotateError}{" "}
           {t("experiments.dashboard.writeAccessRequired", { repo: `${ns}/${repo}` })}
@@ -192,7 +195,12 @@ export function RunDetail({
         canWrite={canWrite}
         saving={annotate.isPending}
         onToggleBaseline={() => annotate.mutate({ is_baseline: !run.is_baseline })}
-        onEditTags={() => setTagsOpen(true)}
+        onEditTags={() => {
+          // Drop a failure left over from a baseline/archive click so the
+          // dialog does not open already showing someone else's error.
+          annotate.reset();
+          setTagsOpen(true);
+        }}
         onToggleArchived={() => annotate.mutate({ archived: !run.archived })}
       />
 
@@ -319,7 +327,16 @@ export function RunDetail({
         run={run}
         open={tagsOpen}
         saving={annotate.isPending}
-        onClose={() => setTagsOpen(false)}
+        // Same reason the danger zone hides its copy while its dialog is up:
+        // the page-level Alert is behind the <dialog> backdrop, so without
+        // this a failed save reported nothing the reader could see.
+        error={annotateError}
+        // Ignored while the PATCH is in flight (the pattern
+        // components/repo/delete-file-button.tsx uses): Escape or a backdrop
+        // click would otherwise read as a cancel for a write already sent.
+        onClose={() => {
+          if (!annotate.isPending) setTagsOpen(false);
+        }}
         onSave={(_, tags) => annotate.mutate({ tags })}
       />
 
@@ -328,7 +345,11 @@ export function RunDetail({
         open={deleteOpen}
         deleting={remove.isPending}
         error={deleteError}
-        onClose={() => setDeleteOpen(false)}
+        // Dismissing mid-DELETE reads as a cancel, and the request keeps
+        // running — then navigates the reader off the page on success.
+        onClose={() => {
+          if (!remove.isPending) setDeleteOpen(false);
+        }}
         onConfirm={() => remove.mutate()}
       />
     </div>

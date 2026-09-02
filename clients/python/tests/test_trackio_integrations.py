@@ -76,6 +76,48 @@ class TestImportNeverBreaks:
             integrations.ThinkingFaceLightningLogger(project="p")
 
 
+# -- fakes shared by both code paths -----------------------------------------
+
+
+class _FakeRun:
+    """Stand-in for the ``thinkingface.trackio._Run`` handle ``init()`` returns.
+
+    Both integrations log and finish through *their own* handle rather than
+    the module-level ``trackio.log()`` / ``trackio.finish()`` (which act on
+    whatever run was started last), so this is where the calls a test asserts
+    on land.
+    """
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        self.config = dict(config or {})
+        self.logged: list[tuple[dict[str, Any], Any]] = []
+        self.finished: list[str] = []
+
+    def log(self, metrics: dict[str, Any], step: Any = None) -> None:
+        self.logged.append((dict(metrics), step))
+
+    def finish(self, status: str = "finished") -> None:
+        self.finished.append(status)
+
+
+@pytest.fixture
+def no_global_logging(monkeypatch):
+    """Make the module-level trackio.log()/finish() a test failure.
+
+    They act on the module global ``_current_run``, which is exactly the run
+    an integration holding its own handle must not use.
+    """
+
+    def _forbidden(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError(
+            "the integration used the module-level trackio API instead of its own run handle"
+        )
+
+    monkeypatch.setattr(integrations.trackio, "log", _forbidden)
+    monkeypatch.setattr(integrations.trackio, "finish", _forbidden)
+    return _forbidden
+
+
 # -- fakes used to exercise the transformers-backed code path ----------------
 
 
@@ -105,16 +147,20 @@ def fake_transformers(monkeypatch):
 
 
 class TestThinkingFaceCallback:
-    def test_full_flow_creates_run_logs_metrics_and_finishes(self, fake_transformers, monkeypatch):
+    def test_full_flow_creates_run_logs_metrics_and_finishes(
+        self, fake_transformers, no_global_logging, monkeypatch
+    ):
         mod = fake_transformers
         assert mod._HAS_TRANSFORMERS is True
 
-        calls: list[tuple] = []
-        monkeypatch.setattr(mod.trackio, "init", lambda **kw: calls.append(("init", kw)))
-        monkeypatch.setattr(
-            mod.trackio, "log", lambda metrics, step=None: calls.append(("log", metrics, step))
-        )
-        monkeypatch.setattr(mod.trackio, "finish", lambda **kw: calls.append(("finish", kw)))
+        init_calls: list[dict] = []
+        run = _FakeRun()
+
+        def fake_init(**kwargs):
+            init_calls.append(kwargs)
+            return run
+
+        monkeypatch.setattr(mod.trackio, "init", fake_init)
 
         callback = mod.ThinkingFaceCallback(project="mnist", name="run1", config={"seed": 0})
         args = _FakeTrainingArguments(learning_rate=1e-3, num_train_epochs=3)
@@ -122,8 +168,8 @@ class TestThinkingFaceCallback:
         control = object()
 
         callback.on_train_begin(args, state, control)
-        assert calls[0][0] == "init"
-        init_kwargs = calls[0][1]
+        assert len(init_calls) == 1
+        init_kwargs = init_calls[0]
         assert init_kwargs["project"] == "mnist"
         assert init_kwargs["name"] == "run1"
         # user config and TrainingArguments coexist under separate namespaces
@@ -137,22 +183,55 @@ class TestThinkingFaceCallback:
         callback.on_log(
             args, state, control, logs={"loss": 0.5, "epoch": 1.0, "eval_runtime": None}
         )
-        assert calls[1][0] == "log"
-        # numeric metrics (including epoch) are forwarded; None is dropped
-        assert calls[1][1] == {"loss": 0.5, "epoch": 1.0}
-        # state.global_step is used as the step, not anything from logs
-        assert calls[1][2] == 5
+        # numeric metrics (including epoch) are forwarded; None is dropped, and
+        # state.global_step is the step, not anything from logs
+        assert run.logged == [({"loss": 0.5, "epoch": 1.0}, 5)]
 
         callback.on_train_end(args, state, control)
-        assert calls[2] == ("finish", {})
+        assert run.finished == ["finished"]
 
-    def test_on_log_drops_non_numeric_and_boolean_values(self, fake_transformers, monkeypatch):
+    def test_two_callbacks_each_log_to_their_own_run(
+        self, fake_transformers, no_global_logging, monkeypatch
+    ):
+        """Regression: the callback used to log through the module global.
+
+        Two callbacks (or a trackio.init() for a side experiment between two
+        on_log calls) rebind that global, so the second one's run received
+        the first one's metrics and was the one finish() closed.
+        """
         mod = fake_transformers
-        log_calls: list[dict] = []
-        monkeypatch.setattr(mod.trackio, "init", lambda **kw: None)
-        monkeypatch.setattr(
-            mod.trackio, "log", lambda metrics, step=None: log_calls.append(metrics)
-        )
+        runs: list[_FakeRun] = []
+
+        def fake_init(**kwargs):
+            runs.append(_FakeRun())
+            return runs[-1]
+
+        monkeypatch.setattr(mod.trackio, "init", fake_init)
+
+        args_a = _FakeTrainingArguments()
+        args_b = _FakeTrainingArguments(learning_rate=1e-3)
+        control = object()
+
+        first = mod.ThinkingFaceCallback(project="a")
+        second = mod.ThinkingFaceCallback(project="b")
+        first.on_train_begin(args_a, _FakeState(0), control)
+        second.on_train_begin(args_b, _FakeState(0), control)
+
+        first.on_log(args_a, _FakeState(1), control, logs={"loss": 1.0})
+        second.on_log(args_b, _FakeState(2), control, logs={"loss": 2.0})
+        first.on_train_end(args_a, _FakeState(1), control)
+
+        assert runs[0].logged == [({"loss": 1.0}, 1)]
+        assert runs[1].logged == [({"loss": 2.0}, 2)]
+        assert runs[0].finished == ["finished"]
+        assert runs[1].finished == []
+
+    def test_on_log_drops_non_numeric_and_boolean_values(
+        self, fake_transformers, no_global_logging, monkeypatch
+    ):
+        mod = fake_transformers
+        run = _FakeRun()
+        monkeypatch.setattr(mod.trackio, "init", lambda **kw: run)
 
         callback = mod.ThinkingFaceCallback(project="p")
         callback.on_train_begin(_FakeTrainingArguments(), _FakeState(0), object())
@@ -163,7 +242,7 @@ class TestThinkingFaceCallback:
             logs={"message": "ok", "is_world_process_zero": True, "loss": None},
         )
         # nothing numeric survives -> log() is never called
-        assert log_calls == []
+        assert run.logged == []
 
     def test_on_log_before_train_begin_warns_instead_of_raising(self, fake_transformers):
         mod = fake_transformers
@@ -185,11 +264,6 @@ class TestThinkingFaceCallback:
 
 class _FakeLightningLoggerBase:
     """Stand-in for lightning.pytorch.loggers.logger.Logger."""
-
-
-class _FakeRun:
-    def __init__(self, config: dict[str, Any]) -> None:
-        self.config = config
 
 
 @pytest.fixture
@@ -229,65 +303,101 @@ class TestThinkingFaceLightningLogger:
         assert logger.version == "run1"
 
     def test_hyperparams_before_first_metric_fold_into_init_config(
-        self, fake_lightning, monkeypatch
+        self, fake_lightning, no_global_logging, monkeypatch
     ):
         mod = fake_lightning
-        calls: list[tuple] = []
+        init_calls: list[dict] = []
+        runs: list[_FakeRun] = []
 
         def fake_init(**kwargs):
-            calls.append(("init", kwargs))
-            return _FakeRun(dict(kwargs["config"]))
+            init_calls.append(kwargs)
+            runs.append(_FakeRun(kwargs["config"]))
+            return runs[-1]
 
         monkeypatch.setattr(mod.trackio, "init", fake_init)
-        monkeypatch.setattr(
-            mod.trackio, "log", lambda metrics, step=None: calls.append(("log", metrics, step))
-        )
 
         logger = mod.ThinkingFaceLightningLogger(project="mnist", config={"seed": 1})
 
         # hyperparams logged before any metric: no run created yet
         logger.log_hyperparams({"lr": 0.01})
-        assert calls == []
+        assert init_calls == []
 
         logger.log_metrics({"loss": 0.9, "note": "skip-me"}, step=3)
-        assert calls[0][0] == "init"
-        assert calls[0][1]["config"] == {"seed": 1, "lr": 0.01}
-        assert calls[1] == ("log", {"loss": 0.9}, 3)
+        assert len(init_calls) == 1
+        assert init_calls[0]["config"] == {"seed": 1, "lr": 0.01}
+        assert runs[0].logged == [({"loss": 0.9}, 3)]
 
-    def test_hyperparams_after_run_started_update_run_config(self, fake_lightning, monkeypatch):
+    def test_hyperparams_after_run_started_update_run_config(
+        self, fake_lightning, no_global_logging, monkeypatch
+    ):
         mod = fake_lightning
-        monkeypatch.setattr(mod.trackio, "init", lambda **kw: _FakeRun(dict(kw["config"])))
-        monkeypatch.setattr(mod.trackio, "log", lambda metrics, step=None: None)
+        monkeypatch.setattr(mod.trackio, "init", lambda **kw: _FakeRun(kw["config"]))
 
         logger = mod.ThinkingFaceLightningLogger(project="mnist")
         logger.log_metrics({"loss": 1.0})
         logger.log_hyperparams({"batch_size": 32})
         assert logger._run.config["batch_size"] == 32
 
-    def test_finalize_maps_status_and_clears_run(self, fake_lightning, monkeypatch):
+    def test_metrics_follow_the_logger_run_not_the_latest_init(
+        self, fake_lightning, no_global_logging, monkeypatch
+    ):
+        """Regression: the logger used to log through the module global.
+
+        A ``trackio.init()`` for a side experiment between two ``log_metrics``
+        calls rebinds that global, so the logger's later metrics landed on the
+        side run and ``finalize()`` marked the wrong run finished.
+        """
         mod = fake_lightning
-        finish_calls: list[dict] = []
-        monkeypatch.setattr(mod.trackio, "init", lambda **kw: _FakeRun(dict(kw["config"])))
-        monkeypatch.setattr(mod.trackio, "log", lambda metrics, step=None: None)
-        monkeypatch.setattr(mod.trackio, "finish", lambda **kw: finish_calls.append(kw))
+        runs: list[_FakeRun] = []
+
+        def fake_init(**kwargs):
+            runs.append(_FakeRun(kwargs["config"]))
+            return runs[-1]
+
+        monkeypatch.setattr(mod.trackio, "init", fake_init)
+
+        logger = mod.ThinkingFaceLightningLogger(project="mnist")
+        logger.log_metrics({"loss": 1.0}, step=1)
+        side_run = fake_init(project="side", config={})  # a second run starts
+        logger.log_metrics({"loss": 0.5}, step=2)
+        logger.finalize("success")
+
+        assert runs[0].logged == [({"loss": 1.0}, 1), ({"loss": 0.5}, 2)]
+        assert runs[0].finished == ["finished"]
+        assert side_run.logged == []
+        assert side_run.finished == []
+
+    def test_finalize_maps_status_and_clears_run(
+        self, fake_lightning, no_global_logging, monkeypatch
+    ):
+        mod = fake_lightning
+        runs: list[_FakeRun] = []
+
+        def fake_init(**kwargs):
+            runs.append(_FakeRun(kwargs["config"]))
+            return runs[-1]
+
+        monkeypatch.setattr(mod.trackio, "init", fake_init)
 
         logger = mod.ThinkingFaceLightningLogger(project="mnist")
         logger.log_metrics({"loss": 1.0})
         logger.finalize("success")
-        assert finish_calls == [{"status": "finished"}]
+        assert runs[0].finished == ["finished"]
         assert logger._run is None
 
         logger.log_metrics({"loss": 1.0})
         logger.finalize("failed")
-        assert finish_calls[-1] == {"status": "failed"}
+        assert runs[1].finished == ["failed"]
 
-    def test_finalize_without_a_run_is_a_no_op(self, fake_lightning, monkeypatch):
+    def test_finalize_without_a_run_is_a_no_op(
+        self, fake_lightning, no_global_logging, monkeypatch
+    ):
         mod = fake_lightning
-        finish_calls = []
-        monkeypatch.setattr(mod.trackio, "finish", lambda **kw: finish_calls.append(kw))
+        init_calls = []
+        monkeypatch.setattr(mod.trackio, "init", lambda **kw: init_calls.append(kw))
         logger = mod.ThinkingFaceLightningLogger(project="mnist")
         logger.finalize("success")
-        assert finish_calls == []
+        assert init_calls == []
 
     def test_experiment_property_lazily_starts_run(self, fake_lightning, monkeypatch):
         mod = fake_lightning

@@ -2,6 +2,7 @@ package wal
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,6 +96,66 @@ func TestMaterialize_WithoutAnIndexLeavesTheLocalCopyAlone(t *testing.T) {
 	if fileExists(filepath.Join(local, StateFileName)) {
 		t.Error("state file written for a repository with no index")
 	}
+}
+
+// The same state read in authoritative mode is the §13 failure, not a
+// migration leftover: the index that governs this repository is gone while a
+// copy of it is still on disk. Serving that copy hides the loss until the next
+// push — whose <old> for a "new" ref is "" — writes an index containing only
+// the ref it touched, truncating the repository for every other instance.
+func TestMaterializeWith_AuthoritativeRefusesToServeACopyWhoseIndexIsGone(t *testing.T) {
+	fx := newMaterializeFixture(t)
+	head := commitTo(t, fx.src, "main", "one")
+	pushToWAL(t, fx.store, fx.src, "main", "", head)
+	opts := Options{Authoritative: true}
+	if err := MaterializeWith(context.Background(), fx.store, fx.dst, storagePath, opts); err != nil {
+		t.Fatalf("MaterializeWith: %v", err)
+	}
+
+	if err := fx.store.Delete(context.Background(), storage.WALIndexKey(storagePath)); err != nil {
+		t.Fatalf("delete index: %v", err)
+	}
+
+	err := MaterializeWith(context.Background(), fx.store, fx.dst, storagePath, opts)
+	if !errors.Is(err, ErrIndexMissing) {
+		t.Fatalf("MaterializeWith err = %v, want ErrIndexMissing", err)
+	}
+	// Failing closed must not also destroy the copy: it is evidence, and the
+	// recovery in docs/dev/wal-index-recovery.md may want to seed from it.
+	assertRefs(t, fx.dst, map[string]string{"refs/heads/main": head})
+}
+
+// The other half of the distinction. A repository this instance has never
+// served has no local copy at all, and one that was created but never written
+// has a copy with no refs; both are legitimately index-less and must stay a
+// no-op, or every freshly created repository would fail its first request.
+func TestMaterializeWith_AuthoritativeIsANoopForARepositoryWithNothingToServe(t *testing.T) {
+	fx := newMaterializeFixture(t)
+	opts := Options{Authoritative: true}
+
+	// Never materialised here: no directory.
+	if err := MaterializeWith(context.Background(), fx.store, fx.dst, storagePath, opts); err != nil {
+		t.Fatalf("MaterializeWith on an absent copy: %v", err)
+	}
+
+	// Created, never written: a bare repository with no refs.
+	empty := newBare(t, t.TempDir(), "empty.git")
+	if err := MaterializeWith(context.Background(), fx.store, empty, storagePath, opts); err != nil {
+		t.Fatalf("MaterializeWith on an empty copy: %v", err)
+	}
+}
+
+// Shadow and off keep the pre-cutover behaviour: during §15 Phase 2/3 most
+// repositories legitimately have no index while disk is still the truth.
+func TestMaterialize_ShadowStillServesACopyWithNoIndex(t *testing.T) {
+	fx := newMaterializeFixture(t)
+	local := newBare(t, t.TempDir(), "local.git")
+	head := commitTo(t, local, "main", "one")
+
+	if err := MaterializeWith(context.Background(), fx.store, local, storagePath, Options{}); err != nil {
+		t.Fatalf("MaterializeWith: %v", err)
+	}
+	assertRefs(t, local, map[string]string{"refs/heads/main": head})
 }
 
 func TestMaterialize_PropagatesRefDeletionsAndAdditions(t *testing.T) {
@@ -273,6 +334,46 @@ func TestMaterialize_HEADFallsBackToTheFirstBranchWhenMainIsAbsent(t *testing.T)
 	fx.mustMaterialize(t)
 	if got := gitRun(t, fx.dst, "symbolic-ref", "HEAD"); got != "refs/heads/develop" {
 		t.Errorf("HEAD = %s, want it to stay on refs/heads/develop", got)
+	}
+}
+
+// The guess above is only correct by accident. A repository whose configured
+// default branch is neither "main" nor alphabetically first got the wrong HEAD
+// on every cold instance, so `git clone` checked out the wrong branch and
+// Repo.Resolve("") answered from it. The index does not carry the symref, so
+// the caller supplies it.
+func TestMaterializeWith_HEADFollowsTheConfiguredDefaultBranch(t *testing.T) {
+	fx := newMaterializeFixture(t)
+	// "main" exists and sorts before "develop": both halves of the guess pick
+	// the wrong branch here.
+	develop := commitTo(t, fx.src, "develop", "one")
+	pushToWAL(t, fx.store, fx.src, "develop", "", develop)
+	main := commitTo(t, fx.src, "main", "two")
+	pushToWAL(t, fx.store, fx.src, "main", "", main)
+
+	if err := MaterializeWith(context.Background(), fx.store, fx.dst, storagePath,
+		Options{DefaultBranch: "develop"}); err != nil {
+		t.Fatalf("MaterializeWith: %v", err)
+	}
+	if got := gitRun(t, fx.dst, "symbolic-ref", "HEAD"); got != "refs/heads/develop" {
+		t.Errorf("HEAD = %s, want refs/heads/develop (the configured default branch)", got)
+	}
+}
+
+// A repository whose default branch has no commits yet still has to advertise
+// that branch as its unborn HEAD, or the first clone lands on "main" —
+// whatever recreateBare happened to seed.
+func TestMaterializeWith_HEADFollowsAnUnbornDefaultBranch(t *testing.T) {
+	fx := newMaterializeFixture(t)
+	tagOnly := commitTo(t, fx.src, "trunk", "one")
+	pushToWAL(t, fx.store, fx.src, "trunk", "", tagOnly)
+
+	if err := MaterializeWith(context.Background(), fx.store, fx.dst, storagePath,
+		Options{DefaultBranch: "release"}); err != nil {
+		t.Fatalf("MaterializeWith: %v", err)
+	}
+	if got := gitRun(t, fx.dst, "symbolic-ref", "HEAD"); got != "refs/heads/release" {
+		t.Errorf("HEAD = %s, want refs/heads/release even though it is unborn", got)
 	}
 }
 

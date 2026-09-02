@@ -51,10 +51,13 @@ resource "google_project_service" "required" {
 #
 # That does not extend to what gc deletes, though. This bucket has
 # versioning enabled, so gc deleting a live object only turns it noncurrent
-# -- the bytes are still there and still billed. A separate lifecycle rule
-# below (scoped to lfs/ and blobs/, never wal/) prunes those *noncurrent*
-# versions after 30 days so gc's deletes actually shrink the bill; see that
-# rule's comment for why the cutoff is on noncurrent age, not object age.
+# -- the bytes are still there and still billed. Separate lifecycle rules
+# below prune those *noncurrent* versions so every delete this system makes
+# actually shrinks the bill: one for lfs/ and blobs/ (`thinkingface gc`), one
+# for tmp/uploads/ (the LFS promote handler's staging copy) and one for
+# wal/**/*.pack (WAL compaction and its gc). See each rule's comment for why
+# the cutoff is on noncurrent age rather than object age -- and, for the wal/
+# one, why it matches packs by suffix instead of the whole prefix.
 # ---------------------------------------------------------------------------
 
 resource "google_storage_bucket" "main" {
@@ -86,6 +89,32 @@ resource "google_storage_bucket" "main" {
     condition {
       age            = var.tmp_uploads_retention_days
       matches_prefix = ["tmp/uploads/"]
+    }
+    action {
+      type = "Delete"
+    }
+  }
+
+  # ... and the same reasoning as the lfs/ and blobs/ rule below applies to what
+  # that Delete actually does here, which is why this second rule exists.
+  # Versioning is on, so *neither* the promote handler's delete nor the rule
+  # above frees anything: both just turn the staging object noncurrent. Since
+  # `git-lfs push` writes the object's full bytes to tmp/uploads/lfs/{repoID}/
+  # {oid} before promote copies them into lfs/, a 20 GB dataset push left a
+  # 20 GB noncurrent staging version that nothing in this configuration would
+  # ever delete -- roughly doubling the steady-state LFS bill for content the
+  # bucket already holds under its permanent key.
+  #
+  # The retention is short (a day by default) because a staging object is by
+  # definition a duplicate: whatever it held is either already promoted into
+  # lfs/, where the lfs/ rules protect it, or belongs to an upload that never
+  # completed and has no referent. soft_delete_policy above is the safety net
+  # for a delete an operator needs to take back.
+  lifecycle_rule {
+    condition {
+      days_since_noncurrent_time = var.tmp_uploads_noncurrent_retention_days
+      with_state                 = "ARCHIVED"
+      matches_prefix             = ["tmp/uploads/"]
     }
     action {
       type = "Delete"
@@ -125,7 +154,56 @@ resource "google_storage_bucket" "main" {
     }
   }
 
+  # The rule above protects wal/ wholesale, and that was too broad: it is
+  # index.json whose generations must survive forever, not the packs beside
+  # it. wal/{storage_path}/ holds exactly three shapes of key
+  # (backend/internal/storage/layout.go): index.json, base/{id}.pack from
+  # compaction, and entries/{seq}-{id}.pack, one per push. Compaction folds a
+  # run of entry packs into a new base pack and backend/internal/wal/gc.go
+  # then deletes the superseded ones -- which, versioning being on, only
+  # archived them. So every scheduled `thinkingface compact` run reported
+  # reclaimed space that the bill never showed, and a busy repository accrued
+  # one permanently-billed noncurrent pack per push.
+  #
+  # matches_suffix is what lets this rule say "packs, not the index" without
+  # re-listing every repository's prefix: only pack objects end in ".pack",
+  # and index.json cannot match it however wal/ evolves. Conditions within one
+  # rule are ANDed, so this is wal/ AND *.pack AND noncurrent-for-N-days; the
+  # index keeps every generation it has always kept.
+  #
+  # The window it does bound is index *recovery* (docs/dev/wal-index-recovery.md):
+  # rolling back to an index generation older than this can only restore refs
+  # whose packs are still around. That is an acceptable bound because recovery
+  # targets the most recent good generation -- minutes or hours old, whose
+  # packs are the live ones and therefore never noncurrent at all -- and
+  # because the alternative is a bucket that grows by every pack ever written.
+  lifecycle_rule {
+    condition {
+      days_since_noncurrent_time = var.wal_pack_noncurrent_retention_days
+      with_state                 = "ARCHIVED"
+      matches_prefix             = ["wal/"]
+      matches_suffix             = [".pack"]
+    }
+    action {
+      type = "Delete"
+    }
+  }
+
   labels = var.labels
+
+  # force_destroy = false already refuses to empty a bucket that still holds
+  # objects, but it says nothing about an *empty* one, and nothing at all
+  # about a `terraform destroy` that runs after a gc pass. This bucket is the
+  # only copy of every LFS object and every WAL pack in the system, so its
+  # removal is never something a plan should be able to arrive at on its own.
+  #
+  # Deliberate teardown is therefore a two-step operation: delete this
+  # lifecycle block (or the resource) in a commit of its own, then destroy.
+  # That is the point -- a guard a single command can step over is not a
+  # guard.
+  lifecycle {
+    prevent_destroy = true
+  }
 
   depends_on = [google_project_service.required]
 }
@@ -235,22 +313,63 @@ resource "random_password" "db" {
 resource "google_sql_database_instance" "main" {
   count = var.database_backend == "postgres" ? 1 : 0
 
-  project             = var.project_id
-  name                = "thinkingface-${var.environment}"
-  region              = var.region
-  database_version    = "POSTGRES_17"
+  project          = var.project_id
+  name             = "thinkingface-${var.environment}"
+  region           = var.region
+  database_version = "POSTGRES_17"
+
+  # Two different guards with the same name, and only having both makes the
+  # instance actually hard to delete:
+  #
+  #   deletion_protection (here) is the *provider's* flag. It makes Terraform
+  #   refuse to issue the delete, and it is invisible to anything that is not
+  #   Terraform.
+  #
+  #   settings.deletion_protection_enabled (below) is Cloud SQL's own flag.
+  #   It makes the API refuse the delete, so `gcloud sql instances delete` and
+  #   the console fail too -- which is the case that actually happens: an
+  #   operator tidying up what they believe is a staging project never touches
+  #   Terraform at all, and the provider-side flag never gets a chance to run.
   deletion_protection = true
 
   depends_on = [google_service_networking_connection.private_services]
+
+  # ... and prevent_destroy is the third: it stops a *plan* from arriving at
+  # the delete in the first place, including the one that would follow from
+  # setting database_backend = "sqlite" on a live postgres deployment (which
+  # takes count to 0 and destroys the instance without ever saying "database"
+  # out loud). Deliberate teardown is a two-step operation -- remove this
+  # block in a commit of its own, then destroy -- and that is intended.
+  lifecycle {
+    prevent_destroy = true
+  }
 
   settings {
     tier              = var.db_tier
     availability_type = var.db_availability_type
 
+    # See the resource-level deletion_protection comment above: this is the
+    # half of the pair that binds callers who are not Terraform.
+    deletion_protection_enabled = true
+
     ip_configuration {
       ipv4_enabled                                  = false
       private_network                               = google_compute_network.main.id
       enable_private_path_for_google_cloud_services = true
+
+      # Private IP keeps this instance off the internet, but it does not
+      # encrypt anything: without ssl_mode the instance happily accepts
+      # cleartext sessions, and the connect handshake carries the generated
+      # password (random_password.db) in the clear across the VPC on every
+      # cold start. Anything that can observe VPC traffic -- a compromised
+      # workload sharing the network, a misconfigured packet mirroring
+      # policy, a future peering -- reads it.
+      #
+      # ENCRYPTED_ONLY requires TLS but not a client certificate, which is
+      # what lets the DATABASE_URL below stay a plain `sslmode=require`
+      # connection string with no cert material to provision or rotate. It is
+      # the strongest mode that does not change how the application connects.
+      ssl_mode = "ENCRYPTED_ONLY"
     }
 
     backup_configuration {
@@ -310,8 +429,17 @@ resource "google_secret_manager_secret_version" "database_url" {
   count = var.database_backend == "postgres" ? 1 : 0
 
   secret = google_secret_manager_secret.database_url[0].id
+  # sslmode=require: encrypt the session (and therefore the password sent
+  # during the connect handshake), matching the instance's ENCRYPTED_ONLY
+  # ssl_mode above -- with sslmode=disable the client would simply be refused
+  # now, and before that it was crossing the VPC in cleartext. `require`
+  # rather than `verify-full` because there is no client-side CA bundle to
+  # verify against here: the instance is reached over Direct VPC egress at a
+  # private IP, so its identity comes from the network path, not from a
+  # certificate. Provisioning the server CA into the container is the change
+  # to make if that ever stops being true.
   secret_data = format(
-    "postgres://%s:%s@%s/%s?sslmode=disable",
+    "postgres://%s:%s@%s/%s?sslmode=require",
     google_sql_user.app[0].name,
     random_password.db[0].result,
     google_sql_database_instance.main[0].private_ip_address,
@@ -534,6 +662,52 @@ resource "google_cloud_run_v2_service" "api" {
           memory = "8Gi" # tmpfs GIT_ROOT (materialised-repository cache) and the git/pack-objects processes share this budget; the parquet viewer's metadata cache is a small heap allocation, not tmpfs, so it no longer figures into this sizing
         }
         cpu_idle = false # CPU always allocated: syncer/webhook workers run in-process outside request handling
+      }
+
+      # This service has no way to recycle a wedged process without probes.
+      # min_instance_count = 1 and cpu_idle = false mean the instance is never
+      # scaled to zero and never replaced on its own, and a wedge here does
+      # not close the listener: 40 stuck `git-upload-pack` children
+      # (max_instance_request_concurrency) exhaust the instance's concurrency
+      # while the socket stays open, so Cloud Run keeps routing to it and
+      # every request queues behind processes that will never finish. The
+      # container has advertised /healthz to Docker since it was written
+      # (backend/Dockerfile HEALTHCHECK); Cloud Run just was not asking.
+      #
+      # /healthz is answered in-process with a constant and touches neither
+      # the database nor the bucket. That is deliberate for a *liveness*
+      # probe: a Cloud SQL blip or a GCS outage must not restart every
+      # instance in the service at once, turning a dependency's bad minute
+      # into an outage of our own. What this catches is the thing a restart
+      # actually fixes -- a process that can no longer serve.
+      startup_probe {
+        # Startup is a listen() away (migrations aside), but the first
+        # instance of a revision may be materialising repositories into its
+        # tmpfs cache while it does. Generous, and still well inside Cloud
+        # Run's 240s ceiling on initial_delay + failure_threshold * period.
+        initial_delay_seconds = 10
+        timeout_seconds       = 5
+        period_seconds        = 10
+        failure_threshold     = 20
+        http_get {
+          path = "/healthz"
+          port = 8080
+        }
+      }
+
+      liveness_probe {
+        # Three minutes of consecutive failures before a restart. Sized to be
+        # slower than any hiccup a healthy instance can have under load: a
+        # clone or push may occupy the instance for up to timeout = 3600s, and
+        # serving one must never look like a wedge. Nothing short of a
+        # listener that has genuinely stopped answering trips this.
+        timeout_seconds   = 5
+        period_seconds    = 30
+        failure_threshold = 6
+        http_get {
+          path = "/healthz"
+          port = 8080
+        }
       }
 
       dynamic "env" {

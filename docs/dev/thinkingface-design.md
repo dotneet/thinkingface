@@ -341,9 +341,20 @@ purely a buffer — the source of truth is always the Parquet inside the dataset
 - The write target is the same file as path A. If an existing `metrics.parquet` exists (the path
   `DetectLayouts` found for that project), it writes there; otherwise it creates
   `{project}/metrics.parquet`. Columns are `run_name` / `step` / `timestamp` plus metric columns,
-  and if a file already exists, its column types are preserved as-is. The current implementation
-  reads and rewrites the whole file, so flush cost rises as a single file grows (split/append is
-  a future improvement).
+  and if a file already exists, its column types are preserved as-is — except that a metric column
+  typed as an integer is widened to `DOUBLE` when an incoming value would not survive it, so a
+  later `log({"epoch": 3.5})` against a file whose `epoch` was written as an integer is stored as
+  `3.5` rather than silently truncated to `3`. The implementation reads and rewrites the whole
+  file, so flush cost rises as a single file grows.
+- Because of that rewrite, a metrics file has a ceiling: `maxExistingFlushRows` (1,000,000 rows).
+  Rather than write a file it would then refuse to read, a flush that would cross the ceiling
+  **rotates** — it starts a continuation file `{project}/metrics.partNNNN.parquet` (zero-padded,
+  `MetricsShardPath`) next to the base file and writes there instead. Readers treat the base and
+  its continuations as one series: `Layout.MetricsFiles()` returns them in part order, and the
+  indexer and the chart API both iterate it, so runs, summaries and charts span a rotation without
+  noticing it. `_ingest_id` carries over into the new file, so a crash between the commit and the
+  delete still dedupes. Rotation only ever adds files, so `metrics.parquet` always remains and
+  anything keying off that name (`syncer.looksLikeExperiment`) is unaffected.
 - The commit is created server-side by `gitrepo.Repo.Commit` (there's a single write path: git).
   `*.parquet` is LFS-targeted by default, so the payload is placed in GCS and an LFS pointer is
   committed. Optimistic locking via `PathPrecondition` serializes concurrent pushes and flushes
@@ -358,8 +369,11 @@ purely a buffer — the source of truth is always the Parquet inside the dataset
   matter which moment during a flush you look at**.
 - Because a flush rebuilds the whole file in memory, an existing metrics parquet past
   `maxExistingFlushRows` (1,000,000 rows, `backend/internal/experiments/flush.go`) cannot be
-  flushed within the process's memory budget. A project name that no filesystem path can hold
-  hits the same wall. Neither is retried at full rate: `Flusher.blockFlush` records the reason on
+  flushed within the process's memory budget. Rotation means this package never writes such a
+  file itself, so the remaining way to reach it is a parquet a user pushed by hand — as is a
+  metrics parquet whose columns this package cannot rewrite at all (a repeated column, a nested
+  group, an unsupported logical type). A project name that no filesystem path can hold hits the
+  same wall. None of them is retried at full rate: `Flusher.blockFlush` records the reason on
   `exp_projects.flush_blocked_at` / `flush_error` (migration `0003_exp_project_flush_block.sql`),
   and `ListPendingFlushProjects` skips a project blocked within the last `flushBlockRetryAfter`
   (one hour, `backend/internal/store/experiments.go`) — capping a wedged project to one attempt an

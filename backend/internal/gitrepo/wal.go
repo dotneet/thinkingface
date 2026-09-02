@@ -26,6 +26,9 @@ type walBackend struct {
 	mu       sync.Mutex
 	lastUse  map[string]time.Time // dir → last EnsureLocal
 	lastScan time.Time
+	// scanning is true while an eviction pass is running on its own
+	// goroutine, so a burst of requests schedules one pass, not one each.
+	scanning bool
 }
 
 // materializeTimeout bounds one catch-up. Independent of the request context
@@ -57,7 +60,23 @@ func (m *Manager) EnableWAL(st storage.Storage, cacheBytes int64) {
 // index (§9), under the same per-repository lock every write path uses. A
 // no-op unless EnableWAL was called. storagePath is the repository's
 // immutable physical location (store.Repo.StoragePath), not its name.
+//
+// Prefer EnsureLocalWithDefaultBranch wherever the caller already holds the
+// store.Repo: without the default branch a rebuilt copy has to reconstruct
+// HEAD by rule, and the rule is wrong for any repository whose default branch
+// is neither "main" nor alphabetically first.
 func (m *Manager) EnsureLocal(ctx context.Context, storagePath string) error {
+	return m.EnsureLocalWithDefaultBranch(ctx, storagePath, "")
+}
+
+// EnsureLocalWithDefaultBranch is EnsureLocal for a caller that knows the
+// repository's configured default branch (store.Repo.DefaultBranch, no
+// refs/heads/ prefix). The WAL index carries refs but not the symbolic HEAD,
+// so this is the only way a materialised copy can point HEAD at the branch the
+// repository actually declares — which is what `git clone` checks out and what
+// Repo.Resolve("") answers from. An empty defaultBranch means "unknown" and
+// falls back to the guess.
+func (m *Manager) EnsureLocalWithDefaultBranch(ctx context.Context, storagePath, defaultBranch string) error {
 	if m.wal == nil {
 		return nil
 	}
@@ -68,7 +87,14 @@ func (m *Manager) EnsureLocal(ctx context.Context, storagePath string) error {
 	dir := m.Dir(storagePath)
 	lock := m.lockFor(dir)
 	lock.Lock()
-	err := wal.Materialize(mctx, m.wal.store, dir, storagePath)
+	// Authoritative is not a parameter: EnableWAL is only ever called when
+	// TF_WAL_MODE=authoritative (cmd/thinkingface/serve.go, resync.go), which
+	// is what makes "the WAL is the truth" true for every path that reaches
+	// here. Shadow and off never build a walBackend at all.
+	err := wal.MaterializeWith(mctx, m.wal.store, dir, storagePath, wal.Options{
+		DefaultBranch: defaultBranch,
+		Authoritative: true,
+	})
 	if err == nil {
 		// Stamp before releasing the lock. Eviction can only look at this
 		// directory once its TryLock succeeds — i.e. after this unlock — and
@@ -85,7 +111,7 @@ func (m *Manager) EnsureLocal(ctx context.Context, storagePath string) error {
 	if err != nil {
 		return fmt.Errorf("materialize %s: %w", storagePath, err)
 	}
-	m.maybeEvict()
+	m.triggerEvict()
 	return nil
 }
 
@@ -103,28 +129,65 @@ func (m *Manager) AdoptLocal(ctx context.Context, storagePath string) error {
 	return wal.AdoptIfConverged(ctx, m.wal.store, dir, storagePath)
 }
 
-// maybeEvict keeps the materialised cache under its byte budget. It walks the
-// git root at most once per evictScanInterval, and only ever removes
-// directories that are (a) WAL-backed — a state file proves the WAL can
-// rebuild them — (b) idle for at least evictMinIdle, and (c) not currently
-// locked. Repositories that predate the WAL (no state file) are never
-// touched: deleting one would destroy data the WAL cannot restore — and for
-// the same reason they are excluded from the budget itself, or a large
-// legacy population would make the target unreachable and every scan would
-// pointlessly flush the entire evictable cache.
-func (m *Manager) maybeEvict() {
+// triggerEvict considers running the eviction pass, and never makes the
+// caller wait for it.
+//
+// The decision — has evictScanInterval elapsed, is a pass already running —
+// is in-memory and costs a mutex. The pass itself is a WalkDir of the whole
+// git root plus a dirSize walk and a state-file read per repository, and then
+// possibly a synchronous RemoveAll: hundreds of milliseconds of unrelated
+// filesystem work that used to land on whichever request happened to arrive
+// first after the interval lapsed. Nothing about it needs to be ordered with
+// respect to that request — the budget it enforces is a steady-state property
+// — so it belongs on its own goroutine.
+//
+// The `scanning` flag is what the goroutine costs: without it a pass slower
+// than evictScanInterval would be joined by a second one walking the same
+// tree and racing it to the same RemoveAll.
+func (m *Manager) triggerEvict() {
 	w := m.wal
 	if w == nil || w.cacheBytes <= 0 {
 		return
 	}
 	w.mu.Lock()
-	if time.Since(w.lastScan) < evictScanInterval {
+	if w.scanning || time.Since(w.lastScan) < evictScanInterval {
 		w.mu.Unlock()
 		return
 	}
 	w.lastScan = time.Now()
+	w.scanning = true
 	w.mu.Unlock()
 
+	go func() {
+		defer func() {
+			w.mu.Lock()
+			w.scanning = false
+			// Measure the interval from the end of a pass, not its start: a
+			// scan that took longer than the interval must not be
+			// immediately eligible again.
+			w.lastScan = time.Now()
+			w.mu.Unlock()
+		}()
+		m.evictOnce()
+	}()
+}
+
+// evictOnce keeps the materialised cache under its byte budget. It only ever
+// removes directories that are (a) WAL-backed — a state file proves the WAL
+// can rebuild them — (b) idle for at least evictMinIdle, and (c) not
+// currently locked. Repositories that predate the WAL (no state file) are
+// never touched: deleting one would destroy data the WAL cannot restore — and
+// for the same reason they are excluded from the budget itself, or a large
+// legacy population would make the target unreachable and every scan would
+// pointlessly flush the entire evictable cache.
+//
+// Separate from triggerEvict so a test can run one pass deterministically
+// instead of racing the goroutine that normally schedules it.
+func (m *Manager) evictOnce() {
+	w := m.wal
+	if w == nil || w.cacheBytes <= 0 {
+		return
+	}
 	repos, evictableTotal := m.scanEvictable()
 	if evictableTotal <= w.cacheBytes {
 		return

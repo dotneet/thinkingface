@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/dotneet/thinkingface/backend/internal/storage"
 )
@@ -27,6 +28,71 @@ func NeedsCompaction(ix *Index, maxEntries int) bool {
 		maxEntries = DefaultCompactionThreshold
 	}
 	return len(ix.Entries) > maxEntries
+}
+
+// MaintenanceResult reports what one CompactAndSweep call did, so the
+// scheduling job can log it without re-deriving anything.
+type MaintenanceResult struct {
+	// Compacted is true when a snapshot was published and the CAS won.
+	Compacted bool
+	// Raced is true when compaction was attempted and lost the CAS. Not an
+	// error to the caller: §10 says to defer to the next run.
+	Raced bool
+	// SweepDeferred is true when the orphan sweep was deliberately skipped.
+	SweepDeferred bool
+	// Deleted are the pack keys the sweep collected.
+	Deleted []string
+}
+
+// CompactAndSweep is one repository's turn in the scheduled maintenance job
+// (§10): fold a long WAL into a base snapshot, and collect packs no index
+// needs any more — but never both in the same call.
+//
+// Not doing both is the point. GCOrphans measures a pack's age from its upload
+// time, which for a compaction's leftovers says nothing about when they stopped
+// being referenced: a WAL only reaches the compaction threshold over time, so
+// the packs a compaction folds away are already past any sane grace period the
+// instant the CAS drops them. Sweeping in the same pass would delete them
+// seconds after that CAS, out from under any instance that read the
+// pre-compaction index and is still applying them — a 500 on a clone that was
+// going fine, and exactly what invariant 3 of §5 exists to prevent.
+//
+// So the grace for those packs is not a duration at all: it is the gap to the
+// next run of this job. That gap needs nothing persisted and nothing
+// coordinated, which is why it is preferred over recording an "unreferenced
+// since" timestamp in the bucket — a value two concurrent compactors would
+// race to write, on the one object whose loss is already the §13 single point
+// of failure.
+//
+// A compaction that lost its CAS does not defer the sweep: the index it tried
+// to replace is still current, so nothing became unreferenced, and the orphan
+// base it uploaded is protected by its own upload age like any other CAS loser.
+func CompactAndSweep(ctx context.Context, st storage.Storage, workDir, storagePath string,
+	threshold int, minAge time.Duration,
+) (MaintenanceResult, error) {
+	var res MaintenanceResult
+
+	ix, _, err := ReadIndex(ctx, st, storagePath)
+	if err != nil {
+		return res, err
+	}
+	if NeedsCompaction(ix, threshold) {
+		switch err := Compact(ctx, st, workDir, storagePath); {
+		case errors.Is(err, ErrCompactionRaced):
+			res.Raced = true
+		case err != nil:
+			return res, err
+		default:
+			res.Compacted = true
+		}
+	}
+	if res.Compacted {
+		res.SweepDeferred = true
+		return res, nil
+	}
+
+	res.Deleted, err = GCOrphans(ctx, st, storagePath, minAge)
+	return res, err
 }
 
 // Compact folds base+entries into a single snapshot pack (§10):

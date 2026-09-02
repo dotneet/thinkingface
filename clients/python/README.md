@@ -93,6 +93,12 @@ whichever comes first, and always flushed on process exit (`atexit`).
 Network errors are logged as warnings and never raised — a flaky
 connection to the server will not abort your training run.
 
+A metric whose value is `NaN` or `±inf` is **dropped** (with one warning per
+run) and the rest of the point is sent as usual: JSON has no way to spell
+those values, so a point carrying one could never be delivered. A diverging
+loss therefore shows up as a gap in the chart rather than stopping the run's
+logging.
+
 ### Artifacts
 
 `trackio.log_artifact(path, name=None)` attaches a file — or a whole

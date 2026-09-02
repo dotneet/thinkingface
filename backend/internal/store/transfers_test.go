@@ -8,6 +8,7 @@ package store
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 // A new_version edge targets the kind that declared it -- a model's successor
@@ -170,6 +171,125 @@ func TestIntegrationRenameKeepsRepoScopedWebhooks(t *testing.T) {
 		}
 		if got := hooksOf(t, moved.ID, aliceNS.ID); got != 0 {
 			t.Errorf("after a cross-namespace transfer: %d repo-scoped webhooks left behind, want 0", got)
+		}
+	})
+}
+
+// Expiry is lazy: nothing sweeps repo_transfers, and a row only stops being
+// 'pending' when something touches it. But every path that could find a
+// pending row filters on expires_at, so once the TTL passes there is nothing
+// left to touch it -- and the row still occupies
+// idx_repo_transfers_one_pending. Before CreateRepoTransfer reconciled it,
+// that made one unanswered request wedge the repository's approval flow
+// permanently: invisible to both parties, uncancellable, and answering every
+// later request with ErrConflict.
+func TestIntegrationExpiredTransferDoesNotWedgeTheNextRequest(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+		bobNS := f.ns(t, "bob")
+
+		r := f.repo(t, "alice", "thing", "model", nil)
+		spec := TransferSpec{RepoID: r.ID, ToNamespaceID: bobNS.ID, ActorID: f.alice.ID}
+
+		// A negative TTL is the eighth day of a seven-day request, without a
+		// test that waits a week for it.
+		stale, err := s.CreateRepoTransfer(ctx, spec, -time.Hour)
+		if err != nil {
+			t.Fatalf("CreateRepoTransfer: %v", err)
+		}
+
+		// Nobody can see it any more: not the settings-page banner (which is
+		// also what DELETE .../transfer cancels through)...
+		if _, err := s.PendingRepoTransfer(ctx, r.ID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("PendingRepoTransfer on an expired request = %v, want ErrNotFound", err)
+		}
+		// ...nor either party's /me/transfers.
+		for _, u := range []*User{f.alice, f.bob} {
+			in, out, err := s.ListRepoTransfersForUser(ctx, u.ID)
+			if err != nil {
+				t.Fatalf("ListRepoTransfersForUser(%s): %v", u.Username, err)
+			}
+			if len(in) != 0 || len(out) != 0 {
+				t.Fatalf("%s sees %d incoming / %d outgoing expired transfers, want none",
+					u.Username, len(in), len(out))
+			}
+		}
+
+		// So the next request is the only thing that can ever reconcile it,
+		// and it must not collide with it.
+		fresh, err := s.CreateRepoTransfer(ctx, spec, time.Hour)
+		if err != nil {
+			t.Fatalf("CreateRepoTransfer after the previous one expired: %v", err)
+		}
+		if fresh.ID == stale.ID {
+			t.Fatalf("the expired row was reused rather than superseded (id %d)", fresh.ID)
+		}
+
+		// The old row is recorded as expired, not left pending for the unique
+		// index to trip over again.
+		old, err := s.GetRepoTransfer(ctx, stale.ID)
+		if err != nil {
+			t.Fatalf("GetRepoTransfer(%d): %v", stale.ID, err)
+		}
+		if old.Status != "expired" {
+			t.Errorf("expired request status = %q, want expired", old.Status)
+		}
+
+		// And the new one is the live one.
+		got, err := s.PendingRepoTransfer(ctx, r.ID)
+		if err != nil || got.ID != fresh.ID {
+			t.Fatalf("PendingRepoTransfer = %+v, %v; want the fresh request %d", got, err, fresh.ID)
+		}
+	})
+}
+
+// A site administrator is RoleAdmin in every namespace as far as the API
+// layer is concerned (api.roleIn, docs/dev/repo-transfer-design.md §5), which
+// is what lets them accept, reject or cancel any pending transfer by id. The
+// listing has to agree, or the one endpoint that could act on a stuck
+// transfer is the one nothing in the UI ever points at.
+func TestIntegrationSiteAdminSeesEveryPendingTransfer(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+
+		carol, err := s.CreateUser(ctx, "carol", "carol@example.com", "hash", false)
+		if err != nil {
+			t.Fatalf("create carol: %v", err)
+		}
+
+		r := f.repo(t, "alice", "foo", "model", nil)
+		created, err := s.CreateRepoTransfer(ctx, TransferSpec{
+			RepoID: r.ID, ToNamespaceID: f.ns(t, "bob").ID, ActorID: f.alice.ID,
+		}, time.Hour)
+		if err != nil {
+			t.Fatalf("CreateRepoTransfer: %v", err)
+		}
+
+		// The admin is neither namespace's owner nor a member of anything,
+		// and still sees it from both sides: they may accept it (destination)
+		// and they may cancel it (source).
+		in, out, err := s.ListRepoTransfersForUser(ctx, f.admin.ID)
+		if err != nil {
+			t.Fatalf("ListRepoTransfersForUser(admin): %v", err)
+		}
+		if len(in) != 1 || in[0].ID != created.ID {
+			t.Errorf("admin incoming = %+v, want the pending transfer %d", in, created.ID)
+		}
+		if len(out) != 1 || out[0].ID != created.ID {
+			t.Errorf("admin outgoing = %+v, want the pending transfer %d", out, created.ID)
+		}
+
+		// An ordinary account with no relationship to either side still sees
+		// nothing: the admin arm widens the predicate for administrators
+		// only.
+		in, out, err = s.ListRepoTransfersForUser(ctx, carol.ID)
+		if err != nil {
+			t.Fatalf("ListRepoTransfersForUser(carol): %v", err)
+		}
+		if len(in) != 0 || len(out) != 0 {
+			t.Errorf("carol sees %d incoming / %d outgoing, want none", len(in), len(out))
 		}
 	})
 }

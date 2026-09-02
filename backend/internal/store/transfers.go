@@ -311,6 +311,31 @@ func (s *Store) CreateRepoTransfer(ctx context.Context, spec TransferSpec, ttl t
 	}
 
 	now := time.Now()
+
+	// Reconcile a request nobody answered before retiring it. Expiry is lazy
+	// -- only a decision endpoint flips 'pending' to 'expired' -- but every
+	// path that could *find* the row filters on expires_at, so once the TTL
+	// passes there is no endpoint left that would touch it: GET .../transfer
+	// and DELETE .../transfer both answer 404, and it appears in neither
+	// party's /me/transfers. The row nevertheless still counts as pending for
+	// idx_repo_transfers_one_pending, so without this it would answer every
+	// later request for this repository with ErrConflict forever, and a repo
+	// whose owner cannot write any other namespace could never be offered
+	// again. This runs under resolveTransferTarget's FOR UPDATE lock on the
+	// repository, the same lock TransferRepo takes, so a concurrent create
+	// cannot slip an insert between the expiry and ours.
+	//
+	// Deliberately not done on the read paths (PendingRepoTransfer,
+	// ListRepoTransfersForUser): they already report an expired row as absent,
+	// which is the truth, and making a page load write would charge every
+	// visit for a state nobody can observe.
+	if _, err := tx.Exec(ctx,
+		`UPDATE repo_transfers SET status = 'expired'
+		 WHERE repo_id = $1 AND status = 'pending' AND expires_at <= $2`,
+		spec.RepoID, now); err != nil {
+		return nil, err
+	}
+
 	var id int64
 	err = tx.QueryRow(ctx,
 		`INSERT INTO repo_transfers (repo_id, from_namespace_id, from_name, to_namespace_id, to_name,
@@ -353,11 +378,17 @@ func (s *Store) PendingRepoTransfer(ctx context.Context, repoID int64) (*RepoTra
 
 // ListRepoTransfersForUser splits the pending, unexpired transfers relevant
 // to a user: incoming are the ones they could accept or reject (write
-// access to the target namespace: its owner, or an org member with role
-// admin/write), outgoing are the ones they could cancel (the same, for the
-// source namespace). A pending row past its expires_at is treated as if it
-// were not pending; it is flipped to 'expired' lazily on first touch by the
-// decision methods rather than through a cleanup job
+// access to the target namespace: its owner, an org member with role
+// admin/write, or a site administrator -- see namespaceWritable, which is the
+// same rule the accept/reject endpoint applies), outgoing are the ones they
+// could cancel (the same, for the source namespace). A site administrator is
+// therefore shown every pending transfer on the server, which is the honest
+// answer given they may act on every one of them.
+//
+// A pending row past its expires_at is treated as if it were not pending; it
+// is flipped to 'expired' lazily rather than through a cleanup job -- by the
+// decision methods on first touch, and by CreateRepoTransfer, which is the
+// only path that can still reach a row nobody ever answered
 // (docs/dev/repo-transfer-design.md §7.2).
 func (s *Store) ListRepoTransfersForUser(ctx context.Context, userID int64) (incoming, outgoing []RepoTransfer, err error) {
 	now := time.Now()

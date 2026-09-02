@@ -194,6 +194,13 @@ func (s *Store) deleteLFSObjectUnderClaim(ctx context.Context, oid string, remov
 // write transaction runs alone on the single writer connection, so a link
 // either committed before this transaction began or waits for it to end.
 //
+// The NOT EXISTS below reads repo_lfs_objects by oid alone, which neither
+// PRIMARY KEY (repo_id, oid) nor the partial (repo_id, created_at) index can
+// serve -- oid leads neither. Migration 0004 adds idx_repo_lfs_objects_oid
+// for it, and the foreign-key check the lfs_objects DELETE triggers uses the
+// same index: without it a collection pass scanned the whole link table twice
+// per candidate, while holding this lock across a storage round trip.
+//
 // Returns deleted=false with a nil error when the oid is gone or has gained
 // a repository reference; the caller must not treat that as a storage fault.
 func (s *Store) DeleteOrphanedLFSObject(ctx context.Context, oid string, removeStorage func() error) (deleted bool, err error) {

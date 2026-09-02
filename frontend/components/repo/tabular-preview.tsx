@@ -13,6 +13,33 @@ import type { Translator } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
 import { MAX_ROWS, parseTabular, type TabularFormat, type TabularParseError } from "@/lib/tabular";
 
+/**
+ * Why the full-file download failed. `status: null` is a network-level failure
+ * (offline, DNS, CORS, abort) — the only thing `fetch` itself rejects for.
+ */
+type FetchFailure = { status: number | null };
+
+/**
+ * Turns a failure of the raw `fetch` below into translated copy.
+ *
+ * This is not an `apiFetch` call (the body is a whole file, not JSON), so
+ * `errorMessage()` cannot be applied to it — but the same rule holds: nothing
+ * the backend or the browser wrote in English may reach the screen inside a
+ * translated sentence (DESIGN.md §7). The status *line* ("404 Not Found") and
+ * the browser's own message ("Failed to fetch") are therefore dropped; a
+ * status this maps gets a translated phrase, and anything else keeps only the
+ * status number, which is the one genuinely useful, language-neutral detail.
+ */
+function fetchFailureReason(t: Translator, failure: FetchFailure): string {
+  const { status } = failure;
+  if (status === null) return t("repo.tabular.networkError");
+  if (status === 401) return t("repo.tabular.fetchReasonUnauthorized");
+  if (status === 403) return t("repo.tabular.fetchReasonForbidden");
+  if (status === 404) return t("repo.tabular.fetchReasonNotFound");
+  if (status >= 500) return t("repo.tabular.fetchReasonServer");
+  return t("repo.tabular.fetchReasonStatus", { status: String(status) });
+}
+
 /** Turns parseTabular's reason code into a translated clause. */
 function parseReason(t: Translator, error: TabularParseError): string {
   switch (error.reason) {
@@ -59,24 +86,34 @@ export function TabularPreview({
   const [mode, setMode] = useState<Mode>("table");
   const [fullText, setFullText] = useState<string | null>(null);
   const [fetching, setFetching] = useState(previewTruncated);
-  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [fetchFailure, setFetchFailure] = useState<FetchFailure | null>(null);
 
   useEffect(() => {
     if (!previewTruncated) return;
     let cancelled = false;
     setFetching(true);
+    // A failure belongs to one download; carrying it into the next file's
+    // fetch would report an error that is not this file's.
+    setFetchFailure(null);
     (async () => {
       try {
         // `credentials: "include"` sends tf_session so the request is authenticated; the
         // backend echoes the Origin and allows credentials (`cors` in
         // backend/internal/api/server.go).
         const res = await fetch(downloadUrl, { credentials: "include" });
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        if (!res.ok) {
+          // Only the status code is kept; the status line is server-authored
+          // English and is translated at display time (fetchFailureReason).
+          if (!cancelled) setFetchFailure({ status: res.status });
+          return;
+        }
         const text = await res.text();
         if (!cancelled) setFullText(text);
-      } catch (err) {
-        // An empty string marks an "unspecified network error"; translated at display time.
-        if (!cancelled) setFetchError(err instanceof Error ? err.message : "");
+      } catch {
+        // `fetch` rejects only below HTTP: offline, DNS, CORS, abort. The
+        // browser's own message for those is untranslated and says nothing
+        // the network-error copy doesn't, so it is not carried forward.
+        if (!cancelled) setFetchFailure({ status: null });
       } finally {
         if (!cancelled) setFetching(false);
       }
@@ -146,11 +183,9 @@ export function TabularPreview({
         </span>
       </div>
 
-      {fetchError !== null && (
+      {fetchFailure !== null && (
         <Alert tone="warning" title={t("repo.tabular.fetchFailedTitle")}>
-          {t("repo.tabular.fetchFailedBody", {
-            error: fetchError || t("repo.tabular.networkError"),
-          })}
+          {t("repo.tabular.fetchFailedBody", { error: fetchFailureReason(t, fetchFailure) })}
         </Alert>
       )}
 

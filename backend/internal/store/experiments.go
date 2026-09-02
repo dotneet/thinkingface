@@ -635,6 +635,30 @@ func (s *Store) DeleteExpRun(ctx context.Context, projectID int64, name string) 
 // DeleteProjectRunsNotIn prunes runs that vanished from the parquet export, so
 // a rewritten history does not leave ghosts in the run list.
 //
+// It deletes only what the indexer owns, and the three conditions below are
+// what "owns" means:
+//
+//   - not named by this index (the caller passes every run the parquet holds);
+//   - holding no buffered ingest points, so a run whose points have not been
+//     flushed yet is not deleted out from under a live training job;
+//   - and num_points > 0, which is the one that says the indexer put it there.
+//
+// That last condition is not a heuristic. num_points only ever counts rows the
+// indexer read out of a parquet or rows sitting in exp_points, and the upsert
+// raises it monotonically (GREATEST / MAX), so zero means "this run has never
+// had a single point anywhere" -- which the indexer cannot produce: it creates
+// a run only from rows it scanned. Zero therefore means the run was created
+// through the API, by `POST .../finish` or by a `POST .../log` carrying no
+// points. That is a real run: a job that crashed before its first metric, or
+// one that logs only artifacts.
+//
+// Without it those runs were listed and then deleted on the next index --
+// which happens after any push and after any flush, so within seconds --
+// taking the user's tags, note, baseline flag and exp_run_models rows with
+// them through the foreign key's cascade. The run had never been in the
+// parquet and had no buffered points, so both of the older conditions passed
+// and it looked exactly like a ghost.
+//
 // A nil keep set is a no-op. Both dialects bind nil as SQL NULL, and the two
 // engines then disagree by exactly the worst amount: `NOT (name = ANY(NULL))`
 // is NULL on Postgres and deletes nothing, while
@@ -648,6 +672,7 @@ func (s *Store) DeleteProjectRunsNotIn(ctx context.Context, projectID int64, kee
 	}
 	_, err := s.db.Exec(ctx,
 		`DELETE FROM exp_runs WHERE project_id = $1 AND NOT (name `+s.d.inArray("$2")+`)
+		   AND num_points > 0
 		   AND NOT EXISTS (SELECT 1 FROM exp_points p WHERE p.run_id = exp_runs.id)`,
 		projectID, s.d.stringArrayArg(keep))
 	return err

@@ -391,6 +391,33 @@ func (s *Server) lfsObjectOwned(w http.ResponseWriter, r *http.Request, repo *st
 	return true
 }
 
+// lfsObjectSize answers how many bytes the object really has, from the ledger
+// rather than from the pointer text in the tree.
+//
+// lfs_objects.size is written by promotion from the length the object was
+// measured at (lfs.promoteFrom stats the staged bytes and refuses anything
+// that disagrees with what the client declared), and store.LinkLFSObjects
+// refuses to create a link whose declared size does not match that row, so it
+// is the one number on this path that no committer chose.
+//
+// A missing row on an object this repository is linked to should not happen --
+// the link has a foreign key to it -- but "the ledger does not know how big
+// this is" must not become "serve it as zero bytes", so it is answered as the
+// absent object it describes. It writes the response and reports false when
+// the caller must stop.
+func (s *Server) lfsObjectSize(w http.ResponseWriter, r *http.Request, oid string) (int64, bool) {
+	size, known, err := s.store.HasLFSObject(r.Context(), oid)
+	if err != nil {
+		internalError(w, "read lfs object size", err)
+		return 0, false
+	}
+	if !known {
+		notFound(w, "object not found")
+		return 0, false
+	}
+	return size, true
+}
+
 // ownedLFSKey is the non-HTTP form of the same gate, for code that resolves
 // a key without answering a request directly: the storage key of oid if repo
 // links it, store.ErrNotFound if it does not. It is the only way a tree
@@ -414,12 +441,34 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 	if !s.lfsObjectOwned(w, r, repo, oid) {
 		return
 	}
+	// The size the *object* has, not the one the pointer claims.
+	//
+	// entry.LFS.Size is parsed out of a blob a writer committed, and nothing on
+	// this path re-checks it: the create-a-link paths do (store.LinkLFSObjects
+	// refuses a size that disagrees with the ledger, verifyCommitLFSFile
+	// refuses one on the HF commit path), but a repository already linked to an
+	// object could then push a hand-written pointer naming it with "size 5" and
+	// have this hand every downloader a five-byte file. On the emulator path
+	// net/http truncates the body at the declared Content-Length; on the
+	// signed-URL path GCS serves the whole object and hf_hub_download's own
+	// size check fails instead. Neither is a lie the reader can see through.
+	//
+	// The header set is unchanged in shape -- huggingface_hub reads exactly
+	// these -- only the value is now one the server stands behind. The ledger
+	// is the authority rather than a storage Stat because it is written from
+	// the object's measured length at promotion (lfs.promoteFrom) and it is a
+	// row this request is already talking to the database for, where a Stat
+	// would be a GCS round trip added to every download.
+	size, ok := s.lfsObjectSize(w, r, oid)
+	if !ok {
+		return
+	}
 	// hf_hub_download reads the linked headers to learn the real object's
 	// identity before it follows the redirect.
 	etag := `"` + oid + `"`
 	w.Header().Set("ETag", etag)
 	w.Header().Set("X-Linked-Etag", etag)
-	w.Header().Set("X-Linked-Size", strconv.FormatInt(entry.LFS.Size, 10))
+	w.Header().Set("X-Linked-Size", strconv.FormatInt(size, 10))
 	w.Header().Set("Content-Type", contentType)
 
 	// Deliberately after lfsObjectOwned: a 304 confirms that the oid the
@@ -437,7 +486,7 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 	if r.Method == http.MethodHead {
 		// Unlike GET below, a HEAD never touches storage, so nothing here can
 		// fail after this point -- Content-Length is safe to set unconditionally.
-		w.Header().Set("Content-Length", strconv.FormatInt(entry.LFS.Size, 10))
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -450,7 +499,7 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 		// One object, so the URL only has to outlive this single transfer --
 		// but a 10 GiB file over a slow link still needs far more than the
 		// base TTL.
-		ttl := lfs.TTLFor(s.cfg.SignedURLTTL, s.cfg.SignedURLMaxTTL, entry.LFS.Size)
+		ttl := lfs.TTLFor(s.cfg.SignedURLTTL, s.cfg.SignedURLMaxTTL, size)
 		url, err := s.storage.SignedGetURL(r.Context(), key, ttl, path.Base(entry.Path))
 		if err != nil {
 			internalError(w, "sign download url", err)
@@ -474,13 +523,13 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 	// Emulator mode: stream the object through, honouring Range so partial
 	// reads (parquet footers, resumed downloads) still work. Content-Length
 	// is set only once storage has confirmed the object still exists --
-	// setting it earlier would leave it describing entry.LFS.Size even when
-	// GetRange fails below and a JSON error body (a different length) is
+	// setting it earlier would leave it describing the object's length even
+	// when GetRange fails below and a JSON error body (a different length) is
 	// written instead, corrupting the response the same way a redirect body
 	// would be corrupted by it.
-	offset, length, verdict := parseRange(r.Header.Get("Range"), entry.LFS.Size)
+	offset, length, verdict := parseRange(r.Header.Get("Range"), size)
 	if verdict == rangeUnsatisfiable {
-		writeRangeNotSatisfiable(w, entry.LFS.Size)
+		writeRangeNotSatisfiable(w, size)
 		return
 	}
 	rc, err := s.storage.GetRange(r.Context(), key, offset, length)
@@ -495,9 +544,9 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 	defer rc.Close()
 
 	if verdict == rangePartial {
-		writePartialContent(w, offset, length, entry.LFS.Size)
+		writePartialContent(w, offset, length, size)
 	} else {
-		w.Header().Set("Content-Length", strconv.FormatInt(entry.LFS.Size, 10))
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	}
 	_, _ = io.Copy(w, rc)
 }
@@ -619,7 +668,13 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 		if !s.lfsObjectOwned(w, r, repo, entry.LFS.OID) {
 			return
 		}
-		size = entry.LFS.Size
+		// The ledger's size, not the pointer's, for the same reason
+		// serveLFSFile uses it: this one feeds `truncated`, and a pointer
+		// understating its object turns a cut-off preview into one the UI
+		// presents as the whole file.
+		if size, ok = s.lfsObjectSize(w, r, entry.LFS.OID); !ok {
+			return
+		}
 		reader, err = s.storage.GetRange(r.Context(), storage.LFSKey(entry.LFS.OID), 0, maxRawPreviewBytes)
 	} else {
 		reader, _, err = gitRepo.BlobReader(entry.Hash)

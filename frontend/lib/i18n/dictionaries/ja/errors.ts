@@ -27,6 +27,9 @@ export const errors = {
   // lib/api-error-message.ts の DETAIL_KEYS を参照。
   conflictDetail: "競合が発生しました: {detail}",
   payloadTooLarge: "リクエストが大きすぎます。",
+  unsupportedMediaType: "この形式のリクエストはサーバーが読み取れません。",
+  insufficientStorage: "この名前空間にはこのアップロードを保存する空き容量がありません。",
+  insufficientStorageDetail: "容量が足りません: {detail}",
   internalError: "サーバー側で問題が発生しました。しばらくしてから再度お試しください。",
   repositoryArchived:
     "このリポジトリはアーカイブされ読み取り専用です。変更するにはリポジトリ設定でアーカイブを解除してください。",

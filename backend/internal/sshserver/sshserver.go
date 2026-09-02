@@ -67,12 +67,30 @@ type Options struct {
 	// Clones of large repositories stream continuously, so this only bites
 	// abandoned connections.
 	IdleTimeout time.Duration
+	// AuthRateLimitPerMinute caps *failed* public-key attempts per client
+	// address per minute, the SSH counterpart of the HTTP auth guard (it is
+	// fed from the same TF_AUTH_RATE_LIMIT_PER_MIN). Zero disables it, which
+	// is only sensible in tests: without it an unauthenticated peer drives a
+	// LookupSSHKey database round trip per authentication attempt, six per
+	// connection, at whatever rate it opens connections.
+	AuthRateLimitPerMinute int
+	// MaxUnauthenticatedConns caps how many connections may sit in the
+	// pre-authentication phase at once. Zero means
+	// DefaultMaxUnauthenticatedConns. The slot is released as soon as a
+	// connection authenticates, so this never limits real work.
+	MaxUnauthenticatedConns int
 }
 
 type Server struct {
 	keys Keys
 	git  Git
 	srv  *gssh.Server
+
+	budget *authBudget
+	gate   *connGate
+	// touches bounds the fire-and-forget TouchSSHKey writes; see
+	// recordKeyUse.
+	touches chan struct{}
 }
 
 // contextKey namespaces the values the auth callback hands to the session
@@ -82,6 +100,9 @@ type contextKey string
 const (
 	ctxKeyUser  contextKey = "thinkingface.user"
 	ctxKeyKeyID contextKey = "thinkingface.ssh_key_id"
+	// ctxKeyConnSlot carries the connection's gate slot so authentication can
+	// hand it back the moment the peer stops being unauthenticated.
+	ctxKeyConnSlot contextKey = "thinkingface.conn_slot"
 )
 
 func New(opts Options, keys Keys, git Git) (*Server, error) {
@@ -89,13 +110,24 @@ func New(opts Options, keys Keys, git Git) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{keys: keys, git: git}
+	s := &Server{
+		keys:    keys,
+		git:     git,
+		budget:  newAuthBudget(opts.AuthRateLimitPerMinute),
+		gate:    newConnGate(opts.MaxUnauthenticatedConns),
+		touches: make(chan struct{}, touchConcurrency),
+	}
 	s.srv = &gssh.Server{
 		Addr:        opts.Addr,
 		HostSigners: []gssh.Signer{hostKey},
 		Version:     "thinkingface",
 		IdleTimeout: opts.IdleTimeout,
 		Handler:     s.handleSession,
+
+		// Every connection passes the gate before a single byte of the SSH
+		// handshake is read, which is the only place a peer can be turned
+		// away before it costs anything.
+		ConnCallback: s.admit,
 
 		PublicKeyHandler: s.authenticate,
 		// No PasswordHandler and no KeyboardInteractiveHandler: with
@@ -123,11 +155,35 @@ func (s *Server) ListenAndServe() error { return s.srv.ListenAndServe() }
 // need an ephemeral port.
 func (s *Server) Serve(l net.Listener) error { return s.srv.Serve(l) }
 
+// Shutdown stops accepting connections and waits for the in-flight ones,
+// then closes whatever is left.
+//
+// Close runs on *every* path, including the timeout. gliderlabs' Shutdown
+// waits indefinitely for connections and returns ctx.Err() when the budget
+// runs out — it does not close anything it was still waiting on — so
+// returning there left the listeners and every stuck clone open, and the
+// process hung on an SSH session that had gone quiet instead of exiting.
+// The deadline is the whole point of passing one.
 func (s *Server) Shutdown(ctx context.Context) error {
-	if err := s.srv.Shutdown(ctx); err != nil {
-		return err
+	err := s.srv.Shutdown(ctx)
+	if cerr := s.srv.Close(); err == nil {
+		err = cerr
 	}
-	return s.srv.Close()
+	return err
+}
+
+// admit is the gate every connection passes before the SSH handshake begins.
+// Returning nil makes gliderlabs close the connection immediately, which is
+// the cheapest possible refusal.
+func (s *Server) admit(ctx gssh.Context, conn net.Conn) net.Conn {
+	slot, ok := s.gate.acquire()
+	if !ok {
+		slog.Warn("ssh: refused a connection, too many unauthenticated connections in flight",
+			"remote", addrKey(conn.RemoteAddr()), "limit", cap(s.gate.sem))
+		return nil
+	}
+	ctx.SetValue(ctxKeyConnSlot, slot)
+	return &guardedConn{Conn: conn, slot: slot}
 }
 
 // ErrServerClosed is returned by ListenAndServe after Shutdown.
@@ -137,13 +193,29 @@ var ErrServerClosed = gssh.ErrServerClosed
 //
 // The fingerprint is only an index: the stored key material is re-parsed and
 // compared byte for byte, so authentication never rests on a digest alone.
+//
+// The budget check comes *before* the lookup, which is the whole reason it
+// exists here rather than around it: x/crypto lets a peer make six
+// authentication attempts per connection, and each one that reached the
+// database was a free query for anybody who could open a socket.
 func (s *Server) authenticate(ctx gssh.Context, offered gssh.PublicKey) bool {
+	addr := addrKey(ctx.RemoteAddr())
+	if !s.budget.allow(addr) {
+		slog.Warn("ssh: too many failed authentication attempts, refusing without a lookup", "remote", addr)
+		return false
+	}
+
 	fingerprint := auth.SSHKeyFingerprint(offered)
 	user, key, err := s.keys.LookupSSHKey(ctx, fingerprint)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
+			// A database failure is the server's problem, not the client's:
+			// charging the address for it would let one outage lock out every
+			// user who kept trying.
 			slog.Error("ssh: look up public key", "fingerprint", fingerprint, "error", err)
+			return false
 		}
+		s.budget.penalize(addr)
 		return false
 	}
 
@@ -157,12 +229,49 @@ func (s *Server) authenticate(ctx gssh.Context, offered gssh.PublicKey) bool {
 		// the check costs nothing and removes the digest from the trust path.
 		slog.Warn("ssh: offered key does not match the stored key for its fingerprint",
 			"fingerprint", fingerprint, "key_id", key.ID)
+		s.budget.penalize(addr)
 		return false
+	}
+
+	// Authenticated: forget the address's failures (an agent that walked
+	// through three keys first must leave no mark) and hand back the
+	// unauthenticated-connection slot, so a long clone never occupies one.
+	s.budget.reset(addr)
+	if slot, ok := ctx.Value(ctxKeyConnSlot).(*connSlot); ok {
+		slot.release()
 	}
 
 	ctx.SetValue(ctxKeyUser, user)
 	ctx.SetValue(ctxKeyKeyID, key.ID)
 	return true
+}
+
+// recordKeyUse stamps a key's last-used time without making the client wait.
+//
+// Detached, but neither unbounded nor deadline-free — the two things that made
+// the previous `go s.keys.TouchSSHKey(context.Background(), id)` a liability.
+// A stalled database turned every session into a goroutine holding a
+// connection forever, and nothing capped how many. The shape matches
+// detachedWrite in internal/api, which exists for exactly this.
+//
+// Dropping the write when the semaphore is full is deliberate: last-used is
+// advisory, and shedding it is strictly better than queueing behind a database
+// that is already in trouble.
+func (s *Server) recordKeyUse(keyID int64) {
+	select {
+	case s.touches <- struct{}{}:
+	default:
+		slog.Debug("ssh: dropped a key-use record, too many in flight", "key_id", keyID)
+		return
+	}
+	go func() {
+		defer func() { <-s.touches }()
+		ctx, cancel := context.WithTimeout(context.Background(), touchTimeout)
+		defer cancel()
+		if err := s.keys.TouchSSHKey(ctx, keyID); err != nil {
+			slog.Debug("ssh: record key use", "key_id", keyID, "error", err)
+		}
+	}()
 }
 
 func (s *Server) handleSession(sess gssh.Session) {
@@ -196,11 +305,7 @@ func (s *Server) handleSession(sess gssh.Session) {
 	// Detached from the session so a slow write never delays the clone, and
 	// recorded before the permission check: the key was used either way.
 	if keyID, ok := sess.Context().Value(ctxKeyKeyID).(int64); ok {
-		go func() {
-			if err := s.keys.TouchSSHKey(context.Background(), keyID); err != nil {
-				slog.Debug("ssh: record key use", "key_id", keyID, "error", err)
-			}
-		}()
+		s.recordKeyUse(keyID)
 	}
 
 	streams := gitserver.Streams{In: sess, Out: sess, Err: sess.Stderr()}

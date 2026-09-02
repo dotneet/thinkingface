@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -414,6 +415,19 @@ type fakeUpDeleteServer struct {
 	srv *httptest.Server
 
 	deletedPaths []string
+	filePaths    []string
+	// commitAnswer replaces the body the fake commit endpoint returns.
+	// Set it to reproduce a server (or a proxy) that answers 200 with
+	// something other than a commit.
+	commitAnswer map[string]any
+}
+
+// committedPaths is the sorted list of paths the commit actually wrote (the
+// "file" / "lfsFile" ops), as opposed to the ones it deleted.
+func (f *fakeUpDeleteServer) committedPaths() []string {
+	out := append([]string(nil), f.filePaths...)
+	sort.Strings(out)
+	return out
 }
 
 func newFakeUpDeleteServer(t *testing.T, treeEntries string) *fakeUpDeleteServer {
@@ -470,15 +484,22 @@ func newFakeUpDeleteServer(t *testing.T, treeEntries string) *fakeUpDeleteServer
 			if err := dec.Decode(&line); err != nil {
 				break
 			}
-			if line.Key == "deletedFile" {
+			switch line.Key {
+			case "deletedFile":
 				f.deletedPaths = append(f.deletedPaths, line.Value.Path)
+			case "file", "lfsFile":
+				f.filePaths = append(f.filePaths, line.Value.Path)
 			}
 		}
-		writeJSON(t, w, map[string]any{
-			"success":   true,
-			"commitUrl": "http://example.invalid/datasets/alice/x/commit/abc1234def",
-			"commitOid": "abc1234def5678",
-		})
+		answer := f.commitAnswer
+		if answer == nil {
+			answer = map[string]any{
+				"success":   true,
+				"commitUrl": "http://example.invalid/datasets/alice/x/commit/abc1234def",
+				"commitOid": "abc1234def5678",
+			}
+		}
+		writeJSON(t, w, answer)
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -666,5 +687,141 @@ func TestWarnSkippedCapsTheList(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "3 more path(s) skipped") {
 		t.Errorf("stderr = %q, want it to count the paths it did not list", buf.String())
+	}
+}
+
+// TestUpSkipsDotfilesAndSaysSo is the credential-leak regression: repositories
+// here are world-readable, and `tf up ./project` used to publish a ".env"
+// sitting next to the data with nothing on stderr to say it had.
+func TestUpSkipsDotfilesAndSaysSo(t *testing.T) {
+	isolateEnv(t)
+
+	dir := dirWithFiles(t, "data/train.parquet", ".env", ".envrc", ".aws/credentials", ".gitignore")
+
+	srv := newFakeUpDeleteServer(t, `[{"type":"file","path":".gitattributes","oid":"a1","size":10}]`)
+
+	var out, errOut bytes.Buffer
+	code := Main([]string{
+		"up", dir,
+		"--endpoint", srv.srv.URL,
+		"--token", "t",
+		"--to", "alice/x",
+		"--quiet",
+		"--json",
+	}, nil, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut.String())
+	}
+
+	committed := srv.committedPaths()
+	want := []string{".gitignore", "data/train.parquet"}
+	if !equalStringSlices(committed, want) {
+		t.Fatalf("committed files = %v, want %v (dot-files must not be uploaded)", committed, want)
+	}
+
+	// Warnings survive --quiet, and they name the flag that opts back in.
+	stderr := errOut.String()
+	for _, want := range []string{".env", ".envrc", ".aws/", "--hidden"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to mention %q", stderr, want)
+		}
+	}
+	if got := strings.Count(stderr, "hidden path(s)"); got != 1 {
+		t.Errorf("stderr = %q, want exactly one grouped hidden-path warning, got %d", stderr, got)
+	}
+}
+
+// TestUpHiddenFlagUploadsDotfiles is the opt-back-in half.
+func TestUpHiddenFlagUploadsDotfiles(t *testing.T) {
+	isolateEnv(t)
+
+	dir := dirWithFiles(t, "data/train.parquet", ".env")
+	srv := newFakeUpDeleteServer(t, `[{"type":"file","path":".gitattributes","oid":"a1","size":10}]`)
+
+	var out, errOut bytes.Buffer
+	code := Main([]string{
+		"up", dir,
+		"--endpoint", srv.srv.URL,
+		"--token", "t",
+		"--to", "alice/x",
+		"--hidden",
+		"--quiet",
+	}, nil, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut.String())
+	}
+	want := []string{".env", "data/train.parquet"}
+	if !equalStringSlices(srv.committedPaths(), want) {
+		t.Fatalf("committed files = %v, want %v", srv.committedPaths(), want)
+	}
+	if strings.Contains(errOut.String(), "hidden path(s)") {
+		t.Errorf("stderr = %q, want no hidden-path warning with --hidden", errOut.String())
+	}
+}
+
+// TestUpDeleteKeepsRemoteCopiesOfNowSkippedDotfiles is the dangerous half of
+// the change: a repository uploaded before dot-files were skipped still has
+// them on the remote, and the files are still on disk. "Not part of this
+// upload" must not be read as "deleted locally".
+func TestUpDeleteKeepsRemoteCopiesOfNowSkippedDotfiles(t *testing.T) {
+	isolateEnv(t)
+
+	dir := dirWithFiles(t, "data/train.parquet", ".env", ".aws/credentials")
+
+	srv := newFakeUpDeleteServer(t, `[
+		{"type":"file","path":".gitattributes","oid":"a1","size":10},
+		{"type":"file","path":".env","oid":"b2","size":1},
+		{"type":"file","path":".aws/credentials","oid":"c3","size":1},
+		{"type":"file","path":"data/gone.txt","oid":"d4","size":1}
+	]`)
+
+	var out, errOut bytes.Buffer
+	code := Main([]string{
+		"up", dir,
+		"--endpoint", srv.srv.URL,
+		"--token", "t",
+		"--to", "alice/x",
+		"--delete",
+		"--quiet",
+	}, nil, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut.String())
+	}
+	if !equalStringSlices(srv.deletedPaths, []string{"data/gone.txt"}) {
+		t.Fatalf("deletedFile ops = %v, want only [data/gone.txt]: a skipped dot-file is still on disk", srv.deletedPaths)
+	}
+}
+
+// TestUpFailsWhenTheServerReportsNoCommit: `tf up` used to ignore the commit
+// answer's success flag and an empty commitOid, printing a tick with an empty
+// short oid and exiting 0 -- a script checking the exit code was told the
+// upload had landed when nothing had.
+func TestUpFailsWhenTheServerReportsNoCommit(t *testing.T) {
+	isolateEnv(t)
+
+	dir := dirWithFiles(t, "data/train.parquet")
+	srv := newFakeUpDeleteServer(t, `[{"type":"file","path":".gitattributes","oid":"a1","size":10}]`)
+	srv.commitAnswer = map[string]any{"success": false, "commitOid": ""}
+
+	var out, errOut bytes.Buffer
+	code := Main([]string{
+		"up", dir,
+		"--endpoint", srv.srv.URL,
+		"--token", "t",
+		"--to", "alice/x",
+		"--json",
+	}, nil, &out, &errOut)
+
+	if code == 0 {
+		t.Fatalf("exit code = 0, want non-zero; stderr=%s", errOut.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout = %q, want no JSON result for a commit that did not happen", out.String())
+	}
+	if strings.Contains(errOut.String(), "✓") {
+		t.Errorf("stderr = %q, want no success line", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "reported no commit") {
+		t.Errorf("stderr = %q, want it to say the server reported no commit", errOut.String())
 	}
 }

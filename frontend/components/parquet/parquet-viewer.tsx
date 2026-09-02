@@ -11,6 +11,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { Select } from "@/components/ui/field";
 import { SegmentedControl } from "@/components/ui/segmented-control";
+import { Skeleton } from "@/components/ui/skeleton";
 import { SpinnerSlot } from "@/components/ui/spinner";
 import { ApiResultError, queryErrorMessage } from "@/lib/api-error-message";
 import { cellFeatureFor } from "@/lib/cell-value";
@@ -128,25 +129,34 @@ export function ParquetViewer({
     });
   }
 
-  const rows: Row[] = data?.rows ?? [];
+  // The one response the table is actually drawing. `placeholderData` keeps the
+  // previous page on screen for the whole round trip and react-query keeps the
+  // last successful `data` after a failure, so *everything the table says about
+  // itself* — its columns, its row range, its total — is read from here rather
+  // than from the offset/limit/column state, which has already moved on
+  // (DESIGN.md §9: "not fetched yet" is not "empty" and is not "failed").
+  const page = isError ? undefined : data;
+  const rows: Row[] = page?.rows ?? [];
 
-  const schemaByName = useMemo(
-    () => new Map(schema.columns.map((c) => [c.name, c])),
-    [schema.columns],
-  );
-
+  // From the response, not from `debouncedColumnNames`: un-hiding a column
+  // updates the state immediately while `rows` is still the placeholder page
+  // fetched for the previous column set, so a state-derived column list
+  // painted a column of `undefined` — which ValueCell used to render as the
+  // string "null", indistinguishable from a column that really is null.
+  // The response's columns also carry the README-resolved `feature`, which is
+  // what decides image/JSON rendering.
   const columns = useMemo(
-    () =>
-      debouncedColumnNames.map((name) => {
-        const col = schemaByName.get(name);
-        return { key: name, feature: col ? cellFeatureFor(col) : undefined };
-      }),
-    [debouncedColumnNames, schemaByName],
+    () => (page?.columns ?? []).map((col) => ({ key: col.name, feature: cellFeatureFor(col) })),
+    [page],
   );
 
-  const totalRows = data?.num_rows ?? schema.num_rows;
+  const totalRows = page?.num_rows ?? schema.num_rows;
   const hasPrev = offset > 0;
   const hasNext = offset + limit < totalRows;
+  // Authoritative offset/limit from the response; `rows.length` rather than
+  // `limit` for the upper bound so a short final page reads correctly.
+  const pageFrom = page && rows.length > 0 ? page.offset + 1 : 0;
+  const pageTo = page ? page.offset + rows.length : 0;
 
   const resolveUrl = resolveFileUrl(kind, ns, name, rev, path, publicApiBase());
 
@@ -237,12 +247,20 @@ export function ParquetViewer({
                   />
                 </div>
                 <div className="flex items-center gap-2 text-sm">
-                  <span className="tabular-nums text-fg-subtle">
-                    {t("parquet.viewer.pageInfo", {
-                      from: totalRows === 0 ? 0 : offset + 1,
-                      to: Math.min(offset + limit, totalRows),
-                      total: formatNumber(totalRows),
-                    })}
+                  {/* A range is only ever stated from a response that is on
+                      screen: none while the first page is still in flight, and
+                      none at all when the fetch failed — "Showing 201–300 of
+                      4,000,000" directly above "failed to load rows" is §9
+                      rule 1. The slot keeps its width so the buttons beside it
+                      do not move when the text appears (§8.3). */}
+                  <span className="min-w-[14ch] text-right tabular-nums text-fg-subtle">
+                    {page
+                      ? t("parquet.viewer.pageInfo", {
+                          from: pageFrom,
+                          to: pageTo,
+                          total: formatNumber(page.num_rows),
+                        })
+                      : null}
                   </span>
                   <Button
                     size="sm"
@@ -276,13 +294,21 @@ export function ParquetViewer({
                   title={t("parquet.errorTitle")}
                   message={queryErrorMessage(t, error, t("parquet.viewer.loadRowsFailed"))}
                 />
-              ) : columns.length === 0 ? (
+              ) : debouncedColumnNames.length === 0 ? (
+                // The *selection*, not the response: with every column hidden
+                // the query above is disabled, so there is no response to read
+                // this from.
                 <EmptyState
                   icon={Database}
                   title={t("parquet.viewer.noColumnsTitle")}
                   description={t("parquet.viewer.noColumnsDescription")}
                 />
-              ) : rows.length === 0 && !isFetching ? (
+              ) : !page ? (
+                // No page has arrived yet (first paint, or the first paint
+                // after unhiding a column from an empty selection). Not empty
+                // and not failed — a placeholder, per DESIGN.md §4.
+                <Skeleton className="h-96 w-full" />
+              ) : rows.length === 0 ? (
                 <EmptyState icon={Database} title={t("parquet.viewer.noRowsTitle")} />
               ) : (
                 <DataTable

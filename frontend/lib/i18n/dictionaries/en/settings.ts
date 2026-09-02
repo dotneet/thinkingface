@@ -56,6 +56,9 @@ export const settings = {
     creating: "Creating…",
     createdTitle: 'Token "{name}" created',
     copyNow: "Copy it now — it won't be shown again.",
+    // Lets the one-time token off the screen once it has been copied, instead
+    // of leaving it rendered until the page happens to be reloaded.
+    dismissToken: "Hide this token",
     sessionExpiredCreate: "Your session expired. Log in again to create a token.",
     sessionExpiredDelete: "Your session expired. Log in again to delete this token.",
     confirmDeleteTitle: "Delete access token?",
@@ -107,6 +110,13 @@ export const settings = {
     sessionExpiredDelete: "Your session expired. Log in again to delete this key.",
     confirmDeleteTitle: "Delete SSH key?",
     confirmDelete: "Delete this SSH key? Anything using it will stop working.",
+    // Names the row that is about to go: "this SSH key" is ambiguous the moment
+    // the list holds more than one, and "work laptop" / "home desktop" / "ci
+    // runner" otherwise produce a byte-identical dialog. `confirmDelete` above
+    // stays as the fallback for the (impossible in practice) case where the row
+    // is gone by the time the dialog renders. `{title}` falls back to the
+    // fingerprint for a key registered without one.
+    confirmDeleteNamed: 'Delete the SSH key "{title}"? Anything using it will stop working.',
     loadFailed: "Failed to load SSH keys",
     loadFailedHint: "The backend API may be unreachable. Try reloading the page.",
     emptyTitle: "No SSH keys",
@@ -167,6 +177,9 @@ export const settings = {
     createdTitle: "Webhook created",
     secretCopyPrefix: "Copy the secret now — it won't be shown again. Use it to verify the",
     secretCopySuffix: "header on every delivery.",
+    // Lets the one-time secret off the screen once it has been copied, instead
+    // of leaving it rendered until the page happens to be reloaded.
+    dismissSecret: "Hide this secret",
     emptyTitle: "No webhooks yet",
     emptyDescription:
       "Create one above to get notified about pushes, repository changes, and run status.",
@@ -190,8 +203,13 @@ export const settings = {
     saving: "Saving…",
     rotateSecret: "Rotate secret",
     confirmRotateTitle: "Rotate secret?",
+    // Says what rotating touches *and* what it leaves alone: the button sits
+    // next to Save changes in the same panel, and the request used to carry the
+    // edit buffers along with it.
     confirmRotate:
-      "The current secret stops working immediately. Update the endpoint with the new one before closing this dialog.",
+      "Replace this webhook's signing secret with a new one. The current secret stops working immediately; nothing else about the webhook changes. Update the endpoint with the new secret before closing this dialog.",
+    confirmRotateUnsaved:
+      "Your unsaved changes to the URL and events are not included — close this dialog and choose Save changes to apply them.",
   },
   webhookEvents: {
     repoPush: { label: "Repository push", hint: "A commit landed on any ref" },

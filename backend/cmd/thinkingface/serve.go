@@ -135,6 +135,11 @@ func runServe(ctx context.Context, cfg *config.Config, db *store.Store) error {
 			Addr:        cfg.SSHAddr,
 			HostKeyPath: cfg.SSHHostKeyPath,
 			IdleTimeout: cfg.SSHIdleTimeout,
+			// The same budget the HTTP auth guard uses: an unauthenticated
+			// peer over SSH costs a database lookup per attempt just as one
+			// over HTTP costs a bcrypt, and there is no reason for the two
+			// transports to disagree about how much of that an address gets.
+			AuthRateLimitPerMinute: cfg.AuthRateLimitPerMinute,
 		}, db, server)
 		if err != nil {
 			slog.Error("ssh server disabled: it could not be started", "error", err)
@@ -153,13 +158,43 @@ func runServe(ctx context.Context, cfg *config.Config, db *store.Store) error {
 		return err
 	case <-ctx.Done():
 		slog.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		if ssh != nil {
-			if err := ssh.Shutdown(shutdownCtx); err != nil {
-				slog.Warn("ssh server shutdown", "error", err)
-			}
-		}
-		return httpServer.Shutdown(shutdownCtx)
+		return drain(httpServer, ssh)
 	}
+}
+
+// shutdownGrace is how long each listener gets to finish what it is already
+// serving. It is per listener, not shared: a git clone over SSH and a git push
+// over HTTP are unrelated transfers, and one being slow is no reason to cut
+// the other short.
+const shutdownGrace = 20 * time.Second
+
+// drain stops both listeners at once and gives each its own budget.
+//
+// Sequential shutdown with one shared context was the bug: ssh.Shutdown waits
+// on every in-flight clone, so a single slow one consumed the whole 20 seconds
+// and handed httpServer.Shutdown an already-expired context — which drops
+// in-flight HTTP requests instead of draining them, and on this server an
+// in-flight request can be a push whose WAL entry has been written but whose
+// response has not been sent. Concurrent is also simply the truth of it:
+// neither listener's drain depends on the other's.
+func drain(httpServer *http.Server, ssh *sshserver.Server) error {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+	defer cancel()
+
+	sshDone := make(chan struct{})
+	go func() {
+		defer close(sshDone)
+		if ssh == nil {
+			return
+		}
+		if err := ssh.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("ssh server shutdown", "error", err)
+		}
+	}()
+
+	// The HTTP error is the returned one: it is the transport this server
+	// exists for, and SSH is optional (it may not even be running).
+	err := httpServer.Shutdown(shutdownCtx)
+	<-sshDone
+	return err
 }

@@ -138,6 +138,21 @@ func (h *Handler) promoteFrom(ctx context.Context, repoID int64, oid string, siz
 	if info.Size != size {
 		return &SizeMismatchError{OID: oid, Got: info.Size, Want: size}
 	}
+	// The namespace's allowance, charged where the bytes are actually paid for:
+	// the link below is a row in repo_lfs_objects and that is exactly what
+	// store.UsageByRepo sums (see quota.go). Checking only in Batch left the two
+	// upload routes that call PromoteStagedFrom -- the browser's multipart
+	// endpoint and the emulator's transfer proxy -- outside enforcement
+	// entirely.
+	//
+	// Before confirmDigest rather than after: a refusal here should not first
+	// pay for a full re-read of the staged object out of the bucket. It is
+	// after the size check because info.Size is what the link will record, so
+	// this charges the object's real length rather than the one the client
+	// declared.
+	if err := h.chargeQuota(ctx, repoID, oid, info.Size); err != nil {
+		return err
+	}
 	if proof == digestUnproven {
 		if err := h.confirmDigest(ctx, oid, staging); err != nil {
 			return err
@@ -377,6 +392,15 @@ func (h *Handler) Verify(ctx context.Context, repoID int64, oid string, size int
 	case errors.Is(err, ErrNotStaged), errors.Is(err, store.ErrLFSObjectGone):
 		return fmt.Errorf("object %s was not uploaded", oid)
 	default:
+		// Passed through unchanged so handleLFSVerify can answer 507 with this
+		// sentence: it names the namespace, the limit and the shortfall, and
+		// folding it into a generic failure would leave `git push` reporting
+		// "object could not be verified" for a condition the operator can act
+		// on.
+		var overQuota *QuotaExceededError
+		if errors.As(err, &overQuota) {
+			return overQuota
+		}
 		var mismatch *SizeMismatchError
 		if errors.As(err, &mismatch) {
 			return mismatch

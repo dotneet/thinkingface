@@ -142,16 +142,7 @@ type preuploadAnswer struct {
 // answers keyed by path, plus the raw body for the null-shape assertions.
 func (f *preuploadFixture) preupload(repo string, rev string, files []preuploadFile) (map[string]preuploadAnswer, string) {
 	f.t.Helper()
-	payload := map[string]any{"files": files}
-	b, err := json.Marshal(payload)
-	if err != nil {
-		f.t.Fatalf("marshal body: %v", err)
-	}
-	req := httptest.NewRequest("POST", "/api/models/alice/"+repo+"/preupload/"+rev, bytes.NewReader(b))
-	req.Header.Set("Authorization", "Bearer "+f.token)
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	f.s.Handler().ServeHTTP(rec, req)
+	rec := f.preuploadRaw(repo, rev, files)
 	if rec.Code != 200 {
 		f.t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -169,6 +160,22 @@ func (f *preuploadFixture) preupload(repo string, rev string, files []preuploadF
 		f.t.Fatalf("answered for %d of %d paths: %s", len(body.Files), len(files), rec.Body.String())
 	}
 	return out, rec.Body.String()
+}
+
+// preuploadRaw posts a preupload body and hands back the recorder untouched,
+// for the cases whose subject is the status rather than the answers.
+func (f *preuploadFixture) preuploadRaw(repo, rev string, files []preuploadFile) *httptest.ResponseRecorder {
+	f.t.Helper()
+	b, err := json.Marshal(map[string]any{"files": files})
+	if err != nil {
+		f.t.Fatalf("marshal body: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/api/models/alice/"+repo+"/preupload/"+rev, bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+f.token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	f.s.Handler().ServeHTTP(rec, req)
+	return rec
 }
 
 // gitHashObject is `git hash-object` -- and the exact computation
@@ -280,23 +287,62 @@ func TestPreupload_DirectoryPathIsNull(t *testing.T) {
 	repo := f.emptyRepo("foo")
 	f.commit(repo, map[string][]byte{"data/train.txt": []byte("rows\n")})
 
-	answers, _ := f.preupload("foo", "main", []preuploadFile{
-		{Path: "data", Size: 10},
-		{Path: "data/", Size: 10},
-	})
+	answers, _ := f.preupload("foo", "main", []preuploadFile{{Path: "data", Size: 10}})
 	assertOID(t, answers["data"], "regular", nil)
-	assertOID(t, answers["data/"], "regular", nil)
 }
 
-// The repository root, reachable as "" or "/", is a directory too. Its tree
-// hash must not escape either.
-func TestPreupload_RootPathIsNull(t *testing.T) {
+// The paths preupload refuses outright are the ones the commit that follows it
+// would refuse too: handlePreupload now runs the same checkOpPath the commit
+// body's entries go through, so a caller learns about a malformed path before
+// it uploads anything against the answer rather than after.
+//
+// The empty path and the trailing-slash directory used to be answered with a
+// null oid, which was the right value but the wrong shape of answer: it told
+// the client to go ahead and upload a file it could never commit.
+func TestPreupload_RefusesPathsTheCommitWouldRefuse(t *testing.T) {
+	f := newPreuploadFixture(t)
+	repo := f.emptyRepo("foo")
+	f.commit(repo, map[string][]byte{"data/train.txt": []byte("rows\n")})
+
+	for _, path := range []string{"", "/", "data/", "../escape.txt", ".git/config"} {
+		t.Run(path, func(t *testing.T) {
+			rec := f.preuploadRaw("foo", "main", []preuploadFile{{Path: path, Size: 1}})
+			if rec.Code != 400 {
+				t.Fatalf("status = %d, body = %s; want 400", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// The element and path-length bounds paths-info has always had. Without them
+// maxBatchBody alone allows on the order of 380k records in one 8 MiB body,
+// each costing a .gitattributes pass and a tree lookup.
+func TestPreupload_BoundsTheBatch(t *testing.T) {
 	f := newPreuploadFixture(t)
 	repo := f.emptyRepo("foo")
 	f.commit(repo, map[string][]byte{"README.md": []byte("hi\n")})
 
-	answers, _ := f.preupload("foo", "main", []preuploadFile{{Path: "", Size: 1}})
-	assertOID(t, answers[""], "regular", nil)
+	tooMany := make([]preuploadFile, maxPathsInfoPaths+1)
+	for i := range tooMany {
+		tooMany[i] = preuploadFile{Path: fmt.Sprintf("f%d.txt", i), Size: 1}
+	}
+	if rec := f.preuploadRaw("foo", "main", tooMany); rec.Code != 400 {
+		t.Errorf("status for %d files = %d, want 400", len(tooMany), rec.Code)
+	}
+
+	long := []preuploadFile{{Path: strings.Repeat("a", maxPathBytes+1), Size: 1}}
+	if rec := f.preuploadRaw("foo", "main", long); rec.Code != 400 {
+		t.Errorf("status for an over-long path = %d, want 400", rec.Code)
+	}
+
+	// One under each bound still answers: these are ceilings, not thresholds.
+	ok := make([]preuploadFile, maxPathsInfoPaths)
+	for i := range ok {
+		ok[i] = preuploadFile{Path: fmt.Sprintf("f%d.txt", i), Size: 1}
+	}
+	if rec := f.preuploadRaw("foo", "main", ok); rec.Code != 200 {
+		t.Errorf("status for %d files = %d, want 200: %s", len(ok), rec.Code, rec.Body.String())
+	}
 }
 
 // ------------------------------------------------------- mismatched pairings

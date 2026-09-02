@@ -206,19 +206,28 @@ func (s *Store) NamespacesForUser(ctx context.Context, userID int64) ([]Namespac
 }
 
 // namespaceWritable renders "the user bound to $1 may write here": they own
-// the namespace, or they are an organisation member with role admin or write.
-// idExpr names the namespace and is a column of the surrounding query
-// (t.to_namespace_id / t.from_namespace_id) -- a package constant at every
-// call site, never anything a caller supplies, which is what makes
-// interpolating it safe.
+// the namespace, they are an organisation member with role admin or write, or
+// they are a site administrator. idExpr names the namespace and is a column of
+// the surrounding query (t.to_namespace_id / t.from_namespace_id) -- a package
+// constant at every call site, never anything a caller supplies, which is what
+// makes interpolating it safe. The whole thing is parenthesised so a caller
+// may AND it onto other conditions without the trailing OR swallowing them.
 //
 // It is the only spelling of that predicate left in this package.
 // CanWriteNamespace, its by-name twin, was the second one and had no caller
 // outside its own test; two spellings of an authorization rule is one more
 // than an authorization rule may have.
+//
+// The users.is_admin arm exists because the API layer's roleIn answers
+// RoleAdmin for a site administrator in *every* namespace
+// (docs/dev/repo-transfer-design.md §5 "permissions" puts a server admin on the
+// same footing as write access at the destination), and the two must not
+// disagree: without it a site admin could accept or cancel any pending
+// transfer by id while /api/v1/me/transfers listed them nothing to act on.
 func namespaceWritable(idExpr string) string {
-	return `EXISTS (
+	return `(EXISTS (
 		SELECT 1 FROM namespaces n
 		LEFT JOIN org_members m ON m.namespace_id = n.id AND m.user_id = $1
-		WHERE n.id = ` + idExpr + ` AND (n.owner_user_id = $1 OR m.role IN ('admin', 'write')))`
+		WHERE n.id = ` + idExpr + ` AND (n.owner_user_id = $1 OR m.role IN ('admin', 'write')))
+	 OR EXISTS (SELECT 1 FROM users au WHERE au.id = $1 AND au.is_admin))`
 }

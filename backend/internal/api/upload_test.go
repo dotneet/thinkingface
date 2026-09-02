@@ -904,3 +904,68 @@ func TestEditFile_RefusesToCreateAnLFSManagedPath(t *testing.T) {
 		}
 	}
 }
+
+// ------------------------------------------------------------ storage quotas
+
+// The browser upload endpoint reaches lfs.PromoteStagedFrom without passing
+// through the LFS batch API, so for as long as the quota lived only in Batch
+// this was a way around it: a namespace pinned at its limit took a 507 on
+// `git push` and then uploaded the same weights here -- 64 files and up to
+// 10 GiB per request -- with usage growing without limit.
+func TestUpload_RefusesAnLFSFileTheNamespaceHasNoRoomFor(t *testing.T) {
+	f := newArchiveFixture(t)
+	r := f.repo("alice", "up", "model")
+	tok := f.token(f.alice, "write")
+	// A namespace that may hold repositories but must not store a byte.
+	zero := int64(0)
+	if err := f.st.SetNamespaceQuota(context.Background(), "alice", &zero); err != nil {
+		t.Fatalf("set namespace quota: %v", err)
+	}
+
+	resp := upload(t, f, "/api/v1/upload/model/alice/up/main", tok, "", []uploadPart{
+		{path: "model.safetensors", name: "model.safetensors", content: []byte("not really tensors")},
+	})
+	if resp.status() != http.StatusInsufficientStorage {
+		t.Fatalf("status = %d, body = %s; want 507", resp.status(), resp.rec.Body.String())
+	}
+	// The sentence has to name the namespace and the limit -- it is the whole
+	// answer to "why was this refused and by how much".
+	if body := resp.rec.Body.String(); !strings.Contains(body, `alice`) {
+		t.Errorf("body %q does not name the namespace", body)
+	}
+
+	// Nothing was committed, nothing was linked, and the staged bytes were
+	// dropped rather than left for gc.
+	if !fileMissing(t, f, r, "main", "model.safetensors") {
+		t.Error("the refused file was committed anyway")
+	}
+	scratch, err := f.obj.List(context.Background(), "tmp/uploads/")
+	if err != nil {
+		t.Fatalf("list scratch: %v", err)
+	}
+	if len(scratch) != 0 {
+		t.Errorf("scratch objects left behind after a refused upload: %v", scratch)
+	}
+}
+
+// The mirror image: a quota with room for the file lets it through, so the
+// refusal above is enforcement rather than the endpoint being broken.
+func TestUpload_AllowsAnLFSFileThatFitsTheQuota(t *testing.T) {
+	f := newArchiveFixture(t)
+	r := f.repo("alice", "up", "model")
+	tok := f.token(f.alice, "write")
+	plenty := int64(1 << 20)
+	if err := f.st.SetNamespaceQuota(context.Background(), "alice", &plenty); err != nil {
+		t.Fatalf("set namespace quota: %v", err)
+	}
+
+	resp := upload(t, f, "/api/v1/upload/model/alice/up/main", tok, "", []uploadPart{
+		{path: "model.safetensors", name: "model.safetensors", content: []byte("not really tensors")},
+	})
+	if resp.status() != 200 {
+		t.Fatalf("status = %d, body = %s; want 200", resp.status(), resp.rec.Body.String())
+	}
+	if _, ok := gitrepo.ParseLFSPointer(readFile(t, f, r, "main", "model.safetensors")); !ok {
+		t.Error("the file was not committed as an LFS pointer")
+	}
+}

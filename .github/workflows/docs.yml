@@ -65,8 +65,12 @@ jobs:
 
   deploy:
     name: deploy (github-pages)
-    # PRs only build; only main publishes.
-    if: github.event_name != 'pull_request'
+    # Only main publishes -- asserted on the ref, not on the event. The
+    # `push` trigger above is already branch-restricted, but
+    # `workflow_dispatch` is not: an "event is not pull_request" test let a
+    # maintainer building the docs from a feature branch replace the live
+    # site, and nothing about that run would have looked wrong.
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10

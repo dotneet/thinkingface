@@ -104,6 +104,12 @@ export function SSHKeysManager() {
     await refresh();
   }
 
+  // The row the confirmation dialog is about, so it can name the key instead
+  // of asking about "this SSH key" on a screen listing several — "work
+  // laptop", "home desktop" and "ci runner" otherwise produce a byte-identical
+  // dialog.
+  const confirmDeleteKey = keys?.find((key) => key.id === confirmDeleteId);
+
   return (
     <div className="flex flex-col gap-6">
       {!needsLogin && (
@@ -265,7 +271,17 @@ export function SSHKeysManager() {
         onClose={() => setConfirmDeleteId(null)}
         onConfirm={handleDelete}
         title={t("settings.sshKeys.confirmDeleteTitle")}
-        description={<p className="text-sm text-fg-muted">{t("settings.sshKeys.confirmDelete")}</p>}
+        description={
+          <p className="text-sm text-fg-muted">
+            {confirmDeleteKey
+              ? t("settings.sshKeys.confirmDeleteNamed", {
+                  // A title is optional; the fingerprint is not, and it
+                  // identifies the row just as well.
+                  title: confirmDeleteKey.title || confirmDeleteKey.fingerprint,
+                })
+              : t("settings.sshKeys.confirmDelete")}
+          </p>
+        }
         confirmLabel={t("settings.sshKeys.delete")}
         confirmingLabel={t("settings.sshKeys.deleting")}
         confirming={deletingId !== null}

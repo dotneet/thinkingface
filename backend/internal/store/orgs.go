@@ -234,9 +234,9 @@ func (s *Store) DeleteOrg(ctx context.Context, id int64) error {
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	var kind string
+	var kind, name string
 	if err := tx.QueryRow(ctx,
-		`SELECT kind FROM namespaces WHERE id = $1`+s.d.forUpdate(""), id).Scan(&kind); err != nil {
+		`SELECT kind, name FROM namespaces WHERE id = $1`+s.d.forUpdate(""), id).Scan(&kind, &name); err != nil {
 		return norm(err)
 	}
 	if kind != "org" {
@@ -249,6 +249,19 @@ func (s *Store) DeleteOrg(ctx context.Context, id int64) error {
 	}
 	if n > 0 {
 		return ErrConflict
+	}
+	// The redirects this namespace left behind go with it, in the same
+	// transaction. repo_redirects.from_namespace is a plain string -- it has
+	// to be, since it names a place that no longer holds the repository -- so
+	// nothing in the schema removes these, and a later user or organisation
+	// registered under the same name would inherit them: `GET /acme/x` would
+	// 308 into whichever namespace the *previous* acme handed the repository
+	// to, a decision the new owner of the name never made. Folded because
+	// namespace names are unique case-insensitively and a redirect records
+	// whatever spelling the row was written with (see ResolveRepoRedirect).
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM repo_redirects WHERE LOWER(from_namespace) = LOWER($1)`, name); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM namespaces WHERE id = $1`, id); err != nil {
 		return err

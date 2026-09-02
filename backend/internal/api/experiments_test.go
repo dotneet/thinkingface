@@ -15,6 +15,8 @@ package api
 import (
 	"context"
 	"fmt"
+	"math"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -435,5 +437,125 @@ func TestExperimentMetricsClampsMaxPoints(t *testing.T) {
 	}
 	if got := series(""); got != 1000 {
 		t.Fatalf("no max_points returned %d points, want the default 1000", got)
+	}
+}
+
+// TestExperimentLog_NullMetricIsSkippedRatherThanStoredAsZero pins the
+// difference between "this step logged no value for that metric" and "this
+// step measured zero".
+//
+// ingestPoint.Metrics was map[string]float64, so a JSON null decoded to the
+// zero value and was recorded as a real measurement at 0.0 -- a point on the
+// chart, an entry in the summary, and a row in the parquet, none of which
+// anybody logged, and none distinguishable afterwards from a loss that
+// genuinely reached zero.
+func TestExperimentLog_NullMetricIsSkippedRatherThanStoredAsZero(t *testing.T) {
+	f := newExpFixture(t)
+	f.repo("alice", "exp", "dataset")
+	tok := f.token(f.alice, "write")
+	f.s.exp = experiments.NewIndexer(f.st, f.git, newMemStore(), nil)
+
+	f.logBatch(tok, map[string]any{
+		"run":    "run-1",
+		"points": []map[string]any{point(1, map[string]any{"loss": nil, "accuracy": 0.75})},
+	})
+
+	run := f.runNamed(t, tok, "run-1")
+	for _, k := range run.MetricKeys {
+		if k == "loss" {
+			t.Errorf("metric_keys = %v, want no %q: a null is not a measurement", run.MetricKeys, "loss")
+		}
+	}
+	if _, ok := run.Summary["loss"]; ok {
+		t.Errorf("summary = %v, want no %q", run.Summary, "loss")
+	}
+	if run.Summary["accuracy"] != 0.75 {
+		t.Errorf("summary[accuracy] = %v, want the metric that did carry a value", run.Summary["accuracy"])
+	}
+
+	// And nothing was buffered for it either, so no chart can grow a zero.
+	resp := f.do("GET", "/api/v1/experiments/alice/exp/proj/metrics", "", nil)
+	if resp.status() != 200 {
+		t.Fatalf("metrics status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+	var body apitypes.ExpMetricsResponse
+	resp.json(t, &body)
+	for _, s := range body.Series {
+		if s.Key == "loss" {
+			t.Errorf("series = %+v, want no loss trace at all", s)
+		}
+	}
+}
+
+// TestBuildRunPoints_RejectsNonFiniteMetricValues covers the guard that cannot
+// be reached through an ordinary request body: encoding/json refuses to decode
+// a bare NaN or Infinity, so the only way in would be a future decoder that is
+// more permissive. The cost of being wrong about that is high enough to be
+// worth one comparison -- a NaN in the store comes back out of every read path
+// as an encoding/json error, so one bad point would 500 the run list, the
+// summary and the metrics endpoint for the whole project, permanently.
+func TestBuildRunPoints_RejectsNonFiniteMetricValues(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value float64
+	}{
+		{"NaN", math.NaN()},
+		{"+Inf", math.Inf(1)},
+		{"-Inf", math.Inf(-1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := tc.value
+			rec := httptest.NewRecorder()
+			if _, ok := buildRunPoints(rec, []ingestPoint{{Step: 1, Metrics: map[string]*float64{"loss": &v}}}); ok {
+				t.Fatalf("buildRunPoints accepted %v, want a refusal", tc.value)
+			}
+			if rec.Code != 400 {
+				t.Errorf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestLoadRunState_FailsRatherThanReportingAnEmptyRun is the whole point of
+// that function returning an error.
+//
+// Both of its reads used to answer *any* failure with the zero runState, and
+// the zero value is not neutral: mergeRunState merges the batch onto it and
+// the upsert then replaces metric_keys and summary wholesale, so one statement
+// timeout while a run logged {"loss": ...} truncated metric_keys to ["loss"]
+// and dropped every other metric from the summary -- permanently, unless a
+// later batch happened to mention them again. The stored status went with it,
+// so a finished run looked new and fired run.finished a second time.
+//
+// The failure is induced by closing the database, which is the bluntest
+// version of the same thing an interrupted connection produces: an error that
+// is not ErrNotFound.
+func TestLoadRunState_FailsRatherThanReportingAnEmptyRun(t *testing.T) {
+	f := newExpFixture(t)
+	repo := f.repo("alice", "exp", "dataset")
+	tok := f.token(f.alice, "write")
+	f.logBatch(tok, map[string]any{
+		"run":    "run-1",
+		"points": []map[string]any{point(1, map[string]any{"loss": 0.5, "accuracy": 0.8})},
+	})
+
+	ctx := context.Background()
+	// A project and run that were never written are "no state", not a failure:
+	// the very first batch of a run depends on that.
+	if state, err := f.s.loadRunState(ctx, repo.ID, "never-ingested", "run-1"); err != nil {
+		t.Fatalf("missing project = %v, want the zero state and no error", err)
+	} else if len(state.keys) != 0 || state.status != "" {
+		t.Errorf("missing project state = %+v, want zero", state)
+	}
+	if state, err := f.s.loadRunState(ctx, repo.ID, "proj", "never-logged"); err != nil {
+		t.Fatalf("missing run = %v, want the zero state and no error", err)
+	} else if len(state.keys) != 0 {
+		t.Errorf("missing run state = %+v, want zero", state)
+	}
+
+	f.st.Close()
+	if state, err := f.s.loadRunState(ctx, repo.ID, "proj", "run-1"); err == nil {
+		t.Fatalf("loadRunState over a closed database = %+v with no error; a truncated "+
+			"state would then be written over the run's real metric_keys and summary", state)
 	}
 }

@@ -7,6 +7,11 @@ import type { FailedApiResult } from "@/lib/api-error-message";
 /** The shape every `{ items, total }` listing endpoint answers with. */
 export type PagedListResponse = { items: unknown[]; total: number };
 
+/** Element-wise `Object.is`, since `deps` is a fresh array on every render. */
+function sameDeps(a: React.DependencyList, b: React.DependencyList): boolean {
+  return a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
+}
+
 /**
  * Everything `PaginationControls` needs, handed over as one object.
  *
@@ -76,12 +81,20 @@ export type UsePagedList<R extends PagedListResponse> = {
  *   window past the end of a list that is not empty at all.
  *
  * `deps` is the caller's own input set — a search term, an organisation name,
- * a webhook id — and changing any of them re-reads. **The translator is
- * deliberately not one of them.** Two of the five screens used to fold `t` (or
- * a `describe` built on it) into the dependencies, so switching language
- * refetched the whole listing; the labels re-render on their own, and only
- * `loadError` is a string frozen at fetch time. Keeping `t` out is the
- * behaviour the other three already had, and it is the cheaper of the two.
+ * a webhook id — and changing any of them re-reads *and* rewinds to the first
+ * page: an offset only means anything against the result set it was chosen in,
+ * so paging to offset 200 and then typing a search that matches three rows
+ * used to request page 11 of the new list and land on the out-of-range empty
+ * state. `deps` is compared element-wise with `Object.is`, so every entry has
+ * to be a stable value — a primitive, or an object identity that survives a
+ * re-render — or the rewind fires on every render.
+ *
+ * **The translator is deliberately not one of them.** Two of the five screens
+ * used to fold `t` (or a `describe` built on it) into the dependencies, so
+ * switching language refetched the whole listing; the labels re-render on
+ * their own, and only `loadError` is a string frozen at fetch time. Keeping
+ * `t` out is the behaviour the other three already had, and it is the cheaper
+ * of the two.
  */
 export function usePagedList<R extends PagedListResponse>({
   pageSize,
@@ -101,6 +114,18 @@ export function usePagedList<R extends PagedListResponse>({
   const [offset, setOffset] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+
+  // A change to `deps` selects a different list, so the window into it starts
+  // over. Adjusted during render rather than in an effect: an effect would run
+  // after this render's fetch had already been scheduled for the old offset,
+  // so switching from page 2 would fire a request for page 2 of the new list
+  // and immediately abandon it. React discards this render and re-runs the
+  // component with the new state instead, so only one fetch is ever committed.
+  const [shownDeps, setShownDeps] = useState<React.DependencyList>(deps);
+  if (!sameDeps(shownDeps, deps)) {
+    setShownDeps(deps);
+    if (offset !== 0) setOffset(0);
+  }
 
   // Both callbacks are re-created on every render by their call sites, and
   // `describe` closes over the translator. Reading them through a ref keeps

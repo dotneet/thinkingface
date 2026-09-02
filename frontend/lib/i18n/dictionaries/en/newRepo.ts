@@ -8,6 +8,11 @@ export const newRepo = {
     link: "Log in",
     suffix: " first.",
   },
+  // A backend that answered with an error, or did not answer at all, is not
+  // the same thing as being signed out (DESIGN.md §9) — this is what the
+  // failure says instead of the login notice above.
+  accountLoadFailed: "Couldn't check which namespaces you can create in.",
+  accountLoadFailedHint: "The backend API may be unreachable. Try reloading the page.",
   kind: {
     dataset: "dataset",
     model: "model",

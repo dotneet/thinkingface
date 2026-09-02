@@ -506,16 +506,37 @@ func (s *Server) handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Both free-text fields are validated before anything is written. The
-	// three updates are separate writes, so a request that is going to be
-	// refused for its name must be refused before the other two have already
-	// landed.
+	// The three updates are separate writes with no transaction around them
+	// -- one of them repoints git's HEAD, which no database transaction could
+	// roll back anyway -- so every reason this request has to fail is checked
+	// here, before the first of them lands. Otherwise
+	// {"description":"new","name":"taken"} answers 409 with the description
+	// already committed, which is the one thing a refusal must not do.
+	//
+	// What that buys is all-or-nothing for the request as written; it is not a
+	// lock. A repository created at newName in the window between this check
+	// and the rename still turns into a 409 after the first two writes -- the
+	// store's own constraint is the backstop for that race, and closing it
+	// properly means holding the destination, which a rename does not get to
+	// do. The check below is the one that is otherwise deferred all the way
+	// into resolveTransferTarget; validateName and the description ceiling
+	// were already early, and stay here beside it.
 	newName := ""
 	if req.Name != nil {
 		newName = strings.TrimSpace(*req.Name)
 		if verr := validateName(newName); verr != nil {
 			badRequest(w, "name "+verr.Error())
 			return
+		}
+		if newName != repo.Name {
+			switch _, err := s.store.GetRepo(r.Context(), repo.Kind, repo.Namespace, newName); {
+			case err == nil:
+				conflict(w, repo.Namespace+"/"+newName+" already exists")
+				return
+			case !errors.Is(err, store.ErrNotFound):
+				internalError(w, "check repository name", err)
+				return
+			}
 		}
 	}
 	description := ""

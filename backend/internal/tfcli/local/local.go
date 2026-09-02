@@ -23,6 +23,10 @@ type Options struct {
 	Include []string
 	// Exclude drops paths matching any pattern; applied after Include.
 	Exclude []string
+	// Hidden uploads dot-files and dot-directories found inside the tree,
+	// which are left out by default (see Scan). It does not affect a root
+	// the user named explicitly, which is always scanned.
+	Hidden bool
 }
 
 // File is one file found by Scan.
@@ -52,7 +56,27 @@ const (
 	// ReasonIgnoredDir: ".git" / "__pycache__", skipped by design and
 	// documented, so not worth telling the user about.
 	ReasonIgnoredDir = "ignored directory"
+	// ReasonHidden: a dot-file or dot-directory inside the tree. Left out
+	// by default because repositories here are world-readable and a
+	// project directory routinely holds ".env", ".envrc" or ".aws/" next
+	// to the data the user meant to publish; --hidden opts back in.
+	ReasonHidden = "hidden"
 )
+
+// alwaysKeptDotfiles are the dot-files that are repository content rather
+// than local machine state, so the hidden rule does not apply to them.
+// ".gitattributes" in particular carries the LFS routing rules and must keep
+// travelling with the upload.
+var alwaysKeptDotfiles = map[string]bool{
+	".gitattributes": true,
+	".gitignore":     true,
+}
+
+// isHidden reports whether a path component is a dot-name (".env", ".venv"),
+// excluding "." and ".." which a walk never yields as an entry name anyway.
+func isHidden(name string) bool {
+	return len(name) > 1 && name[0] == '.' && name != ".."
+}
 
 // Skipped is one path Scan deliberately left out of files. Dir means the
 // whole subtree beneath RepoPath went unread, so the walk cannot say what (if
@@ -89,8 +113,12 @@ func SkippedDirs(skipped []Skipped) []string {
 // skipped: ".git" directories, ".DS_Store", "Thumbs.db", "__pycache__"
 // directories, symlinks *inside* the tree that point at directories (to
 // avoid loops; symlinked files are followed), broken symlinks and
-// non-regular files. Results are sorted by RepoPath. A root that does not
-// exist is an error.
+// non-regular files. Dot-files and dot-directories found *inside* the tree
+// are skipped as well unless opts.Hidden is set -- ".env" and friends are
+// local machine state, and a repository here is world-readable -- except for
+// the names in alwaysKeptDotfiles, which are repository content. A root the
+// user named explicitly is always scanned, hidden or not. Results are sorted
+// by RepoPath. A root that does not exist is an error.
 //
 // allPaths reports every path the walk found on disk -- including the ones
 // left out of files, whether by the always-skipped names above or by
@@ -168,6 +196,13 @@ func Scan(root string, opts Options) (files []File, allPaths []string, skipped [
 				skipped = append(skipped, Skipped{RepoPath: repoPath, Dir: true, Reason: ReasonIgnoredDir})
 				return filepath.SkipDir
 			}
+			if !opts.Hidden && isHidden(name) {
+				// Dir: true, so `tf up --delete` treats everything the
+				// remote holds under this path as "not looked at"
+				// rather than "gone locally".
+				skipped = append(skipped, Skipped{RepoPath: repoPath, Dir: true, Reason: ReasonHidden})
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
@@ -198,11 +233,22 @@ func Scan(root string, opts Options) (files []File, allPaths []string, skipped [
 			if name == ".DS_Store" || name == "Thumbs.db" {
 				return nil
 			}
+			if hiddenSkip(name, opts) {
+				skipped = append(skipped, Skipped{RepoPath: repoPath, Reason: ReasonHidden})
+				return nil
+			}
 			keep(target.Size())
 			return nil
 		}
 
 		if name == ".DS_Store" || name == "Thumbs.db" {
+			return nil
+		}
+		if hiddenSkip(name, opts) {
+			// Still in allPaths above: the file exists on disk, so
+			// --delete must not read its absence from the upload as
+			// "deleted locally" and remove the remote copy.
+			skipped = append(skipped, Skipped{RepoPath: repoPath, Reason: ReasonHidden})
 			return nil
 		}
 		if !d.Type().IsRegular() {
@@ -225,6 +271,12 @@ func Scan(root string, opts Options) (files []File, allPaths []string, skipped [
 	sort.Strings(allPaths)
 	sort.Slice(skipped, func(i, j int) bool { return skipped[i].RepoPath < skipped[j].RepoPath })
 	return files, allPaths, skipped, nil
+}
+
+// hiddenSkip reports whether a file named name inside the tree is left out
+// for being hidden.
+func hiddenSkip(name string, opts Options) bool {
+	return !opts.Hidden && isHidden(name) && !alwaysKeptDotfiles[name]
 }
 
 func matchFilters(repoPath string, opts Options) bool {

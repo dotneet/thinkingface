@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +16,19 @@ import (
 	"github.com/dotneet/thinkingface/backend/internal/gitexec"
 	"github.com/dotneet/thinkingface/backend/internal/storage"
 )
+
+// ErrIndexMissing reports that a repository which demonstrably has WAL state —
+// a local copy holding refs, or packs in object storage — has no index.json.
+//
+// This is the §13 "index corrupted / deleted" failure, and it is deliberately
+// its own error rather than a variant of "empty repository". The two states are
+// byte-identical to a reader of the bucket (ReadIndex maps a missing object to
+// an empty index at generation 0), and confusing them is destructive in both
+// directions: serving the stale local copy hides the loss until the next push
+// truncates the repository to the one ref it touched, and sweeping the packs
+// destroys the material docs/dev/wal-index-recovery.md needs to put the index
+// back.
+var ErrIndexMissing = errors.New("wal: index is missing but the repository has WAL state")
 
 // StateFileName is the local bookkeeping file that records which index
 // generation a bare repository currently reflects. It lives directly in the
@@ -32,7 +47,34 @@ type localState struct {
 	Seq        int               `json:"seq"`
 }
 
+// Options steers a materialisation beyond what the index alone can say.
+//
+// The zero value is the pre-cutover behaviour: no known default branch, and
+// the WAL treated as a mirror rather than the truth. Shadow and off mode keep
+// using it, which is what makes the authoritative-only checks below impossible
+// to trip during the migration phases that legitimately have no index yet.
+type Options struct {
+	// DefaultBranch is the repository's configured default branch
+	// (store.Repo.DefaultBranch), without the refs/heads/ prefix. The index
+	// does not carry the symbolic HEAD, so without this alignHEAD has to
+	// guess; see the comment there for what the guess costs. Empty means
+	// "unknown", which is the only reason the guess still exists.
+	DefaultBranch string
+	// Authoritative says the WAL — not the directory on disk — is the source
+	// of truth for this repository (§15 Phase 4+). It turns "no index" from
+	// an expected migration state into the §13 failure it is by then.
+	Authoritative bool
+}
+
 // Materialize brings the bare repository at gitDir up to the current index
+// (§9) with no extra knowledge about the repository. See MaterializeWith for
+// the form that takes it; this one is what the migration and verification
+// tools use, where a repository's metadata is not at hand.
+func Materialize(ctx context.Context, st storage.Storage, gitDir, storagePath string) error {
+	return MaterializeWith(ctx, st, gitDir, storagePath, Options{})
+}
+
+// MaterializeWith brings the bare repository at gitDir up to the current index
 // (§9). Callers must hold the per-repository lock; concurrent materialisation
 // of the same directory is not safe.
 //
@@ -41,26 +83,52 @@ type localState struct {
 // reverse order would leave refs pointing at objects that were never applied,
 // which is a corrupt repository. The state file is written last for the same
 // reason: it is only true once everything it claims has happened.
-func Materialize(ctx context.Context, st storage.Storage, gitDir, storagePath string) error {
+func MaterializeWith(ctx context.Context, st storage.Storage, gitDir, storagePath string, opts Options) error {
 	idx, gen, err := ReadIndex(ctx, st, storagePath)
 	if err != nil {
 		return err
 	}
 	if gen == 0 {
-		// No index object exists: this repository has never been written
-		// through the WAL. Rebuilding from an empty index would delete every
-		// local ref, so leave the copy untouched and let the first write
-		// create the index.
+		// No index object exists. Rebuilding from an empty index would delete
+		// every local ref, so this never rewrites the copy — the only
+		// question is whether it is safe to keep serving it.
 		//
-		// This is load bearing during the shadow-write phases of the
-		// migration (docs/dev/continuity-design.md §15 Phase 2/3), where the
-		// on-disk copy is still the source of truth and many repositories
-		// have no index yet. Once the WAL is authoritative (Phase 4+), a
-		// missing index on a repository that should have one is the §13
-		// "index corrupted / missing" failure and deserves an alarm — revisit
-		// this branch when the cutover lands rather than letting it silently
-		// absorb that state forever.
-		return nil
+		// Shadow / off (§15 Phase 2/3): yes, and it is the common case. The
+		// on-disk copy is still the source of truth and most repositories
+		// have no index yet.
+		if !opts.Authoritative {
+			return nil
+		}
+		// Authoritative (Phase 4+, what infra/main.tf deploys): "no index"
+		// means one of two things and they must not share an outcome.
+		//
+		//   * a repository that was never written — freshly created, or one
+		//     this instance has never served. No local copy, or a local copy
+		//     with no refs. Nothing to serve wrongly; the first write creates
+		//     the index.
+		//   * a repository whose index is gone (deleted, or the bucket/prefix
+		//     was repointed) while this instance still holds a materialised
+		//     copy. Serving it means answering from a cache with no authority
+		//     behind it, and the next push — whose <old> for a "new" ref is
+		//     "" — writes a fresh index containing only that ref, truncating
+		//     the repository for every other instance. §13 calls this the
+		//     single point of failure; the recovery is
+		//     docs/dev/wal-index-recovery.md, and it needs an operator, not a
+		//     silent fallback.
+		refs, rerr := localRefsIfAny(ctx, gitDir)
+		if rerr != nil {
+			return rerr
+		}
+		if len(refs) == 0 {
+			return nil
+		}
+		local, haveState := readLocalState(gitDir)
+		slog.Error("wal index is missing for a repository this instance has materialised; refusing to serve the stale local copy",
+			"repo", storagePath, "local_refs", len(refs),
+			"last_known_generation", local.Generation, "have_local_state", haveState,
+			"recovery", "docs/dev/wal-index-recovery.md")
+		return fmt.Errorf("%w: %s (%d local refs, last known generation %d)",
+			ErrIndexMissing, storagePath, len(refs), local.Generation)
 	}
 
 	local, haveState := readLocalState(gitDir)
@@ -96,10 +164,25 @@ func Materialize(ctx context.Context, st storage.Storage, gitDir, storagePath st
 		}
 	}
 
-	if err := writeRefs(ctx, gitDir, idx.Refs); err != nil {
+	if err := writeRefs(ctx, gitDir, idx.Refs, opts.DefaultBranch); err != nil {
 		return err
 	}
 	return writeLocalState(gitDir, gen, idx)
+}
+
+// localRefsIfAny reads the on-disk refs of a directory that may not be a
+// repository at all. "Not a repository" is not an error here: it is the
+// answer — a repository this instance has never served has no local copy, and
+// that is exactly the state that must stay a no-op.
+func localRefsIfAny(ctx context.Context, gitDir string) (map[string]string, error) {
+	if !isBareRepo(gitDir) {
+		return nil, nil
+	}
+	refs, err := listRefs(ctx, gitDir)
+	if err != nil {
+		return nil, fmt.Errorf("read local refs %s: %w", gitDir, err)
+	}
+	return refs, nil
 }
 
 // LocalGeneration reports the index generation the local copy reflects, or 0
@@ -235,7 +318,7 @@ func applyPack(ctx context.Context, st storage.Storage, gitDir, key string) erro
 //
 // No old-value assertions are used. The index is the authority; whatever the
 // local copy believed is irrelevant (invariant 5 of §5).
-func writeRefs(ctx context.Context, gitDir string, refs map[string]string) error {
+func writeRefs(ctx context.Context, gitDir string, refs map[string]string, defaultBranch string) error {
 	current, err := listRefs(ctx, gitDir)
 	if err != nil {
 		return err
@@ -273,7 +356,7 @@ func writeRefs(ctx context.Context, gitDir string, refs map[string]string) error
 			return fmt.Errorf("update-ref --stdin: %w: %s", err, strings.TrimSpace(stderr.String()))
 		}
 	}
-	return alignHEAD(ctx, gitDir, refs)
+	return alignHEAD(ctx, gitDir, refs, defaultBranch)
 }
 
 func listRefs(ctx context.Context, gitDir string) (map[string]string, error) {
@@ -295,42 +378,50 @@ func listRefs(ctx context.Context, gitDir string) (map[string]string, error) {
 	return refs, nil
 }
 
-// alignHEAD keeps the symbolic HEAD pointing at a branch that exists, so clones
-// of a materialised copy check something out.
+// alignHEAD points the symbolic HEAD at the repository's default branch, so a
+// clone of a materialised copy checks out what the repository says it should.
 //
-// TODO(continuity-design): the default branch is repository metadata (Postgres
-// `default_branch`) and the index does not carry it, so this reconstructs it
-// with a rule — keep HEAD if its target still exists, else prefer
-// refs/heads/main, else the alphabetically first branch. A repository whose
-// default branch is neither "main" nor first alphabetically gets the wrong HEAD
-// after a cache rebuild. Recording the symref in the index (a schema change)
-// is the real fix; §9 leaves it open.
-func alignHEAD(ctx context.Context, gitDir string, refs map[string]string) error {
-	out, err := runGit(ctx, gitDir, "symbolic-ref", "--quiet", "HEAD")
-	if err == nil {
-		if _, ok := refs[strings.TrimSpace(out)]; ok {
-			return nil
-		}
-	}
-
+// defaultBranch is the configured branch (store.Repo.DefaultBranch), passed in
+// by the caller because the index does not carry the symref. When it is known
+// it wins outright — including when the branch is unborn, which is what an
+// empty repository's HEAD is supposed to look like, and which recreateBare
+// otherwise leaves seeded as "main".
+//
+// The guess only survives for callers that cannot know: `wal-verify`, `compact`
+// and other tooling that works from the bucket alone. It is the old rule — keep
+// HEAD if its target still exists, else prefer refs/heads/main, else the
+// alphabetically first branch — and it is wrong for a repository whose default
+// branch is neither. That is tolerable there (nothing clones from a scratch
+// directory) and is why the parameter exists for the paths that serve clients.
+func alignHEAD(ctx context.Context, gitDir string, refs map[string]string, defaultBranch string) error {
 	target := ""
-	if _, ok := refs["refs/heads/main"]; ok {
-		target = "refs/heads/main"
+	if defaultBranch != "" {
+		target = "refs/heads/" + defaultBranch
 	} else {
-		branches := make([]string, 0)
-		for ref := range refs {
-			if strings.HasPrefix(ref, "refs/heads/") {
-				branches = append(branches, ref)
+		out, err := runGit(ctx, gitDir, "symbolic-ref", "--quiet", "HEAD")
+		if err == nil {
+			if _, ok := refs[strings.TrimSpace(out)]; ok {
+				return nil
 			}
 		}
-		sort.Strings(branches)
-		if len(branches) > 0 {
-			target = branches[0]
+		if _, ok := refs["refs/heads/main"]; ok {
+			target = "refs/heads/main"
+		} else {
+			branches := make([]string, 0)
+			for ref := range refs {
+				if strings.HasPrefix(ref, "refs/heads/") {
+					branches = append(branches, ref)
+				}
+			}
+			sort.Strings(branches)
+			if len(branches) > 0 {
+				target = branches[0]
+			}
 		}
 	}
 	if target == "" {
 		return nil // no branches at all: leave whatever init chose
 	}
-	_, err = runGit(ctx, gitDir, "symbolic-ref", "HEAD", target)
+	_, err := runGit(ctx, gitDir, "symbolic-ref", "HEAD", target)
 	return err
 }

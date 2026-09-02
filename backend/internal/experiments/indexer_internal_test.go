@@ -196,3 +196,76 @@ func TestIndexedRunStatus(t *testing.T) {
 		t.Errorf("error %q does not name the run", err)
 	}
 }
+
+// TestIndexRepo_KeepsARunThatLoggedNoPoints covers the run shape the prune
+// used to destroy.
+//
+// `trackio.init(...)` followed by `finish()` with no `log()` in between -- a
+// job that crashed before its first metric, or one that only records artifacts
+// -- creates a run through the API alone. It is in no parquet and holds no
+// buffered points, so DeleteProjectRunsNotIn saw exactly a ghost: it listed
+// fine, and then vanished on the next index, which happens after any push and
+// after any flush. Its tags, note, baseline flag and produced-model rows went
+// with it through the foreign key's cascade.
+//
+// num_points is what tells the two apart: the indexer builds a run from rows
+// it scanned, so a run it created always has some, and the upsert only ever
+// raises the count.
+func TestIndexRepo_KeepsARunThatLoggedNoPoints(t *testing.T) {
+	h := newExpHarness(t)
+	h.commitParquet("demo.parquet",
+		[]flushColumn{
+			stringColumn("run_name", false),
+			int64Column("step"),
+			doubleColumn("loss"),
+		},
+		[]map[string]any{{"run_name": "logged", "step": int64(1), "loss": 0.5}})
+
+	project, err := h.st.GetExpProject(h.ctx, h.repo.ID, "demo")
+	if err != nil {
+		t.Fatalf("get project: %v", err)
+	}
+	// What POST .../finish writes for a run that never logged anything.
+	if _, err := h.st.UpsertExpRunWith(h.ctx, project.ID, store.ExpRunUpsert{
+		Name: "crashed-early", Status: "failed",
+	}); err != nil {
+		t.Fatalf("finish run: %v", err)
+	}
+	if _, err := h.st.UpdateExpRunAnnotation(h.ctx, project.ID, "crashed-early",
+		store.RunAnnotation{Note: ptrTo("OOM before the first step")}); err != nil {
+		t.Fatalf("annotate run: %v", err)
+	}
+	// A genuine ghost for contrast: a run the indexer once wrote (hence a
+	// point count) that a rewritten export no longer lists.
+	if _, err := h.st.UpsertExpRunWith(h.ctx, project.ID, store.ExpRunUpsert{
+		Name: "dropped-from-export", Status: "finished", NumPoints: 4,
+	}); err != nil {
+		t.Fatalf("seed ghost: %v", err)
+	}
+
+	h.reindex()
+
+	runs, err := h.st.ListExpRuns(h.ctx, project.ID)
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+	names := map[string]store.ExpRun{}
+	for _, r := range runs {
+		names[r.Name] = r
+	}
+	if _, ok := names["logged"]; !ok {
+		t.Errorf("runs = %v, want the parquet's own run", names)
+	}
+	kept, ok := names["crashed-early"]
+	if !ok {
+		t.Fatalf("runs = %v, want the API-created run to survive the index", names)
+	}
+	if kept.Note != "OOM before the first step" {
+		t.Errorf("note = %q, want the annotation to survive with it", kept.Note)
+	}
+	if _, ok := names["dropped-from-export"]; ok {
+		t.Errorf("runs = %v, want the run that vanished from the export to be pruned", names)
+	}
+}
+
+func ptrTo[T any](v T) *T { return &v }

@@ -16,22 +16,37 @@ deliberate design goal.
   in the destination side of the `gcloud storage cp` script
   `GET /api/v1/repos/{kind}/{ns}/{name}/gcs/{rev}` generates), and `wal/` (the
   git write-ahead log — primary persistence for git data, see
-  `docs/dev/continuity-design.md` §3; noncurrent versions of `wal/` objects are
-  kept indefinitely, since old `index.json` generations are the recovery path
-  for the WAL's single point of failure — §13/§16, recovery procedure in
-  `docs/dev/wal-index-recovery.md`). Which *live* `lfs/`/`blobs/` objects get
-  deleted is reference-counted GC (`thinkingface gc`), never a bucket
-  lifecycle rule keyed on object age — but because the bucket has versioning
-  enabled, a gc delete only makes an object noncurrent, so a separate
-  lifecycle rule (`var.lfs_blobs_noncurrent_retention_days`, default 30 days,
-  scoped to `lfs/`/`blobs/` only — never `wal/`) deletes those noncurrent
-  versions so gc's deletes actually free storage. Versioning and soft delete
-  otherwise stay purely as a safety net against operator error
+  `docs/dev/continuity-design.md` §3; noncurrent versions of
+  `wal/**/index.json` are kept indefinitely, since old `index.json`
+  generations are the recovery path for the WAL's single point of failure —
+  §13/§16, recovery procedure in `docs/dev/wal-index-recovery.md`). Which
+  *live* `lfs/`/`blobs/` objects get deleted is reference-counted GC
+  (`thinkingface gc`), never a bucket lifecycle rule keyed on object age — but
+  because the bucket has versioning enabled, *every* delete this system makes
+  only turns an object noncurrent, so three lifecycle rules prune those
+  noncurrent versions and make the deletes actually free storage:
+  `var.lfs_blobs_noncurrent_retention_days` (default 30 days, `lfs/`/`blobs/`,
+  what `thinkingface gc` deletes), `var.tmp_uploads_noncurrent_retention_days`
+  (default 1 day, `tmp/uploads/`, the LFS promote handler's staging copy of
+  every uploaded object — without it each push was billed twice forever) and
+  `var.wal_pack_noncurrent_retention_days` (default 30 days, `wal/**/*.pack`,
+  the packs WAL compaction supersedes — matched by suffix precisely so
+  `index.json` generations stay untouched). Versioning and soft delete
+  otherwise stay purely as a safety net against operator error. The bucket
+  also carries `lifecycle { prevent_destroy = true }`, so tearing it down on
+  purpose means removing that block first
 - `google_artifact_registry_repository.images` — Docker repo for
   backend/frontend images
 - `google_sql_database_instance.main` — Cloud SQL for PostgreSQL 17, private
-  IP only (via `google_service_networking_connection`), automated daily
-  backups + PITR. Holds metadata only (repos / ACL / LFS ledger / jobs /
+  IP only (via `google_service_networking_connection`) and `ssl_mode =
+  "ENCRYPTED_ONLY"`, so the session — including the password sent during the
+  connect handshake — is encrypted rather than merely off the internet; the
+  `DATABASE_URL` secret is built with `sslmode=require` to match. Deletion is
+  guarded three ways (provider `deletion_protection`, GCP-side
+  `settings.deletion_protection_enabled` so `gcloud sql instances delete`
+  fails too, and `lifecycle { prevent_destroy = true }` so no plan reaches the
+  delete — including the one that setting `database_backend = "sqlite"` would
+  produce). Automated daily backups + PITR. Holds metadata only (repos / ACL / LFS ledger / jobs /
   experiments) — it is never on the git consistency path
   (`docs/dev/continuity-design.md` §1, §5 invariant 6)
 - `google_service_account.api` — the api workload identity, scoped to:
@@ -90,6 +105,7 @@ domain strategy for your environment.
 | Concurrency | 40 (`max_instance_request_concurrency`) | The default of 80 is too many for git processes — memory is the limiting factor |
 | min/max instances | 1 / `var.api_max_instances` (default 4; always 1 when `database_backend = "sqlite"`) | min=1 keeps the cache warm and avoids cold starts; max is also pinned to 1 for sqlite since Litestream assumes a single writer |
 | Request timeout | 3600s | For large clones |
+| Health probes | startup + liveness `GET /healthz` (liveness: 30s period, 6 failures ≈ 3 min) | `min_instance_count = 1` with `cpu_idle = false` means nothing ever recycles a wedged instance on its own: 40 stuck `git-upload-pack` children exhaust concurrency while the listener stays open, and Cloud Run keeps routing to it. `/healthz` is answered in-process and touches neither the database nor the bucket, deliberately — a liveness probe that failed on a Cloud SQL blip would restart the whole service at once. The margins are wide enough that serving an hour-long clone never looks like a wedge |
 | `GIT_ROOT` | `/tmp/git` | tmpfs. **A warm cache, not the source of truth** — the source of truth is the WAL in GCS |
 | `TF_VIEWER_CACHE_DIR` | `/tmp/cache` | tmpfs. Scratch space for WAL compaction only — the parquet viewer no longer caches to disk (it reads via storage range requests, see `TF_VIEWER_METADATA_CACHE_BYTES`) |
 

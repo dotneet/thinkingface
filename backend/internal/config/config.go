@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -282,11 +283,16 @@ func Load() (*Config, error) {
 	default:
 		return nil, fmt.Errorf("TF_ORG_CREATION must be anyone or admin, got %q", c.OrgCreation)
 	}
-	if c.WALMode != "off" && c.GitHooksPath == "" {
-		// Without the hook, pushes over git smart HTTP would bypass the WAL
-		// entirely — silently in shadow mode, catastrophically once
-		// authoritative. Refuse to start rather than run half-wired.
-		return nil, fmt.Errorf("TF_GIT_HOOKS_PATH is required when TF_WAL_MODE=%s", c.WALMode)
+	if c.WALMode != "off" {
+		if c.GitHooksPath == "" {
+			// Without the hook, pushes over git smart HTTP would bypass the
+			// WAL entirely — silently in shadow mode, catastrophically once
+			// authoritative. Refuse to start rather than run half-wired.
+			return nil, fmt.Errorf("TF_GIT_HOOKS_PATH is required when TF_WAL_MODE=%s", c.WALMode)
+		}
+		if err := checkPreReceiveHook(c.GitHooksPath); err != nil {
+			return nil, fmt.Errorf("TF_WAL_MODE=%s: %w", c.WALMode, err)
+		}
 	}
 	// The development defaults are public knowledge -- the seeded admin
 	// password is in .env.example, and the default session secret lets anyone
@@ -382,6 +388,49 @@ func Load() (*Config, error) {
 		}
 	}
 	return c, nil
+}
+
+// PreReceiveHookName is the file git looks for inside core.hooksPath when a
+// push arrives. Named because both the check below and the deployment that
+// bakes it into the image have to agree on it
+// (docs/dev/continuity-design.md §6.2).
+const PreReceiveHookName = "pre-receive"
+
+// checkPreReceiveHook is the fail-closed half of the TF_GIT_HOOKS_PATH
+// requirement, and it is a filesystem check inside Load for a reason.
+//
+// A non-empty path only proves an operator typed something. git treats a hook
+// that is missing, is a directory, or is not executable as *no hook at all*:
+// it runs no hook, reports nothing, and lets the push proceed. So an image
+// that lost hooks/pre-receive, a path with a typo in it, or a bind mount that
+// shadowed the directory produces a server that applies every push over HTTP
+// and SSH to disk and acks it to the client with no WAL entry and no CAS —
+// invariant 4 of §5 broken silently. Nothing surfaces until the next
+// Materialize, where writeRefs projects the index over the copy and deletes
+// the refs those pushes created.
+//
+// Startup is the only honest place to catch that: by the time a push arrives
+// the damage is already acknowledged.
+func checkPreReceiveHook(hooksPath string) error {
+	hook := filepath.Join(hooksPath, PreReceiveHookName)
+	info, err := os.Stat(hook)
+	if err != nil {
+		return fmt.Errorf("the pre-receive hook %s is unreadable (%w): "+
+			"without it every git push is applied and acknowledged without a WAL entry", hook, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("the pre-receive hook %s is a directory, not an executable", hook)
+	}
+	// Any of the three execute bits: the server may run as owner, as a member
+	// of the file's group, or as neither, and which one applies is a property
+	// of the deployment rather than of the image. Requiring all three would
+	// reject a correctly locked-down 0700 hook owned by the server's user.
+	if info.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("the pre-receive hook %s is not executable (mode %s): "+
+			"git silently skips a non-executable hook, so every git push would be "+
+			"applied and acknowledged without a WAL entry", hook, info.Mode().Perm())
+	}
+	return nil
 }
 
 func env(key, def string) string {

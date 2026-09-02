@@ -29,8 +29,31 @@ const DefaultGCGracePeriod = 24 * time.Hour
 //     previous index may still be materialising from it. minAge must exceed the
 //     longest plausible materialisation; DefaultGCGracePeriod is that number.
 //
+// Rule 2 has a limit worth stating plainly, because it is not obvious from the
+// code: obj.Updated is the pack's *upload* time, not the moment it stopped
+// being referenced. For a CAS loser the two coincide, so minAge means what it
+// says. For a pack a compaction folded away they do not — compaction only
+// triggers past DefaultCompactionThreshold entries, which by definition took
+// time to accumulate, so those packs are already older than minAge when the
+// CAS drops them and this sweep would collect them seconds later, while an
+// instance that read the pre-compaction index is still applying them. The
+// grace for that case therefore cannot come from age; it comes from the caller
+// never sweeping a repository in the same run that compacted it (see
+// runCompact in cmd/thinkingface/walops.go). That costs nothing to persist,
+// which is the reason it is shaped that way rather than as an
+// "unreferenced since" timestamp in the bucket that two compactors would race
+// to write.
+//
 // index.json is structurally out of reach: it lives under neither base/ nor
 // entries/, so it is never listed as a candidate.
+//
+// A repository with packs but no index returns ErrIndexMissing and sweeps
+// nothing. "No index" reads as "nothing is referenced", and acting on that
+// would delete every base/ and entries/ pack the repository has — which is
+// precisely the material docs/dev/wal-index-recovery.md restores an index
+// from. The scheduled compaction job would otherwise turn a recoverable
+// incident into an unrecoverable one on its next tick. A repository with no
+// packs at all is a genuine empty WAL and stays a silent no-op.
 //
 // Deletion is per object and best effort in the sense that a failure stops the
 // sweep — the packs already deleted are returned so the caller can log what
@@ -46,9 +69,13 @@ func GCOrphans(ctx context.Context, st storage.Storage, storagePath string, minA
 
 	// Read the index *after* listing, and use nothing older: it must reflect at
 	// least everything the listing saw (rule 1 above).
-	idx, _, err := ReadIndex(ctx, st, storagePath)
+	idx, gen, err := ReadIndex(ctx, st, storagePath)
 	if err != nil {
 		return nil, err
+	}
+	if gen == 0 {
+		return nil, fmt.Errorf("%w: %s (%d packs present, sweep skipped)",
+			ErrIndexMissing, storagePath, len(candidates))
 	}
 	referenced := make(map[string]bool, len(idx.Entries)+1)
 	if idx.Base != "" {

@@ -38,11 +38,11 @@ func mkRepoDir(t *testing.T, root, kindDir, ns, name string, size int, managed b
 func evictionManager(t *testing.T, cacheBytes int64) *Manager {
 	t.Helper()
 	m := NewManager(t.TempDir())
-	m.EnableWAL(nil, cacheBytes) // maybeEvict never touches the store
+	m.EnableWAL(nil, cacheBytes) // the eviction pass never touches the store
 	return m
 }
 
-func TestMaybeEvict_LegacyDirsAreNeitherBudgetedNorRemoved(t *testing.T) {
+func TestEvictOnce_LegacyDirsAreNeitherBudgetedNorRemoved(t *testing.T) {
 	m := evictionManager(t, 1024)
 	// A legacy (pre-WAL) directory far over budget on its own: without the
 	// evictable-only budget it would doom every managed repository (H-3-1).
@@ -50,7 +50,7 @@ func TestMaybeEvict_LegacyDirsAreNeitherBudgetedNorRemoved(t *testing.T) {
 	managed := mkRepoDir(t, m.root, "models", "acme", "small", 128, true)
 	m.wal.lastUse[managed] = time.Now().Add(-24 * time.Hour)
 
-	m.maybeEvict()
+	m.evictOnce()
 
 	for _, dir := range []string{legacy, managed} {
 		if _, err := os.Stat(dir); err != nil {
@@ -59,7 +59,7 @@ func TestMaybeEvict_LegacyDirsAreNeitherBudgetedNorRemoved(t *testing.T) {
 	}
 }
 
-func TestMaybeEvict_RecentlyUsedSurvivesEvenOverBudget(t *testing.T) {
+func TestEvictOnce_RecentlyUsedSurvivesEvenOverBudget(t *testing.T) {
 	m := evictionManager(t, 1024)
 	// A single repository larger than the whole budget, used just now: the
 	// idle window is what stops it evicting itself right after its own
@@ -67,14 +67,14 @@ func TestMaybeEvict_RecentlyUsedSurvivesEvenOverBudget(t *testing.T) {
 	big := mkRepoDir(t, m.root, "models", "acme", "big", 4096, true)
 	m.wal.lastUse[big] = time.Now()
 
-	m.maybeEvict()
+	m.evictOnce()
 
 	if _, err := os.Stat(big); err != nil {
 		t.Fatal("a just-used repository must never be evicted")
 	}
 }
 
-func TestMaybeEvict_IdleOldestGoFirstUntilUnderBudget(t *testing.T) {
+func TestEvictOnce_IdleOldestGoFirstUntilUnderBudget(t *testing.T) {
 	m := evictionManager(t, 3000)
 	oldest := mkRepoDir(t, m.root, "models", "acme", "oldest", 2048, true)
 	middle := mkRepoDir(t, m.root, "models", "acme", "middle", 2048, true)
@@ -83,7 +83,7 @@ func TestMaybeEvict_IdleOldestGoFirstUntilUnderBudget(t *testing.T) {
 	m.wal.lastUse[middle] = time.Now().Add(-2 * time.Hour)
 	m.wal.lastUse[newest] = time.Now().Add(-1 * time.Hour)
 
-	m.maybeEvict()
+	m.evictOnce()
 
 	if _, err := os.Stat(oldest); err == nil {
 		t.Fatal("oldest idle repository should have been evicted")
@@ -96,7 +96,7 @@ func TestMaybeEvict_IdleOldestGoFirstUntilUnderBudget(t *testing.T) {
 	}
 }
 
-func TestMaybeEvict_LockedRepositoryIsSkipped(t *testing.T) {
+func TestEvictOnce_LockedRepositoryIsSkipped(t *testing.T) {
 	m := evictionManager(t, 1024)
 	busy := mkRepoDir(t, m.root, "models", "acme", "busy", 4096, true)
 	m.wal.lastUse[busy] = time.Now().Add(-24 * time.Hour)
@@ -104,7 +104,7 @@ func TestMaybeEvict_LockedRepositoryIsSkipped(t *testing.T) {
 	lock.Lock()
 	defer lock.Unlock()
 
-	m.maybeEvict()
+	m.evictOnce()
 
 	if _, err := os.Stat(busy); err != nil {
 		t.Fatal("a locked repository must never be evicted")
@@ -116,7 +116,7 @@ func TestMaybeEvict_LockedRepositoryIsSkipped(t *testing.T) {
 // eviction must treat {root}/repos/{ulid}.git (two levels) exactly like
 // {root}/{models|datasets}/{ns}/{name}.git (three levels) — any directory
 // ending in ".git", wherever it sits under root.
-func TestMaybeEvict_FindsBothLegacyAndNewStoragePathShapes(t *testing.T) {
+func TestEvictOnce_FindsBothLegacyAndNewStoragePathShapes(t *testing.T) {
 	m := evictionManager(t, 1024)
 	legacyManaged := mkRepoDir(t, m.root, "models", "acme", "small", 128, true)
 	m.wal.lastUse[legacyManaged] = time.Now().Add(-24 * time.Hour)
@@ -134,24 +134,74 @@ func TestMaybeEvict_FindsBothLegacyAndNewStoragePathShapes(t *testing.T) {
 	}
 	m.wal.lastUse[newDir] = time.Now().Add(-24 * time.Hour)
 
-	m.maybeEvict()
+	m.evictOnce()
 
 	if _, err := os.Stat(newDir); err == nil {
 		t.Fatal("repos/{ulid}.git (new storage_path shape) was not found by the walker and so was never evicted")
 	}
 }
 
-func TestMaybeEvict_ScanIntervalThrottles(t *testing.T) {
+func TestTriggerEvict_ScanIntervalThrottles(t *testing.T) {
 	m := evictionManager(t, 1024)
 	victim := mkRepoDir(t, m.root, "models", "acme", "victim", 4096, true)
 	m.wal.lastUse[victim] = time.Now().Add(-24 * time.Hour)
 	m.wal.lastScan = time.Now() // a scan just happened
 
-	m.maybeEvict()
+	m.triggerEvict()
 
+	// No pass was scheduled, so there is nothing to wait for -- but give a
+	// wrongly scheduled one every chance to do its damage before asserting.
+	waitForEvictionIdle(t, m)
 	if _, err := os.Stat(victim); err != nil {
-		t.Fatal("within the scan interval maybeEvict must be a no-op")
+		t.Fatal("within the scan interval triggerEvict must schedule nothing")
 	}
+}
+
+// The scan is a WalkDir of the whole git root plus a dirSize walk per
+// repository; a request must never wait for it. The gate makes the pass block
+// on a locked repository, so a synchronous implementation would deadlock this
+// test rather than merely slow a request down.
+func TestTriggerEvict_DoesNotRunOnTheCallersGoroutine(t *testing.T) {
+	m := evictionManager(t, 1024)
+	victim := mkRepoDir(t, m.root, "models", "acme", "victim", 4096, true)
+	m.wal.lastUse[victim] = time.Now().Add(-24 * time.Hour)
+	m.wal.lastScan = time.Now().Add(-time.Hour) // the interval has lapsed
+
+	// Hold the victim's lock: evictDown's TryLock fails, so the pass finishes
+	// without deleting anything, and the only thing being asserted is that
+	// the caller was never the one doing the walking.
+	lock := m.lockFor(victim)
+	lock.Lock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.triggerEvict()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("triggerEvict blocked its caller: the scan is still on the request path")
+	}
+	lock.Unlock()
+	waitForEvictionIdle(t, m)
+}
+
+// waitForEvictionIdle blocks until no eviction pass is running, so an
+// assertion about the filesystem is not racing one.
+func waitForEvictionIdle(t *testing.T, m *Manager) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		m.wal.mu.Lock()
+		running := m.wal.scanning
+		m.wal.mu.Unlock()
+		if !running {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("an eviction pass never finished")
 }
 
 // indexOnlyStore serves exactly one WAL index object — the minimum Storage
@@ -261,7 +311,7 @@ func TestEnsureLocal_SurvivesConcurrentEviction(t *testing.T) {
 	st := &indexOnlyStore{}
 	// A one-byte budget, not 512: these are stub repositories of a few dozen
 	// bytes, so with 512 the first successful pass evicts B and everything
-	// left fits, after which maybeEvict returns before it ever looks at idle
+	// left fits, after which the pass returns before it ever looks at idle
 	// time. The eviction pressure this test is named for lasted one round.
 	m.EnableWAL(st, 1)
 	dirA := walManagedRepo(t, m, st, "datasets/acme/widgets")
@@ -284,7 +334,7 @@ func TestEnsureLocal_SurvivesConcurrentEviction(t *testing.T) {
 	_ = os.Chtimes(filepath.Join(dirB, wal.StateFileName), oldT, oldT)
 
 	// The evictor runs until the loop below is finished rather than for a
-	// fixed number of rounds: maybeEvict is microseconds, so a counted loop
+	// fixed number of rounds: one pass is microseconds, so a counted loop
 	// drains before the first EnsureLocal even starts and the two never
 	// overlap at all (this test used to report the race happening in 0 of 300
 	// rounds).
@@ -298,15 +348,12 @@ func TestEnsureLocal_SurvivesConcurrentEviction(t *testing.T) {
 				return
 			default:
 			}
-			m.wal.mu.Lock()
-			m.wal.lastScan = time.Time{} // defeat the scan throttle
-			m.wal.mu.Unlock()
-			m.maybeEvict()
+			m.evictOnce()
 		}
 	}()
 	// Deferred, not written after the loop: a t.Fatalf below unwinds through
 	// runtime.Goexit, which would skip a trailing close and leave this
-	// goroutine spinning maybeEvict for the rest of the package's run.
+	// goroutine spinning the eviction pass for the rest of the package's run.
 	defer func() {
 		close(stop)
 		<-done
@@ -387,7 +434,7 @@ func TestEvictDown_SkipsRepositoryStampedAfterTheScan(t *testing.T) {
 
 // The sharp version of the Bugbot regression: the stamp must be visible the
 // instant the repo lock is released, because that instant is the earliest a
-// concurrent maybeEvict's TryLock can succeed. The gate parks EnsureLocal
+// concurrent eviction pass's TryLock can succeed. The gate parks EnsureLocal
 // inside Materialize while holding the lock; a spinning watcher then races
 // the unlock itself. With the stamp inside the lock the watcher can never
 // observe "lock free, stamp missing"; with the pre-fix ordering it can.

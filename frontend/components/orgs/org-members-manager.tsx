@@ -45,9 +45,19 @@ export function OrgMembersManager({
   // open until the request finishes; the page-level Alert below the table
   // carries the failures that have no dialog (a role change).
   const [dialogError, setDialogError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  // Which member has a write in flight, and which one — the Remove button used
+  // to say "Removing…" while a role change was running, because both wrote the
+  // same bare username here.
+  const [busy, setBusy] = useState<{ username: string; kind: "remove" | "role" } | null>(null);
   // Member whose removal is pending confirmation in the ConfirmDialog.
   const [confirmTarget, setConfirmTarget] = useState<OrgMember | null>(null);
+  // Role change pending confirmation: the member and the role they would move
+  // to. A privilege change is confirmed here for the same reason the admin
+  // screens confirm one (components/settings/admin-user-confirms.tsx) — the
+  // trigger is a native <select>, so a scroll wheel over a focused control or
+  // a mis-release in the open dropdown used to promote a read-only member to
+  // organisation admin with no prompt and nothing to undo it.
+  const [confirmRole, setConfirmRole] = useState<{ member: OrgMember; next: OrgRole } | null>(null);
 
   const [username, setUsername] = useState("");
   const [role, setRole] = useState<OrgRole>("read");
@@ -90,19 +100,32 @@ export function OrgMembersManager({
     await refresh();
   }
 
-  async function handleRoleChange(member: OrgMember, next: string) {
+  // The <select> is controlled on `member.role`, so declining the dialog (or
+  // simply opening it) re-renders the row back to the role the server holds:
+  // nothing is written until the confirmation fires.
+  function handleRoleChange(member: OrgMember, next: string) {
     if (!isOrgRole(next) || next === member.role) return;
-    setBusy(member.username);
+    // Clear the previous failure: both dialogs share the slot, and a stale
+    // error under a different name reads as this change having already failed.
+    setDialogError(null);
+    setActionError(null);
+    setConfirmRole({ member, next });
+  }
+
+  async function applyRoleChange(member: OrgMember, next: OrgRole) {
+    setBusy({ username: member.username, kind: "role" });
+    setDialogError(null);
     setActionError(null);
     const result = await updateMemberRole(org, member.username, next);
     setBusy(null);
     if (!result.ok) {
       const key = orgErrorKey(result);
-      setActionError(key ? t(key) : errorMessage(t, result));
+      setDialogError(key ? t(key) : errorMessage(t, result));
       // Re-read so the <select> snaps back to the role the server still holds.
       await refresh();
       return;
     }
+    setConfirmRole(null);
     await refresh();
   }
 
@@ -111,7 +134,7 @@ export function OrgMembersManager({
   // it the instant the request left, which also made `confirming` permanently
   // false: the removal ran with nothing on screen to say so.
   async function handleRemove(member: OrgMember) {
-    setBusy(member.username);
+    setBusy({ username: member.username, kind: "remove" });
     setDialogError(null);
     setActionError(null);
     const result = await removeMember(org, member.username);
@@ -225,7 +248,7 @@ export function OrgMembersManager({
                 <Td>
                   <Select
                     value={member.role}
-                    disabled={busy === member.username}
+                    disabled={busy?.username === member.username}
                     aria-label={t("org.settings.members.colRole")}
                     onChange={(e) => handleRoleChange(member, e.target.value)}
                     className="w-36 py-1 text-xs"
@@ -244,7 +267,7 @@ export function OrgMembersManager({
                   <Button
                     variant="danger"
                     size="sm"
-                    disabled={busy === member.username}
+                    disabled={busy?.username === member.username}
                     onClick={() => {
                       // Clear the previous failure: the dialog is reused for
                       // every row, and a stale error under a different name
@@ -253,7 +276,7 @@ export function OrgMembersManager({
                       setConfirmTarget(member);
                     }}
                   >
-                    {busy === member.username
+                    {busy?.username === member.username && busy.kind === "remove"
                       ? t("org.settings.members.removing")
                       : t("org.settings.members.remove")}
                   </Button>
@@ -294,7 +317,46 @@ export function OrgMembersManager({
         }
         confirmLabel={t("org.settings.members.remove")}
         confirmingLabel={t("org.settings.members.removing")}
-        confirming={busy !== null && confirmTarget !== null}
+        confirming={busy?.kind === "remove"}
+        error={dialogError}
+      />
+
+      <ConfirmDialog
+        open={confirmRole !== null}
+        onClose={() => {
+          setConfirmRole(null);
+          setDialogError(null);
+        }}
+        onConfirm={() => {
+          if (confirmRole) void applyRoleChange(confirmRole.member, confirmRole.next);
+        }}
+        // Admin hands over the member list and the organisation's settings —
+        // the one direction that grants rather than narrows, so it gets the
+        // destructive styling the admin screens' promote dialog uses.
+        tone={confirmRole?.next === "admin" ? "danger" : "primary"}
+        title={t("org.settings.members.confirmRoleTitle", {
+          username: confirmRole?.member.username ?? "",
+        })}
+        description={
+          <>
+            <p className="text-sm text-fg-muted">
+              {t("org.settings.members.confirmRole", {
+                username: confirmRole?.member.username ?? "",
+                org,
+                from: confirmRole ? t(orgRoleLabelKey(confirmRole.member.role)) : "",
+                to: confirmRole ? t(orgRoleLabelKey(confirmRole.next)) : "",
+              })}
+            </p>
+            {confirmRole?.next === "admin" && (
+              <p className="mt-2 text-sm text-fg-muted">
+                {t("org.settings.members.confirmRoleAdmin")}
+              </p>
+            )}
+          </>
+        }
+        confirmLabel={t("org.settings.members.confirmRoleConfirm")}
+        confirmingLabel={t("org.settings.members.changingRole")}
+        confirming={busy?.kind === "role"}
         error={dialogError}
       />
     </div>

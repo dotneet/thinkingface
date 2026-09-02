@@ -77,6 +77,21 @@ describe("formatCompactNumber", () => {
   it("returns a placeholder for non-finite input", () => {
     expect(formatCompactNumber(Number.NaN)).toBe("-");
   });
+
+  it("defaults to en-US when no locale is given", () => {
+    expect(formatCompactNumber(1_200_000)).toBe(formatCompactNumber(1_200_000, "en"));
+  });
+
+  it("abbreviates in the reader's own units", () => {
+    // The whole reason this formatter takes a locale: Japanese counts in
+    // 万 / 億, so the English abbreviation is not merely differently spelled.
+    expect(formatCompactNumber(1_200_000, "en")).toBe("1.2M");
+    expect(formatCompactNumber(1_200_000, "ja")).toBe("120万");
+    expect(formatCompactNumber(120_000_000, "ja")).toBe("1.2億");
+    // The first threshold differs too: "1.2K" has no Japanese counterpart.
+    expect(formatCompactNumber(1200, "en")).toBe("1.2K");
+    expect(formatCompactNumber(1200, "ja")).toBe("1200");
+  });
 });
 
 describe("formatDate", () => {

@@ -3,13 +3,13 @@ import Link from "next/link";
 import { Badge, badgeClass } from "@/components/ui/badge";
 import { TimeText } from "@/components/ui/time-text";
 import { formatCompactNumber } from "@/lib/format";
-import { getT } from "@/lib/i18n/server";
+import { getLocale, getT } from "@/lib/i18n/server";
 import { namespaceHref } from "@/lib/namespace";
 import { repoBase } from "@/lib/paths";
 import type { RepoSummary } from "@/types/api";
 
 export async function RepoCard({ repo }: { repo: RepoSummary }) {
-  const t = await getT();
+  const [t, locale] = await Promise.all([getT(), getLocale()]);
   const href = repoBase(repo.kind, repo.namespace, repo.name);
   const Icon = repo.kind === "model" ? Boxes : Database;
   return (
@@ -88,7 +88,7 @@ export async function RepoCard({ repo }: { repo: RepoSummary }) {
           title={t("repo.sidebar.downloadsHint")}
         >
           <Download size={12} />
-          {formatCompactNumber(repo.downloads)}
+          {formatCompactNumber(repo.downloads, locale)}
         </span>
         <TimeText iso={repo.updated_at} style="relative" />
         {repo.license && <span className="truncate">{repo.license}</span>}

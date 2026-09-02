@@ -505,7 +505,7 @@ func (s *Server) handleHFCommits(w http.ResponseWriter, r *http.Request) {
 	}
 	// Resolved up front so an unknown revision is a RevisionNotFoundError and
 	// not an empty list: ListCommits cannot tell the two apart on its own.
-	gitRepo, _, ok := s.resolveRev(w, repo, rev)
+	gitRepo, commit, ok := s.resolveRev(w, repo, rev)
 	if !ok {
 		return
 	}
@@ -515,7 +515,15 @@ func (s *Server) handleHFCommits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metas, next, err := gitRepo.ListCommits(rev, r.URL.Query().Get("path"), after, limit)
+	// The resolved hash, not rev -- the same rule handleUICommits and
+	// serveResolve follow, and for the same reason. Passing the name back would
+	// throw away everything the resolve just established: a branch deleted
+	// between the two calls sends ListCommits down its ErrEmptyRepo branch, so
+	// list_repo_commits answers 200 [] and the caller reads a live repository
+	// as one with no history -- precisely the confusion resolving first exists
+	// to prevent. It also pins every page of one walk to the commit that was
+	// validated, rather than to whatever a push has since moved the branch to.
+	metas, next, err := gitRepo.ListCommits(commit.String(), r.URL.Query().Get("path"), after, limit)
 	if err != nil {
 		// Not a RevisionNotFound: resolveRev already proved rev exists a few
 		// lines above, so answering every failure that way sends the client

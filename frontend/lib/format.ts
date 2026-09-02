@@ -1,7 +1,8 @@
 import type { Locale } from "@/lib/i18n";
 
 // Display locale -> Intl locale tag. When the caller doesn't pass a locale,
-// format as en-US as before (numbers and byte sizes barely differ across locales).
+// format as en-US as before (plain grouping and byte sizes barely differ across
+// locales). Compact notation is the exception — see `formatCompactNumber`.
 const intlLocales: Record<Locale, string> = { en: "en-US", ja: "ja-JP" };
 
 function intlLocale(locale?: Locale): string {
@@ -23,9 +24,16 @@ export function formatNumber(n: number): string {
   return new Intl.NumberFormat("en-US").format(n);
 }
 
-export function formatCompactNumber(n: number): string {
+/**
+ * An abbreviated count (a repository's downloads, say). Unlike plain grouping,
+ * compact notation is *not* locale-neutral: Japanese counts in 万 and 億, so
+ * 1,200,000 is "1.2M" in English and "120万" in Japanese. Pass the display
+ * locale (`useLocale()` / `getLocale()`) wherever this is user-visible; the
+ * en-US default is only the fallback for a call site that has none.
+ */
+export function formatCompactNumber(n: number, locale?: Locale): string {
   if (!Number.isFinite(n)) return "-";
-  return new Intl.NumberFormat("en-US", { notation: "compact" }).format(n);
+  return new Intl.NumberFormat(intlLocale(locale), { notation: "compact" }).format(n);
 }
 
 /**

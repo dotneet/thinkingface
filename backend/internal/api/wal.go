@@ -99,7 +99,7 @@ func (s *Server) commitThroughWAL(ctx context.Context, repo *store.Repo, req git
 				// state and rebuild the commit on top of it (§7 step 5). The
 				// rolled-back commit's objects become unreferenced garbage,
 				// not corruption.
-				if merr := s.git.EnsureLocal(ctx, repo.StoragePath); merr != nil {
+				if merr := s.git.EnsureLocalWithDefaultBranch(ctx, repo.StoragePath, repo.DefaultBranch); merr != nil {
 					return newHash, oldHash, merr
 				}
 				continue
@@ -164,6 +164,14 @@ func writeCommitError(w http.ResponseWriter, err error, what string) bool {
 		if at == "" {
 			at = "no commits"
 		}
+		// stale_parent is the one error type frontend/lib/api-error-message.ts
+		// does not map, and that is not an oversight: StaleParentError can only
+		// arise from a commit carrying parentCommit, which only the
+		// HF-compatible endpoint accepts and no Web UI call sends. An
+		// unmapped type falls back to this sentence verbatim, so even if a
+		// future UI feature starts sending one the reader gets the message
+		// rather than nothing. Noted here so the next audit does not have to
+		// re-derive it from both sides.
 		writeError(w, http.StatusPreconditionFailed, "stale_parent",
 			"parentCommit "+staleParent.Expected+" is not the head of "+staleParent.Branch+
 				" (now at "+at+"); fetch the branch and rebuild the commit on top of it")
@@ -329,8 +337,14 @@ func (s *Server) recordRefUpdate(ctx context.Context, repo *store.Repo, update w
 
 // ensureRepoLocal materialises the on-disk copy before a git smart-HTTP
 // operation touches it. A no-op unless the WAL is authoritative.
+//
+// The default branch is passed through because a rebuild has to reconstruct
+// HEAD, and the WAL index does not record the symref: without it, alignHEAD
+// falls back to guessing (main if present, else the alphabetically first
+// branch), so a repository whose default branch is anything else would hand
+// every `git clone` off a cold instance the wrong checkout.
 func (s *Server) ensureRepoLocal(ctx context.Context, repo *store.Repo) error {
-	return s.git.EnsureLocal(ctx, repo.StoragePath)
+	return s.git.EnsureLocalWithDefaultBranch(ctx, repo.StoragePath, repo.DefaultBranch)
 }
 
 // adoptAfterPush stamps the local state file when disk and index agree, so

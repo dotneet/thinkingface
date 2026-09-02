@@ -433,6 +433,21 @@ func (s *Server) writeUploadPartError(w http.ResponseWriter, target string, err 
 				target, int64(maxUploadFileBytes), int64(maxUploadInlineBytes), int64(maxUploadInlineTotalBytes)))
 		return
 	}
+	// The namespace has no room for this file. 507 rather than 413: the request
+	// is not too large in itself, it is the account that is full, and RFC 4918
+	// reserves this status for exactly that -- the same one the LFS batch
+	// endpoint answers a `git push` with, so both ways into a repository refuse
+	// an over-quota upload identically.
+	//
+	// The type is not one frontend/lib/api-error-message.ts maps, so the Web UI
+	// renders the message verbatim. That is the right fallback here: the
+	// sentence names the namespace, the limit and the shortfall, which no
+	// generic translated string could.
+	var overQuota *lfs.QuotaExceededError
+	if errors.As(err, &overQuota) {
+		writeError(w, http.StatusInsufficientStorage, "insufficient_storage", overQuota.Error())
+		return
+	}
 	// A garbage collection that removed the object between the copy and the
 	// link is contention, not a fault: the same bytes uploaded again succeed.
 	// The emulator's LFS proxy upload answers the identical condition with a

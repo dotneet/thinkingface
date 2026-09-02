@@ -397,3 +397,72 @@ func TestHFDeleteRepo_AtOldName_PlainNotFound(t *testing.T) {
 		t.Fatalf("repo at new name should be untouched: %v", err)
 	}
 }
+
+// The auditor's reproduction, end to end: alice offers alice/thing to bob,
+// bob never answers, and seven days pass. The request is then invisible
+// (GET .../transfer 404) and uncancellable (DELETE .../transfer 404), yet it
+// still held the repository's one pending slot -- so alice could not offer
+// the repository to anybody, ever again. The TTL is a constant, so the
+// expired row is planted through the store rather than by waiting a week.
+func TestTransfer_ExpiredRequestDoesNotBlockANewOne(t *testing.T) {
+	f := newTransferFixture(t)
+	ctx := context.Background()
+	r := f.repo("alice", "thing", "model")
+	bobNS, err := f.st.GetNamespace(ctx, "bob")
+	if err != nil {
+		t.Fatalf("namespace bob: %v", err)
+	}
+	if _, err := f.st.CreateRepoTransfer(ctx, store.TransferSpec{
+		RepoID: r.ID, ToNamespaceID: bobNS.ID, ActorID: f.alice.ID,
+	}, -time.Hour); err != nil {
+		t.Fatalf("plant an expired request: %v", err)
+	}
+
+	aliceTok := f.token(f.alice, "write")
+	if got := f.do("GET", "/api/v1/repos/model/alice/thing/transfer", aliceTok, nil).status(); got != 404 {
+		t.Fatalf("GET .../transfer on an expired request = %d, want 404", got)
+	}
+	if got := f.do("DELETE", "/api/v1/repos/model/alice/thing/transfer", aliceTok, nil).status(); got != 404 {
+		t.Fatalf("DELETE .../transfer on an expired request = %d, want 404", got)
+	}
+	var mine apitypes.MyTransfersResponse
+	f.do("GET", "/api/v1/me/transfers", aliceTok, nil).json(t, &mine)
+	if len(mine.Incoming) != 0 || len(mine.Outgoing) != 0 {
+		t.Fatalf("/me/transfers = %+v, want an expired request listed nowhere", mine)
+	}
+
+	// Nothing above could have cleared it, so this is the request that has to.
+	resp := f.do("POST", "/api/v1/repos/model/alice/thing/transfer", aliceTok,
+		map[string]any{"namespace": "bob"})
+	if resp.status() != 202 {
+		t.Fatalf("a fresh transfer request = %d, body = %s, want 202", resp.status(), resp.rec.Body.String())
+	}
+	if got := f.do("GET", "/api/v1/repos/model/alice/thing/transfer", aliceTok, nil).status(); got != 200 {
+		t.Fatalf("GET .../transfer after the fresh request = %d, want 200", got)
+	}
+}
+
+// A site admin may accept or reject any pending transfer by id (roleIn
+// answers RoleAdmin in every namespace), so /me/transfers has to show them
+// the ones they may act on. It used to show them nothing, which left the
+// power reachable only by guessing numeric ids.
+func TestMyTransfers_ListsPendingTransfersForASiteAdmin(t *testing.T) {
+	f := newTransferFixture(t)
+	f.repo("alice", "foo", "model")
+
+	aliceTok := f.token(f.alice, "write")
+	if got := f.do("POST", "/api/repos/move", aliceTok, map[string]any{
+		"fromRepo": "alice/foo", "toRepo": "bob/foo", "type": "model",
+	}).status(); got != 202 {
+		t.Fatalf("move status = %d, want 202 (pending)", got)
+	}
+
+	var mine apitypes.MyTransfersResponse
+	f.do("GET", "/api/v1/me/transfers", f.token(f.admin, "write"), nil).json(t, &mine)
+	if len(mine.Incoming) != 1 || len(mine.Outgoing) != 1 {
+		t.Fatalf("site admin /me/transfers = %+v, want the pending transfer on both sides", mine)
+	}
+	if mine.Incoming[0].ToNamespace != "bob" || mine.Incoming[0].FromNamespace != "alice" {
+		t.Fatalf("incoming[0] = %+v, want alice -> bob", mine.Incoming[0])
+	}
+}

@@ -353,6 +353,17 @@ export const repo = {
     fetchFailedBody:
       "The full file couldn't be downloaded ({error}), so only the first 512KB is parsed here.",
     networkError: "Network error",
+    // Short, translated stand-ins for the HTTP status line, which is
+    // server-authored English (see fetchFailureReason in
+    // components/repo/tabular-preview.tsx). Noun phrases, because they are
+    // interpolated into fetchFailedBody's parenthesis.
+    fetchReasonUnauthorized: "Not signed in",
+    fetchReasonForbidden: "No permission",
+    fetchReasonNotFound: "File not found",
+    fetchReasonServer: "Server error",
+    // Anything unmapped keeps only the number: "HTTP 418" is language-neutral
+    // in a way the status text that goes with it is not.
+    fetchReasonStatus: "HTTP {status}",
     // {link} is replaced with a "download the full file" link.
     rowLimit: "Stopped after the first {rows} rows. {link} to see the rest.",
     rowLimitLink: "Download the full file",
