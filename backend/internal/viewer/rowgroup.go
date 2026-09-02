@@ -133,6 +133,29 @@ func (p *rowPlan) rowsFor(rg parquet.RowGroup) (parquet.Rows, error) {
 	return proj.Rows(), nil
 }
 
+// readRange reads take rows out of rg, starting skip rows in, converting each
+// one and handing it to emit. It returns how many rows were emitted.
+//
+// It owns the row reader's lifetime so that callers do not each have to
+// repeat the close dance: the reader is always closed, but a close failure is
+// only reported when the read itself succeeded -- surfacing it over a real
+// read error would replace the useful diagnosis with the cleanup's.
+func (p *rowPlan) readRange(rg parquet.RowGroup, skip, take int64, emit func(map[string]any) error) (int64, error) {
+	rows, err := p.rowsFor(rg)
+	if err != nil {
+		return 0, err
+	}
+	got, err := readGroupRows(rows, p, skip, take, emit)
+	closeErr := rows.Close()
+	if err != nil {
+		return got, err
+	}
+	if closeErr != nil {
+		return got, fmt.Errorf("viewer: close row reader: %w", closeErr)
+	}
+	return got, nil
+}
+
 // convertRow turns a raw parquet.Row read from rowsFor's reader into a
 // JSON-safe map keyed by column name.
 func (p *rowPlan) convertRow(row parquet.Row) (map[string]any, error) {

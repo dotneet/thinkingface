@@ -206,20 +206,12 @@ func (r *Reader) Rows(ctx context.Context, key string, offset int64, limit int, 
 			groupTake = remainingTake
 		}
 
-		rows, err := plan.rowsFor(rg)
-		if err != nil {
-			return nil, err
-		}
-		got, err := readGroupRows(rows, plan, groupOffset, groupTake, func(m map[string]any) error {
+		got, err := plan.readRange(rg, groupOffset, groupTake, func(m map[string]any) error {
 			out = append(out, m)
 			return nil
 		})
-		closeErr := rows.Close()
 		if err != nil {
 			return nil, err
-		}
-		if closeErr != nil {
-			return nil, fmt.Errorf("viewer: close row reader: %w", closeErr)
 		}
 
 		remainingTake -= got
@@ -275,17 +267,8 @@ func (r *Reader) Scan(ctx context.Context, key string, req ScanRequest, fn func(
 			continue
 		}
 
-		rows, err := plan.rowsFor(rg)
-		if err != nil {
+		if _, err := plan.readRange(rg, 0, n, fn); err != nil {
 			return err
-		}
-		_, err = readGroupRows(rows, plan, 0, n, fn)
-		closeErr := rows.Close()
-		if err != nil {
-			return err
-		}
-		if closeErr != nil {
-			return fmt.Errorf("viewer: close row reader: %w", closeErr)
 		}
 	}
 

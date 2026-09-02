@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/go-chi/chi/v5"
-
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
 	"github.com/dotneet/thinkingface/backend/internal/repocard"
@@ -54,21 +52,15 @@ type parquetTarget struct {
 // resolveParquet is the shared prologue of both viewer endpoints. It has
 // already written the error response when ok is false.
 func (s *Server) resolveParquet(w http.ResponseWriter, r *http.Request) (pt parquetTarget, ok bool) {
-	repo, ok := s.loadRepoForRead(w, r, chi.URLParam(r, "kind"), chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectUI)
+	repo, rev, filePath, ok := s.uiFileTarget(w, r)
 	if !ok {
 		return parquetTarget{}, false
 	}
-	filePath := wildcardPath(r)
 	if !strings.HasSuffix(strings.ToLower(filePath), ".parquet") {
 		badRequest(w, filePath+" is not a parquet file")
 		return parquetTarget{}, false
 	}
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
-		return parquetTarget{}, false
-	}
-	rev, ok := revParam(w, r, "rev", repo)
+	gitRepo, ok := s.openGit(w, repo)
 	if !ok {
 		return parquetTarget{}, false
 	}

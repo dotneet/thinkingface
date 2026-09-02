@@ -1,15 +1,18 @@
 "use client";
 
 import { HardDrive, Pencil, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { Input } from "@/components/ui/field";
+import { OutOfRangeEmptyState, PaginationControls } from "@/components/ui/pagination-controls";
 import { SearchInput } from "@/components/ui/search-input";
 import { SkeletonLines } from "@/components/ui/skeleton";
+import { Table, TBody, Td, THead, Th, Tr } from "@/components/ui/table";
+import { usePagedList } from "@/hooks/use-paged-list";
 import type { AdminNamespaceUsage } from "@/lib/admin";
 import { listAdminNamespaces, namespaceQuotaErrorKey, setNamespaceQuota } from "@/lib/admin";
 import type { FailedApiResult } from "@/lib/api-error-message";
@@ -39,12 +42,7 @@ const PAGE_SIZE = 50;
  */
 export function AdminNamespacesManager() {
   const t = useT();
-  const [rows, setRows] = useState<AdminNamespaceUsage[] | null>(null);
-  const [total, setTotal] = useState<number | null>(null);
-  const [defaultQuota, setDefaultQuota] = useState<number | null | undefined>(undefined);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [offset, setOffset] = useState(0);
 
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -61,44 +59,27 @@ export function AdminNamespacesManager() {
     [t],
   );
 
-  // Every fetch, whoever started it, may only write state if it is still the
-  // newest one: an action handler reloads by calling refresh directly and has
-  // no effect closure to be cancelled by, so a slow reload could otherwise
-  // land on top of a page the user has since moved to.
-  const latestRequest = useRef(0);
+  const {
+    items: rows,
+    data,
+    total,
+    offset,
+    setOffset,
+    loadError,
+    reload: refresh,
+    outOfRange,
+    pager,
+  } = usePagedList({
+    pageSize: PAGE_SIZE,
+    deps: [search],
+    fetchPage: ({ limit, offset }) => listAdminNamespaces({ search, limit, offset }),
+    describe,
+  });
 
-  const refresh = useCallback(
-    async (isStale: () => boolean = () => false) => {
-      const ticket = ++latestRequest.current;
-      const result = await listAdminNamespaces({ search, limit: PAGE_SIZE, offset });
-      if (isStale() || ticket !== latestRequest.current) return;
-      if (!result.ok) {
-        setLoadError(describe(result));
-        setRows(null);
-        // Never carry a count or a limit over from a failed read: stated next
-        // to an empty table they claim something the page does not know
-        // (DESIGN.md §9).
-        setTotal(null);
-        setDefaultQuota(undefined);
-        return;
-      }
-      setLoadError(null);
-      setRows(result.data.items);
-      setTotal(result.data.total);
-      setDefaultQuota(result.data.default_quota_bytes);
-    },
-    [search, offset, describe],
-  );
-
-  // Guards against a fast search/page change letting an older, slower
-  // response land after the newer one and overwrite it.
-  useEffect(() => {
-    let cancelled = false;
-    refresh(() => cancelled);
-    return () => {
-      cancelled = true;
-    };
-  }, [refresh]);
+  // `undefined` is "we have not had a successful read", which is not the same
+  // as the instance having no default quota (DESIGN.md §9), so the two are
+  // kept apart rather than collapsed into one nullable number.
+  const defaultQuota: number | null | undefined = data?.default_quota_bytes;
 
   function runSearch(value: string) {
     setSearch(value);
@@ -165,9 +146,6 @@ export function AdminNamespacesManager() {
     await refresh();
   }
 
-  const hasPrev = offset > 0;
-  const hasNext = total !== null && offset + PAGE_SIZE < total;
-
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-3">
@@ -191,9 +169,6 @@ export function AdminNamespacesManager() {
         </Button>
       </div>
 
-      {/* `undefined` is "we have not had a successful read", which is not the
-          same as the instance having no default — so the line is absent
-          rather than claiming "unlimited" (DESIGN.md §9). */}
       {defaultQuota !== undefined && (
         <p className="text-xs font-medium text-fg-subtle">
           {defaultQuota === null
@@ -212,109 +187,77 @@ export function AdminNamespacesManager() {
           hint={t("settings.adminQuotas.loadFailedHint")}
         />
       ) : rows.length === 0 ? (
-        <EmptyState
-          icon={HardDrive}
-          title={t("settings.adminQuotas.emptyTitle")}
-          description={t("settings.adminQuotas.emptyDescription")}
-        />
+        outOfRange ? (
+          <OutOfRangeEmptyState onBackToFirstPage={() => setOffset(0)} />
+        ) : (
+          <EmptyState
+            icon={HardDrive}
+            title={t("settings.adminQuotas.emptyTitle")}
+            description={t("settings.adminQuotas.emptyDescription")}
+          />
+        )
       ) : (
-        <div className="scroll-x rounded-lg border border-border">
-          <table className="w-full min-w-[760px] border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-xs font-medium text-fg-subtle">
-                <th className="px-3 py-2 font-medium">{t("settings.adminQuotas.colNamespace")}</th>
-                <th className="px-3 py-2 font-medium">{t("settings.adminQuotas.colKind")}</th>
-                <th className="px-3 py-2 text-right font-medium">
-                  {t("settings.adminQuotas.colRepos")}
-                </th>
-                <th className="px-3 py-2 text-right font-medium">
-                  {t("settings.adminQuotas.colUsed")}
-                </th>
-                <th className="px-3 py-2 font-medium">{t("settings.adminQuotas.colQuota")}</th>
-                <th className="px-3 py-2 text-right font-medium">
-                  {t("settings.adminQuotas.colActions")}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.namespace} className="border-b border-border align-top last:border-0">
-                  <td className="px-3 py-2 font-medium text-fg">{row.namespace}</td>
-                  <td className="px-3 py-2 text-fg-muted">
-                    {row.kind === "org"
-                      ? t("settings.adminQuotas.kindOrg")
-                      : t("settings.adminQuotas.kindUser")}
-                  </td>
-                  <td className="px-3 py-2 text-right tabular-nums text-fg-muted">
-                    {formatNumber(row.num_repos)}
-                  </td>
-                  <td className="px-3 py-2 text-right tabular-nums text-fg-muted">
-                    {formatBytes(row.lfs_size)}
-                  </td>
-                  <td className="px-3 py-2">
-                    {editing === row.namespace ? (
-                      <QuotaEditor
-                        value={draft}
-                        onChange={setDraft}
-                        busy={busy === row.namespace}
-                        onSave={() => void handleSave(row)}
-                        onCancel={() => setEditing(null)}
-                      />
-                    ) : (
-                      <QuotaCell row={row} />
-                    )}
-                  </td>
-                  <td className="px-3 py-2">
-                    <div className="flex justify-end">
-                      <Button
-                        size="sm"
-                        disabled={busy !== null || editing === row.namespace}
-                        onClick={() => startEdit(row)}
-                      >
-                        <Pencil size={13} />
-                        {t("settings.adminQuotas.edit")}
-                      </Button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Table minWidth={760}>
+          <THead>
+            <Th>{t("settings.adminQuotas.colNamespace")}</Th>
+            <Th>{t("settings.adminQuotas.colKind")}</Th>
+            <Th align="right">{t("settings.adminQuotas.colRepos")}</Th>
+            <Th align="right">{t("settings.adminQuotas.colUsed")}</Th>
+            <Th>{t("settings.adminQuotas.colQuota")}</Th>
+            <Th align="right">{t("settings.adminQuotas.colActions")}</Th>
+          </THead>
+          <TBody>
+            {rows.map((row) => (
+              <Tr key={row.namespace} className="align-top">
+                <Td className="font-medium text-fg">{row.namespace}</Td>
+                <Td className="text-fg-muted">
+                  {row.kind === "org"
+                    ? t("settings.adminQuotas.kindOrg")
+                    : t("settings.adminQuotas.kindUser")}
+                </Td>
+                <Td align="right" className="tabular-nums text-fg-muted">
+                  {formatNumber(row.num_repos)}
+                </Td>
+                <Td align="right" className="tabular-nums text-fg-muted">
+                  {formatBytes(row.lfs_size)}
+                </Td>
+                <Td>
+                  {editing === row.namespace ? (
+                    <QuotaEditor
+                      value={draft}
+                      onChange={setDraft}
+                      busy={busy === row.namespace}
+                      onSave={() => void handleSave(row)}
+                      onCancel={() => setEditing(null)}
+                    />
+                  ) : (
+                    <QuotaCell row={row} />
+                  )}
+                </Td>
+                <Td>
+                  <div className="flex justify-end">
+                    <Button
+                      size="sm"
+                      disabled={busy !== null || editing === row.namespace}
+                      onClick={() => startEdit(row)}
+                    >
+                      <Pencil size={13} />
+                      {t("settings.adminQuotas.edit")}
+                    </Button>
+                  </div>
+                </Td>
+              </Tr>
+            ))}
+          </TBody>
+        </Table>
       )}
 
-      {(hasPrev || hasNext) && (
-        <div className="flex items-center justify-between text-sm text-fg-subtle">
-          {/* A failed reload leaves total null. Rendering it as 0 would put
-              "51–0 of 0" under the error state, which reads as "there are no
-              namespaces" rather than "we could not ask" (DESIGN.md §9). */}
-          <span className="tabular-nums">
-            {total === null
-              ? "—"
-              : t("ui.pagination.range", {
-                  from: offset + 1,
-                  to: Math.min(offset + PAGE_SIZE, total),
-                  total: formatNumber(total),
-                })}
-          </span>
-          <div className="flex gap-2">
-            <Button
-              size="sm"
-              disabled={!hasPrev}
-              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-            >
-              {t("ui.pagination.prev")}
-            </Button>
-            <Button size="sm" disabled={!hasNext} onClick={() => setOffset(offset + PAGE_SIZE)}>
-              {t("ui.pagination.next")}
-            </Button>
-          </div>
-        </div>
-      )}
+      <PaginationControls pager={pager} />
 
-      {/* Below the table: a quota save reported above it moved every row down
-          by the Alert's height, with the Edit control of the next namespace
-          landing where the pointer already was (DESIGN.md §8.1). */}
+      {/* Below the table and its pager: a quota save reported above them moved
+          every row down by the Alert's height, with the Edit control of the
+          next namespace landing where the pointer already was
+          (DESIGN.md §8.1). */}
       {actionError && <Alert tone="negative">{actionError}</Alert>}
       {notice && <Alert tone="positive">{notice}</Alert>}
     </div>

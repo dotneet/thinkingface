@@ -256,11 +256,8 @@ func TestIntegrationUsersNamespacesTokens(t *testing.T) {
 		if got, err := s.GetOrg(ctx, "Acme"); err != nil || got.Name != "acme" {
 			t.Fatalf("GetOrg(Acme) = %+v, %v, want Name=acme", got, err)
 		}
-		if role, err := s.RoleInNamespace(ctx, f.alice.ID, "ACME"); err != nil || role != "admin" {
-			t.Fatalf("RoleInNamespace alice/ACME = %q, %v, want admin", role, err)
-		}
-		if ok, err := s.CanWriteNamespace(ctx, f.alice.ID, "AcMe"); err != nil || !ok {
-			t.Fatalf("alice can write AcMe = %v, %v, want true", ok, err)
+		if r, err := s.NamespaceRoleFor(ctx, f.alice.ID, "ACME"); err != nil || r.Role != "admin" {
+			t.Fatalf("NamespaceRoleFor alice/ACME = %+v, %v, want admin", r, err)
 		}
 
 		nss, err := s.NamespacesForUser(ctx, f.alice.ID)
@@ -274,36 +271,26 @@ func TestIntegrationUsersNamespacesTokens(t *testing.T) {
 		if !equalStrings(got, []string{"acme:admin", "alice:admin"}) {
 			t.Fatalf("NamespacesForUser = %v", got)
 		}
-		if ok, err := s.CanWriteNamespace(ctx, f.alice.ID, "acme"); err != nil || !ok {
-			t.Fatalf("alice can write acme = %v, %v", ok, err)
-		}
-		if ok, err := s.CanWriteNamespace(ctx, f.bob.ID, "acme"); err != nil || ok {
-			t.Fatalf("bob can write acme = %v, %v", ok, err)
-		}
-		if ok, err := s.CanWriteNamespace(ctx, f.bob.ID, "bob"); err != nil || !ok {
-			t.Fatalf("bob can write bob = %v, %v", ok, err)
-		}
-
-		// RoleInNamespace: owner (personal namespace or org admin), an
+		// NamespaceRoleFor: owner (personal namespace or org admin), an
 		// explicit org role, no relationship, and a missing namespace.
-		if role, err := s.RoleInNamespace(ctx, f.alice.ID, "alice"); err != nil || role != "admin" {
-			t.Fatalf("RoleInNamespace alice/alice = %q, %v", role, err)
+		if r, err := s.NamespaceRoleFor(ctx, f.alice.ID, "alice"); err != nil || r.Role != "admin" {
+			t.Fatalf("NamespaceRoleFor alice/alice = %+v, %v", r, err)
 		}
-		if role, err := s.RoleInNamespace(ctx, f.alice.ID, "acme"); err != nil || role != "admin" {
-			t.Fatalf("RoleInNamespace alice/acme = %q, %v", role, err)
+		if r, err := s.NamespaceRoleFor(ctx, f.alice.ID, "acme"); err != nil || r.Role != "admin" {
+			t.Fatalf("NamespaceRoleFor alice/acme = %+v, %v", r, err)
 		}
-		if role, err := s.RoleInNamespace(ctx, f.bob.ID, "acme"); err != nil || role != "" {
-			t.Fatalf("RoleInNamespace bob/acme (no relationship) = %q, %v", role, err)
+		if r, err := s.NamespaceRoleFor(ctx, f.bob.ID, "acme"); err != nil || r.Role != "" {
+			t.Fatalf("NamespaceRoleFor bob/acme (no relationship) = %+v, %v", r, err)
 		}
 		if _, err := s.db.Exec(ctx,
 			`INSERT INTO org_members (namespace_id, user_id, role) VALUES ($1, $2, 'write')`, org.ID, f.bob.ID); err != nil {
 			t.Fatal(err)
 		}
-		if role, err := s.RoleInNamespace(ctx, f.bob.ID, "acme"); err != nil || role != "write" {
-			t.Fatalf("RoleInNamespace bob/acme (write member) = %q, %v", role, err)
+		if r, err := s.NamespaceRoleFor(ctx, f.bob.ID, "acme"); err != nil || r.Role != "write" {
+			t.Fatalf("NamespaceRoleFor bob/acme (write member) = %+v, %v", r, err)
 		}
-		if _, err := s.RoleInNamespace(ctx, f.alice.ID, "no-such-namespace"); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("RoleInNamespace missing namespace err = %v", err)
+		if _, err := s.NamespaceRoleFor(ctx, f.alice.ID, "no-such-namespace"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("NamespaceRoleFor missing namespace err = %v", err)
 		}
 
 		// Tokens.
@@ -534,12 +521,6 @@ func TestIntegrationRepos(t *testing.T) {
 		st, err := s.Stats(ctx)
 		if err != nil || st.Datasets != 2 || st.Models != 2 || st.Experiments != 1 || st.TotalSize != 41 {
 			t.Fatalf("Stats = %+v, %v", st, err)
-		}
-		if err := s.SetRepoHead(ctx, bert.ID, "fff"); err != nil {
-			t.Fatal(err)
-		}
-		if r, _ := s.GetRepoByID(ctx, bert.ID); r.HeadSHA != "fff" || !r.UpdatedAt.After(bert.UpdatedAt) {
-			t.Fatalf("SetRepoHead: %+v (was %v)", r, bert.UpdatedAt)
 		}
 		refs, err := s.AllRepoRefs(ctx)
 		if err != nil || len(refs) != 4 || refs[0].Namespace != "alice" || refs[3].Name != "secret-set" {
@@ -958,9 +939,6 @@ func TestIntegrationSyncJobs(t *testing.T) {
 			failed[0].Attempts != SyncMaxAttempts {
 			t.Fatalf("ListFailedSyncJobs entry = %+v", failed[0])
 		}
-		if n, err := s.FailedSyncCount(ctx); err != nil || n != 1 {
-			t.Fatalf("FailedSyncCount = %d, %v", n, err)
-		}
 		if ok, err := s.RetrySyncJob(ctx, failed[0].ID); err != nil || !ok {
 			t.Fatalf("RetrySyncJob = %v, %v", ok, err)
 		}
@@ -1326,9 +1304,12 @@ func TestIntegrationExperiments(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("InsertPoints: %v", err)
 		}
-		points, err := s.ListPoints(ctx, runID)
-		if err != nil || len(points) != 3 || points[0].Step != 1 || points[1].Metrics["loss"] != 0.5 || !points[1].TS.Equal(ts) {
-			t.Fatalf("ListPoints = %+v, %v", points, err)
+		// Read back through the reader the flusher uses -- insertion order,
+		// not step order (the step-ordered ListPoints had no callers left).
+		points, err := s.ListProjectPoints(ctx, pid, 0)
+		if err != nil || len(points) != 3 || points[0].Step != 2 ||
+			points[0].Metrics["loss"] != 0.5 || !points[0].TS.Equal(ts) {
+			t.Fatalf("ListProjectPoints = %+v, %v", points, err)
 		}
 		if points[2].TS.IsZero() || time.Since(points[2].TS) > time.Minute {
 			t.Fatalf("zero TS should default to now: %v", points[2].TS)
@@ -1471,12 +1452,15 @@ func TestIntegrationWebhooks(t *testing.T) {
 		if d, _ := s.GetWebhookDelivery(ctx, d1); d.Status != "success" || *d.ResponseStatus != 204 {
 			t.Fatalf("delivery after success = %+v", d)
 		}
-		// Parked at max attempts.
+		// Parked at max attempts. The attempts argument is the fencing token
+		// as well as the retry budget, so it has to be the count the claim
+		// actually returned; maxAttempts is what makes this the last one.
 		d2, _ := s.CreateWebhookDelivery(ctx, wide.ID, "repo.created", []byte(`{}`))
-		if j, _ := s.ClaimWebhookDelivery(ctx, time.Minute); j == nil || j.DeliveryID != d2 {
-			t.Fatalf("claim d2 = %+v", j)
+		j2, _ := s.ClaimWebhookDelivery(ctx, time.Minute)
+		if j2 == nil || j2.DeliveryID != d2 {
+			t.Fatalf("claim d2 = %+v", j2)
 		}
-		if err := s.FinishWebhookDelivery(ctx, d2, false, 3, 3, nil, "dead", time.Hour); err != nil {
+		if err := s.FinishWebhookDelivery(ctx, d2, false, j2.Attempts, j2.Attempts, nil, "dead", time.Hour); err != nil {
 			t.Fatal(err)
 		}
 		if d, _ := s.GetWebhookDelivery(ctx, d2); d.Status != "failed" || d.ResponseStatus != nil {
@@ -1512,6 +1496,33 @@ func TestIntegrationWebhooks(t *testing.T) {
 		}
 		if j, _ := s.ClaimWebhookDelivery(ctx, time.Minute); j == nil || j.DeliveryID != dInactive {
 			t.Fatalf("claim reactivated = %+v", j)
+		}
+
+		// A worker whose lease lapsed must not be able to write the outcome
+		// of a delivery somebody else has since reclaimed: attempts is the
+		// fencing token (FinishWebhookDelivery).
+		d5, _ := s.CreateWebhookDelivery(ctx, wide.ID, "repo.pushed", []byte(`{}`))
+		stale, err := s.ClaimWebhookDelivery(ctx, 0) // lease expires immediately
+		if err != nil || stale == nil || stale.DeliveryID != d5 || stale.Attempts != 1 {
+			t.Fatalf("claim d5 = %+v, %v", stale, err)
+		}
+		held, err := s.ClaimWebhookDelivery(ctx, time.Minute) // a second worker takes it
+		if err != nil || held == nil || held.DeliveryID != d5 || held.Attempts != 2 {
+			t.Fatalf("re-claim d5 = %+v, %v", held, err)
+		}
+		// The lapsed worker reporting late is a no-op, not an error.
+		if err := s.FinishWebhookDelivery(ctx, d5, true, stale.Attempts, 3, ptr(204), "stale", 0); err != nil {
+			t.Fatal(err)
+		}
+		if d, _ := s.GetWebhookDelivery(ctx, d5); d.Status != "pending" || d.ResponseBody != "" || d.Attempts != 2 {
+			t.Fatalf("stale finish overwrote a reclaimed delivery: %+v", d)
+		}
+		// The worker that actually holds the claim still writes the outcome.
+		if err := s.FinishWebhookDelivery(ctx, d5, true, held.Attempts, 3, ptr(200), "ok", 0); err != nil {
+			t.Fatal(err)
+		}
+		if d, _ := s.GetWebhookDelivery(ctx, d5); d.Status != "success" || d.ResponseBody != "ok" {
+			t.Fatalf("holder finish did not land: %+v", d)
 		}
 
 		if err := s.DeleteWebhook(ctx, wide.ID); err != nil {
@@ -1746,11 +1757,6 @@ func TestIntegrationRepoTransfer(t *testing.T) {
 		if got2, err := s.GetRepo(ctx, "model", "bob", "foo"); err != nil || got2.ID != r.ID {
 			t.Fatalf("GetRepo new name = %+v, %v", got2, err)
 		}
-		if list, err := s.ListRepoRedirects(ctx, r.ID); err != nil || len(list) != 1 ||
-			list[0].FromNamespace != "alice" || list[0].FromName != "foo" {
-			t.Fatalf("ListRepoRedirects = %+v, %v", list, err)
-		}
-
 		// repo_lineage's target follows the move.
 		if deps, err := s.ListLineageDependents(ctx, []string{LineageKindBaseModel}, "bob", "foo"); err != nil ||
 			len(deps) != 1 || deps[0].Repo.ID != dep.ID {

@@ -1,12 +1,12 @@
 "use client";
 
 import { Webhook as WebhookIcon } from "lucide-react";
-import Link from "next/link";
 import { useEffect, useState } from "react";
+import { LoginRequiredState } from "@/components/settings/login-required-state";
 import { WEBHOOK_EVENT_OPTIONS } from "@/components/settings/webhook-events";
 import { WebhookRow } from "@/components/settings/webhook-row";
 import { Alert } from "@/components/ui/alert";
-import { Button, buttonClass } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
@@ -158,20 +158,7 @@ export function WebhooksManager({
     return <SkeletonLines lines={4} />;
   }
   if (needsLogin) {
-    return (
-      <ErrorState
-        title={t("settings.webhooks.loginRequiredTitle")}
-        message={t("settings.webhooks.loginRequiredMessage")}
-        action={
-          <Link
-            href={`/login?next=${encodeURIComponent(loginNext)}`}
-            className={buttonClass({ variant: "primary" })}
-          >
-            {t("settings.webhooks.login")}
-          </Link>
-        }
-      />
-    );
+    return <LoginRequiredState next={loginNext} />;
   }
   if (!user) {
     return (

@@ -17,7 +17,7 @@ import type { ExpRun } from "@/types/api";
 const SYSTEM_PREFIX = "system/";
 
 /** How many metric columns the run table shows before it stops adding them. */
-export const MAX_METRIC_COLUMNS = 5;
+const MAX_METRIC_COLUMNS = 5;
 
 /**
  * One row of the run table: either a single ungrouped run, or a sweep with its
@@ -228,7 +228,7 @@ export type MetricFilterOp = (typeof METRIC_FILTER_OPS)[number];
 /** "keep the runs whose `key` is `op` `value`". */
 export type MetricFilter = { key: string; op: MetricFilterOp; value: number };
 
-export function isMetricFilterOp(raw: string): raw is MetricFilterOp {
+function isMetricFilterOp(raw: string): raw is MetricFilterOp {
   return (METRIC_FILTER_OPS as readonly string[]).includes(raw);
 }
 

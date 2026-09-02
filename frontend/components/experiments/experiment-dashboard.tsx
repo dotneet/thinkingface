@@ -4,16 +4,18 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FlaskConical } from "lucide-react";
 import { useMemo, useState } from "react";
 import { ConfigDiffTable } from "@/components/experiments/config-diff-table";
-import { CsvDownloadButton } from "@/components/experiments/csv-download-button";
 import {
   hasLiveRun,
   LIVE_REFRESH_INTERVAL_MS,
   liveRefetchInterval,
 } from "@/components/experiments/live-refresh";
 import { MetricsCharts } from "@/components/experiments/metrics-charts";
+import { MetricsChartsSkeleton } from "@/components/experiments/metrics-charts-skeleton";
+import { MetricsToolbar } from "@/components/experiments/metrics-toolbar";
 import { ParallelCoordinates } from "@/components/experiments/parallel-coordinates";
 import { csvFilename, metricSeriesCsv } from "@/components/experiments/run-csv";
 import { RunDeleteDialog } from "@/components/experiments/run-delete-dialog";
+import { RunFilterBar } from "@/components/experiments/run-filter-bar";
 import { RunScatter } from "@/components/experiments/run-scatter";
 import { RunTable } from "@/components/experiments/run-table";
 import { RunTagsDialog } from "@/components/experiments/run-tags-dialog";
@@ -21,10 +23,10 @@ import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
-import { Checkbox, Input, Select, Slider } from "@/components/ui/field";
 import { SegmentedControl } from "@/components/ui/segmented-control";
-import { Skeleton } from "@/components/ui/skeleton";
-import { SpinnerSlot } from "@/components/ui/spinner";
+import { useChartOptions } from "@/hooks/use-chart-options";
+import { useRunFilters } from "@/hooks/use-run-filters";
+import { useRunSelection } from "@/hooks/use-run-selection";
 import { ApiResultError, queryErrorMessage } from "@/lib/api-error-message";
 import { deleteRun, getMetrics, listRuns, updateRunAnnotations } from "@/lib/experiments";
 import { metricsQueryKey } from "@/lib/experiments-query-keys";
@@ -35,7 +37,6 @@ import { allTags, filterRuns } from "@/lib/run-compare";
 import {
   buildMetricFilter,
   filterByMetric,
-  METRIC_FILTER_OPS,
   metricColumns,
   type RunSort,
   type RunSortColumn,
@@ -96,44 +97,36 @@ export function ExperimentDashboard({
   });
   const runs = runsData.runs;
 
-  const [selected, setSelected] = useState<Set<string>>(
-    () =>
-      new Set(
-        initialRuns
-          .filter((r) => !r.archived)
-          .slice(0, DEFAULT_SELECTION)
-          .map((r) => r.name),
-      ),
+  const selection = useRunSelection(
+    initialRuns
+      .filter((r) => !r.archived)
+      .slice(0, DEFAULT_SELECTION)
+      .map((r) => r.name),
   );
+  const { filters, setFilters, reset: resetFilters } = useRunFilters();
+  const { options: chartOptions, setOptions: setChartOptions } = useChartOptions();
   const [view, setView] = useState<ViewId>("metrics");
-  const [showArchived, setShowArchived] = useState(false);
-  const [tagFilter, setTagFilter] = useState("");
-  // Metric filter: three controls rather than a query language, so the metric
-  // names on offer are the ones this project actually logged.
-  const [filterMetric, setFilterMetric] = useState("");
-  const [filterOp, setFilterOp] = useState<string>("<");
-  const [filterValue, setFilterValue] = useState("");
   // null is "the order the server returned" (started_at, then name), which is
   // what the table showed before it was sortable.
   const [sort, setSort] = useState<RunSort | null>(null);
   const [tagsFor, setTagsFor] = useState<string | null>(null);
   const [deleteFor, setDeleteFor] = useState<string | null>(null);
-  const [xMode, setXMode] = useState<"step" | "time">("step");
-  const [smoothing, setSmoothing] = useState(0);
-  const [logScale, setLogScale] = useState(false);
-  const [syncZoom, setSyncZoom] = useState(true);
 
   const tags = useMemo(() => allTags(runs), [runs]);
   const filterKeys = useMemo(() => metricColumns(runs, Number.POSITIVE_INFINITY), [runs]);
   const metricFilter = useMemo(
-    () => buildMetricFilter(filterMetric, filterOp, filterValue),
-    [filterMetric, filterOp, filterValue],
+    () => buildMetricFilter(filters.metric, filters.op, filters.value),
+    [filters.metric, filters.op, filters.value],
   );
   const visibleRuns = useMemo(
     () =>
-      filterByMetric(filterRuns(runs, { showArchived, tag: tagFilter || undefined }), metricFilter),
-    [runs, showArchived, tagFilter, metricFilter],
+      filterByMetric(
+        filterRuns(runs, { showArchived: filters.showArchived, tag: filters.tag || undefined }),
+        metricFilter,
+      ),
+    [runs, filters.showArchived, filters.tag, metricFilter],
   );
+  const visibleNames = useMemo(() => visibleRuns.map((r) => r.name), [visibleRuns]);
   // Colours are assigned from the project's full run order so a run keeps the
   // same colour when the filters change what is on screen.
   const runOrder = useMemo(() => runs.map((r) => r.name), [runs]);
@@ -141,6 +134,7 @@ export function ExperimentDashboard({
 
   // Only runs that are both selected and visible get plotted: a run hidden by
   // the archive filter should not keep drawing a line.
+  const { selected } = selection;
   const selectedRuns = useMemo(
     () => visibleRuns.filter((r) => selected.has(r.name)),
     [visibleRuns, selected],
@@ -171,67 +165,20 @@ export function ExperimentDashboard({
       void queryClient.invalidateQueries({ queryKey: runsKey });
       // Drop the deleted run from the plotted selection; nothing else on the
       // page knows it is gone until the run list comes back.
-      setSelected((prev) => {
-        const next = new Set(prev);
-        next.delete(run);
-        return next;
-      });
+      selection.remove(run);
       setDeleteFor(null);
     },
   });
-
-  function toggle(name: string) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
-  }
-
-  function toggleMany(names: string[], select: boolean) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      for (const name of names) {
-        if (select) next.add(name);
-        else next.delete(name);
-      }
-      return next;
-    });
-  }
-
-  /** Clears every run filter (archived / tag / metric threshold) at once, for
-   * the table's empty state — the fastest way back to "something is showing"
-   * when a filter combination matches nothing. */
-  function resetFilters() {
-    setShowArchived(false);
-    setTagFilter("");
-    setFilterMetric("");
-    setFilterOp("<");
-    setFilterValue("");
-  }
-
-  function toggleAll() {
-    setSelected((prev) => {
-      const everyVisible = visibleRuns.every((r) => prev.has(r.name));
-      const next = new Set(prev);
-      for (const run of visibleRuns) {
-        if (everyVisible) next.delete(run.name);
-        else next.add(run.name);
-      }
-      return next;
-    });
-  }
 
   const { data, isFetching, isPending, isError, error } = useQuery({
     // Keyed through the shared helper, which serializes the run list as JSON:
     // a run literally named `lr=0.1,bs=32` would otherwise collide with the
     // pair `lr=0.1` + `bs=32` under a comma-join.
-    queryKey: metricsQueryKey(ns, repo, project, selectedNames, xMode),
+    queryKey: metricsQueryKey(ns, repo, project, selectedNames, chartOptions.xMode),
     queryFn: async () => {
       const result = await getMetrics(ns, repo, project, {
         runs: selectedNames,
-        x: xMode,
+        x: chartOptions.xMode,
         max_points: 1000,
       });
       if (!result.ok) throw new ApiResultError(result);
@@ -270,86 +217,16 @@ export function ExperimentDashboard({
         </Alert>
       )}
 
-      <div className="flex flex-wrap items-center gap-5 rounded-lg border border-border bg-bg-sunken px-4 py-3 text-sm">
-        <span className="text-fg-subtle">
-          {t("experiments.dashboard.selectedCount", {
-            selected: selectedRuns.length,
-            total: visibleRuns.length,
-          })}
-        </span>
-
-        {tags.length > 0 && (
-          <label className="flex items-center gap-2">
-            <span className="text-fg-subtle">{t("experiments.dashboard.tagLabel")}</span>
-            <Select
-              value={tagFilter}
-              onChange={(e) => setTagFilter(e.target.value)}
-              className="w-auto bg-bg-raised px-2 py-1"
-            >
-              <option value="">{t("experiments.dashboard.allTags")}</option>
-              {tags.map((tag) => (
-                <option key={tag} value={tag}>
-                  {tag}
-                </option>
-              ))}
-            </Select>
-          </label>
-        )}
-
-        {filterKeys.length > 0 && (
-          <div className="flex items-center gap-2">
-            <span className="text-fg-subtle">{t("experiments.dashboard.metricFilterLabel")}</span>
-            <Select
-              value={filterMetric}
-              onChange={(e) => setFilterMetric(e.target.value)}
-              aria-label={t("experiments.dashboard.metricFilterMetricAria")}
-              className="w-auto bg-bg-raised px-2 py-1 font-mono text-xs"
-            >
-              <option value="">{t("experiments.dashboard.metricFilterNone")}</option>
-              {filterKeys.map((key) => (
-                <option key={key} value={key}>
-                  {key}
-                </option>
-              ))}
-            </Select>
-            <Select
-              value={filterOp}
-              onChange={(e) => setFilterOp(e.target.value)}
-              aria-label={t("experiments.dashboard.metricFilterOpAria")}
-              disabled={!filterMetric}
-              className="w-auto bg-bg-raised px-2 py-1"
-            >
-              {METRIC_FILTER_OPS.map((op) => (
-                <option key={op} value={op}>
-                  {op}
-                </option>
-              ))}
-            </Select>
-            <Input
-              value={filterValue}
-              onChange={(e) => setFilterValue(e.target.value)}
-              inputMode="decimal"
-              disabled={!filterMetric}
-              placeholder={t("experiments.dashboard.metricFilterValuePlaceholder")}
-              aria-label={t("experiments.dashboard.metricFilterValueAria")}
-              className="w-24 bg-bg-raised px-2 py-1 tabular-nums"
-            />
-          </div>
-        )}
-
-        <label className="flex items-center gap-2">
-          <Checkbox checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
-          <span className="text-fg-subtle">
-            {t("experiments.dashboard.showArchived", { count: archivedCount })}
-          </span>
-        </label>
-
-        <SpinnerSlot
-          active={annotate.isPending}
-          size={14}
-          label={t("experiments.dashboard.savingAnnotation")}
-        />
-      </div>
+      <RunFilterBar
+        filters={filters}
+        onChange={setFilters}
+        tags={tags}
+        metricKeys={filterKeys}
+        archivedCount={archivedCount}
+        selectedCount={selectedRuns.length}
+        visibleCount={visibleRuns.length}
+        saving={annotate.isPending}
+      />
 
       <SegmentedControl
         value={view}
@@ -360,58 +237,15 @@ export function ExperimentDashboard({
 
       {view === "metrics" && (
         <>
-          <div className="flex flex-wrap items-center gap-5 rounded-lg border border-border bg-bg-sunken px-4 py-3 text-sm">
-            <label className="flex items-center gap-2">
-              <span className="text-fg-subtle">{t("experiments.dashboard.xAxis")}</span>
-              <Select
-                value={xMode}
-                onChange={(e) => setXMode(e.target.value as "step" | "time")}
-                className="w-auto bg-bg-raised px-2 py-1"
-              >
-                <option value="step">{t("experiments.dashboard.xStep")}</option>
-                <option value="time">{t("experiments.dashboard.xTime")}</option>
-              </Select>
-            </label>
-
-            <label className="flex flex-1 items-center gap-2 min-w-[200px]">
-              <span className="whitespace-nowrap text-fg-subtle">
-                {t("experiments.dashboard.smoothing")}
-              </span>
-              <Slider
-                min={0}
-                max={0.95}
-                step={0.05}
-                value={smoothing}
-                onChange={(e) => setSmoothing(Number(e.target.value))}
-                aria-label={t("experiments.dashboard.smoothingAria")}
-                className="flex-1"
-              />
-              <span className="w-10 tabular-nums text-fg-subtle">{smoothing.toFixed(2)}</span>
-            </label>
-
-            <label className="flex items-center gap-2">
-              <Checkbox checked={logScale} onChange={(e) => setLogScale(e.target.checked)} />
-              <span className="text-fg-subtle">{t("experiments.dashboard.logScale")}</span>
-            </label>
-
-            <label className="flex items-center gap-2">
-              <Checkbox checked={syncZoom} onChange={(e) => setSyncZoom(e.target.checked)} />
-              <span className="text-fg-subtle">{t("experiments.dashboard.syncZoom")}</span>
-            </label>
-
-            <SpinnerSlot
-              active={isFetching}
-              size={14}
-              label={t("experiments.dashboard.loadingMetrics")}
-            />
-
-            <CsvDownloadButton
-              label={t("experiments.dashboard.exportMetricsCsv")}
-              filename={csvFilename([ns, repo, project, "metrics"])}
-              disabled={(data?.series.length ?? 0) === 0}
-              build={() => metricSeriesCsv(data?.series ?? [], xMode === "time")}
-            />
-          </div>
+          <MetricsToolbar
+            options={chartOptions}
+            onChange={setChartOptions}
+            showSyncZoom
+            fetching={isFetching}
+            csvFilename={csvFilename([ns, repo, project, "metrics"])}
+            csvDisabled={(data?.series.length ?? 0) === 0}
+            buildCsv={() => metricSeriesCsv(data?.series ?? [], chartOptions.xMode === "time")}
+          />
 
           {selectedRuns.length === 0 ? (
             <p className="text-sm text-fg-subtle">{t("experiments.dashboard.selectPrompt")}</p>
@@ -421,20 +255,16 @@ export function ExperimentDashboard({
               message={queryErrorMessage(t, error, t("experiments.dashboard.metricsLoadFailed"))}
             />
           ) : isPending ? (
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              {Array.from({ length: 2 }, (_, i) => `chart-${i}`).map((key) => (
-                <Skeleton key={key} className="h-56 w-full" />
-              ))}
-            </div>
+            <MetricsChartsSkeleton />
           ) : (
             <MetricsCharts
               series={data?.series ?? []}
               runOrder={runOrder}
-              xIsTime={xMode === "time"}
-              smoothing={smoothing}
-              logScale={logScale}
+              xIsTime={chartOptions.xMode === "time"}
+              smoothing={chartOptions.smoothing}
+              logScale={chartOptions.logScale}
               baseline={baseline}
-              syncZoom={syncZoom}
+              syncZoom={chartOptions.syncZoom}
             />
           )}
         </>
@@ -477,9 +307,9 @@ export function ExperimentDashboard({
             runs={visibleRuns}
             runOrder={runOrder}
             selected={selected}
-            onToggle={toggle}
-            onToggleAll={toggleAll}
-            onToggleMany={toggleMany}
+            onToggle={selection.toggle}
+            onToggleAll={() => selection.toggleAll(visibleNames)}
+            onToggleMany={selection.toggleMany}
             runModels={runModels}
             sort={sort}
             onSort={(column: RunSortColumn) => setSort((current) => toggleSort(current, column))}

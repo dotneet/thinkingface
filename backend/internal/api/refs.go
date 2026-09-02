@@ -20,7 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
@@ -164,9 +163,8 @@ func writeRefError(w http.ResponseWriter, what, name string, err error) {
 // gitRepo.IsEmpty is the tie-breaker -- a repository whose HEAD resolves is
 // not empty, so the failure was the revision's.
 func (s *Server) resolveRev(w http.ResponseWriter, repo *store.Repo, rev string) (*gitrepo.Repo, plumbing.Hash, bool) {
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
+	gitRepo, ok := s.openGit(w, repo)
+	if !ok {
 		return nil, plumbing.ZeroHash, false
 	}
 	target, err := gitRepo.Resolve(rev)
@@ -254,8 +252,7 @@ func (s *Server) fireRefDeleted(ctx context.Context, repo *store.Repo, refType, 
 // `write` in the namespace, and refuses an archived repository. A branch is
 // repository content as much as a commit is.
 func (s *Server) handleHFCreateBranch(w http.ResponseWriter, r *http.Request) {
-	kind := kindFromURL(chi.URLParam(r, "repoType"))
-	repo, ok := s.loadRepoForWrite(w, r, kind, chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectHF)
+	repo, _, ok := s.loadHFRepoForWrite(w, r)
 	if !ok {
 		return
 	}
@@ -314,8 +311,7 @@ func (s *Server) handleHFCreateBranch(w http.ResponseWriter, r *http.Request) {
 // ("If trying to delete a protected branch. Ex: `main` cannot be deleted") and
 // raises HfHubHTTPError for it, so the status only has to be an error status.
 func (s *Server) handleHFDeleteBranch(w http.ResponseWriter, r *http.Request) {
-	kind := kindFromURL(chi.URLParam(r, "repoType"))
-	repo, ok := s.loadRepoForWrite(w, r, kind, chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectHF)
+	repo, _, ok := s.loadHFRepoForWrite(w, r)
 	if !ok {
 		return
 	}
@@ -358,8 +354,7 @@ func (s *Server) handleHFDeleteBranch(w http.ResponseWriter, r *http.Request) {
 // A message produces a real annotated tag object, the way `git tag -m` does,
 // rather than being dropped on the floor; without one the tag is lightweight.
 func (s *Server) handleHFCreateTag(w http.ResponseWriter, r *http.Request) {
-	kind := kindFromURL(chi.URLParam(r, "repoType"))
-	repo, ok := s.loadRepoForWrite(w, r, kind, chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectHF)
+	repo, _, ok := s.loadHFRepoForWrite(w, r)
 	if !ok {
 		return
 	}
@@ -383,15 +378,7 @@ func (s *Server) handleHFCreateTag(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	tagger := gitrepo.Signature{
-		Name: "thinkingface", Email: "noreply@thinkingface.local", When: time.Now(),
-	}
-	if user := currentUser(r.Context()); user != nil {
-		tagger.Name = user.Username
-		if user.Email != "" {
-			tagger.Email = user.Email
-		}
-	}
+	tagger := commitAuthor(r.Context())
 	// The tag object -- when there is one -- is written inside
 	// createTagRefThroughWAL, on the same repository handle the ref write and
 	// the WAL entry pack use. Writing it out here instead would put a
@@ -416,8 +403,7 @@ func (s *Server) handleHFCreateTag(w http.ResponseWriter, r *http.Request) {
 // {rev} is the tag name (huggingface_hub reuses the create route's path
 // parameter for a different thing).
 func (s *Server) handleHFDeleteTag(w http.ResponseWriter, r *http.Request) {
-	kind := kindFromURL(chi.URLParam(r, "repoType"))
-	repo, ok := s.loadRepoForWrite(w, r, kind, chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectHF)
+	repo, _, ok := s.loadHFRepoForWrite(w, r)
 	if !ok {
 		return
 	}
@@ -458,6 +444,47 @@ type hfCommitAuthor struct {
 	User string `json:"user"`
 }
 
+// commitPageParams reads the `limit` / `after` window both commit listings
+// take -- the HuggingFace-compatible one and the Web UI's -- and answers the
+// request itself on an unusable value.
+//
+// Parsed in one place because the two must not drift apart. They were
+// nineteen near-identical lines apiece, over the same history, so raising
+// maxCommitPage or loosening the cursor rule on one side would silently have
+// left the other where it was.
+//
+// Strict, unlike the UI listings' pageParams (urlparams.go), and the same
+// strictness on both endpoints even though only one of them is
+// HF-compatible: huggingface_hub's `paginate` follows the Link header this
+// server builds out of the parameters it was sent, so a `limit` quietly
+// replaced by a default is a client that pages wrongly rather than one that
+// reports an error -- and a cursor read as "start again from the top" would
+// walk the same page forever.
+func commitPageParams(w http.ResponseWriter, r *http.Request) (limit int, after plumbing.Hash, ok bool) {
+	q := r.URL.Query()
+	limit = defaultCommitPage
+	if v := q.Get("limit"); v != "" {
+		n, convErr := strconv.Atoi(v)
+		if convErr != nil || n < 1 {
+			badRequest(w, "limit must be a positive integer")
+			return 0, plumbing.ZeroHash, false
+		}
+		limit = min(n, maxCommitPage)
+	}
+	after = plumbing.ZeroHash
+	if v := q.Get("after"); v != "" {
+		// The cursor names an object, so it has to be a full hex hash; a
+		// branch name here would silently restart the walk.
+		parsed := plumbing.NewHash(v)
+		if parsed.IsZero() || parsed.String() != strings.ToLower(v) {
+			badRequest(w, "after must be a full commit hash")
+			return 0, plumbing.ZeroHash, false
+		}
+		after = parsed
+	}
+	return limit, after, true
+}
+
 // handleHFCommits answers GET /api/{type}s/{ns}/{name}/commits/{rev} for
 // HfApi.list_repo_commits. Authorisation is an ordinary read, the same as
 // every other HF-compatible GET on a repository.
@@ -468,8 +495,7 @@ type hfCommitAuthor struct {
 // absolute. A client that ignores the header simply gets the first page, which
 // is what `limit` is for.
 func (s *Server) handleHFCommits(w http.ResponseWriter, r *http.Request) {
-	kind := kindFromURL(chi.URLParam(r, "repoType"))
-	repo, ok := s.loadRepoForRead(w, r, kind, chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectHF)
+	repo, _, ok := s.loadHFRepoForRead(w, r)
 	if !ok {
 		return
 	}
@@ -484,23 +510,9 @@ func (s *Server) handleHFCommits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := defaultCommitPage
-	if v := r.URL.Query().Get("limit"); v != "" {
-		n, convErr := strconv.Atoi(v)
-		if convErr != nil || n < 1 {
-			badRequest(w, "limit must be a positive integer")
-			return
-		}
-		limit = min(n, maxCommitPage)
-	}
-	after := plumbing.ZeroHash
-	if v := r.URL.Query().Get("after"); v != "" {
-		parsed := plumbing.NewHash(v)
-		if parsed.IsZero() || parsed.String() != strings.ToLower(v) {
-			badRequest(w, "after must be a full commit hash")
-			return
-		}
-		after = parsed
+	limit, after, ok := commitPageParams(w, r)
+	if !ok {
+		return
 	}
 
 	metas, next, err := gitRepo.ListCommits(rev, r.URL.Query().Get("path"), after, limit)

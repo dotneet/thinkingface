@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
 	"github.com/dotneet/thinkingface/backend/internal/auth"
 	"github.com/dotneet/thinkingface/backend/internal/store"
@@ -333,98 +331,27 @@ func (s *Server) requireWrite(w http.ResponseWriter, r *http.Request) (*store.Us
 	return user, true
 }
 
-// loadRepoForRead fetches the repository named in the URL and enforces read
-// access, writing the error response itself when it returns false. When the
-// name is a former name of a repository that has since moved
-// (docs/dev/repo-transfer-design.md §9), it answers according to mode instead of
-// a plain 404 -- see resolveRepo and redirectMoved.
+// loadUserByName resolves a username to an account, answering the request
+// itself when there is none.
 //
-// "No such repository" goes out as repoNotFound rather than a bare notFound:
-// huggingface_hub's hf_raise_for_status only turns a 404 into
-// RepositoryNotFoundError when X-Error-Code says RepoNotFound, and that is the
-// one exception HfApi.repo_exists / file_exists / revision_exists catch. Without
-// the header they raise HfHubHTTPError instead of answering False, and every
-// caller that probes for an optional repository or file -- transformers picking
-// the next candidate filename, for one -- fails instead of moving on. The 401
-// fallback in hf_raise_for_status is no help here: its REPO_API_REGEX is
-// anchored on `^https://`, so a self-hosted instance served over plain HTTP
-// never matches it.
-func (s *Server) loadRepoForRead(w http.ResponseWriter, r *http.Request, kind, ns, name string, mode redirectMode) (*store.Repo, bool) {
-	ctx := r.Context()
-	repo, err := s.resolveRepo(ctx, kind, ns, name)
+// notFoundMsg is a parameter rather than a fixed sentence because its two
+// kinds of caller mean different things by "no such user". The admin
+// endpoints look an account up *as an account*, so they say "no user named
+// x". The organisation endpoints look one up as a *membership* (see
+// loadOrgMemberTarget) and answer "x is not a member of y" for a stranger and
+// for an account that does not exist alike, so a 404 against a membership URL
+// never says which of the two it was.
+func (s *Server) loadUserByName(w http.ResponseWriter, r *http.Request, username, notFoundMsg string) (*store.User, bool) {
+	user, err := s.store.GetUserByUsername(r.Context(), username)
 	if err != nil {
-		var moved *repoMovedError
-		if errors.As(err, &moved) {
-			if mode == redirectNone {
-				// redirectNone means "answer exactly as if it never existed"
-				// (see redirect.go), so it gets the same signal as a genuine
-				// miss -- header included. Anything else here would leak the
-				// existence of the repository at its new name through a
-				// difference the message itself does not make.
-				repoNotFound(w, "repository "+ns+"/"+name+" not found")
-			} else {
-				redirectMoved(w, r, mode, ns, name, moved)
-			}
+		if errors.Is(err, store.ErrNotFound) {
+			notFound(w, notFoundMsg)
 			return nil, false
 		}
-		if errors.Is(err, store.ErrNotFound) {
-			repoNotFound(w, "repository "+ns+"/"+name+" not found")
-		} else {
-			internalError(w, "load repository", err)
-		}
+		internalError(w, "load user", err)
 		return nil, false
 	}
-	return repo, true
-}
-
-// loadRepoForWrite is the gate every content-changing endpoint passes
-// through: git receive-pack, the HF commit/preupload pair, the LFS upload
-// batch, in-browser editing, transfers and experiment ingest. On top of the
-// write permission it refuses an archived repository, so archiving one
-// stops all of them in a single place (docs/dev/api-contract.md §2 "archiving").
-// The two operations that must keep working on an archive -- unarchiving and
-// deleting it -- use loadRepoForWriteAllowArchived instead.
-func (s *Server) loadRepoForWrite(w http.ResponseWriter, r *http.Request, kind, ns, name string, mode redirectMode) (*store.Repo, bool) {
-	repo, ok := s.loadRepoForWriteAllowArchived(w, r, kind, ns, name, mode)
-	if !ok {
-		return nil, false
-	}
-	// After the permission check, so an archived repository does not answer
-	// differently to someone who could not write to it anyway.
-	//
-	// Deliberately *not* repoNotFound: the repository exists and this caller
-	// can read it. Tagging it RepoNotFound would make huggingface_hub raise
-	// RepositoryNotFoundError -- and repo_exists() answer False -- for a
-	// repository the very same client can still list and download.
-	if repo.Archived() {
-		writeError(w, http.StatusForbidden, "repository_archived",
-			repo.FullName()+" is archived and read-only; unarchive it in the repository settings to make changes")
-		return nil, false
-	}
-	return repo, true
-}
-
-// loadRepoForWriteAllowArchived enforces the write permission only. Callers
-// that are not changing repository content -- delete, archive/unarchive --
-// use it directly; everything else wants loadRepoForWrite.
-func (s *Server) loadRepoForWriteAllowArchived(w http.ResponseWriter, r *http.Request, kind, ns, name string, mode redirectMode) (*store.Repo, bool) {
-	repo, ok := s.loadRepoForRead(w, r, kind, ns, name, mode)
-	if !ok {
-		return nil, false
-	}
-	// Also deliberately left as 401/403 rather than RepoNotFound. There is no
-	// private-repository concept here (nothing in this package filters reads on
-	// visibility), so a repository the caller cannot write is still one they can
-	// see -- hiding it behind a 404 would only teach clients that it is gone.
-	if !s.canWriteIgnoringArchive(r.Context(), repo) {
-		if currentUser(r.Context()) == nil {
-			unauthorized(w, "authentication required to write to "+repo.FullName())
-		} else {
-			forbidden(w, "you do not have write access to "+repo.FullName())
-		}
-		return nil, false
-	}
-	return repo, true
+	return user, true
 }
 
 // -------------------------------------------------------------- handlers
@@ -888,120 +815,4 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 	})
-}
-
-func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
-	user, ok := s.requireUser(w, r)
-	if !ok {
-		return
-	}
-	tokens, err := s.store.ListTokens(r.Context(), user.ID)
-	if err != nil {
-		internalError(w, "list tokens", err)
-		return
-	}
-	items := make([]apitypes.TokenItem, 0, len(tokens))
-	for _, t := range tokens {
-		items = append(items, toTokenItem(&t))
-	}
-	writeJSON(w, http.StatusOK, apitypes.TokenListResponse{Items: items})
-}
-
-// maxTokenExpiryDays bounds how far out a token's expiry can be set. The cap
-// exists so "no expiry" stays a deliberate choice rather than the only
-// practical one, and so a client can't request something absurd like a
-// 100-year token. It is not part of the HF-compatible surface: nothing in
-// huggingface_hub mints tokens, so this endpoint and its cap are ours alone
-// to define.
-const maxTokenExpiryDays = 365
-
-func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
-	// Write scope, not merely authentication: minting is how a read-only
-	// token would otherwise escalate itself into a write-scoped one.
-	user, ok := s.requireWrite(w, r)
-	if !ok {
-		return
-	}
-	var req struct {
-		Name  string `json:"name"`
-		Scope string `json:"scope"`
-		// ExpiresInDays is omitted, null, or 0 for a token that never
-		// expires -- encoding/json leaves a plain (non-pointer) int
-		// untouched for both a missing key and an explicit `null`, so all
-		// three spellings collapse to the same zero value here.
-		ExpiresInDays int `json:"expires_in_days"`
-	}
-	if !decodeJSON(w, r, maxAuthBody, &req, "request body must be JSON with name and scope") {
-		return
-	}
-	if req.Name == "" {
-		req.Name = "token"
-	}
-	if req.Scope != "read" && req.Scope != "write" {
-		req.Scope = "read"
-	}
-	if req.ExpiresInDays < 0 {
-		badRequest(w, "expires_in_days must not be negative")
-		return
-	}
-	if req.ExpiresInDays > maxTokenExpiryDays {
-		badRequest(w, fmt.Sprintf("expires_in_days must be at most %d", maxTokenExpiryDays))
-		return
-	}
-	var expiresAt *time.Time
-	if req.ExpiresInDays > 0 {
-		// Computed here in Go (UTC) rather than left to the database's own
-		// "now + N days": PostgreSQL and SQLite spell that arithmetic
-		// differently (see dialect.nowPlusSeconds), and resolving it to a
-		// single absolute instant before it ever reaches SQL keeps the two
-		// backends from being able to disagree about it.
-		t := time.Now().UTC().AddDate(0, 0, req.ExpiresInDays)
-		expiresAt = &t
-	}
-	token, hash, err := auth.NewToken()
-	if err != nil {
-		internalError(w, "generate token", err)
-		return
-	}
-	rec, err := s.store.CreateToken(r.Context(), user.ID, req.Name, req.Scope, hash, expiresAt)
-	if err != nil {
-		internalError(w, "create token", err)
-		return
-	}
-	// Minting a credential is an auditable event, so it is logged by id,
-	// name and scope. The token value itself appears in the response and
-	// nowhere else -- not in this line, not truncated, not as a prefix.
-	slog.Info("access token created", "username", user.Username, "user_id", user.ID,
-		"token_id", rec.ID, "token_name", rec.Name, "scope", rec.Scope,
-		"client_ip", s.clientIP(r))
-	// The plaintext value appears here and nowhere else.
-	writeJSON(w, http.StatusOK, apitypes.CreateTokenResponse{TokenItem: toTokenItem(rec), Token: token})
-}
-
-// toTokenItem drops the owning user id, which never leaves the server.
-func toTokenItem(t *store.AccessToken) apitypes.TokenItem {
-	return apitypes.TokenItem{
-		ID: t.ID, Name: t.Name, Scope: apitypes.TokenScope(t.Scope),
-		CreatedAt: t.CreatedAt, LastUsedAt: t.LastUsedAt, ExpiresAt: t.ExpiresAt,
-	}
-}
-
-func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
-	// Revocation is a state change, so a read-only token may not do it.
-	user, ok := s.requireWrite(w, r)
-	if !ok {
-		return
-	}
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		badRequest(w, "token id must be a number")
-		return
-	}
-	if err := s.store.DeleteToken(r.Context(), user.ID, id); err != nil {
-		handleStoreError(w, "delete token", err)
-		return
-	}
-	slog.Info("access token revoked", "username", user.Username, "user_id", user.ID,
-		"token_id", id, "actor", "self", "client_ip", s.clientIP(r))
-	w.WriteHeader(http.StatusNoContent)
 }

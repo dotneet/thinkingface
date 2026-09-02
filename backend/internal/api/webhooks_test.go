@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
@@ -114,5 +115,63 @@ func TestCreateWebhook_NewEventsCanBeSubscribedAndMatched(t *testing.T) {
 				t.Fatalf("ListMatchingWebhooks(repo.push) = %+v, want no match for a webhook scoped to %q", other, event)
 			}
 		})
+	}
+}
+
+// TestWebhookByID_TellsANonAdminNothing pins that /webhooks/{id} answers a
+// caller who may not administer the owning namespace exactly as it answers
+// one who named an id that does not exist -- same status, same body.
+//
+// Webhook ids are instance-wide serials, so anything that distinguishes the
+// two lets a caller with any write-scoped credential walk the id space and
+// read off which namespaces hold webhooks. A 403 does that twice over: it
+// confirms the row, and names the namespace in its message. The endpoint
+// used to return one, and nothing failed when it did -- there was no test
+// here that looked at a status code at all.
+func TestWebhookByID_TellsANonAdminNothing(t *testing.T) {
+	f := newTransferFixture(t)
+	aliceTok := f.token(f.alice, "write")
+	bobTok := f.token(f.bob, "write")
+
+	created := f.do("POST", "/api/v1/namespaces/alice/webhooks", aliceTok, map[string]any{
+		"url":    "https://example.com/hook",
+		"events": []string{string(apitypes.WebhookEventRepoPush)},
+	})
+	if created.status() != 200 {
+		t.Fatalf("create webhook: status = %d, body = %s", created.status(), created.rec.Body.String())
+	}
+	var hook apitypes.CreateWebhookResponse
+	created.json(t, &hook)
+
+	// The owner reaches it, which is what makes the rest of this test mean
+	// something: the id is real and the route works.
+	if got := f.do("GET", fmt.Sprintf("/api/v1/webhooks/%d", hook.ID), aliceTok, nil); got.status() != 200 {
+		t.Fatalf("owner GET: status = %d, body = %s", got.status(), got.rec.Body.String())
+	}
+
+	// bob holds a write token and administers his own namespace, but not
+	// alice's. He must not be able to tell alice's webhook from a gap in the
+	// id space.
+	real := f.do("GET", fmt.Sprintf("/api/v1/webhooks/%d", hook.ID), bobTok, nil)
+	missing := f.do("GET", fmt.Sprintf("/api/v1/webhooks/%d", hook.ID+9999), bobTok, nil)
+	if real.status() != 404 {
+		t.Fatalf("non-admin GET of an existing webhook: status = %d, want 404 (body %s)",
+			real.status(), real.rec.Body.String())
+	}
+	if missing.status() != 404 {
+		t.Fatalf("GET of a missing webhook: status = %d, want 404 (body %s)",
+			missing.status(), missing.rec.Body.String())
+	}
+	if real.rec.Body.String() != missing.rec.Body.String() {
+		t.Fatalf("the two 404s differ, so the id is still distinguishable:\n existing: %s\n  missing: %s",
+			real.rec.Body.String(), missing.rec.Body.String())
+	}
+
+	// The same for the write paths, which is where a leak would also mutate.
+	if got := f.do("DELETE", fmt.Sprintf("/api/v1/webhooks/%d", hook.ID), bobTok, nil); got.status() != 404 {
+		t.Fatalf("non-admin DELETE: status = %d, want 404 (body %s)", got.status(), got.rec.Body.String())
+	}
+	if got := f.do("GET", fmt.Sprintf("/api/v1/webhooks/%d", hook.ID), aliceTok, nil); got.status() != 200 {
+		t.Fatalf("webhook gone after a refused DELETE: status = %d", got.status())
 	}
 }

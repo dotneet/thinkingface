@@ -349,8 +349,8 @@ Error `type` values (`{"error": {"type": ...}}`, with their corresponding HTTP s
 `already_member` (409).
 
 The uniqueness of `namespaces.name` itself **ignores case**
-(a `LOWER(name)` unique index in
-`backend/internal/store/migrations/{postgres,sqlite}/*_namespace_name_ci_unique.sql`).
+(`idx_namespaces_name_lower`, a `LOWER(name)` unique index defined in
+`backend/internal/store/migrations/{postgres,sqlite}/0001_init.sql`).
 Lookups also resolve via `LOWER(n.name) = LOWER($1)`, so a namespace in a URL reaches the same
 repository regardless of the spelling used to hit it. The reserved-name check has always run
 through `toLowerCase()`, so it's already consistent with this policy.
@@ -2754,7 +2754,7 @@ git-receive-pack '<path>'      # push
 
 When an event occurs, an HTTP POST is sent to a registered URL. Registration can be per-namespace
 (`repo_id` is null) or per specific repository; the permission required is write/admin on the
-target namespace (`CanWriteNamespace`, or site admin). Every endpoint requires auth and write
+target namespace (owner or org admin/write member, or site admin). Every endpoint requires auth and write
 scope. **When the namespace is an organization, the admin role is required** (write gets 403). In
 a user namespace the owner is admin, so behavior doesn't change (`docs/dev/organization-design.md`
 §4).

@@ -20,6 +20,22 @@ import type {
 export type FetchOpts = { headers?: Record<string, string> };
 
 /**
+ * The API path of one experiment repository, or of one project inside it.
+ *
+ * Same arrangement as `repoApiPath` (`lib/repos.ts`): the namespace, the
+ * repository and the project are all user-chosen and all need escaping, so
+ * they are escaped in one place rather than at each of the six endpoints.
+ * `suffix` is appended verbatim, so a caller that puts a run name in it
+ * encodes that itself — a run name is only forbidden control characters at
+ * ingest and may carry slashes.
+ */
+export function expApiPath(ns: string, repo: string, project?: string, suffix = ""): string {
+  const base = `/api/v1/experiments/${encodeURIComponent(ns)}/${encodeURIComponent(repo)}`;
+  if (project === undefined) return `${base}${suffix}`;
+  return `${base}/${encodeURIComponent(project)}${suffix}`;
+}
+
+/**
  * Path of one run's detail page.
  *
  * A run name is only forbidden control characters at ingest, so it may carry
@@ -69,10 +85,9 @@ export function getExperimentRepo(
   repo: string,
   opts?: FetchOpts,
 ): Promise<ApiResult<{ repo: RepoSummary; projects: ExpProject[] }>> {
-  return apiFetch<{ repo: RepoSummary; projects: ExpProject[] }>(
-    `/api/v1/experiments/${encodeURIComponent(ns)}/${encodeURIComponent(repo)}`,
-    { headers: opts?.headers },
-  );
+  return apiFetch<{ repo: RepoSummary; projects: ExpProject[] }>(expApiPath(ns, repo), {
+    headers: opts?.headers,
+  });
 }
 
 export function listRuns(
@@ -81,10 +96,9 @@ export function listRuns(
   project: string,
   opts?: FetchOpts,
 ): Promise<ApiResult<{ runs: ExpRun[] }>> {
-  return apiFetch<{ runs: ExpRun[] }>(
-    `/api/v1/experiments/${encodeURIComponent(ns)}/${encodeURIComponent(repo)}/${encodeURIComponent(project)}/runs`,
-    { headers: opts?.headers },
-  );
+  return apiFetch<{ runs: ExpRun[] }>(expApiPath(ns, repo, project, "/runs"), {
+    headers: opts?.headers,
+  });
 }
 
 /**
@@ -99,10 +113,9 @@ export function deleteRun(
   project: string,
   run: string,
 ): Promise<ApiResult<void>> {
-  return apiFetch<void>(
-    `/api/v1/experiments/${encodeURIComponent(ns)}/${encodeURIComponent(repo)}/${encodeURIComponent(project)}/runs/${encodeURIComponent(run)}`,
-    { method: "DELETE" },
-  );
+  return apiFetch<void>(expApiPath(ns, repo, project, `/runs/${encodeURIComponent(run)}`), {
+    method: "DELETE",
+  });
 }
 
 /**
@@ -119,7 +132,7 @@ export function updateRunAnnotations(
   body: ExpRunAnnotationRequest,
 ): Promise<ApiResult<ExpRunAnnotationResponse>> {
   return apiFetch<ExpRunAnnotationResponse>(
-    `/api/v1/experiments/${encodeURIComponent(ns)}/${encodeURIComponent(repo)}/${encodeURIComponent(project)}/runs/${encodeURIComponent(run)}`,
+    expApiPath(ns, repo, project, `/runs/${encodeURIComponent(run)}`),
     { method: "PATCH", body },
   );
 }
@@ -140,7 +153,7 @@ export function listRunArtifacts(
   opts?: FetchOpts,
 ): Promise<ApiResult<ExpArtifactListResponse>> {
   return apiFetch<ExpArtifactListResponse>(
-    `/api/v1/experiments/${encodeURIComponent(ns)}/${encodeURIComponent(repo)}/${encodeURIComponent(project)}/runs/${encodeURIComponent(run)}/artifacts`,
+    expApiPath(ns, repo, project, `/runs/${encodeURIComponent(run)}/artifacts`),
     { headers: opts?.headers },
   );
 }
@@ -201,6 +214,16 @@ export function formatMetricValue(value: number): string {
   return Number(value.toPrecision(6)).toLocaleString("en-US", { maximumFractionDigits: 6 });
 }
 
+/**
+ * How a metric value reads in a table cell, or "—" for a run that never
+ * logged this metric. Shared by the run rows and the group rows so a folded
+ * sweep's best value and a member's own value can never print differently.
+ */
+export function metricCellText(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  return formatMetricValue(value);
+}
+
 export function getMetrics(
   ns: string,
   repo: string,
@@ -208,22 +231,19 @@ export function getMetrics(
   params: { runs?: string[]; keys?: string[]; x?: "step" | "time"; max_points?: number },
   opts?: FetchOpts,
 ): Promise<ApiResult<ExpMetricsResponse>> {
-  return apiFetch<ExpMetricsResponse>(
-    `/api/v1/experiments/${encodeURIComponent(ns)}/${encodeURIComponent(repo)}/${encodeURIComponent(project)}/metrics`,
-    {
-      query: {
-        // Repeated `run=` / `key=` rather than comma-joined `runs=` / `keys=`:
-        // a run named `lr=0.1,bs=32` (or a metric key with a comma in it) was
-        // split into fragments that matched no run at all — and a fragment
-        // that happened to match another run silently plotted a series nobody
-        // selected. `apiFetch` sends a string[] as one key per entry, so each
-        // name travels percent-encoded and arrives byte-for-byte.
-        run: params.runs?.length ? params.runs : undefined,
-        key: params.keys?.length ? params.keys : undefined,
-        x: params.x,
-        max_points: params.max_points,
-      },
-      headers: opts?.headers,
+  return apiFetch<ExpMetricsResponse>(expApiPath(ns, repo, project, "/metrics"), {
+    query: {
+      // Repeated `run=` / `key=` rather than comma-joined `runs=` / `keys=`:
+      // a run named `lr=0.1,bs=32` (or a metric key with a comma in it) was
+      // split into fragments that matched no run at all — and a fragment
+      // that happened to match another run silently plotted a series nobody
+      // selected. `apiFetch` sends a string[] as one key per entry, so each
+      // name travels percent-encoded and arrives byte-for-byte.
+      run: params.runs?.length ? params.runs : undefined,
+      key: params.keys?.length ? params.keys : undefined,
+      x: params.x,
+      max_points: params.max_points,
     },
-  );
+    headers: opts?.headers,
+  });
 }

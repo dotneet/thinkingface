@@ -91,10 +91,11 @@ type NamespaceRole struct {
 }
 
 // orgColumns reads a namespaces row as an organisation. updated_at is
-// scanned through a pointer because SQLite cannot add a NOT NULL column with
-// a non-constant default, so the column is nullable there
-// (migrations/sqlite/0004); a COALESCE would work but erases the declared
-// column type the SQLite driver needs to hand back a time.Time.
+// scanned through a pointer because SQLite cannot attach NOT NULL to a column
+// carrying a non-constant default, so the column is nullable there while
+// Postgres declares it NOT NULL DEFAULT now(); a COALESCE would work but
+// erases the declared column type the SQLite driver needs to hand back a
+// time.Time.
 const orgColumns = `n.id, n.name, n.display_name, n.description, n.website, n.avatar_url,
 	n.members_visibility, n.created_by, n.created_at, n.updated_at`
 
@@ -220,17 +221,6 @@ func (s *Store) GetOrgByID(ctx context.Context, id int64) (*Org, error) {
 		`SELECT `+orgColumns+` FROM namespaces n WHERE n.id = $1 AND n.kind = 'org'`, id))
 }
 
-func joinComma(parts []string) string {
-	out := ""
-	for i, p := range parts {
-		if i > 0 {
-			out += ", "
-		}
-		out += p
-	}
-	return out
-}
-
 // DeleteOrg removes the organisation, cascading its memberships, webhooks
 // and audit log. It refuses (ErrConflict) while any repository still lives
 // there: dropping dozens of repositories behind one click is exactly the
@@ -310,15 +300,18 @@ func (s *Store) ListOrgsForUser(ctx context.Context, userID int64) ([]OrgSummary
 func (s *Store) ListOrgs(ctx context.Context, search string, viewerID *int64, limit, offset int) ([]OrgSummary, int64, error) {
 	limit, offset = pageWindow(limit, offset, defaultOrgPageSize, MaxOrgPageSize)
 
+	var args []any
+	bind := binder(&args)
 	where := `WHERE n.kind = 'org'`
-	var countArgs []any
-	countBind := binder(&countArgs)
-	if search != "" {
-		// Escaped to a literal substring rather than interpolated as a
-		// pattern, so the directory answers what was typed (see like.go).
-		p := countBind(likeContains(search))
-		where += ` AND ` + likeAnyOf(p, "n.name", "n.display_name")
+	// Escaped to a literal substring rather than interpolated as a pattern,
+	// so the directory answers what was typed (see like.go).
+	if c := searchClause(bind, search, "n.name", "n.display_name"); c != "" {
+		where += ` AND ` + c
 	}
+	// The count runs on the clause's own parameters. The viewer id and the
+	// page window are bound below rather than above for exactly that reason:
+	// this prefix has to be the WHERE clause and nothing else (searchClause).
+	countArgs := append([]any{}, args...)
 
 	var total int64
 	if err := s.db.QueryRow(ctx,
@@ -326,8 +319,6 @@ func (s *Store) ListOrgs(ctx context.Context, search string, viewerID *int64, li
 		return nil, 0, err
 	}
 
-	var args []any
-	bind := binder(&args)
 	// The viewer's own membership, joined rather than re-queried per row.
 	viewerRole, viewerJoin := `''`, ``
 	if viewerID != nil {
@@ -335,16 +326,11 @@ func (s *Store) ListOrgs(ctx context.Context, search string, viewerID *int64, li
 		viewerRole = `COALESCE(vm.role, '')`
 		viewerJoin = ` LEFT JOIN org_members vm ON vm.namespace_id = n.id AND vm.user_id = ` + v
 	}
-	listWhere := `WHERE n.kind = 'org'`
-	if search != "" {
-		p := bind(likeContains(search))
-		listWhere += ` AND ` + likeAnyOf(p, "n.name", "n.display_name")
-	}
 	limitP, offsetP := bind(limit), bind(offset)
 
 	rows, err := s.db.Query(ctx,
 		`SELECT `+orgColumns+`, `+viewerRole+`, `+orgMemberCount+`, `+orgRepoCount+`
-		 FROM namespaces n`+viewerJoin+` `+listWhere+`
+		 FROM namespaces n`+viewerJoin+` `+where+`
 		 ORDER BY n.name LIMIT `+limitP+` OFFSET `+offsetP, args...)
 	if err != nil {
 		return nil, 0, err
@@ -535,6 +521,36 @@ func countOrgAdmins(ctx context.Context, ex executor, id int64) (int64, error) {
 	return n, err
 }
 
+// guardLastOrgAdmin refuses a membership change that would leave the
+// organisation with no admin: ErrLastAdmin. current is the member's role as
+// it stands, stillAdmin whether they would still be one afterwards -- so a
+// demotion passes false and a removal always does.
+//
+// One spelling for the same reason guardLastSiteAdmin is one: "an
+// organisation always has an admin" is an invariant, and an invariant written
+// twice is an invariant enforced in one of the two places until someone
+// notices. The caller must already hold lockOrgForMembershipChange, since the
+// rule is about the count.
+func guardLastOrgAdmin(ctx context.Context, ex executor, id, userID int64, stillAdmin bool) error {
+	var current string
+	if err := ex.QueryRow(ctx,
+		`SELECT role FROM org_members WHERE namespace_id = $1 AND user_id = $2`, id, userID,
+	).Scan(&current); err != nil {
+		return norm(err)
+	}
+	if current != "admin" || stillAdmin {
+		return nil
+	}
+	admins, err := countOrgAdmins(ctx, ex, id)
+	if err != nil {
+		return err
+	}
+	if admins <= 1 {
+		return ErrLastAdmin
+	}
+	return nil
+}
+
 // UpdateOrgMemberRole changes an existing member's role. Demoting the only
 // admin is ErrLastAdmin: an organisation with no admin could never be
 // administered again (docs/dev/organization-design.md §5).
@@ -548,20 +564,8 @@ func (s *Store) UpdateOrgMemberRole(ctx context.Context, id, userID int64, role 
 	if err := s.lockOrgForMembershipChange(ctx, tx, id); err != nil {
 		return nil, err
 	}
-	var current string
-	if err := tx.QueryRow(ctx,
-		`SELECT role FROM org_members WHERE namespace_id = $1 AND user_id = $2`, id, userID,
-	).Scan(&current); err != nil {
-		return nil, norm(err)
-	}
-	if current == "admin" && role != "admin" {
-		admins, err := countOrgAdmins(ctx, tx, id)
-		if err != nil {
-			return nil, err
-		}
-		if admins <= 1 {
-			return nil, ErrLastAdmin
-		}
+	if err := guardLastOrgAdmin(ctx, tx, id, userID, role == "admin"); err != nil {
+		return nil, err
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE org_members SET role = $3, updated_at = now()
@@ -590,20 +594,9 @@ func (s *Store) RemoveOrgMember(ctx context.Context, id, userID int64) error {
 	if err := s.lockOrgForMembershipChange(ctx, tx, id); err != nil {
 		return err
 	}
-	var current string
-	if err := tx.QueryRow(ctx,
-		`SELECT role FROM org_members WHERE namespace_id = $1 AND user_id = $2`, id, userID,
-	).Scan(&current); err != nil {
-		return norm(err)
-	}
-	if current == "admin" {
-		admins, err := countOrgAdmins(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		if admins <= 1 {
-			return ErrLastAdmin
-		}
+	// A removal never leaves them an admin.
+	if err := guardLastOrgAdmin(ctx, tx, id, userID, false); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(ctx,
 		`DELETE FROM org_members WHERE namespace_id = $1 AND user_id = $2`, id, userID); err != nil {
@@ -695,16 +688,4 @@ func (s *Store) NamespaceRoleFor(ctx context.Context, userID int64, ns string) (
 	}
 	out.Role = role
 	return out, nil
-}
-
-// RoleInNamespace reports a user's relationship to a namespace: "admin" for
-// the owner of a user namespace or an org admin, "write"/"read" for the
-// corresponding org_members roles, and "" when the user has no relationship.
-// ErrNotFound when the namespace does not exist.
-func (s *Store) RoleInNamespace(ctx context.Context, userID int64, ns string) (string, error) {
-	r, err := s.NamespaceRoleFor(ctx, userID, ns)
-	if err != nil {
-		return "", err
-	}
-	return r.Role, nil
 }

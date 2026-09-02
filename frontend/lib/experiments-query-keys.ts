@@ -14,8 +14,8 @@
  *
  * The run list is serialized with `JSON.stringify`, never `join(",")`. Run
  * names may contain commas — `lib/experiments.ts` builds sweep names like
- * `lr=0.1,bs=32`, which is the reason the metrics API takes a repeated `runs=`
- * parameter instead of one comma-joined value — so a comma-join collapses
+ * `lr=0.1,bs=32`, which is the reason the metrics API takes a repeated `run=`
+ * parameter instead of one comma-joined `runs=` value — so a comma-join collapses
  * `["lr=0.1,bs=32"]` and `["lr=0.1", "bs=32"]` onto the same key and serves
  * one query's series to the other. Same class of bug as the Parquet viewer's
  * column list (components/parquet/parquet-viewer.tsx).

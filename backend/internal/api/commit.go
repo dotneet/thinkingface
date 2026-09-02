@@ -1,21 +1,16 @@
 package api
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
-	"github.com/dotneet/thinkingface/backend/internal/storage"
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
 
@@ -68,8 +63,7 @@ func rejectCreatePR(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *Server) handlePreupload(w http.ResponseWriter, r *http.Request) {
-	kind := kindFromURL(chi.URLParam(r, "repoType"))
-	repo, ok := s.loadRepoForWrite(w, r, kind, chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectHF)
+	repo, _, ok := s.loadHFRepoForWrite(w, r)
 	if !ok {
 		return
 	}
@@ -87,9 +81,8 @@ func (s *Server) handlePreupload(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, maxBatchBody, &req, "request body must be JSON with a files array") {
 		return
 	}
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
+	gitRepo, ok := s.openGit(w, repo)
+	if !ok {
 		return
 	}
 	rev, ok := revParam(w, r, "rev", repo)
@@ -397,15 +390,13 @@ func resolveCopies(w http.ResponseWriter, gitRepo *gitrepo.Repo, rev string, cop
 }
 
 func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
-	kind := kindFromURL(chi.URLParam(r, "repoType"))
-	repo, ok := s.loadRepoForWrite(w, r, kind, chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectHF)
+	repo, _, ok := s.loadHFRepoForWrite(w, r)
 	if !ok {
 		return
 	}
 	if rejectCreatePR(w, r) {
 		return
 	}
-	user := currentUser(r.Context())
 	rev, ok := revParam(w, r, "rev", repo)
 	if !ok {
 		return
@@ -420,293 +411,37 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	// straight away: commitThroughWAL (re-)opens the repository itself, since
 	// an authoritative-mode materialisation may rebuild the directory and
 	// invalidate any handle taken before it.
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
+	gitRepo, ok := s.openGit(w, repo)
+	if !ok {
 		return
 	}
 	if !ensureBranchRev(w, gitRepo, rev, "commits") {
 		return
 	}
 
-	summary := "Upload files"
-	parentCommit := ""
-	var ops []gitrepo.Op
-	var lfsOIDs []store.LFSObjectRef
-	var copies []pendingCopy
-
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxCommitBody))
-	for {
-		var line commitLine
-		if err := dec.Decode(&line); errors.Is(err, io.EOF) {
-			break
-		} else if err != nil {
-			// The decoder's own text describes the server's parse state;
-			// errors.go's decodeJSON deliberately never echoes it and this
-			// hand-rolled NDJSON loop should not either.
-			badRequest(w, "commit body must be newline-delimited JSON")
-			return
-		}
-
-		switch line.Key {
-		case "header":
-			var v struct {
-				Summary     string `json:"summary"`
-				Description string `json:"description"`
-				// ParentCommit is huggingface_hub's optimistic lock: it is
-				// only present when the caller passed parent_commit, and it
-				// means "commit only if the branch is still where I last saw
-				// it". Ignoring it would answer 200 to a caller who asked
-				// precisely not to overwrite somebody else's push.
-				ParentCommit string `json:"parentCommit"`
-			}
-			// A header that will not parse is an error rather than a header
-			// that was not there. It used to be silently skipped, which was
-			// harmless while the header carried nothing but a commit message
-			// and is not now: the one field that must never be dropped lives
-			// in it.
-			if err := json.Unmarshal(line.Value, &v); err != nil {
-				badRequest(w, "invalid header entry")
-				return
-			}
-			if v.Summary != "" {
-				summary = v.Summary
-			}
-			if v.Description != "" {
-				summary += "\n\n" + v.Description
-			}
-			if v.ParentCommit != "" {
-				parentCommit = strings.ToLower(strings.TrimSpace(v.ParentCommit))
-				if !validParentCommit(parentCommit) {
-					badRequest(w, "header: parentCommit must be a commit hash, or its first 7 or more characters")
-					return
-				}
-			}
-
-		case "file":
-			var v struct {
-				Path     string `json:"path"`
-				Content  string `json:"content"`
-				Encoding string `json:"encoding"`
-			}
-			if err := json.Unmarshal(line.Value, &v); err != nil {
-				badRequest(w, "invalid file entry")
-				return
-			}
-			if !checkOpPath(w, "file", v.Path) {
-				return
-			}
-			data := []byte(v.Content)
-			if v.Encoding == "base64" || v.Encoding == "" {
-				decoded, err := base64.StdEncoding.DecodeString(v.Content)
-				if err != nil {
-					if v.Encoding == "base64" {
-						badRequest(w, "file "+v.Path+": content is not valid base64")
-						return
-					}
-				} else {
-					data = decoded
-				}
-			}
-			ops = append(ops, gitrepo.Op{Kind: gitrepo.OpAdd, Path: v.Path, Data: data})
-
-		case "lfsFile":
-			var v struct {
-				Path string `json:"path"`
-				Algo string `json:"algo"`
-				OID  string `json:"oid"`
-				Size int64  `json:"size"`
-			}
-			if err := json.Unmarshal(line.Value, &v); err != nil {
-				badRequest(w, "invalid lfsFile entry")
-				return
-			}
-			if !checkOpPath(w, "lfsFile", v.Path) {
-				return
-			}
-			if !gitrepo.ValidOID(v.OID) {
-				badRequest(w, "lfsFile "+v.Path+": oid must be a sha256 hex digest")
-				return
-			}
-			// The object must already be recorded against *this* repository,
-			// not merely present in the bucket. Objects are content-addressed
-			// and shared instance-wide, so accepting on presence alone lets a
-			// caller commit a pointer to bytes they were never given -- and
-			// from then on fetch them through their own repository's resolve.
-			// The normal flow (preupload -> LFS batch upload -> verify, or a
-			// git-lfs push) always links the object first.
-			owned, err := s.store.RepoHasLFSObject(r.Context(), repo.ID, v.OID)
-			if err != nil {
-				internalError(w, "check lfs object ownership", err)
-				return
-			}
-			if !owned {
-				badRequest(w, "lfsFile "+v.Path+": object "+v.OID+" has not been uploaded")
-				return
-			}
-			// Still confirm the bytes are actually in the bucket: a link can
-			// outlive the object if a GC ran between upload and commit.
-			info, err := s.storage.Stat(r.Context(), storage.LFSKey(v.OID))
-			if err != nil {
-				if errors.Is(err, storage.ErrNotFound) {
-					badRequest(w, "lfsFile "+v.Path+": object "+v.OID+" has not been uploaded")
-					return
-				}
-				internalError(w, "stat lfs object", err)
-				return
-			}
-			// The pointer always carries the object's real size, and a
-			// declared size that disagrees with it is refused rather than
-			// quietly corrected. The pointer's size is what resolve declares
-			// as Content-Length before streaming the object, so a client-chosen
-			// one is a client-chosen truncation: net/http cuts the body off at
-			// the declared length, and a lie of "1" hands every downloader a
-			// one-byte file that looks completely downloaded. Too large hangs
-			// the connection instead, and either way repo_files.size and the
-			// repository's total size are indexed from the pointer. Omitting
-			// the field stays legal -- the object itself is the source of
-			// truth -- and a caller that sends a size is simply told when it
-			// does not match, rather than being ignored.
-			if v.Size != 0 && v.Size != info.Size {
-				badRequest(w, fmt.Sprintf("lfsFile %s: size %d does not match the uploaded object's %d bytes",
-					v.Path, v.Size, info.Size))
-				return
-			}
-			ops = append(ops, gitrepo.Op{
-				Kind: gitrepo.OpAdd, Path: v.Path, Data: gitrepo.FormatLFSPointer(v.OID, info.Size),
-			})
-			// info.Size is the object as stored, already checked against
-			// v.Size above -- so this is the declared size, verified.
-			lfsOIDs = append(lfsOIDs, store.LFSObjectRef{OID: v.OID, Size: info.Size})
-
-		// The two delete operations refuse a malformed entry rather than
-		// skipping it, for the same reason the default case below refuses an
-		// unknown key: a commit that drops one of its operations and answers
-		// 200 tells the caller the deletion happened. Silently keeping a file
-		// somebody asked to remove is the worse half of that -- it can leave
-		// data published that was meant to be gone.
-		case "deletedFile":
-			var v struct {
-				Path string `json:"path"`
-			}
-			if err := json.Unmarshal(line.Value, &v); err != nil || v.Path == "" {
-				badRequest(w, "deletedFile entry must be an object with a non-empty path")
-				return
-			}
-			if !checkOpPath(w, "deletedFile", v.Path) {
-				return
-			}
-			ops = append(ops, gitrepo.Op{Kind: gitrepo.OpDelete, Path: v.Path})
-
-		case "deletedFolder":
-			var v struct {
-				Path string `json:"path"`
-			}
-			if err := json.Unmarshal(line.Value, &v); err != nil || v.Path == "" {
-				badRequest(w, "deletedFolder entry must be an object with a non-empty path")
-				return
-			}
-			folder := strings.TrimSuffix(v.Path, "/")
-			if !checkOpPath(w, "deletedFolder", folder) {
-				return
-			}
-			ops = append(ops, gitrepo.Op{Kind: gitrepo.OpDeleteDir, Path: folder})
-
-		case "copyFile":
-			// huggingface_hub's CommitOperationCopy. srcRevision arrives as
-			// JSON null when it was left unset, which decodes to "" here and
-			// is resolved against the revision being committed to.
-			var v struct {
-				Path        string `json:"path"`
-				SrcPath     string `json:"srcPath"`
-				SrcRevision string `json:"srcRevision"`
-			}
-			if err := json.Unmarshal(line.Value, &v); err != nil {
-				badRequest(w, "invalid copyFile entry")
-				return
-			}
-			if v.Path == "" || v.SrcPath == "" {
-				badRequest(w, "copyFile: path and srcPath are both required")
-				return
-			}
-			// Both ends, and the source for the same reason as the
-			// destination: resolveCopies would otherwise answer a traversal
-			// attempt with 404 EntryNotFound, which reads as "that file is
-			// missing" rather than "that is not a path".
-			if !checkOpPath(w, "copyFile", v.Path) || !checkOpPath(w, "copyFile srcPath", v.SrcPath) {
-				return
-			}
-			// The source is resolved after the whole body has been read, so
-			// the placeholder holds the operation's position in the meantime.
-			copies = append(copies, pendingCopy{op: len(ops), dst: v.Path, src: v.SrcPath, rev: v.SrcRevision})
-			ops = append(ops, gitrepo.Op{Kind: gitrepo.OpCopy, Path: v.Path})
-
-		default:
-			// An operation this server does not implement is refused, never
-			// skipped. There was no default here, so an unknown key fell
-			// through in silence: a commit that mixed one add with one
-			// unsupported operation applied the add, answered 200 `success`,
-			// and the caller had no way to learn that half of what they sent
-			// never happened. That is the same trade rejectCreatePR makes --
-			// an error the caller can act on beats a partial write they
-			// cannot see.
-			badRequest(w, "unsupported commit operation "+strconv.Quote(line.Key))
-			return
-		}
-	}
-
-	lfsCopies, ok := resolveCopies(w, gitRepo, rev, copies, ops)
+	plan, ok := s.parseCommitBody(w, r, repo)
 	if !ok {
 		return
 	}
-	lfsOIDs = append(lfsOIDs, lfsCopies...)
+	lfsCopies, ok := resolveCopies(w, gitRepo, rev, plan.copies, plan.ops)
+	if !ok {
+		return
+	}
+	lfsOIDs := append(plan.lfsOIDs, lfsCopies...)
 
-	if len(ops) == 0 {
+	if len(plan.ops) == 0 {
 		badRequest(w, "commit contains no file operations")
 		return
 	}
 
-	author := gitrepo.Signature{Name: "thinkingface", Email: "noreply@thinkingface.local", When: time.Now()}
-	if user != nil {
-		author.Name = user.Username
-		if user.Email != "" {
-			author.Email = user.Email
-		}
-	}
-
 	newHash, oldHash, err := s.commitThroughWAL(r.Context(), repo, gitrepo.CommitRequest{
-		Branch: rev, Message: summary, Author: author, Ops: ops, ParentCommit: parentCommit,
+		Branch: rev, Message: plan.summary, Author: commitAuthor(r.Context()),
+		Ops: plan.ops, ParentCommit: plan.parentCommit,
 	}, true)
-	// The two conflicts below are deliberately different answers, because the
-	// caller's next move differs. errWALConflict means another writer won a
-	// race this request could still win: 409, retry as sent. A stale parent
-	// means the branch is not where the caller believed it was: 412, and
-	// retrying the identical request can only fail again -- they have to look
-	// at what landed in between and decide whether their change still applies.
-	//
-	// 412 rather than 409 for the second one for exactly that reason: the
-	// precondition is the request's own (`parentCommit`, an If-Match by
-	// another name), not the server's state being momentarily busy, and 409
-	// already means "retryable contention" everywhere else in this API.
-	// huggingface_hub raises HfHubHTTPError for both, and reads the sentence
-	// out of X-Error-Message either way, so nothing is lost on the client.
-	var staleParent *gitrepo.StaleParentError
-	if errors.As(err, &staleParent) {
-		at := staleParent.Actual
-		if at == "" {
-			at = "no commits"
-		}
-		writeError(w, http.StatusPreconditionFailed, "stale_parent",
-			"parentCommit "+parentCommit+" is not the head of "+rev+" (now at "+at+"); "+
-				"fetch the branch and rebuild the commit on top of it")
-		return
-	}
-	if errors.Is(err, errWALConflict) {
-		writeError(w, http.StatusConflict, "conflict", "branch changed concurrently; retry the commit")
-		return
-	}
-	if err != nil {
-		internalError(w, "create commit", err)
+	// The stale-parent 412 and the contention 409 are deliberately different
+	// answers, and writeCommitError (wal.go) is where the difference is
+	// explained and applied for every commitThroughWAL caller.
+	if writeCommitError(w, err, "commit") {
 		return
 	}
 

@@ -19,7 +19,14 @@ const ROLE_LABEL_KEYS: Record<OrgRole, MessageKey> = {
   read: "org.roles.read",
 };
 
-export function orgRoleTone(role: OrgRole): BadgeTone {
+/**
+ * Module-private on purpose. `OrgRoleBadge` is the only thing that needs it,
+ * and a plain value exported from a module a Client Component may pull in is
+ * exactly the shape `check:ui`'s `client-boundary` rule exists to catch — a
+ * Server Component importing it would get `undefined` at runtime, silently
+ * and only in a production build.
+ */
+function orgRoleTone(role: OrgRole): BadgeTone {
   return ROLE_TONES[role];
 }
 

@@ -5,26 +5,18 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/dotneet/thinkingface/backend/internal/api"
 	"github.com/dotneet/thinkingface/backend/internal/auth"
 	"github.com/dotneet/thinkingface/backend/internal/config"
-	"github.com/dotneet/thinkingface/backend/internal/experiments"
-	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
-	"github.com/dotneet/thinkingface/backend/internal/modelmeta"
-	"github.com/dotneet/thinkingface/backend/internal/sshserver"
 	"github.com/dotneet/thinkingface/backend/internal/storage"
 	"github.com/dotneet/thinkingface/backend/internal/store"
-	"github.com/dotneet/thinkingface/backend/internal/syncer"
-	"github.com/dotneet/thinkingface/backend/internal/viewer"
-	"github.com/dotneet/thinkingface/backend/internal/webhooks"
 )
 
 func main() {
@@ -55,11 +47,27 @@ func main() {
 	}
 
 	if err := run(command); err != nil {
+		// -h is not a failure. Every subcommand parses with
+		// flag.ContinueOnError so that the deferred cleanups in run() still
+		// happen, which means `flag.Parse` hands back ErrHelp instead of
+		// exiting 0 on its own the way ExitOnError did; usage has already been
+		// printed by then.
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
 		slog.Error("fatal", "command", command, "error", err)
 		os.Exit(1)
 	}
 }
 
+// run prepares what every subcommand needs -- configuration, a migrated
+// database, and a context cancelled on SIGINT/SIGTERM -- and dispatches.
+//
+// `serve` is one case among the others rather than the tail of this function,
+// which it used to be: everything the server itself needs (the storage
+// driver, the git manager, the viewer, the sync worker, two listeners and
+// their shutdown) now lives in runServe, so this reads as the list of things
+// this binary can be asked to do.
 func run(command string) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -84,6 +92,8 @@ func run(command string) error {
 	}
 
 	switch command {
+	case "serve":
+		return runServe(ctx, cfg, db)
 	case "migrate":
 		slog.Info("migrations applied")
 		return nil
@@ -96,167 +106,42 @@ func run(command string) error {
 		// cannot reach its bucket must still be able to reset a password.
 		return runAdmin(ctx, db, os.Args[2:], os.Stdout)
 	case "gc":
-		obj, err := newStorage(ctx, cfg)
-		if err != nil {
-			return err
-		}
-		return runGC(ctx, db, obj, cfg.SignedURLMaxTTL, os.Args[2:])
+		return withStorage(ctx, cfg, func(obj storage.Storage) error {
+			return runGC(ctx, db, obj, cfg.SignedURLMaxTTL, os.Args[2:])
+		})
 	case "resync":
-		obj, err := newStorage(ctx, cfg)
-		if err != nil {
-			return err
-		}
-		return runResync(ctx, db, obj, cfg, os.Args[2:])
+		return withStorage(ctx, cfg, func(obj storage.Storage) error {
+			return runResync(ctx, db, obj, cfg, os.Args[2:])
+		})
 	case "compact":
-		obj, err := newStorage(ctx, cfg)
-		if err != nil {
-			return err
-		}
-		return runCompact(ctx, db, obj, cfg, os.Args[2:])
+		return withStorage(ctx, cfg, func(obj storage.Storage) error {
+			return runCompact(ctx, db, obj, cfg, os.Args[2:])
+		})
 	case "wal-seed":
-		obj, err := newStorage(ctx, cfg)
-		if err != nil {
-			return err
-		}
-		return runWALSeed(ctx, db, obj, cfg, os.Args[2:])
+		return withStorage(ctx, cfg, func(obj storage.Storage) error {
+			return runWALSeed(ctx, db, obj, cfg, os.Args[2:])
+		})
 	case "wal-verify":
-		obj, err := newStorage(ctx, cfg)
-		if err != nil {
-			return err
-		}
-		return runWALVerify(ctx, db, obj, cfg, os.Args[2:])
-	case "serve":
+		return withStorage(ctx, cfg, func(obj storage.Storage) error {
+			return runWALVerify(ctx, db, obj, cfg, os.Args[2:])
+		})
 	default:
 		return fmt.Errorf("unknown command %q (expected serve, migrate, seed, admin, gc, resync, compact, wal-seed, wal-verify or hook)", command)
 	}
+}
 
-	if err := seedAdmin(ctx, db, cfg); err != nil {
-		return err
-	}
-
+// withStorage builds the object store driver and hands it to fn. The five
+// operational subcommands that need bucket access all did this inline, which
+// is three lines of error handling repeated per case for one call -- and the
+// shape they share is worth naming, because it is also the boundary at which
+// a driver that cannot be built stops the subcommand before it touches
+// anything.
+func withStorage(ctx context.Context, cfg *config.Config, fn func(storage.Storage) error) error {
 	obj, err := newStorage(ctx, cfg)
 	if err != nil {
 		return err
 	}
-
-	if err := os.MkdirAll(cfg.GitRoot, 0o755); err != nil {
-		return fmt.Errorf("create git root %s: %w", cfg.GitRoot, err)
-	}
-	gitManager := gitrepo.NewManager(cfg.GitRoot)
-	if cfg.WALMode == "authoritative" {
-		// Phase 4+ (docs/dev/continuity-design.md §15): the WAL is the truth and
-		// the directories under GIT_ROOT become a bounded cache.
-		gitManager.EnableWAL(obj, cfg.GitCacheBytes)
-	}
-	parquet := viewer.New(obj, cfg.ViewerMetadataCacheBytes)
-	// Checkpoint headers are read straight out of storage, so this cache only
-	// has to hold the parsed result, not the file.
-	checkpoints := modelmeta.NewCache(modelmeta.DefaultCacheEntries)
-	indexer := experiments.NewIndexer(db, gitManager, obj, parquet)
-	hooks := webhooks.New(db, webhooks.Options{
-		AllowPrivateTargets: cfg.AllowPrivateWebhookTargets,
-		Workers:             cfg.WebhookWorkers,
-	})
-	sync := syncer.New(db, gitManager, obj, parquet, indexer, hooks, cfg.SyncWorkers)
-	// Route B's ingest buffer is only a buffer: the source of truth stays the
-	// parquet inside the dataset repository (docs/dev/thinkingface-design.md §8),
-	// so the sync worker periodically commits the buffered points there.
-	if cfg.ExpFlushInterval > 0 {
-		sync.EnableFlush(experiments.NewFlusher(db, gitManager, obj, parquet, cfg.WALMode), cfg.ExpFlushInterval)
-	}
-
-	server := api.NewServer(api.Deps{
-		Config:      cfg,
-		Store:       db,
-		Git:         gitManager,
-		Storage:     obj,
-		Viewer:      parquet,
-		Sessions:    auth.NewSessions(cfg.SessionSecret, cfg.SessionTTL),
-		Syncer:      sync,
-		Experiments: indexer,
-		ModelMeta:   checkpoints,
-		Webhooks:    hooks,
-	})
-
-	// Only jobs whose lease has lapsed, never every running row: with
-	// api_max_instances above 1 this process is starting up *beside* live
-	// replicas, and the unconditional sweep this replaced handed their
-	// in-flight jobs to a second worker. The syncer repeats this sweep on a
-	// ticker, so a job interrupted by this process's own shutdown is picked
-	// up once its lease expires rather than needing a restart to notice.
-	if n, err := db.RequeueExpiredSyncJobs(ctx); err != nil {
-		return fmt.Errorf("requeue expired sync jobs: %w", err)
-	} else if n > 0 {
-		slog.Info("requeued sync jobs whose lease had expired", "count", n)
-	}
-
-	go sync.Run(ctx)
-	go sync.RunFlush(ctx)
-	go hooks.Run(ctx)
-
-	// Unencrypted HTTP/2 (h2c, prior knowledge) lets Cloud Run's "HTTP/2
-	// end-to-end" reach the container without TLS termination, which is the
-	// only way past the 32 MiB HTTP/1 request cap on large pushes
-	// (docs/dev/continuity-design.md §12). Plain HTTP/1 clients are unaffected:
-	// the server still speaks HTTP/1 on the same port.
-	protocols := new(http.Protocols)
-	protocols.SetHTTP1(true)
-	protocols.SetUnencryptedHTTP2(true)
-
-	httpServer := &http.Server{
-		Addr:      cfg.Addr,
-		Handler:   server.Handler(),
-		Protocols: protocols,
-		// Uploads and clones can be slow; a write timeout would cut them off.
-		ReadHeaderTimeout: 30 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		slog.Info("listening", "addr", cfg.Addr, "public_url", cfg.PublicURL,
-			"storage", cfg.StorageDriver, "bucket", cfg.GCSBucket)
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-	}()
-
-	// git over SSH (docs/dev/thinkingface-design.md §5). Optional: HTTPS remains
-	// the primary transport, so a failure to start SSH must not take the API
-	// down with it -- it is logged loudly and the process keeps serving.
-	var ssh *sshserver.Server
-	if cfg.SSHEnabled {
-		ssh, err = sshserver.New(sshserver.Options{
-			Addr:        cfg.SSHAddr,
-			HostKeyPath: cfg.SSHHostKeyPath,
-			IdleTimeout: cfg.SSHIdleTimeout,
-		}, db, server)
-		if err != nil {
-			slog.Error("ssh server disabled: it could not be started", "error", err)
-		} else {
-			go func() {
-				slog.Info("listening for ssh", "addr", cfg.SSHAddr, "host_key", cfg.SSHHostKeyPath)
-				if err := ssh.ListenAndServe(); err != nil && !errors.Is(err, sshserver.ErrServerClosed) {
-					slog.Error("ssh server stopped", "error", err)
-				}
-			}()
-		}
-	}
-
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
-		slog.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		if ssh != nil {
-			if err := ssh.Shutdown(shutdownCtx); err != nil {
-				slog.Warn("ssh server shutdown", "error", err)
-			}
-		}
-		return httpServer.Shutdown(shutdownCtx)
-	}
+	return fn(obj)
 }
 
 // warnInsecureDefaults flags the development credentials at boot. They are

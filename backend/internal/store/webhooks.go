@@ -310,25 +310,39 @@ func (s *Store) ClaimWebhookDelivery(ctx context.Context, leaseDuration time.Dur
 // under maxAttempts is left "pending" with next_attempt_at pushed out by
 // backoff, so ClaimWebhookDelivery will retry it later; at or past
 // maxAttempts it is parked as "failed".
+//
+// attempts is the count ClaimWebhookDelivery returned, and it is the fencing
+// token, exactly as it is in FinishSyncJob (jobs.go): every statement here
+// also requires attempts = that value, so a worker can only write the outcome
+// of the claim it still holds. The lease alone closes half the race. A worker
+// whose lease lapsed while its HTTP call hung would otherwise write 'success'
+// -- or park as 'failed' -- over a delivery a second worker has since
+// reclaimed and is still making, either burying an attempt the reclaimer is
+// about to report or resurrecting a row it already finished. There is no
+// 'running' status to test as well: the claim marks the row by incrementing
+// attempts, so the counter is the whole token here.
+//
+// A no-op update therefore means the claim was lost, which is not an error:
+// whoever holds it now is responsible for the outcome.
 func (s *Store) FinishWebhookDelivery(ctx context.Context, deliveryID int64, success bool, attempts, maxAttempts int, respStatus *int, respBody string, backoff time.Duration) error {
 	if success {
 		_, err := s.db.Exec(ctx,
 			`UPDATE webhook_deliveries
-			 SET status = 'success', response_status = $2, response_body = $3
-			 WHERE id = $1`, deliveryID, respStatus, respBody)
+			 SET status = 'success', response_status = $3, response_body = $4
+			 WHERE id = $1 AND attempts = $2`, deliveryID, attempts, respStatus, respBody)
 		return err
 	}
 	if attempts >= maxAttempts {
 		_, err := s.db.Exec(ctx,
 			`UPDATE webhook_deliveries
-			 SET status = 'failed', response_status = $2, response_body = $3
-			 WHERE id = $1`, deliveryID, respStatus, respBody)
+			 SET status = 'failed', response_status = $3, response_body = $4
+			 WHERE id = $1 AND attempts = $2`, deliveryID, attempts, respStatus, respBody)
 		return err
 	}
 	_, err := s.db.Exec(ctx,
 		`UPDATE webhook_deliveries
-		 SET status = 'pending', response_status = $2, response_body = $3,
-		     next_attempt_at = `+s.d.nowPlusSeconds("$4")+`
-		 WHERE id = $1`, deliveryID, respStatus, respBody, backoff.Seconds())
+		 SET status = 'pending', response_status = $3, response_body = $4,
+		     next_attempt_at = `+s.d.nowPlusSeconds("$5")+`
+		 WHERE id = $1 AND attempts = $2`, deliveryID, attempts, respStatus, respBody, backoff.Seconds())
 	return err
 }

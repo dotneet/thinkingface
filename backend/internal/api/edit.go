@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
+	"github.com/dotneet/thinkingface/backend/internal/store"
 )
 
 // maxEditBytes bounds an in-browser edit. Unlike maxCommitBody, this endpoint
@@ -59,32 +59,55 @@ func lfsEditRejection(path string) string {
 	return fmt.Sprintf("%s is tracked by Git LFS and can't be edited from the web UI; use git or huggingface_hub instead", path)
 }
 
-// handleEditFile lets the web UI save small text-file edits straight to a
-// branch. It is a shortcut around the NDJSON commit protocol huggingface_hub
-// clients use, meant only for one file at a time from the browser.
-func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request) {
-	repo, ok := s.loadRepoForWrite(w, r, chi.URLParam(r, "kind"), chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectUI)
+// uiWriteTarget is the prologue the browser's three write endpoints share:
+// resolve the repository with write permission, require a file path, read the
+// revision, and refuse a detached commit SHA.
+//
+// One function rather than four lines copied per handler because every one of
+// the four fails *open* when it is left out. A missing path check writes at
+// the repository root, or lets a path gitrepo.Commit will refuse anyway reach
+// it and come back as a 500; a missing looksLikeSHA check "commits" to a hash,
+// creating a branch named after a commit that every later read resolves to
+// the commit instead -- so the caller is told the write succeeded and then
+// never sees it again.
+//
+// what names the operation in the SHA refusal ("edits" / "deletions" /
+// "renames"), the way ensureBranchRev's does for the tag one.
+func (s *Server) uiWriteTarget(w http.ResponseWriter, r *http.Request, what string) (repo *store.Repo, path, rev string, ok bool) {
+	repo, ok = s.loadRepoForWrite(w, r, chi.URLParam(r, "kind"), chi.URLParam(r, "ns"),
+		repoName(chi.URLParam(r, "name")), redirectUI)
 	if !ok {
-		return
+		return nil, "", "", false
 	}
-	path := wildcardPath(r)
+	path = wildcardPath(r)
 	if path == "" {
 		badRequest(w, "no file path given")
-		return
+		return nil, "", "", false
 	}
 	// The same check handleRenameFile already applies to new_path, and
 	// handleUploadFiles to every part's name: a path the commit would refuse
 	// is a 400 here rather than a 500 out of gitrepo.Commit (see checkOpPath).
 	if !checkOpPath(w, "path", path) {
-		return
+		return nil, "", "", false
 	}
-	rev, ok := revParam(w, r, "rev", repo)
+	rev, ok = revParam(w, r, "rev", repo)
 	if !ok {
-		return
+		return nil, "", "", false
 	}
 	// Committing to a detached SHA is meaningless; the API only writes branches.
 	if looksLikeSHA(rev) {
-		badRequest(w, "edits must target a branch, not a commit SHA")
+		badRequest(w, what+" must target a branch, not a commit SHA")
+		return nil, "", "", false
+	}
+	return repo, path, rev, true
+}
+
+// handleEditFile lets the web UI save small text-file edits straight to a
+// branch. It is a shortcut around the NDJSON commit protocol huggingface_hub
+// clients use, meant only for one file at a time from the browser.
+func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request) {
+	repo, path, rev, ok := s.uiWriteTarget(w, r, "edits")
+	if !ok {
 		return
 	}
 
@@ -102,9 +125,8 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request) {
 	}
 	summary := commitSummary(path, req.Message, req.Description)
 
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
+	gitRepo, ok := s.openGit(w, repo)
+	if !ok {
 		return
 	}
 
@@ -160,14 +182,7 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	user := currentUser(r.Context())
-	author := gitrepo.Signature{Name: "thinkingface", Email: "noreply@thinkingface.local", When: time.Now()}
-	if user != nil {
-		author.Name = user.Username
-		if user.Email != "" {
-			author.Email = user.Email
-		}
-	}
+	author := commitAuthor(r.Context())
 
 	// retryOnStale=false: this endpoint's base_oid check is an optimistic
 	// lock, and rebuilding on a concurrently moved head would overwrite the
@@ -193,18 +208,7 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request) {
 		Ops:           []gitrepo.Op{{Kind: gitrepo.OpAdd, Path: path, Data: content}},
 		Preconditions: preconditions,
 	}, false)
-	var stale *gitrepo.StalePathError
-	if errors.As(err, &stale) {
-		writeError(w, http.StatusConflict, "conflict",
-			path+" changed concurrently; re-read the file and retry with its current oid")
-		return
-	}
-	if errors.Is(err, errWALConflict) {
-		writeError(w, http.StatusConflict, "conflict", "branch changed concurrently; retry the edit")
-		return
-	}
-	if err != nil {
-		internalError(w, "create commit", err)
+	if writeCommitError(w, err, "edit") {
 		return
 	}
 	if err := s.sync.Enqueue(r.Context(), repo.ID, rev, oldHash.String(), newHash.String()); err != nil {
@@ -216,9 +220,8 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request) {
 	// we think it did and picks up the mode git actually stored. Re-open
 	// first: commitThroughWAL may have rebuilt the directory in
 	// authoritative mode, invalidating the handle taken earlier.
-	gitRepo, err = s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "reopen git repository", err)
+	gitRepo, ok = s.openGit(w, repo)
+	if !ok {
 		return
 	}
 	newEntry, _, err := gitRepo.Stat(rev, path)
@@ -279,24 +282,8 @@ func decodeOptionalJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, 
 // in the bucket, content-addressed and shared, until `thinkingface gc` finds
 // that nothing references it (docs/dev/content-addressed-storage-design.md §5).
 func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
-	repo, ok := s.loadRepoForWrite(w, r, chi.URLParam(r, "kind"), chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectUI)
+	repo, path, rev, ok := s.uiWriteTarget(w, r, "deletions")
 	if !ok {
-		return
-	}
-	path := wildcardPath(r)
-	if path == "" {
-		badRequest(w, "no file path given")
-		return
-	}
-	if !checkOpPath(w, "path", path) {
-		return
-	}
-	rev, ok := revParam(w, r, "rev", repo)
-	if !ok {
-		return
-	}
-	if looksLikeSHA(rev) {
-		badRequest(w, "deletions must target a branch, not a commit SHA")
 		return
 	}
 
@@ -305,9 +292,8 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
+	gitRepo, ok := s.openGit(w, repo)
+	if !ok {
 		return
 	}
 
@@ -337,14 +323,7 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user := currentUser(r.Context())
-	author := gitrepo.Signature{Name: "thinkingface", Email: "noreply@thinkingface.local", When: time.Now()}
-	if user != nil {
-		author.Name = user.Username
-		if user.Email != "" {
-			author.Email = user.Email
-		}
-	}
+	author := commitAuthor(r.Context())
 
 	// Same reasoning as handleEditFile: the precondition repeats the base_oid
 	// check under the mutex that picks the parent, and retryOnStale is false
@@ -359,18 +338,7 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		Ops:           []gitrepo.Op{{Kind: gitrepo.OpDelete, Path: path}},
 		Preconditions: preconditions,
 	}, false)
-	var stale *gitrepo.StalePathError
-	if errors.As(err, &stale) {
-		writeError(w, http.StatusConflict, "conflict",
-			path+" changed concurrently; re-read the file and retry with its current oid")
-		return
-	}
-	if errors.Is(err, errWALConflict) {
-		writeError(w, http.StatusConflict, "conflict", "branch changed concurrently; retry the deletion")
-		return
-	}
-	if err != nil {
-		internalError(w, "create commit", err)
+	if writeCommitError(w, err, "deletion") {
 		return
 	}
 	if err := s.sync.Enqueue(r.Context(), repo.ID, rev, oldHash.String(), newHash.String()); err != nil {
@@ -423,24 +391,8 @@ func lfsRenameRejection(oldPath, newPath string) string {
 //     LFS oids this repository references is unchanged -- which is why no
 //     store.LinkLFSObjects call belongs here.
 func (s *Server) handleRenameFile(w http.ResponseWriter, r *http.Request) {
-	repo, ok := s.loadRepoForWrite(w, r, chi.URLParam(r, "kind"), chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectUI)
+	repo, oldPath, rev, ok := s.uiWriteTarget(w, r, "renames")
 	if !ok {
-		return
-	}
-	oldPath := wildcardPath(r)
-	if oldPath == "" {
-		badRequest(w, "no file path given")
-		return
-	}
-	if !checkOpPath(w, "path", oldPath) {
-		return
-	}
-	rev, ok := revParam(w, r, "rev", repo)
-	if !ok {
-		return
-	}
-	if looksLikeSHA(rev) {
-		badRequest(w, "renames must target a branch, not a commit SHA")
 		return
 	}
 
@@ -462,9 +414,8 @@ func (s *Server) handleRenameFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gitRepo, err := s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "open git repository", err)
+	gitRepo, ok := s.openGit(w, repo)
+	if !ok {
 		return
 	}
 	if !ensureBranchRev(w, gitRepo, rev, "renames") {
@@ -519,14 +470,7 @@ func (s *Server) handleRenameFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user := currentUser(r.Context())
-	author := gitrepo.Signature{Name: "thinkingface", Email: "noreply@thinkingface.local", When: time.Now()}
-	if user != nil {
-		author.Name = user.Username
-		if user.Email != "" {
-			author.Email = user.Email
-		}
-	}
+	author := commitAuthor(r.Context())
 
 	// The destination precondition is unconditional (an empty OID asserts the
 	// path is absent) because "the destination is free" is this endpoint's
@@ -548,22 +492,18 @@ func (s *Server) handleRenameFile(w http.ResponseWriter, r *http.Request) {
 		},
 		Preconditions: preconditions,
 	}, false)
+	// The destination half of the conflict is answered here rather than in
+	// writeCommitError: "somebody else took the path you were moving to" is
+	// this endpoint's own rule (see the unconditional precondition above) and
+	// tells the caller to pick another name, not to re-read the source and
+	// retry. Everything else -- the source going stale, WAL contention -- is
+	// the shared mapping.
 	var stale *gitrepo.StalePathError
-	if errors.As(err, &stale) {
-		if stale.Path == newPath {
-			conflict(w, newPath+" appeared concurrently; pick another path and retry")
-			return
-		}
-		writeError(w, http.StatusConflict, "conflict",
-			oldPath+" changed concurrently; re-read the file and retry with its current oid")
+	if errors.As(err, &stale) && stale.Path == newPath {
+		conflict(w, newPath+" appeared concurrently; pick another path and retry")
 		return
 	}
-	if errors.Is(err, errWALConflict) {
-		writeError(w, http.StatusConflict, "conflict", "branch changed concurrently; retry the rename")
-		return
-	}
-	if err != nil {
-		internalError(w, "create commit", err)
+	if writeCommitError(w, err, "rename") {
 		return
 	}
 	if err := s.sync.Enqueue(r.Context(), repo.ID, rev, oldHash.String(), newHash.String()); err != nil {
@@ -574,9 +514,8 @@ func (s *Server) handleRenameFile(w http.ResponseWriter, r *http.Request) {
 	// Re-stat for the same reason handleEditFile does: it confirms the entry
 	// landed where we think it did, and commitThroughWAL may have rebuilt the
 	// directory underneath the handle taken earlier.
-	gitRepo, err = s.git.Open(repo.StoragePath)
-	if err != nil {
-		internalError(w, "reopen git repository", err)
+	gitRepo, ok = s.openGit(w, repo)
+	if !ok {
 		return
 	}
 	newEntry, _, err := gitRepo.Stat(rev, newPath)

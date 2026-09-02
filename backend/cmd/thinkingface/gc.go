@@ -103,7 +103,11 @@ type gcStorage interface {
 //
 // Every pass reports first and only deletes with --yes (or --dry-run=false).
 func runGC(ctx context.Context, db gcDB, obj gcStorage, signedURLMaxTTL time.Duration, args []string) error {
-	fs := flag.NewFlagSet("gc", flag.ExitOnError)
+	// ContinueOnError, like every other subcommand's flag set: ExitOnError
+	// calls os.Exit(2) from inside Parse, which skips run()'s `defer
+	// db.Close()` and the signal context's `defer stop()`. A bad flag is a
+	// returned error, so the same teardown a successful run gets happens.
+	fs := flag.NewFlagSet("gc", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", true, "report orphaned objects without deleting anything (default)")
 	yes := fs.Bool("yes", false, "actually delete the orphaned objects from storage and postgres")
 	if err := fs.Parse(args); err != nil {

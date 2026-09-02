@@ -9,10 +9,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
-
-	"github.com/go-chi/chi/v5"
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
 	"github.com/dotneet/thinkingface/backend/internal/auth"
@@ -110,9 +107,8 @@ func (s *Server) handleDeleteSSHKey(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		badRequest(w, "ssh key id must be a number")
+	id, ok := int64Param(w, r, "id", "ssh key")
+	if !ok {
 		return
 	}
 	if err := s.store.DeleteSSHKey(r.Context(), user.ID, id); err != nil {

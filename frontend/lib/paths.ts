@@ -98,11 +98,6 @@ export function decodeSegment(segment: string): string {
   }
 }
 
-/** {@link decodeSegment} for a catch-all route's path segments. */
-export function decodeSegments(path: string[] | undefined): string[] {
-  return (path ?? []).map(decodeSegment);
-}
-
 /**
  * {@link decodeSegment} applied to a whole `params` object, so a page can undo
  * the encoding in one line and hand real names to everything downstream.

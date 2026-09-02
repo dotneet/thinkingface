@@ -280,7 +280,9 @@ type resyncRun struct {
 // A run that ends with findings it did not repair exits non-zero, so this can
 // be scheduled and its verdict acted on the way `wal-verify` already is.
 func runResync(ctx context.Context, db *store.Store, obj storage.Storage, cfg *config.Config, args []string) error {
-	fs := flag.NewFlagSet("resync", flag.ExitOnError)
+	// ContinueOnError for the reason gc.go gives: an ExitOnError parse
+	// bypasses run()'s deferred database close and signal teardown.
+	fs := flag.NewFlagSet("resync", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", true, "report inconsistencies without changing anything (default)")
 	yes := fs.Bool("yes", false, "republish missing blobs and re-enqueue sync jobs for drifted indexes")
 	repoFlag := fs.String("repo", "", "check only this repository: {ns}/{name} or {kind}/{ns}/{name}")

@@ -49,6 +49,30 @@ func escapeLike(text string) string { return likeEscaper.Replace(text) }
 // itself means.
 func likeContains(text string) string { return "%" + escapeLike(text) + "%" }
 
+// searchClause is likeAnyOf with the binding done: it escapes search, binds
+// it once through bind, and renders the predicate over columns. An empty
+// search renders "", which is what tells the caller there is no condition to
+// append.
+//
+// It exists so a listing builds its search predicate exactly once and hands
+// the same string to its count and to its page. The listings here used to
+// build it twice, against two binders, and that is how a total stops
+// describing the rows underneath it: a condition added to one of the two
+// spellings and not the other leaves the pager promising pages that are not
+// there. ListRepos got this right first (buildRepoWhere returns one clause
+// and one set of arguments for both statements) and this is the same shape
+// for the listings whose WHERE is a single substring match.
+//
+// The caller must bind the clause's parameters *before* anything only the
+// page needs -- a viewer id, LIMIT, OFFSET -- so the count can be run with
+// the leading prefix of the argument slice.
+func searchClause(bind func(any) string, search string, columns ...string) string {
+	if search == "" {
+		return ""
+	}
+	return likeAnyOf(bind(likeContains(search)), columns...)
+}
+
 // likeAnyOf renders "(col1 ILIKE $n ESCAPE '\' OR col2 ILIKE $n ESCAPE '\')"
 // over the given columns. They share one placeholder -- both engines allow a
 // parameter to appear more than once -- so the caller binds likeContains(text)

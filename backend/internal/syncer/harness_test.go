@@ -3,6 +3,7 @@ package syncer
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"os/exec"
@@ -11,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite" // same driver internal/store registers, as "sqlite"
 
 	"github.com/dotneet/thinkingface/backend/internal/experiments"
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
@@ -169,6 +172,10 @@ type harness struct {
 	git *gitrepo.Manager
 	obj *memStorage
 	syn *Syncer
+
+	// dbPath is the SQLite file behind st, so a test that needs to make a
+	// specific query fail can reach the schema directly (see breakSchema).
+	dbPath string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -176,7 +183,8 @@ func newHarness(t *testing.T) *harness {
 	requireGit(t)
 	ctx := context.Background()
 
-	st, err := store.Open(ctx, "sqlite://"+filepath.Join(t.TempDir(), "store.db"))
+	dbPath := filepath.Join(t.TempDir(), "store.db")
+	st, err := store.Open(ctx, "sqlite://"+dbPath)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -191,7 +199,23 @@ func newHarness(t *testing.T) *harness {
 	indexer := experiments.NewIndexer(st, git, obj, parquet)
 	syn := New(st, git, obj, parquet, indexer, nil, 1)
 
-	return &harness{t: t, ctx: ctx, st: st, git: git, obj: obj, syn: syn}
+	return &harness{t: t, ctx: ctx, st: st, git: git, obj: obj, syn: syn, dbPath: dbPath}
+}
+
+// breakSchema runs one DDL statement against the harness's SQLite file from a
+// second connection, so a test can take out exactly one query and leave the
+// rest of the pipeline working. WAL mode means this does not have to wait for
+// the store's own pools.
+func (h *harness) breakSchema(ddl string) {
+	h.t.Helper()
+	db, err := sql.Open("sqlite", h.dbPath)
+	if err != nil {
+		h.t.Fatalf("open sqlite directly: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.ExecContext(h.ctx, ddl); err != nil {
+		h.t.Fatalf("break schema (%s): %v", ddl, err)
+	}
 }
 
 // step claims and processes exactly one pending job, failing the test if the

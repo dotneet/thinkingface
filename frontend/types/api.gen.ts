@@ -76,6 +76,36 @@ export const RunStatusFailed = "failed";
 export const RunStatusStale = "stale";
 export type RunStatus = typeof RunStatusRunning | typeof RunStatusFinished | typeof RunStatusFailed | typeof RunStatusStale;
 /**
+ * ApiError describes what went wrong.
+ */
+export interface ApiError {
+  message: string;
+  type: string;
+  /**
+   * MovedTo is set (with Type "repo_moved", status 404) when the requested
+   * repository name is a former name of a repository that has since been
+   * transferred or renamed; the client should retry at the new location.
+   */
+  moved_to?: RepoLocation;
+}
+/**
+ * RepoLocation names a repository by namespace and name.
+ */
+export interface RepoLocation {
+  namespace: string;
+  name: string;
+}
+/**
+ * ApiErrorBody is the body of every non-2xx API response.
+ */
+export interface ApiErrorBody {
+  error: ApiError;
+}
+
+//////////
+// source: apitypes_accounts.go
+
+/**
  * Namespace is somewhere the user may create repositories.
  */
 export interface Namespace {
@@ -238,252 +268,435 @@ export interface SSHKeyItem {
 export interface SSHKeyListResponse {
   items: SSHKeyItem[];
 }
+
+//////////
+// source: apitypes_admin.go
+
 /**
- * RepoSummary is the repository shape used in listings and search results.
+ * PasswordChangeRequest is the body of PATCH /api/v1/me/password. The current
+ * password is always required: holding a session is not on its own permission
+ * to replace the credential that session was minted from.
  */
-export interface RepoSummary {
+export interface PasswordChangeRequest {
+  current_password: string;
+  new_password: string;
+}
+/**
+ * AdminUser is one account as GET /api/v1/admin/users lists it. The stored
+ * password hash has no field here and never will: this type *is* the wire
+ * contract, so a field that does not exist cannot be serialised by accident.
+ */
+export interface AdminUser {
   id: number /* int64 */;
-  kind: RepoKind;
-  namespace: string;
+  username: string;
+  email: string;
   /**
-   * NamespaceKind says whether Namespace is a user or an organisation, so
-   * the UI can link to the right profile page.
+   * IsAdmin is the instance-wide administrator flag (users.is_admin), not
+   * a role in any organisation.
    */
-  namespace_kind: NamespaceKind;
-  name: string;
+  is_admin: boolean;
   /**
-   * FullName is "namespace/name".
+   * Disabled reports whether the account is suspended. A disabled account
+   * authenticates on no path at all -- not password, not access token, not
+   * SSH key -- which is what makes it the offboarding switch. Resetting a
+   * password deliberately does not revoke tokens, so before this existed
+   * there was no way to actually cut somebody off.
    */
-  full_name: string;
-  description: string;
-  tags: string[];
-  /**
-   * License is "" when the repository card does not name one.
-   */
-  license: string;
-  downloads: number /* int64 */;
-  /**
-   * TotalSize is the sum of all file sizes, in bytes.
-   */
-  total_size: number /* int64 */;
-  num_files: number /* int */;
-  /**
-   * IsExperiment marks a dataset repository holding tracked training runs.
-   */
-  is_experiment: boolean;
-  default_branch: string;
-  head_sha: string;
+  disabled: boolean;
   created_at: string;
-  updated_at: string;
   /**
-   * Archived marks a read-only repository: it still resolves, clones and
-   * downloads, but every write is refused with 403 until it is unarchived.
+   * LastLoginAt is when this account last authenticated with its password
+   * (a session being minted), null for one that never has. Access tokens
+   * and SSH keys carry their own last-used timestamps and deliberately do
+   * not move this one: the question it answers is "is anybody still using
+   * this account", for which an automation's token is the wrong signal.
    */
-  archived: boolean;
+  last_login_at: string | null;
   /**
-   * ArchivedAt is when it was archived, or null while it is active.
+   * Approval is "pending" for an account that signed up while
+   * TF_SIGNUP_REQUIRE_APPROVAL was on and has not been approved yet. A
+   * pending account cannot authenticate on any path.
    */
-  archived_at: string | null;
+  approval: UserApproval;
 }
 /**
- * ParquetSummary describes an indexed parquet file inside a repository.
+ * UserApproval is whether a self-registered account has been let in yet.
  */
-export interface ParquetSummary {
-  path: string;
-  num_rows: number /* int64 */;
-  num_row_groups: number /* int */;
-  num_columns: number /* int */;
-  size: number /* int64 */;
-}
+export const UserApprovalApproved = "approved";
+export const UserApprovalPending = "pending";
+export type UserApproval = typeof UserApprovalApproved | typeof UserApprovalPending;
 /**
- * RepoDetail is the summary plus everything a repository page needs.
+ * AdminUserListResponse is one page of the account directory. Total counts
+ * every account matching `search`, ignoring the page window.
  */
-export interface RepoDetail extends RepoSummary {
-  /**
-   * Card is the parsed YAML front matter of README.md.
-   */
-  card: { [key: string]: unknown};
-  readme: string;
-  /**
-   * ReadmeTooLarge is true when README.md exists but exceeds the server's
-   * size limit for rendering, in which case Readme is left empty instead of
-   * silently looking like "no README". Card is unaffected: it comes from the
-   * index built at push time, not from this read.
-   */
-  readme_too_large: boolean;
-  clone_url: string;
-  /**
-   * SSHCloneURL is the git-over-SSH remote, empty when TF_SSH_ENABLED is
-   * off. It is served because the port is deployment-specific and cannot be
-   * guessed: the UI happily let people register an SSH key at
-   * /settings/ssh-keys while showing no URL that key could be used against.
-   */
-  ssh_clone_url: string;
-  branches: string[];
-  tags_refs: string[];
-  /**
-   * ParquetFiles lists the indexed parquet files on the default branch.
-   */
-  parquet_files: ParquetSummary[];
-  /**
-   * Indexing reports that a background index of this repository is running,
-   * so ParquetFiles may still be incomplete.
-   */
-  indexing: boolean;
-  /**
-   * CanWrite tells the web UI whether to offer in-browser editing. It is
-   * false for an archived repository even when the viewer would otherwise
-   * have write access, so every editing affordance disappears at once.
-   */
-  can_write: boolean;
-  /**
-   * CanAdmin tells the web UI whether to offer the owner-only operations:
-   * transfer, archive/unarchive and delete. Unlike CanWrite it stays true
-   * while the repository is archived -- unarchiving it is exactly what an
-   * owner needs to be able to do.
-   */
-  can_admin: boolean;
-  /**
-   * DownloadsLast30Days is the resolve-endpoint hit count for the trailing
-   * 30 days. RepoSummary.Downloads (embedded above) stays the all-time
-   * cumulative counter.
-   */
-  downloads_last_30_days: number /* int64 */;
-}
-/**
- * RepoDetailResponse wraps the repository page's data in its envelope.
- */
-export interface RepoDetailResponse {
-  repo: RepoDetail;
-}
-/**
- * RepoUpdateRequest is the body of PATCH /api/v1/repos/{kind}/{ns}/{name}.
- * Every field is optional and absent ones are left unchanged, so new
- * configuration fields can be added here without breaking existing callers;
- * today there is only one, and the request must set it (there is nothing
- * else to update).
- */
-export interface RepoUpdateRequest {
-  /**
-   * DefaultBranch switches which branch clone, tree listings, the
-   * repository card, lineage and the parquet index read by default. The
-   * branch must already exist in the repository.
-   */
-  default_branch?: string;
-  /**
-   * Name renames the repository inside its current namespace, leaving a
-   * redirect behind exactly as a transfer does. Renaming is a rename, not
-   * a change of owner: it deliberately does not go through the transfer
-   * approval flow, which exists because the *destination namespace* has to
-   * consent -- here the destination is the namespace it already lives in.
-   */
-  name?: string;
-  /**
-   * Description replaces the repository's one-line description. A README
-   * card that carries its own `description` still wins on the next push
-   * (the card is the source of truth when it says anything); this field is
-   * what a repository with no card description has instead.
-   */
-  description?: string;
-}
-/**
- * RepoFacetItem is one value of a listing facet (a tag, a license, a task)
- * together with how many repositories in the current result set carry it.
- */
-export interface RepoFacetItem {
-  value: string;
-  count: number /* int64 */;
-}
-/**
- * RepoFacets aggregates the filterable repository-card dimensions the
- * listing sidebar offers. Each facet is computed under every filter
- * currently applied except its own dimension, so picking a value shows how
- * many *more* results narrowing further would leave.
- */
-export interface RepoFacets {
-  tags: RepoFacetItem[];
-  licenses: RepoFacetItem[];
-  tasks: RepoFacetItem[];
-  /**
-   * Relations counts the base model relations present in the result set
-   * (LineageRelation, or whatever else a card declared), so the sidebar can
-   * offer "quantized (12)". A repository that declares no base model is in
-   * no bucket: "base only" is the `base_only=true` filter, not a relation.
-   */
-  relations: RepoFacetItem[];
-}
-/**
- * RepoListResponse is one page of a repository listing.
- */
-export interface RepoListResponse {
-  items: RepoSummary[];
-  /**
-   * Total is how many repositories match, ignoring the page window.
-   */
+export interface AdminUserListResponse {
+  items: AdminUser[];
   total: number /* int64 */;
-  /**
-   * Facets is only populated for GET /api/v1/repos; the HF-compatible
-   * list endpoints leave it as its zero value.
-   */
-  facets: RepoFacets;
 }
 /**
- * StatsResponse holds the dashboard counters.
+ * AdminUserResponse wraps the account after an administrative change.
  */
-export interface StatsResponse {
-  datasets: number /* int64 */;
-  models: number /* int64 */;
-  experiments: number /* int64 */;
-  /**
-   * TotalSize is the sum of every visible repository's size, in bytes.
-   */
-  total_size: number /* int64 */;
+export interface AdminUserResponse {
+  user: AdminUser;
 }
 /**
- * UsageNamespace aggregates one namespace's storage footprint: the actual
- * bytes kept in GCS (the LFS objects its repositories reference -- plain git
- * blobs never leave the repository, so they cost nothing in GCS and are not
- * counted here), how many files are indexed across those repositories, and
- * how many repositories it holds.
+ * AdminUserCreateRequest is the body of POST /api/v1/admin/users: a site
+ * administrator adds an account directly. It is the only way to create one on
+ * an instance with TF_ALLOW_SIGNUP=false, so it deliberately does not consult
+ * that setting.
  */
-export interface UsageNamespace {
+export interface AdminUserCreateRequest {
+  username: string;
+  email: string;
+  password: string;
+  /**
+   * IsAdmin makes the new account a site administrator. Optional; the
+   * account is an ordinary user when it is absent or false.
+   */
+  is_admin?: boolean;
+}
+/**
+ * AdminUserUpdateRequest is the body of PATCH
+ * /api/v1/admin/users/{username}. Both fields are optional and an absent one
+ * is left unchanged, but a body setting neither is refused (400) rather than
+ * treated as a no-op.
+ */
+export interface AdminUserUpdateRequest {
+  /**
+   * Password replaces the account's password and revokes its sessions.
+   * The account's access tokens are deliberately not revoked.
+   */
+  password?: string;
+  /**
+   * IsAdmin grants or revokes site administrator rights. Revoking your
+   * own is 400; revoking the last one on the instance is 409.
+   */
+  is_admin?: boolean;
+  /**
+   * Disabled suspends or restores the account. Suspending it stops every
+   * identity path at once (session, password, access token, SSH key) and
+   * revokes its sessions; disabling your own account is 400
+   * (self_disable) and disabling the last usable site administrator is
+   * 409 (last_admin). Restoring does not bring back credentials revoked
+   * separately.
+   */
+  disabled?: boolean;
+  /**
+   * Approval admits a pending self-registration ("approved") or puts an
+   * account back in the waiting room ("pending"). Sending "pending" for
+   * your own account is 400 (self_pending); doing it to the last usable
+   * site administrator is 409 (last_admin), the same pair of codes the
+   * Disabled field uses.
+   */
+  approval?: UserApproval;
+}
+/**
+ * AdminNamespaceUsage is one namespace as GET /api/v1/admin/namespaces lists
+ * it: what it is storing and what it is allowed to store.
+ */
+export interface AdminNamespaceUsage {
   namespace: string;
+  kind: NamespaceKind;
   lfs_size: number /* int64 */;
-  num_files: number /* int64 */;
   num_repos: number /* int64 */;
   /**
-   * EffectiveQuotaBytes is the storage limit actually enforced for this
-   * namespace (its own override, or the instance default). Null means
-   * unlimited. Only a site administrator can change it -- an organisation
-   * admin raising their own cap would not be a cap.
-   * It is spelled the same as AdminNamespaceUsage.EffectiveQuotaBytes on
-   * purpose: `quota_bytes` there means the *override*, and one name that
-   * means the resolved limit in one response and the raw override in
-   * another is a field whose null is read backwards half the time.
+   * QuotaBytes is this namespace's own override; null means it has none
+   * and the instance default applies.
+   */
+  quota_bytes: number | null;
+  /**
+   * EffectiveQuotaBytes is what is actually enforced on an upload: the
+   * override when set, otherwise the instance default. Null is unlimited.
    */
   effective_quota_bytes: number | null;
 }
 /**
- * UsageRepo is one repository's contribution to storage usage.
+ * AdminNamespaceListResponse is one page of the namespace directory.
  */
-export interface UsageRepo {
-  namespace: string;
-  name: string;
-  kind: RepoKind;
-  full_name: string;
-  lfs_size: number /* int64 */;
-  num_files: number /* int64 */;
+export interface AdminNamespaceListResponse {
+  items: AdminNamespaceUsage[];
+  total: number /* int64 */;
+  /**
+   * DefaultQuotaBytes is the instance-wide default every namespace without
+   * an override gets (TF_DEFAULT_STORAGE_QUOTA_BYTES). Null is unlimited.
+   * It is configuration, not data: changing it needs a redeploy.
+   */
+  default_quota_bytes: number | null;
 }
 /**
- * UsageResponse is the body of GET /api/v1/usage.
+ * AdminNamespaceQuotaRequest is the body of PATCH
+ * /api/v1/admin/namespaces/{ns}. The field is required and nullable: null
+ * clears the override so the instance default applies again, which is a
+ * different thing from setting a quota of zero.
  */
-export interface UsageResponse {
-  namespaces: UsageNamespace[];
-  /**
-   * Repos is sorted by LFSSize descending.
-   */
-  repos: UsageRepo[];
+export interface AdminNamespaceQuotaRequest {
+  quota_bytes: number | null;
 }
+/**
+ * SyncJob is one row of the post-push queue as GET /api/v1/admin/sync-jobs
+ * lists it. Only jobs that exhausted their attempts are listed: a job still
+ * retrying is not an operator's problem yet, and the queue is otherwise high
+ * churn.
+ * A failed job means the repository's file index, search entry and blobs/
+ * export are frozen at the previous push. Nothing republishes it on its own,
+ * which is why this listing exists at all -- before it, the only trace was a
+ * single log line.
+ */
+export interface SyncJob {
+  id: number /* int64 */;
+  /**
+   * Repo is the full name including the kind segment, e.g.
+   * "datasets/acme/imdb-ja", so an operator can open it directly.
+   */
+  repo: string;
+  ref: string;
+  /**
+   * Attempts is how many times the job was claimed before it parked.
+   */
+  attempts: number /* int */;
+  /**
+   * LastError is the error from the final attempt, verbatim.
+   */
+  last_error: string;
+  updated_at: string;
+}
+/**
+ * SyncJobListResponse is one page of failed sync jobs. Total counts every
+ * failed job, ignoring the page window.
+ */
+export interface SyncJobListResponse {
+  items: SyncJob[];
+  total: number /* int64 */;
+}
+
+//////////
+// source: apitypes_experiments.go
+
+/**
+ * ExpProjectListItem is one experiment repository in the global listing.
+ */
+export interface ExpProjectListItem {
+  namespace: string;
+  name: string;
+  full_name: string;
+  num_projects: number /* int */;
+  updated_at: string;
+}
+/**
+ * ExpProjectListResponse is the body of GET /api/v1/experiments.
+ */
+export interface ExpProjectListResponse {
+  items: ExpProjectListItem[];
+  /**
+   * Total is the number of matching repositories regardless of limit /
+   * offset (docs/dev/namespace-design.md §5.6).
+   */
+  total: number /* int64 */;
+}
+/**
+ * ExpProject is one project (a group of runs) inside an experiment repository.
+ */
+export interface ExpProject {
+  name: string;
+  num_runs: number /* int */;
+  updated_at: string;
+}
+/**
+ * ExpRepoResponse is an experiment repository together with its projects.
+ */
+export interface ExpRepoResponse {
+  repo: RepoSummary;
+  projects: ExpProject[];
+}
+/**
+ * ExpRun is one training run's summary row.
+ */
+export interface ExpRun {
+  name: string;
+  status: RunStatus;
+  /**
+   * LastStep is the highest step seen for this run.
+   */
+  last_step: number /* int64 */;
+  /**
+   * NumPoints is how many metric points have been recorded.
+   */
+  num_points: number /* int64 */;
+  /**
+   * StartedAt is null for a run recovered from an export that carried no
+   * start time.
+   */
+  started_at: string | null;
+  updated_at: string;
+  /**
+   * Config is the run's hyperparameters, as logged.
+   */
+  config: { [key: string]: unknown};
+  metric_keys: string[];
+  /**
+   * Summary holds the last value seen for each metric.
+   */
+  summary: { [key: string]: number /* float64 */};
+  /**
+   * Group is the sweep this run belongs to, as `trackio.init(group=...)`
+   * declared it, and JobType the role it played in that sweep
+   * (`job_type=...`). Both are "" for a run that declared neither, which is
+   * how the run table tells a sweep member from a standalone run.
+   */
+  group: string;
+  job_type: string;
+  /**
+   * Tags are free-form labels a user attached to the run.
+   */
+  tags: string[];
+  /**
+   * Archived hides the run from the default listing without deleting it.
+   */
+  archived: boolean;
+  /**
+   * IsBaseline marks the run every other run is compared against. At most one
+   * run per project carries it.
+   */
+  is_baseline: boolean;
+  /**
+   * Note is free-form Markdown a user wrote about the run. Like the other
+   * annotations it is never written by ingest or by the parquet indexer, so
+   * re-indexing the project leaves it in place.
+   */
+  note: string;
+  /**
+   * Models are the model repositories this run declared it produced
+   * (`trackio.log_model`). Another annotation: ingest and the indexer leave
+   * it alone.
+   */
+  models: ExpRunModelRef[];
+}
+/**
+ * ExpRunModelRef is one model a run recorded as its output.
+ */
+export interface ExpRunModelRef {
+  /**
+   * RepoID is the model repository as "ns/name".
+   */
+  repo_id: string;
+  /**
+   * Revision is the commit, branch or tag the run pinned, "" when the shim
+   * could not resolve one. It is recorded verbatim and never verified: only
+   * the repository's existence is checked (see Exists), so a link to a
+   * revision that has since been rewritten fails in the file browser rather
+   * than being hidden here.
+   */
+  revision: string;
+  /**
+   * Exists reports that RepoID resolves to a model repository this viewer
+   * may read. A false value means the UI shows text and a warning instead of
+   * a link -- the same treatment a dangling lineage reference gets.
+   */
+  exists: boolean;
+}
+/**
+ * ExpRunModelInput is one entry of a produced-model list being written. Unlike
+ * ExpRunModelRef it carries no Exists: that is the server's answer, not the
+ * client's claim.
+ */
+export interface ExpRunModelInput {
+  repo_id: string;
+  revision?: string;
+}
+/**
+ * ExpRunListResponse is the body of the run listing endpoint.
+ */
+export interface ExpRunListResponse {
+  runs: ExpRun[];
+}
+/**
+ * ExpArtifact is one file a run stored under its artifact directory.
+ */
+export interface ExpArtifact {
+  /**
+   * Name is the path relative to the run's artifact directory -- the name
+   * `log_artifact` was given, possibly with subdirectories.
+   */
+  name: string;
+  /**
+   * Path is the full path inside the repository, which is what the file
+   * browser and `resolve` need.
+   */
+  path: string;
+  size: number /* int64 */;
+  /**
+   * LFS reports that the file is stored as a Git LFS pointer.
+   */
+  lfs: boolean;
+  /**
+   * Preview is how the file browser would render this file, so the run page
+   * can pick a matching icon and link.
+   */
+  preview: PreviewKind;
+}
+/**
+ * ExpArtifactListResponse lists one run's artifacts.
+ */
+export interface ExpArtifactListResponse {
+  /**
+   * Path is the directory the listing came from,
+   * "{project}/artifacts/{run}" (docs/dev/api-contract.md §7).
+   */
+  path: string;
+  /**
+   * Rev is the revision listed, always the repository's default branch.
+   */
+  rev: string;
+  artifacts: ExpArtifact[];
+}
+/**
+ * ExpRunAnnotationRequest is a partial update of a run's annotations: an
+ * omitted field is left as it is, so a client can toggle one flag without
+ * having to send the rest.
+ * For the two list fields, Tags and Models, "omitted" and "empty" are
+ * different requests and JSON spells them differently: a missing key or an
+ * explicit null leaves the list unchanged, while [] replaces it with nothing
+ * -- which is the only way to clear one. Sending null to clear a list is the
+ * mistake this note exists to prevent.
+ */
+export interface ExpRunAnnotationRequest {
+  /**
+   * Tags replaces the run's tag list wholesale; an empty array clears it.
+   */
+  tags?: string[];
+  archived?: boolean;
+  is_baseline?: boolean;
+  note?: string;
+  /**
+   * Models replaces the run's produced-model list wholesale; an empty array
+   * clears it. This is the write path behind `trackio.log_model`.
+   */
+  models?: ExpRunModelInput[];
+}
+/**
+ * ExpRunAnnotationResponse returns the run as it stands after the update.
+ */
+export interface ExpRunAnnotationResponse {
+  run: ExpRun;
+}
+/**
+ * ExpMetricSeries is one metric's trace for one run, as [x, y] pairs.
+ */
+export interface ExpMetricSeries {
+  run: string;
+  key: string;
+  points: MetricPoint[];
+}
+/**
+ * ExpMetricsResponse carries the traces a chart asked for.
+ */
+export interface ExpMetricsResponse {
+  series: ExpMetricSeries[];
+}
+
+//////////
+// source: apitypes_files.go
+
 /**
  * CommitInfoUI is one commit as the file browser and history views show it.
  */
@@ -831,374 +1044,10 @@ export interface UploadFilesResponse {
   commit_oid: string;
   paths: string[];
 }
-/**
- * ParquetColumn describes one column of a parquet schema.
- */
-export interface ParquetColumn {
-  /**
-   * Name is the column's name.
-   */
-  name: string;
-  /**
-   * Type is the physical parquet type, e.g. "INT64", "BYTE_ARRAY". For
-   * non-leaf (nested group) columns this is "GROUP".
-   */
-  type: string;
-  /**
-   * LogicalType is the logical type annotation, e.g. "STRING",
-   * "TIMESTAMP(MICROS)", "LIST", "MAP", or "" when none is set.
-   */
-  logical_type: string;
-  /**
-   * Optional reports whether the column may be null.
-   */
-  optional: boolean;
-  /**
-   * Repeated reports whether the column may hold multiple values per row.
-   */
-  repeated: boolean;
-  /**
-   * Feature is the Hugging Face `datasets` feature type of the column,
-   * lower-cased (e.g. "image", "audio", "classlabel"), when the file or the
-   * repository's README declares one; "" otherwise. The viewer reads it
-   * from the parquet key-value metadata written by `datasets` (the
-   * "huggingface" key) and falls back to the README's
-   * `dataset_info.features`. It is a rendering hint only: an "image"
-   * column's values are the usual `{bytes, path}` struct or raw bytes.
-   */
-  feature: string;
-}
-/**
- * ParquetSchemaResponse describes a parquet file without reading its rows.
- */
-export interface ParquetSchemaResponse {
-  path: string;
-  size: number /* int64 */;
-  num_rows: number /* int64 */;
-  num_row_groups: number /* int */;
-  compression: string;
-  columns: ParquetColumn[];
-}
-/**
- * ParquetRowsResponse is one page of decoded parquet rows.
- */
-export interface ParquetRowsResponse {
-  path: string;
-  /**
-   * Offset is the row offset this page starts at.
-   */
-  offset: number /* int64 */;
-  /**
-   * Limit is the page size that was applied, after clamping.
-   */
-  limit: number /* int */;
-  /**
-   * NumRows is the total number of rows in the file, not just this page.
-   */
-  num_rows: number /* int64 */;
-  /**
-   * Columns describes the columns present in Rows, in the requested order.
-   */
-  columns: ParquetColumn[];
-  /**
-   * Rows holds one JSON-safe object per row, keyed by column name.
-   */
-  rows: { [key: string]: unknown}[];
-}
-/**
- * ModelTensor is one named tensor in a checkpoint.
- */
-export interface ModelTensor {
-  name: string;
-  /**
-   * DType is the framework-neutral dtype name, e.g. "float32", "bfloat16".
-   */
-  dtype: string;
-  shape: number /* int64 */[];
-  /**
-   * NumParameters is the product of Shape (1 for a scalar tensor).
-   */
-  num_parameters: number /* int64 */;
-  /**
-   * SizeBytes is NumParameters * the dtype's width, 0 when the width is
-   * unknown.
-   */
-  size_bytes: number /* int64 */;
-}
-/**
- * ModelDTypeStat aggregates the tensors sharing one dtype.
- */
-export interface ModelDTypeStat {
-  dtype: string;
-  num_tensors: number /* int */;
-  num_parameters: number /* int64 */;
-  size_bytes: number /* int64 */;
-}
-/**
- * ModelInfo is everything the inspector learns from a checkpoint's header.
- */
-export interface ModelInfo {
-  format: ModelFormat;
-  /**
-   * NumTensors, NumParameters and TensorBytes cover the whole file even
-   * when Tensors below is truncated.
-   */
-  num_tensors: number /* int */;
-  num_parameters: number /* int64 */;
-  tensor_bytes: number /* int64 */;
-  dtypes: ModelDTypeStat[];
-  /**
-   * Metadata is the file's own metadata: the safetensors `__metadata__`
-   * map, or the scalar entries sitting next to the weights in a PyTorch
-   * checkpoint (epoch, global_step, ...).
-   */
-  metadata: { [key: string]: string};
-  /**
-   * HeaderBytes is the size of the parsed header (the safetensors JSON
-   * header or the pickled `data.pkl`).
-   */
-  header_bytes: number /* int64 */;
-  tensors: ModelTensor[];
-  /**
-   * Truncated reports that Tensors lists only the first few thousand
-   * entries; the totals above still cover every tensor.
-   */
-  truncated: boolean;
-  /**
-   * Warnings carries recoverable problems, e.g. a structure the reader
-   * only understood in part.
-   */
-  warnings: string[];
-}
-/**
- * ModelMetaResponse flattens an inspection into the file's own identity, so
- * the UI gets `path` and `size` alongside the header fields.
- */
-export interface ModelMetaResponse extends ModelInfo {
-  path: string;
-  size: number /* int64 */;
-}
-/**
- * ExpProjectListItem is one experiment repository in the global listing.
- */
-export interface ExpProjectListItem {
-  namespace: string;
-  name: string;
-  full_name: string;
-  num_projects: number /* int */;
-  updated_at: string;
-}
-/**
- * ExpProjectListResponse is the body of GET /api/v1/experiments.
- */
-export interface ExpProjectListResponse {
-  items: ExpProjectListItem[];
-  /**
-   * Total is the number of matching repositories regardless of limit /
-   * offset (docs/dev/namespace-design.md §5.6).
-   */
-  total: number /* int64 */;
-}
-/**
- * ExpProject is one project (a group of runs) inside an experiment repository.
- */
-export interface ExpProject {
-  name: string;
-  num_runs: number /* int */;
-  updated_at: string;
-}
-/**
- * ExpRepoResponse is an experiment repository together with its projects.
- */
-export interface ExpRepoResponse {
-  repo: RepoSummary;
-  projects: ExpProject[];
-}
-/**
- * ExpRun is one training run's summary row.
- */
-export interface ExpRun {
-  name: string;
-  status: RunStatus;
-  /**
-   * LastStep is the highest step seen for this run.
-   */
-  last_step: number /* int64 */;
-  /**
-   * NumPoints is how many metric points have been recorded.
-   */
-  num_points: number /* int64 */;
-  /**
-   * StartedAt is null for a run recovered from an export that carried no
-   * start time.
-   */
-  started_at: string | null;
-  updated_at: string;
-  /**
-   * Config is the run's hyperparameters, as logged.
-   */
-  config: { [key: string]: unknown};
-  metric_keys: string[];
-  /**
-   * Summary holds the last value seen for each metric.
-   */
-  summary: { [key: string]: number /* float64 */};
-  /**
-   * Group is the sweep this run belongs to, as `trackio.init(group=...)`
-   * declared it, and JobType the role it played in that sweep
-   * (`job_type=...`). Both are "" for a run that declared neither, which is
-   * how the run table tells a sweep member from a standalone run.
-   */
-  group: string;
-  job_type: string;
-  /**
-   * Tags are free-form labels a user attached to the run.
-   */
-  tags: string[];
-  /**
-   * Archived hides the run from the default listing without deleting it.
-   */
-  archived: boolean;
-  /**
-   * IsBaseline marks the run every other run is compared against. At most one
-   * run per project carries it.
-   */
-  is_baseline: boolean;
-  /**
-   * Note is free-form Markdown a user wrote about the run. Like the other
-   * annotations it is never written by ingest or by the parquet indexer, so
-   * re-indexing the project leaves it in place.
-   */
-  note: string;
-  /**
-   * Models are the model repositories this run declared it produced
-   * (`trackio.log_model`). Another annotation: ingest and the indexer leave
-   * it alone.
-   */
-  models: ExpRunModelRef[];
-}
-/**
- * ExpRunModelRef is one model a run recorded as its output.
- */
-export interface ExpRunModelRef {
-  /**
-   * RepoID is the model repository as "ns/name".
-   */
-  repo_id: string;
-  /**
-   * Revision is the commit, branch or tag the run pinned, "" when the shim
-   * could not resolve one. It is recorded verbatim and never verified: only
-   * the repository's existence is checked (see Exists), so a link to a
-   * revision that has since been rewritten fails in the file browser rather
-   * than being hidden here.
-   */
-  revision: string;
-  /**
-   * Exists reports that RepoID resolves to a model repository this viewer
-   * may read. A false value means the UI shows text and a warning instead of
-   * a link -- the same treatment a dangling lineage reference gets.
-   */
-  exists: boolean;
-}
-/**
- * ExpRunModelInput is one entry of a produced-model list being written. Unlike
- * ExpRunModelRef it carries no Exists: that is the server's answer, not the
- * client's claim.
- */
-export interface ExpRunModelInput {
-  repo_id: string;
-  revision?: string;
-}
-/**
- * ExpRunListResponse is the body of the run listing endpoint.
- */
-export interface ExpRunListResponse {
-  runs: ExpRun[];
-}
-/**
- * ExpArtifact is one file a run stored under its artifact directory.
- */
-export interface ExpArtifact {
-  /**
-   * Name is the path relative to the run's artifact directory -- the name
-   * `log_artifact` was given, possibly with subdirectories.
-   */
-  name: string;
-  /**
-   * Path is the full path inside the repository, which is what the file
-   * browser and `resolve` need.
-   */
-  path: string;
-  size: number /* int64 */;
-  /**
-   * LFS reports that the file is stored as a Git LFS pointer.
-   */
-  lfs: boolean;
-  /**
-   * Preview is how the file browser would render this file, so the run page
-   * can pick a matching icon and link.
-   */
-  preview: PreviewKind;
-}
-/**
- * ExpArtifactListResponse lists one run's artifacts.
- */
-export interface ExpArtifactListResponse {
-  /**
-   * Path is the directory the listing came from,
-   * "{project}/artifacts/{run}" (docs/dev/api-contract.md §7).
-   */
-  path: string;
-  /**
-   * Rev is the revision listed, always the repository's default branch.
-   */
-  rev: string;
-  artifacts: ExpArtifact[];
-}
-/**
- * ExpRunAnnotationRequest is a partial update of a run's annotations: an
- * omitted field is left as it is, so a client can toggle one flag without
- * having to send the rest.
- * For the two list fields, Tags and Models, "omitted" and "empty" are
- * different requests and JSON spells them differently: a missing key or an
- * explicit null leaves the list unchanged, while [] replaces it with nothing
- * -- which is the only way to clear one. Sending null to clear a list is the
- * mistake this note exists to prevent.
- */
-export interface ExpRunAnnotationRequest {
-  /**
-   * Tags replaces the run's tag list wholesale; an empty array clears it.
-   */
-  tags?: string[];
-  archived?: boolean;
-  is_baseline?: boolean;
-  note?: string;
-  /**
-   * Models replaces the run's produced-model list wholesale; an empty array
-   * clears it. This is the write path behind `trackio.log_model`.
-   */
-  models?: ExpRunModelInput[];
-}
-/**
- * ExpRunAnnotationResponse returns the run as it stands after the update.
- */
-export interface ExpRunAnnotationResponse {
-  run: ExpRun;
-}
-/**
- * ExpMetricSeries is one metric's trace for one run, as [x, y] pairs.
- */
-export interface ExpMetricSeries {
-  run: string;
-  key: string;
-  points: MetricPoint[];
-}
-/**
- * ExpMetricsResponse carries the traces a chart asked for.
- */
-export interface ExpMetricsResponse {
-  series: ExpMetricSeries[];
-}
+
+//////////
+// source: apitypes_lineage.go
+
 /**
  * LineageEdgeKind names the sort of provenance one lineage edge records.
  */
@@ -1413,62 +1262,10 @@ export interface ExpRunLineage {
 export interface ExpLineageResponse {
   items: ExpRunLineage[];
 }
-/**
- * RepoTransferStatus is the lifecycle state of a transfer request
- * (docs/dev/repo-transfer-design.md §7).
- */
-export type RepoTransferStatus = string;
-export const RepoTransferPending: RepoTransferStatus = "pending";
-export const RepoTransferAccepted: RepoTransferStatus = "accepted";
-export const RepoTransferRejected: RepoTransferStatus = "rejected";
-export const RepoTransferCancelled: RepoTransferStatus = "cancelled";
-export const RepoTransferExpired: RepoTransferStatus = "expired";
-/**
- * RepoTransferRequest asks to move a repository to another namespace (and
- * optionally rename it at the same time).
- */
-export interface RepoTransferRequest {
-  /**
-   * Namespace is the destination user or organisation.
-   */
-  namespace: string;
-  /**
-   * Name is the new repository name; empty keeps the current one.
-   */
-  name?: string;
-}
-/**
- * RepoTransfer is one transfer request as the web UI sees it.
- */
-export interface RepoTransfer {
-  id: number /* int64 */;
-  kind: RepoKind;
-  from_namespace: string;
-  from_name: string;
-  to_namespace: string;
-  to_name: string;
-  requested_by: string;
-  status: RepoTransferStatus;
-  expires_at: string;
-  created_at: string;
-}
-/**
- * RepoTransferResponse answers a transfer call. Repo is present only when the
- * move completed (immediately, or on accept) and describes the repository at
- * its new location.
- */
-export interface RepoTransferResponse {
-  transfer: RepoTransfer;
-  repo?: RepoDetail;
-}
-/**
- * MyTransfersResponse lists the pending transfers the signed-in user can act
- * on: Incoming ones they may accept or reject, Outgoing ones they may cancel.
- */
-export interface MyTransfersResponse {
-  incoming: RepoTransfer[];
-  outgoing: RepoTransfer[];
-}
+
+//////////
+// source: apitypes_orgs.go
+
 /**
  * OrgRole is a member's role in an organisation. "" means "not a member".
  */
@@ -1609,6 +1406,471 @@ export interface OrgAuditLogResponse {
   items: OrgAuditEntry[];
   next_before: number /* int64 */;
 }
+
+//////////
+// source: apitypes_repos.go
+
+/**
+ * RepoSummary is the repository shape used in listings and search results.
+ */
+export interface RepoSummary {
+  id: number /* int64 */;
+  kind: RepoKind;
+  namespace: string;
+  /**
+   * NamespaceKind says whether Namespace is a user or an organisation, so
+   * the UI can link to the right profile page.
+   */
+  namespace_kind: NamespaceKind;
+  name: string;
+  /**
+   * FullName is "namespace/name".
+   */
+  full_name: string;
+  description: string;
+  tags: string[];
+  /**
+   * License is "" when the repository card does not name one.
+   */
+  license: string;
+  downloads: number /* int64 */;
+  /**
+   * TotalSize is the sum of all file sizes, in bytes.
+   */
+  total_size: number /* int64 */;
+  num_files: number /* int */;
+  /**
+   * IsExperiment marks a dataset repository holding tracked training runs.
+   */
+  is_experiment: boolean;
+  default_branch: string;
+  head_sha: string;
+  created_at: string;
+  updated_at: string;
+  /**
+   * Archived marks a read-only repository: it still resolves, clones and
+   * downloads, but every write is refused with 403 until it is unarchived.
+   */
+  archived: boolean;
+  /**
+   * ArchivedAt is when it was archived, or null while it is active.
+   */
+  archived_at: string | null;
+}
+/**
+ * ParquetSummary describes an indexed parquet file inside a repository.
+ */
+export interface ParquetSummary {
+  path: string;
+  num_rows: number /* int64 */;
+  num_row_groups: number /* int */;
+  num_columns: number /* int */;
+  size: number /* int64 */;
+}
+/**
+ * RepoDetail is the summary plus everything a repository page needs.
+ */
+export interface RepoDetail extends RepoSummary {
+  /**
+   * Card is the parsed YAML front matter of README.md.
+   */
+  card: { [key: string]: unknown};
+  readme: string;
+  /**
+   * ReadmeTooLarge is true when README.md exists but exceeds the server's
+   * size limit for rendering, in which case Readme is left empty instead of
+   * silently looking like "no README". Card is unaffected: it comes from the
+   * index built at push time, not from this read.
+   */
+  readme_too_large: boolean;
+  clone_url: string;
+  /**
+   * SSHCloneURL is the git-over-SSH remote, empty when TF_SSH_ENABLED is
+   * off. It is served because the port is deployment-specific and cannot be
+   * guessed: the UI happily let people register an SSH key at
+   * /settings/ssh-keys while showing no URL that key could be used against.
+   */
+  ssh_clone_url: string;
+  branches: string[];
+  tags_refs: string[];
+  /**
+   * ParquetFiles lists the indexed parquet files on the default branch.
+   */
+  parquet_files: ParquetSummary[];
+  /**
+   * Indexing reports that a background index of this repository is running,
+   * so ParquetFiles may still be incomplete.
+   */
+  indexing: boolean;
+  /**
+   * CanWrite tells the web UI whether to offer in-browser editing. It is
+   * false for an archived repository even when the viewer would otherwise
+   * have write access, so every editing affordance disappears at once.
+   */
+  can_write: boolean;
+  /**
+   * CanAdmin tells the web UI whether to offer the owner-only operations:
+   * transfer, archive/unarchive and delete. Unlike CanWrite it stays true
+   * while the repository is archived -- unarchiving it is exactly what an
+   * owner needs to be able to do.
+   */
+  can_admin: boolean;
+  /**
+   * DownloadsLast30Days is the resolve-endpoint hit count for the trailing
+   * 30 days. RepoSummary.Downloads (embedded above) stays the all-time
+   * cumulative counter.
+   */
+  downloads_last_30_days: number /* int64 */;
+}
+/**
+ * RepoDetailResponse wraps the repository page's data in its envelope.
+ */
+export interface RepoDetailResponse {
+  repo: RepoDetail;
+}
+/**
+ * RepoUpdateRequest is the body of PATCH /api/v1/repos/{kind}/{ns}/{name}.
+ * Every field is optional and absent ones are left unchanged, so new
+ * configuration fields can be added here without breaking existing callers;
+ * today there is only one, and the request must set it (there is nothing
+ * else to update).
+ */
+export interface RepoUpdateRequest {
+  /**
+   * DefaultBranch switches which branch clone, tree listings, the
+   * repository card, lineage and the parquet index read by default. The
+   * branch must already exist in the repository.
+   */
+  default_branch?: string;
+  /**
+   * Name renames the repository inside its current namespace, leaving a
+   * redirect behind exactly as a transfer does. Renaming is a rename, not
+   * a change of owner: it deliberately does not go through the transfer
+   * approval flow, which exists because the *destination namespace* has to
+   * consent -- here the destination is the namespace it already lives in.
+   */
+  name?: string;
+  /**
+   * Description replaces the repository's one-line description. A README
+   * card that carries its own `description` still wins on the next push
+   * (the card is the source of truth when it says anything); this field is
+   * what a repository with no card description has instead.
+   */
+  description?: string;
+}
+/**
+ * RepoFacetItem is one value of a listing facet (a tag, a license, a task)
+ * together with how many repositories in the current result set carry it.
+ */
+export interface RepoFacetItem {
+  value: string;
+  count: number /* int64 */;
+}
+/**
+ * RepoFacets aggregates the filterable repository-card dimensions the
+ * listing sidebar offers. Each facet is computed under every filter
+ * currently applied except its own dimension, so picking a value shows how
+ * many *more* results narrowing further would leave.
+ */
+export interface RepoFacets {
+  tags: RepoFacetItem[];
+  licenses: RepoFacetItem[];
+  tasks: RepoFacetItem[];
+  /**
+   * Relations counts the base model relations present in the result set
+   * (LineageRelation, or whatever else a card declared), so the sidebar can
+   * offer "quantized (12)". A repository that declares no base model is in
+   * no bucket: "base only" is the `base_only=true` filter, not a relation.
+   */
+  relations: RepoFacetItem[];
+}
+/**
+ * RepoListResponse is one page of a repository listing.
+ */
+export interface RepoListResponse {
+  items: RepoSummary[];
+  /**
+   * Total is how many repositories match, ignoring the page window.
+   */
+  total: number /* int64 */;
+  /**
+   * Facets is only populated for GET /api/v1/repos; the HF-compatible
+   * list endpoints leave it as its zero value.
+   */
+  facets: RepoFacets;
+}
+/**
+ * StatsResponse holds the dashboard counters.
+ */
+export interface StatsResponse {
+  datasets: number /* int64 */;
+  models: number /* int64 */;
+  experiments: number /* int64 */;
+  /**
+   * TotalSize is the sum of every visible repository's size, in bytes.
+   */
+  total_size: number /* int64 */;
+}
+/**
+ * UsageNamespace aggregates one namespace's storage footprint: the actual
+ * bytes kept in GCS (the LFS objects its repositories reference -- plain git
+ * blobs never leave the repository, so they cost nothing in GCS and are not
+ * counted here), how many files are indexed across those repositories, and
+ * how many repositories it holds.
+ */
+export interface UsageNamespace {
+  namespace: string;
+  lfs_size: number /* int64 */;
+  num_files: number /* int64 */;
+  num_repos: number /* int64 */;
+  /**
+   * EffectiveQuotaBytes is the storage limit actually enforced for this
+   * namespace (its own override, or the instance default). Null means
+   * unlimited. Only a site administrator can change it -- an organisation
+   * admin raising their own cap would not be a cap.
+   * It is spelled the same as AdminNamespaceUsage.EffectiveQuotaBytes on
+   * purpose: `quota_bytes` there means the *override*, and one name that
+   * means the resolved limit in one response and the raw override in
+   * another is a field whose null is read backwards half the time.
+   */
+  effective_quota_bytes: number | null;
+}
+/**
+ * UsageRepo is one repository's contribution to storage usage.
+ */
+export interface UsageRepo {
+  namespace: string;
+  name: string;
+  kind: RepoKind;
+  full_name: string;
+  lfs_size: number /* int64 */;
+  num_files: number /* int64 */;
+}
+/**
+ * UsageResponse is the body of GET /api/v1/usage.
+ */
+export interface UsageResponse {
+  namespaces: UsageNamespace[];
+  /**
+   * Repos is sorted by LFSSize descending.
+   */
+  repos: UsageRepo[];
+}
+
+//////////
+// source: apitypes_transfers.go
+
+/**
+ * RepoTransferStatus is the lifecycle state of a transfer request
+ * (docs/dev/repo-transfer-design.md §7).
+ */
+export type RepoTransferStatus = string;
+export const RepoTransferPending: RepoTransferStatus = "pending";
+export const RepoTransferAccepted: RepoTransferStatus = "accepted";
+export const RepoTransferRejected: RepoTransferStatus = "rejected";
+export const RepoTransferCancelled: RepoTransferStatus = "cancelled";
+export const RepoTransferExpired: RepoTransferStatus = "expired";
+/**
+ * RepoTransferRequest asks to move a repository to another namespace (and
+ * optionally rename it at the same time).
+ */
+export interface RepoTransferRequest {
+  /**
+   * Namespace is the destination user or organisation.
+   */
+  namespace: string;
+  /**
+   * Name is the new repository name; empty keeps the current one.
+   */
+  name?: string;
+}
+/**
+ * RepoTransfer is one transfer request as the web UI sees it.
+ */
+export interface RepoTransfer {
+  id: number /* int64 */;
+  kind: RepoKind;
+  from_namespace: string;
+  from_name: string;
+  to_namespace: string;
+  to_name: string;
+  requested_by: string;
+  status: RepoTransferStatus;
+  expires_at: string;
+  created_at: string;
+}
+/**
+ * RepoTransferResponse answers a transfer call. Repo is present only when the
+ * move completed (immediately, or on accept) and describes the repository at
+ * its new location.
+ */
+export interface RepoTransferResponse {
+  transfer: RepoTransfer;
+  repo?: RepoDetail;
+}
+/**
+ * MyTransfersResponse lists the pending transfers the signed-in user can act
+ * on: Incoming ones they may accept or reject, Outgoing ones they may cancel.
+ */
+export interface MyTransfersResponse {
+  incoming: RepoTransfer[];
+  outgoing: RepoTransfer[];
+}
+
+//////////
+// source: apitypes_viewer.go
+
+/**
+ * ParquetColumn describes one column of a parquet schema.
+ */
+export interface ParquetColumn {
+  /**
+   * Name is the column's name.
+   */
+  name: string;
+  /**
+   * Type is the physical parquet type, e.g. "INT64", "BYTE_ARRAY". For
+   * non-leaf (nested group) columns this is "GROUP".
+   */
+  type: string;
+  /**
+   * LogicalType is the logical type annotation, e.g. "STRING",
+   * "TIMESTAMP(MICROS)", "LIST", "MAP", or "" when none is set.
+   */
+  logical_type: string;
+  /**
+   * Optional reports whether the column may be null.
+   */
+  optional: boolean;
+  /**
+   * Repeated reports whether the column may hold multiple values per row.
+   */
+  repeated: boolean;
+  /**
+   * Feature is the Hugging Face `datasets` feature type of the column,
+   * lower-cased (e.g. "image", "audio", "classlabel"), when the file or the
+   * repository's README declares one; "" otherwise. The viewer reads it
+   * from the parquet key-value metadata written by `datasets` (the
+   * "huggingface" key) and falls back to the README's
+   * `dataset_info.features`. It is a rendering hint only: an "image"
+   * column's values are the usual `{bytes, path}` struct or raw bytes.
+   */
+  feature: string;
+}
+/**
+ * ParquetSchemaResponse describes a parquet file without reading its rows.
+ */
+export interface ParquetSchemaResponse {
+  path: string;
+  size: number /* int64 */;
+  num_rows: number /* int64 */;
+  num_row_groups: number /* int */;
+  compression: string;
+  columns: ParquetColumn[];
+}
+/**
+ * ParquetRowsResponse is one page of decoded parquet rows.
+ */
+export interface ParquetRowsResponse {
+  path: string;
+  /**
+   * Offset is the row offset this page starts at.
+   */
+  offset: number /* int64 */;
+  /**
+   * Limit is the page size that was applied, after clamping.
+   */
+  limit: number /* int */;
+  /**
+   * NumRows is the total number of rows in the file, not just this page.
+   */
+  num_rows: number /* int64 */;
+  /**
+   * Columns describes the columns present in Rows, in the requested order.
+   */
+  columns: ParquetColumn[];
+  /**
+   * Rows holds one JSON-safe object per row, keyed by column name.
+   */
+  rows: { [key: string]: unknown}[];
+}
+/**
+ * ModelTensor is one named tensor in a checkpoint.
+ */
+export interface ModelTensor {
+  name: string;
+  /**
+   * DType is the framework-neutral dtype name, e.g. "float32", "bfloat16".
+   */
+  dtype: string;
+  shape: number /* int64 */[];
+  /**
+   * NumParameters is the product of Shape (1 for a scalar tensor).
+   */
+  num_parameters: number /* int64 */;
+  /**
+   * SizeBytes is NumParameters * the dtype's width, 0 when the width is
+   * unknown.
+   */
+  size_bytes: number /* int64 */;
+}
+/**
+ * ModelDTypeStat aggregates the tensors sharing one dtype.
+ */
+export interface ModelDTypeStat {
+  dtype: string;
+  num_tensors: number /* int */;
+  num_parameters: number /* int64 */;
+  size_bytes: number /* int64 */;
+}
+/**
+ * ModelInfo is everything the inspector learns from a checkpoint's header.
+ */
+export interface ModelInfo {
+  format: ModelFormat;
+  /**
+   * NumTensors, NumParameters and TensorBytes cover the whole file even
+   * when Tensors below is truncated.
+   */
+  num_tensors: number /* int */;
+  num_parameters: number /* int64 */;
+  tensor_bytes: number /* int64 */;
+  dtypes: ModelDTypeStat[];
+  /**
+   * Metadata is the file's own metadata: the safetensors `__metadata__`
+   * map, or the scalar entries sitting next to the weights in a PyTorch
+   * checkpoint (epoch, global_step, ...).
+   */
+  metadata: { [key: string]: string};
+  /**
+   * HeaderBytes is the size of the parsed header (the safetensors JSON
+   * header or the pickled `data.pkl`).
+   */
+  header_bytes: number /* int64 */;
+  tensors: ModelTensor[];
+  /**
+   * Truncated reports that Tensors lists only the first few thousand
+   * entries; the totals above still cover every tensor.
+   */
+  truncated: boolean;
+  /**
+   * Warnings carries recoverable problems, e.g. a structure the reader
+   * only understood in part.
+   */
+  warnings: string[];
+}
+/**
+ * ModelMetaResponse flattens an inspection into the file's own identity, so
+ * the UI gets `path` and `size` alongside the header fields.
+ */
+export interface ModelMetaResponse extends ModelInfo {
+  path: string;
+  size: number /* int64 */;
+}
+
+//////////
+// source: apitypes_webhooks.go
+
 /**
  * WebhookEvent names one kind of event a webhook may subscribe to.
  */
@@ -1746,226 +2008,4 @@ export interface WebhookDelivery {
 export interface WebhookDeliveryListResponse {
   items: WebhookDelivery[];
   total: number /* int64 */;
-}
-/**
- * PasswordChangeRequest is the body of PATCH /api/v1/me/password. The current
- * password is always required: holding a session is not on its own permission
- * to replace the credential that session was minted from.
- */
-export interface PasswordChangeRequest {
-  current_password: string;
-  new_password: string;
-}
-/**
- * AdminUser is one account as GET /api/v1/admin/users lists it. The stored
- * password hash has no field here and never will: this type *is* the wire
- * contract, so a field that does not exist cannot be serialised by accident.
- */
-export interface AdminUser {
-  id: number /* int64 */;
-  username: string;
-  email: string;
-  /**
-   * IsAdmin is the instance-wide administrator flag (users.is_admin), not
-   * a role in any organisation.
-   */
-  is_admin: boolean;
-  /**
-   * Disabled reports whether the account is suspended. A disabled account
-   * authenticates on no path at all -- not password, not access token, not
-   * SSH key -- which is what makes it the offboarding switch. Resetting a
-   * password deliberately does not revoke tokens, so before this existed
-   * there was no way to actually cut somebody off.
-   */
-  disabled: boolean;
-  created_at: string;
-  /**
-   * LastLoginAt is when this account last authenticated with its password
-   * (a session being minted), null for one that never has. Access tokens
-   * and SSH keys carry their own last-used timestamps and deliberately do
-   * not move this one: the question it answers is "is anybody still using
-   * this account", for which an automation's token is the wrong signal.
-   */
-  last_login_at: string | null;
-  /**
-   * Approval is "pending" for an account that signed up while
-   * TF_SIGNUP_REQUIRE_APPROVAL was on and has not been approved yet. A
-   * pending account cannot authenticate on any path.
-   */
-  approval: UserApproval;
-}
-/**
- * UserApproval is whether a self-registered account has been let in yet.
- */
-export const UserApprovalApproved = "approved";
-export const UserApprovalPending = "pending";
-export type UserApproval = typeof UserApprovalApproved | typeof UserApprovalPending;
-/**
- * AdminUserListResponse is one page of the account directory. Total counts
- * every account matching `search`, ignoring the page window.
- */
-export interface AdminUserListResponse {
-  items: AdminUser[];
-  total: number /* int64 */;
-}
-/**
- * AdminUserResponse wraps the account after an administrative change.
- */
-export interface AdminUserResponse {
-  user: AdminUser;
-}
-/**
- * AdminUserCreateRequest is the body of POST /api/v1/admin/users: a site
- * administrator adds an account directly. It is the only way to create one on
- * an instance with TF_ALLOW_SIGNUP=false, so it deliberately does not consult
- * that setting.
- */
-export interface AdminUserCreateRequest {
-  username: string;
-  email: string;
-  password: string;
-  /**
-   * IsAdmin makes the new account a site administrator. Optional; the
-   * account is an ordinary user when it is absent or false.
-   */
-  is_admin?: boolean;
-}
-/**
- * AdminUserUpdateRequest is the body of PATCH
- * /api/v1/admin/users/{username}. Both fields are optional and an absent one
- * is left unchanged, but a body setting neither is refused (400) rather than
- * treated as a no-op.
- */
-export interface AdminUserUpdateRequest {
-  /**
-   * Password replaces the account's password and revokes its sessions.
-   * The account's access tokens are deliberately not revoked.
-   */
-  password?: string;
-  /**
-   * IsAdmin grants or revokes site administrator rights. Revoking your
-   * own is 400; revoking the last one on the instance is 409.
-   */
-  is_admin?: boolean;
-  /**
-   * Disabled suspends or restores the account. Suspending it stops every
-   * identity path at once (session, password, access token, SSH key) and
-   * revokes its sessions; disabling your own account is 400
-   * (self_disable) and disabling the last usable site administrator is
-   * 409 (last_admin). Restoring does not bring back credentials revoked
-   * separately.
-   */
-  disabled?: boolean;
-  /**
-   * Approval admits a pending self-registration ("approved") or puts an
-   * account back in the waiting room ("pending"). Sending "pending" for
-   * your own account is 400 (self_pending); doing it to the last usable
-   * site administrator is 409 (last_admin), the same pair of codes the
-   * Disabled field uses.
-   */
-  approval?: UserApproval;
-}
-/**
- * AdminNamespaceUsage is one namespace as GET /api/v1/admin/namespaces lists
- * it: what it is storing and what it is allowed to store.
- */
-export interface AdminNamespaceUsage {
-  namespace: string;
-  kind: NamespaceKind;
-  lfs_size: number /* int64 */;
-  num_repos: number /* int64 */;
-  /**
-   * QuotaBytes is this namespace's own override; null means it has none
-   * and the instance default applies.
-   */
-  quota_bytes: number | null;
-  /**
-   * EffectiveQuotaBytes is what is actually enforced on an upload: the
-   * override when set, otherwise the instance default. Null is unlimited.
-   */
-  effective_quota_bytes: number | null;
-}
-/**
- * AdminNamespaceListResponse is one page of the namespace directory.
- */
-export interface AdminNamespaceListResponse {
-  items: AdminNamespaceUsage[];
-  total: number /* int64 */;
-  /**
-   * DefaultQuotaBytes is the instance-wide default every namespace without
-   * an override gets (TF_DEFAULT_STORAGE_QUOTA_BYTES). Null is unlimited.
-   * It is configuration, not data: changing it needs a redeploy.
-   */
-  default_quota_bytes: number | null;
-}
-/**
- * AdminNamespaceQuotaRequest is the body of PATCH
- * /api/v1/admin/namespaces/{ns}. The field is required and nullable: null
- * clears the override so the instance default applies again, which is a
- * different thing from setting a quota of zero.
- */
-export interface AdminNamespaceQuotaRequest {
-  quota_bytes: number | null;
-}
-/**
- * SyncJob is one row of the post-push queue as GET /api/v1/admin/sync-jobs
- * lists it. Only jobs that exhausted their attempts are listed: a job still
- * retrying is not an operator's problem yet, and the queue is otherwise high
- * churn.
- * A failed job means the repository's file index, search entry and blobs/
- * export are frozen at the previous push. Nothing republishes it on its own,
- * which is why this listing exists at all -- before it, the only trace was a
- * single log line.
- */
-export interface SyncJob {
-  id: number /* int64 */;
-  /**
-   * Repo is the full name including the kind segment, e.g.
-   * "datasets/acme/imdb-ja", so an operator can open it directly.
-   */
-  repo: string;
-  ref: string;
-  /**
-   * Attempts is how many times the job was claimed before it parked.
-   */
-  attempts: number /* int */;
-  /**
-   * LastError is the error from the final attempt, verbatim.
-   */
-  last_error: string;
-  updated_at: string;
-}
-/**
- * SyncJobListResponse is one page of failed sync jobs. Total counts every
- * failed job, ignoring the page window.
- */
-export interface SyncJobListResponse {
-  items: SyncJob[];
-  total: number /* int64 */;
-}
-/**
- * ApiError describes what went wrong.
- */
-export interface ApiError {
-  message: string;
-  type: string;
-  /**
-   * MovedTo is set (with Type "repo_moved", status 404) when the requested
-   * repository name is a former name of a repository that has since been
-   * transferred or renamed; the client should retry at the new location.
-   */
-  moved_to?: RepoLocation;
-}
-/**
- * RepoLocation names a repository by namespace and name.
- */
-export interface RepoLocation {
-  namespace: string;
-  name: string;
-}
-/**
- * ApiErrorBody is the body of every non-2xx API response.
- */
-export interface ApiErrorBody {
-  error: ApiError;
 }

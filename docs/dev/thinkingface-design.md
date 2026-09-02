@@ -360,7 +360,7 @@ purely a buffer — the source of truth is always the Parquet inside the dataset
   `maxExistingFlushRows` (1,000,000 rows, `backend/internal/experiments/flush.go`) cannot be
   flushed within the process's memory budget. A project name that no filesystem path can hold
   hits the same wall. Neither is retried at full rate: `Flusher.blockFlush` records the reason on
-  `exp_projects.flush_blocked_at` / `flush_error` (migration `0035_exp_project_flush_block.sql`),
+  `exp_projects.flush_blocked_at` / `flush_error` (migration `0003_exp_project_flush_block.sql`),
   and `ListPendingFlushProjects` skips a project blocked within the last `flushBlockRetryAfter`
   (one hour, `backend/internal/store/experiments.go`) — capping a wedged project to one attempt an
   hour instead of one every ten seconds, so it stops starving every other project's turn in the
@@ -598,7 +598,7 @@ exp_projects     (id, repo_id, name, flush_blocked_at nullable,
                                                                -- why a project's metrics buffer
                                                                -- cannot currently be flushed,
                                                                -- and since when (see §8's "Path
-                                                               -- B's Flush" and migration 0035)
+                                                               -- B's Flush" and migration 0003)
 exp_runs         (id, project_id, name, status, config jsonb,
                   started_at, last_step)                     -- no finished_at column; a
                                                                -- finished/failed run is
@@ -613,18 +613,18 @@ Raw metric data is never stored in PG (Parquet is the source of truth; UI-facing
 through DuckDB). PG serves purely as "an index for fast listings."
 
 `namespaces.name` carries a case-insensitive unique constraint (`idx_namespaces_name_lower` — an
-expression index on `LOWER(name)`; `migrations/postgres/0026_namespace_name_ci_unique.sql` /
-`migrations/sqlite/0020_namespace_name_ci_unique.sql`). `name` is an identifier that appears
+expression index on `LOWER(name)`, defined in `migrations/postgres/0001_init.sql` /
+`migrations/sqlite/0001_init.sql`). `name` is an identifier that appears
 verbatim in the `/{ns}/{name}` route, the HF-compatible `/datasets/{ns}/{name}` route, the git
 remote, and the LFS key layout, and since this project claims HF Hub compatibility, `Alice` and
 `alice` must be prevented from becoming separate accounts/organizations (which would open the
 door to impersonation and confusion). The spelling used for display and URLs is kept as
 registered (the same behavior as GitHub) — it's never renormalized and re-stored via `lower()`.
-Lookup sites (`GetNamespace` / `GetOrg` / `NamespaceRoleFor` / `CanWriteNamespace` / `GetRepo` /
+Lookup sites (`GetNamespace` / `GetOrg` / `NamespaceRoleFor` / `GetRepo` /
 `GetRepoAnyKind`, etc.) match with `LOWER(name) = LOWER($1)`. Because `namespaces.name` is always
 ASCII-only, enforced by `backend/internal/api/repos.go`'s `nameRe`
 (`^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$`), a plain SQL `LOWER()` gives strict, locale/ICU-independent
-folding. The column-level `UNIQUE(name)` constraint inherited from 0001_init.sql is left in place
+folding. The column-level `UNIQUE(name)` constraint on `namespaces` is left in place alongside it
 (it's harmless since it's subsumed by the `LOWER(name)` uniqueness, and dropping a column-level
 UNIQUE on SQLite would require recreating the table).
 

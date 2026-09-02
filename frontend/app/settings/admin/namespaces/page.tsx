@@ -31,7 +31,7 @@ export default async function AdminNamespacesPage() {
       <ErrorState
         title={
           isUnauthorized(me)
-            ? t("settings.account.loginRequiredTitle")
+            ? t("settings.loginRequiredTitle")
             : t("settings.adminQuotas.loadFailed")
         }
         message={
@@ -45,7 +45,7 @@ export default async function AdminNamespacesPage() {
               href="/login?next=/settings/admin/namespaces"
               className={buttonClass({ variant: "primary" })}
             >
-              {t("settings.account.login")}
+              {t("settings.login")}
             </Link>
           ) : undefined
         }

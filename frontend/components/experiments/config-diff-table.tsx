@@ -2,10 +2,12 @@
 
 import { SlidersHorizontal } from "lucide-react";
 import { useMemo, useState } from "react";
+import { RunColorDot } from "@/components/experiments/run-color-dot";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Checkbox } from "@/components/ui/field";
-import { colorForRun } from "@/lib/chart-utils";
+import { Table, TBody, Td, THead, Th, Tr } from "@/components/ui/table";
+import { runColorIndex } from "@/lib/chart-utils";
 import { cn } from "@/lib/cn";
 import { useT } from "@/lib/i18n/client";
 import { buildConfigDiff } from "@/lib/run-compare";
@@ -36,6 +38,7 @@ export function ConfigDiffTable({
   // sweep actually moved. The run detail page shows them in full.
   const [showReserved, setShowReserved] = useState(false);
 
+  const colorIndex = useMemo(() => runColorIndex(runOrder), [runOrder]);
   const allRows = useMemo(() => buildConfigDiff(runs), [runs]);
   const reservedCount = useMemo(
     () => allRows.filter((r) => isReservedConfigKey(r.key)).length,
@@ -112,63 +115,47 @@ export function ConfigDiffTable({
           }
         />
       ) : (
-        <div className="scroll-x rounded-lg border border-border">
-          <table className="w-full border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-xs font-medium text-fg-subtle">
-                <th className="sticky left-0 z-10 bg-bg-raised px-3 py-2 font-medium">
-                  {t("experiments.configDiff.colParameter")}
-                </th>
-                {runs.map((run) => (
-                  <th key={run.name} className="px-3 py-2 font-medium whitespace-nowrap">
-                    <span className="flex items-center gap-2">
-                      <span
-                        className="h-2.5 w-2.5 shrink-0 rounded-full"
-                        style={{ background: colorForRun(runOrder.indexOf(run.name)) }}
-                      />
-                      <span className="text-fg">{run.name}</span>
-                      {run.name === baseline && (
-                        <Badge tone="accent">{t("experiments.table.baselineBadge")}</Badge>
-                      )}
-                    </span>
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map((row) => (
-                <tr
-                  key={row.key}
-                  className={cn(
-                    "border-b border-border last:border-0",
-                    row.differs ? "bg-warning/10" : "hover:bg-bg-hover",
+        <Table>
+          <THead>
+            <Th className="sticky left-0 z-10 bg-bg-raised">
+              {t("experiments.configDiff.colParameter")}
+            </Th>
+            {runs.map((run) => (
+              <Th key={run.name} className="whitespace-nowrap">
+                <span className="flex items-center gap-2">
+                  <RunColorDot run={run.name} colorIndex={colorIndex} />
+                  <span className="text-fg">{run.name}</span>
+                  {run.name === baseline && (
+                    <Badge tone="accent">{t("experiments.table.baselineBadge")}</Badge>
                   )}
-                >
-                  {/* Opaque background so the horizontally scrolled values
-                      pass behind the pinned key column rather than through it. */}
-                  <th
-                    scope="row"
-                    className="sticky left-0 z-10 bg-bg-raised px-3 py-2 text-left font-medium text-fg-muted"
+                </span>
+              </Th>
+            ))}
+          </THead>
+          <TBody>
+            {visible.map((row) => (
+              <Tr key={row.key} className={row.differs ? "bg-warning/10" : "hover:bg-bg-hover"}>
+                {/* Opaque background so the horizontally scrolled values
+                    pass behind the pinned key column rather than through it. */}
+                <Th scope="row" className="sticky left-0 z-10 bg-bg-raised text-left text-fg-muted">
+                  {row.key}
+                </Th>
+                {row.values.map((value, i) => (
+                  <Td
+                    // The run name is the column identity; values repeat.
+                    key={runs[i]?.name ?? i}
+                    className={cn(
+                      "tabular-nums",
+                      row.differs ? "font-medium text-fg" : "text-fg-muted",
+                    )}
                   >
-                    {row.key}
-                  </th>
-                  {row.values.map((value, i) => (
-                    <td
-                      // The run name is the column identity; values repeat.
-                      key={runs[i]?.name ?? i}
-                      className={cn(
-                        "px-3 py-2 tabular-nums",
-                        row.differs ? "font-medium text-fg" : "text-fg-muted",
-                      )}
-                    >
-                      {value}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                    {value}
+                  </Td>
+                ))}
+              </Tr>
+            ))}
+          </TBody>
+        </Table>
       )}
     </div>
   );

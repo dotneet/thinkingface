@@ -47,23 +47,15 @@ func (s *Store) CreateSSHKey(ctx context.Context, userID int64, title, publicKey
 }
 
 func (s *Store) ListSSHKeys(ctx context.Context, userID int64) ([]SSHKey, error) {
-	rows, err := s.db.Query(ctx,
+	return collect(ctx, s.db,
 		`SELECT `+sshKeyColumns+`
-		 FROM user_ssh_keys WHERE user_id = $1 ORDER BY created_at DESC, id DESC`, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := []SSHKey{}
-	for rows.Next() {
-		var k SSHKey
-		if err := scanSSHKey(rows, &k); err != nil {
-			return nil, err
-		}
-		out = append(out, k)
-	}
-	return out, rows.Err()
+		 FROM user_ssh_keys WHERE user_id = $1 ORDER BY created_at DESC, id DESC`,
+		[]any{userID},
+		func(row rowScanner) (SSHKey, error) {
+			var k SSHKey
+			err := scanSSHKey(row, &k)
+			return k, err
+		})
 }
 
 // DeleteSSHKey removes one of the user's own keys. The user_id predicate is
@@ -94,15 +86,14 @@ func (s *Store) DeleteSSHKey(ctx context.Context, userID, id int64) error {
 func (s *Store) LookupSSHKey(ctx context.Context, fingerprint string) (*User, *SSHKey, error) {
 	u := &User{}
 	k := &SSHKey{}
-	err := s.db.QueryRow(ctx,
+	row := s.db.QueryRow(ctx,
 		`SELECT k.id, k.user_id, k.title, k.public_key, k.fingerprint, k.last_used_at, k.created_at,
 		        `+userColumnsOn("u")+`
 		 FROM user_ssh_keys k JOIN users u ON u.id = k.user_id
 		 WHERE k.fingerprint = $1 AND u.disabled_at IS NULL
-		   AND u.approval_pending_at IS NULL`, fingerprint,
-	).Scan(&k.ID, &k.UserID, &k.Title, &k.PublicKey, &k.Fingerprint, &k.LastUsedAt, &k.CreatedAt,
-		&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt, &u.SessionEpoch,
-		&u.DisabledAt, &u.DisabledBy, &u.LastLoginAt, &u.ApprovalPendingAt)
+		   AND u.approval_pending_at IS NULL`, fingerprint)
+	err := scanUserAfter(row, u,
+		&k.ID, &k.UserID, &k.Title, &k.PublicKey, &k.Fingerprint, &k.LastUsedAt, &k.CreatedAt)
 	if err != nil {
 		return nil, nil, norm(err)
 	}

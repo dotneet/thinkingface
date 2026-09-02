@@ -68,6 +68,70 @@ func getNamespaceRef(ctx context.Context, ex executor, id int64) (namespaceRef, 
 	return n, nil
 }
 
+// repoLocation is where a repository lives at the moment a transfer looks at
+// it, read under the row lock so nothing moves underneath the decision.
+type repoLocation struct {
+	NamespaceID int64
+	Namespace   string // namespaces.name, joined
+	Name        string
+	Kind        string
+}
+
+// resolveTransferTarget locks the repository and works out where a transfer
+// would put it, applying every rule the two entry points share: an empty
+// ToName keeps the current name, both namespaces must exist, a move that
+// changes nothing is ErrConflict, and so is a destination (namespace, name,
+// kind) something else already occupies.
+//
+// One function because the immediate move (transferMove) and the pending
+// request (CreateRepoTransfer) have to agree about all of it -- a request
+// filed on terms the accept path would then refuse is a request that should
+// never have been accepted in the first place. The two copies had already
+// drifted: only one of them read the source namespace at all.
+//
+// Errors: ErrNotFound when the repository or either namespace is missing;
+// ErrConflict for the no-op and the taken destination.
+func resolveTransferTarget(ctx context.Context, ex executor, d dialect, spec TransferSpec) (cur repoLocation, toNS namespaceRef, toName string, err error) {
+	fail := func(err error) (repoLocation, namespaceRef, string, error) {
+		return repoLocation{}, namespaceRef{}, "", err
+	}
+
+	if err = ex.QueryRow(ctx,
+		`SELECT namespace_id, name, kind FROM repositories WHERE id = $1`+d.forUpdate(""), spec.RepoID,
+	).Scan(&cur.NamespaceID, &cur.Name, &cur.Kind); err != nil {
+		return fail(norm(err))
+	}
+
+	toName = spec.ToName
+	if toName == "" {
+		toName = cur.Name
+	}
+
+	if toNS, err = getNamespaceRef(ctx, ex, spec.ToNamespaceID); err != nil {
+		return fail(err)
+	}
+	fromNS, err := getNamespaceRef(ctx, ex, cur.NamespaceID)
+	if err != nil {
+		return fail(err)
+	}
+	cur.Namespace = fromNS.Name
+
+	if toNS.ID == cur.NamespaceID && toName == cur.Name {
+		return fail(ErrConflict)
+	}
+
+	var exists bool
+	if err = ex.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM repositories WHERE namespace_id = $1 AND name = $2 AND kind = $3 AND id <> $4)`,
+		toNS.ID, toName, cur.Kind, spec.RepoID).Scan(&exists); err != nil {
+		return fail(err)
+	}
+	if exists {
+		return fail(ErrConflict)
+	}
+	return cur, toNS, toName, nil
+}
+
 const repoTransferColumns = `t.id, t.repo_id, r.kind, t.from_namespace_id, fn.name, t.from_name,
 	t.to_namespace_id, tn.name, t.to_name, t.requested_by, u.username, t.status,
 	t.decided_by, t.decided_at, t.expires_at, t.created_at`
@@ -112,42 +176,11 @@ func scanRepoTransfer(row rowScanner) (*RepoTransfer, error) {
 // exist; ErrConflict when the destination (namespace, name, kind) is already
 // taken, or when the move is a no-op (same namespace and name).
 func (s *Store) transferMove(ctx context.Context, ex executor, spec TransferSpec, keepTransferID int64, now time.Time) (repo *Repo, fromNamespaceID int64, fromName string, err error) {
-	var repoNSID int64
-	var repoName, repoKind string
-	err = ex.QueryRow(ctx,
-		`SELECT namespace_id, name, kind FROM repositories WHERE id = $1`+s.d.forUpdate(""), spec.RepoID,
-	).Scan(&repoNSID, &repoName, &repoKind)
-	if err != nil {
-		return nil, 0, "", norm(err)
-	}
-
-	toName := spec.ToName
-	if toName == "" {
-		toName = repoName
-	}
-
-	toNS, err := getNamespaceRef(ctx, ex, spec.ToNamespaceID)
+	cur, toNS, toName, err := resolveTransferTarget(ctx, ex, s.d, spec)
 	if err != nil {
 		return nil, 0, "", err
 	}
-	fromNS, err := getNamespaceRef(ctx, ex, repoNSID)
-	if err != nil {
-		return nil, 0, "", err
-	}
-
-	if toNS.ID == repoNSID && toName == repoName {
-		return nil, 0, "", ErrConflict
-	}
-
-	var exists bool
-	if err = ex.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM repositories WHERE namespace_id = $1 AND name = $2 AND kind = $3 AND id <> $4)`,
-		toNS.ID, toName, repoKind, spec.RepoID).Scan(&exists); err != nil {
-		return nil, 0, "", err
-	}
-	if exists {
-		return nil, 0, "", ErrConflict
-	}
+	repoNSID, repoName, repoKind := cur.NamespaceID, cur.Name, cur.Kind
 
 	if _, err = ex.Exec(ctx,
 		`UPDATE repositories SET namespace_id = $2, name = $3, updated_at = $4 WHERE id = $1`,
@@ -162,7 +195,7 @@ func (s *Store) transferMove(ctx context.Context, ex executor, spec TransferSpec
 		`INSERT INTO repo_redirects (kind, from_namespace, from_name, repo_id, created_at)
 		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (kind, from_namespace, from_name) DO UPDATE SET repo_id = EXCLUDED.repo_id`,
-		repoKind, fromNS.Name, repoName, spec.RepoID, now); err != nil {
+		repoKind, cur.Namespace, repoName, spec.RepoID, now); err != nil {
 		return nil, 0, "", err
 	}
 
@@ -193,7 +226,7 @@ func (s *Store) transferMove(ctx context.Context, ex executor, spec TransferSpec
 		          WHEN 'base_model' THEN 'model'
 		          WHEN 'new_version' THEN (SELECT src.kind FROM repositories src WHERE src.id = repo_lineage.repo_id)
 		          ELSE 'dataset' END) = $6`,
-		fromNS.Name, repoName, toNS.Name, toName, now, repoKind); err != nil {
+		cur.Namespace, repoName, toNS.Name, toName, now, repoKind); err != nil {
 		return nil, 0, "", err
 	}
 
@@ -218,12 +251,12 @@ func (s *Store) transferMove(ctx context.Context, ex executor, spec TransferSpec
 	}
 
 	repo, err = scanRepo(ex.QueryRow(ctx,
-		`SELECT `+repoColumns+` FROM repositories r JOIN namespaces n ON n.id = r.namespace_id WHERE r.id = $1`,
+		repoSelect+` WHERE r.id = $1`,
 		spec.RepoID))
 	if err != nil {
 		return nil, 0, "", err
 	}
-	return repo, fromNS.ID, repoName, nil
+	return repo, cur.NamespaceID, repoName, nil
 }
 
 // TransferRepo performs an immediate move in one transaction
@@ -272,37 +305,9 @@ func (s *Store) CreateRepoTransfer(ctx context.Context, spec TransferSpec, ttl t
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	var repoNSID int64
-	var repoName, repoKind string
-	err = tx.QueryRow(ctx,
-		`SELECT namespace_id, name, kind FROM repositories WHERE id = $1`+s.d.forUpdate(""), spec.RepoID,
-	).Scan(&repoNSID, &repoName, &repoKind)
-	if err != nil {
-		return nil, norm(err)
-	}
-
-	toName := spec.ToName
-	if toName == "" {
-		toName = repoName
-	}
-
-	toNS, err := getNamespaceRef(ctx, tx, spec.ToNamespaceID)
+	cur, toNS, toName, err := resolveTransferTarget(ctx, tx, s.d, spec)
 	if err != nil {
 		return nil, err
-	}
-
-	if toNS.ID == repoNSID && toName == repoName {
-		return nil, ErrConflict
-	}
-
-	var exists bool
-	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM repositories WHERE namespace_id = $1 AND name = $2 AND kind = $3 AND id <> $4)`,
-		toNS.ID, toName, repoKind, spec.RepoID).Scan(&exists); err != nil {
-		return nil, err
-	}
-	if exists {
-		return nil, ErrConflict
 	}
 
 	now := time.Now()
@@ -311,7 +316,7 @@ func (s *Store) CreateRepoTransfer(ctx context.Context, spec TransferSpec, ttl t
 		`INSERT INTO repo_transfers (repo_id, from_namespace_id, from_name, to_namespace_id, to_name,
 		                             requested_by, status, expires_at, created_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8) RETURNING id`,
-		spec.RepoID, repoNSID, repoName, toNS.ID, toName, spec.ActorID, now.Add(ttl), now,
+		spec.RepoID, cur.NamespaceID, cur.Name, toNS.ID, toName, spec.ActorID, now.Add(ttl), now,
 	).Scan(&id)
 	if s.d.isUniqueViolation(err) {
 		return nil, ErrConflict
@@ -356,18 +361,14 @@ func (s *Store) PendingRepoTransfer(ctx context.Context, repoID int64) (*RepoTra
 // (docs/dev/repo-transfer-design.md §7.2).
 func (s *Store) ListRepoTransfersForUser(ctx context.Context, userID int64) (incoming, outgoing []RepoTransfer, err error) {
 	now := time.Now()
-	writable := `EXISTS (
-		SELECT 1 FROM namespaces n
-		LEFT JOIN org_members m ON m.namespace_id = n.id AND m.user_id = $1
-		WHERE n.id = %s AND (n.owner_user_id = $1 OR m.role IN ('admin', 'write')))`
 
 	incoming, err = s.queryRepoTransfers(ctx,
-		`t.status = 'pending' AND t.expires_at > $2 AND `+fmt.Sprintf(writable, "t.to_namespace_id"), userID, now)
+		`t.status = 'pending' AND t.expires_at > $2 AND `+namespaceWritable("t.to_namespace_id"), userID, now)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list incoming transfers: %w", err)
 	}
 	outgoing, err = s.queryRepoTransfers(ctx,
-		`t.status = 'pending' AND t.expires_at > $2 AND `+fmt.Sprintf(writable, "t.from_namespace_id"), userID, now)
+		`t.status = 'pending' AND t.expires_at > $2 AND `+namespaceWritable("t.from_namespace_id"), userID, now)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list outgoing transfers: %w", err)
 	}
@@ -375,22 +376,16 @@ func (s *Store) ListRepoTransfersForUser(ctx context.Context, userID int64) (inc
 }
 
 func (s *Store) queryRepoTransfers(ctx context.Context, where string, args ...any) ([]RepoTransfer, error) {
-	rows, err := s.db.Query(ctx,
-		`SELECT `+repoTransferColumns+` FROM `+repoTransferFrom+` WHERE `+where+` ORDER BY t.created_at DESC`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := []RepoTransfer{}
-	for rows.Next() {
-		t, err := scanRepoTransfer(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *t)
-	}
-	return out, rows.Err()
+	return collect(ctx, s.db,
+		`SELECT `+repoTransferColumns+` FROM `+repoTransferFrom+` WHERE `+where+` ORDER BY t.created_at DESC`,
+		args,
+		func(row rowScanner) (RepoTransfer, error) {
+			t, err := scanRepoTransfer(row)
+			if err != nil {
+				return RepoTransfer{}, err
+			}
+			return *t, nil
+		})
 }
 
 // AcceptRepoTransfer completes a pending transfer: it locks the transfer

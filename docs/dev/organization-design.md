@@ -61,9 +61,9 @@ Related documents: `thinkingface-design.md` §10-11 (data model, authorization),
 | Layer | Current state | Problem |
 |---|---|---|
 | DB | `namespaces(kind user\|org, owner_user_id)`, `org_members(role admin\|write\|read)` | No columns for organization description, display name, creator, etc. `owner_user_id` still points at the founder even for organizations |
-| store | `CreateOrg` (adds the creator as admin), `NamespacesForUser`, `CanWriteNamespace`, `RoleInNamespace` | No listing/adding/changing/removing members, and no updating/deleting organizations |
+| store | `CreateOrg` (adds the creator as admin), `NamespacesForUser`, `NamespaceRoleFor` | No listing/adding/changing/removing members, and no updating/deleting organizations |
 | API | Only `GET /api/v1/me`'s `namespaces[]` (with role) | **Zero endpoints to create or operate on organizations**. `whoami-v2`'s `orgs` is hardcoded to `[]` |
-| Authorization | `canRead`: private repos are only readable via `CanWriteNamespace` (owner or admin/write). `RepoFilter.ViewerID` / `visibilityClause`: allowed if there's a row in `org_members` | **The `read` role sees private repos in listings, but detail/resolve return 404**. The meaning of the `read` role is undefined |
+| Authorization | `canRead`: private repos are only readable if `NamespaceRoleFor` resolves to at least `write` (owner or admin/write). `RepoFilter.ViewerID` / `visibilityClause`: allowed if there's a row in `org_members` | **The `read` role sees private repos in listings, but detail/resolve return 404**. The meaning of the `read` role is undefined |
 | Authorization | `n.owner_user_id = $1` is treated as "equivalent to admin" everywhere | An organization's founder retains full privileges even after being removed from `org_members`. If the founding user is deleted, `ON DELETE CASCADE` **deletes the entire organization** |
 | Authorization | Webhook management and repository deletion are allowed at write | These are operations that should be admin-only for organizations (only transfer is already admin-only) |
 | Names | `validateName` only checks character classes | Namespaces can be created that collide with routes like `datasets` / `models` / `api` / `settings` / `orgs` (same for usernames) |
@@ -255,34 +255,30 @@ to webhook `events` is future work; it can be added by extending the `WebhookEve
 
 ## 6. Data Model
 
-### 6.1 Migration `postgres/0010_organizations.sql` / `sqlite/0004_organizations.sql`
+### 6.1 Organization Columns and Tables
+
+These are part of the current schema (`migrations/{postgres,sqlite}/0001_init.sql`): the
+profile columns below are declared on `namespaces`' own `CREATE TABLE`, and `org_members` /
+`org_audit_log` are created with the shape shown here.
 
 ```sql
--- Organization profile and policy. Columns exist for user namespaces too but go unused (NULL / default).
-ALTER TABLE namespaces ADD COLUMN display_name           TEXT NOT NULL DEFAULT '';
-ALTER TABLE namespaces ADD COLUMN description            TEXT NOT NULL DEFAULT '';
-ALTER TABLE namespaces ADD COLUMN website                TEXT NOT NULL DEFAULT '';
-ALTER TABLE namespaces ADD COLUMN avatar_url             TEXT NOT NULL DEFAULT '';
-ALTER TABLE namespaces ADD COLUMN members_visibility     TEXT NOT NULL DEFAULT 'members'
-    CHECK (members_visibility IN ('members', 'public'));
-ALTER TABLE namespaces ADD COLUMN created_by             BIGINT REFERENCES users (id) ON DELETE SET NULL;
-ALTER TABLE namespaces ADD COLUMN updated_at             TIMESTAMPTZ NOT NULL DEFAULT now();
+-- On namespaces (organization profile and policy). Columns exist for user
+-- namespaces too but go unused there (NULL / default).
+display_name           TEXT NOT NULL DEFAULT '',
+description            TEXT NOT NULL DEFAULT '',
+website                TEXT NOT NULL DEFAULT '',
+avatar_url             TEXT NOT NULL DEFAULT '',
+members_visibility     TEXT NOT NULL DEFAULT 'members'
+    CHECK (members_visibility IN ('members', 'public')),
+created_by             BIGINT REFERENCES users (id) ON DELETE SET NULL,
+updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
 
--- Add history info to membership.
-ALTER TABLE org_members ADD COLUMN added_by   BIGINT REFERENCES users (id) ON DELETE SET NULL;
-ALTER TABLE org_members ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT now();
-ALTER TABLE org_members ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+-- On org_members (history info on membership).
+added_by   BIGINT REFERENCES users (id) ON DELETE SET NULL,
+created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
 CREATE INDEX IF NOT EXISTS org_members_user_idx ON org_members (user_id);
-
--- Organizations no longer depend on their founder: guarantee the founder's admin row, then drop owner_user_id.
--- This means (a) removing the founder doesn't leave them with privileges, and (b) deleting the founding user
--- no longer CASCADE-deletes the organization.
-INSERT INTO org_members (namespace_id, user_id, role)
-    SELECT id, owner_user_id, 'admin' FROM namespaces
-    WHERE kind = 'org' AND owner_user_id IS NOT NULL
-ON CONFLICT (namespace_id, user_id) DO NOTHING;
-UPDATE namespaces SET created_by = owner_user_id WHERE kind = 'org';
-UPDATE namespaces SET owner_user_id = NULL        WHERE kind = 'org';
 
 CREATE TABLE IF NOT EXISTS org_audit_log (
     id             BIGSERIAL PRIMARY KEY,
@@ -298,10 +294,19 @@ CREATE TABLE IF NOT EXISTS org_audit_log (
 CREATE INDEX IF NOT EXISTS org_audit_log_ns_idx ON org_audit_log (namespace_id, id DESC);
 ```
 
+An organization must not depend on its founder, so `owner_user_id` stays `NULL` for an org and
+`created_by` records the founder instead: removing the founder from `org_members` really removes
+their power, and deleting the founder's account no longer cascade-deletes the organization —
+their authority comes from an ordinary `org_members` row instead (see the comment above
+`namespaces` in `migrations/postgres/0001_init.sql`). At the time this landed as a migration,
+that required a one-time backfill (seeding a founder's `admin` row in `org_members`, copying
+`owner_user_id` into `created_by`, then clearing `owner_user_id` for every existing org); with
+the schema now created in its final shape from the start, new organizations are simply created
+with `owner_user_id` left `NULL` and `created_by` set to the founder, and no backfill is needed.
+
 The SQLite version follows the type mapping (`thinkingface-design.md` §10):
 `BIGSERIAL`→`INTEGER PRIMARY KEY AUTOINCREMENT`, `TIMESTAMPTZ`→`DATETIME DEFAULT (strftime(...))`,
-`JSONB`→`TEXT`, `BOOLEAN`→`INTEGER`. SQLite allows `CHECK` on `ALTER TABLE ... ADD COLUMN` (with
-`DEFAULT`), so it's syntax differences only. `ON CONFLICT DO NOTHING` becomes `INSERT OR IGNORE`.
+`JSONB`→`TEXT`, `BOOLEAN`→`INTEGER`.
 
 ### 6.2 Store Layer (new `internal/store/orgs.go`; org-related code moves out of `users.go`)
 
@@ -336,7 +341,7 @@ ListOrgAudit(ctx, id int64, beforeID int64, limit int) ([]AuditEntry, error)
   **`SELECT count(*) ... role='admin'` → change, within the same transaction**; on PostgreSQL, the
   target organization's `namespaces` row is serialized with `FOR UPDATE` (the existing `forUpdate`
   dialect helper; a no-op on SQLite)
-- `RoleInNamespace` / `CanWriteNamespace` / `NamespacesForUser` are kept as-is (only
+- `NamespaceRoleFor` / `NamespacesForUser` are kept as-is (only
   `owner_user_id` becomes NULL for organizations). `NamespacesForUser`'s result already includes
   `kind`, so the UI select can keep using it unchanged
 
@@ -512,8 +517,8 @@ with `Badge` (admin = accent, write = default, read = muted).
 
 | File | Change |
 |---|---|
-| `store/migrations/{postgres/0010,sqlite/0004}_organizations.sql` | §6.1 |
-| `store/orgs.go` (new) | §6.2. Moves `CreateOrg` / `RoleInNamespace` out of `users.go` |
+| `store/migrations/{postgres,sqlite}/0001_init.sql` (organization columns/tables) | §6.1 |
+| `store/orgs.go` (new) | §6.2. Moves `CreateOrg` / `NamespaceRoleFor` out of `users.go` |
 | `store/store.go` | Adds `ErrLastAdmin` |
 | `api/authz.go` (new) | `Role` type, `roleIn`, `canRead` / `canWrite` / `canAdmin`, `loadRepoForAdmin`, `requireOrgRole(w, r, org, min)` |
 | `api/auth.go` | Changes `canRead` to `roleIn >= RoleRead`. Populates `handleWhoami`'s `orgs` |

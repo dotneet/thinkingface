@@ -150,7 +150,7 @@ const UNPREFIXED_IDS = new Set(["footnote-label"]);
  * are already namespaced — footnote links arrive that way from
  * `mdast-util-to-hast`, and so do the heading permalinks — are left alone.
  */
-export function prefixFragment(suffix: string): string {
+function prefixFragment(suffix: string): string {
   const hash = suffix.indexOf("#");
   if (hash < 0) return suffix;
   const fragment = suffix.slice(hash + 1);

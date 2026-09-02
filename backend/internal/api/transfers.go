@@ -9,7 +9,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -202,10 +201,11 @@ func (s *Server) handleHFMoveRepo(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, maxMetaBody, &req, "request body must be JSON with fromRepo, toRepo and type") {
 		return
 	}
-	kind := "model"
-	if req.Type != "" {
-		kind = strings.TrimSuffix(req.Type, "s")
-	}
+	// hfRepoType, not hfRepoTarget: move_repo names both repositories in full
+	// ("ns/name" for each) and has no "organization" field, so there is no
+	// caller's-own-namespace fallback to apply -- an unqualified name here is
+	// the caller's mistake, which splitRepoID reports.
+	kind := hfRepoType(req.Type)
 	fromNS, fromName, ok := splitRepoID(req.FromRepo)
 	if !ok {
 		badRequest(w, "fromRepo must be namespace/name")
@@ -352,9 +352,8 @@ func (s *Server) handleDecideTransfer(w http.ResponseWriter, r *http.Request, ac
 	if !ok {
 		return
 	}
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		badRequest(w, "transfer id must be a number")
+	id, ok := int64Param(w, r, "id", "transfer")
+	if !ok {
 		return
 	}
 	t, err := s.store.GetRepoTransfer(r.Context(), id)

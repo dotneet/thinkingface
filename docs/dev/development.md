@@ -291,15 +291,16 @@ cleanly when neither is installed.
   `frontend/types/api.gen.ts` (never edit it by hand), and update
   [`api-contract.md`](api-contract.md). HF-compatible / LFS / ingest endpoints are excluded:
   the external protocol defines those.
-- **Database migrations.** Add one SQL file to *both*
-  `backend/internal/store/migrations/postgres/` and `backend/internal/store/migrations/sqlite/`,
-  using the same descriptive name suffix in both (e.g. `NNNN_content_addressed_storage.sql`).
-  The two directories number independently, not as one shared sequence — they diverged early
-  and were never realigned, so `postgres/`'s highest number and `sqlite/`'s highest number are
-  essentially never equal (`content_addressed_storage` is postgres `0027` / sqlite `0021`, for
-  instance). Take the next available number in *each* directory separately; matching numbers
-  across the two is not a goal and not expected. The name suffix, not the number, is what
-  pairs a postgres migration with its sqlite counterpart.
+- **Database migrations.** Add sequentially numbered SQL files to *both*
+  `backend/internal/store/migrations/postgres/` and `backend/internal/store/migrations/sqlite/`.
+  Both directories were squashed to a single `0001_init.sql` (the full current schema) ahead of
+  the first production release, so the next migration in either dialect starts at `0002_...`,
+  and the two dialects now share numbering 1:1 instead of drifting apart as they did
+  historically. **Recreate any database that stopped part-way through the old history**:
+  `Migrate` records applied files by name and checks nothing else, so one that ran the old
+  `0001_init.sql` but not the migrations after it skips the consolidated file, starts cleanly,
+  and then fails at runtime on a column added later. One that ran the whole old history already
+  matches, and an empty one is built from the consolidated file.
 - **Pure Go only.** Parquet goes through `parquet-go` and SQLite through `modernc.org/sqlite`.
   Do not introduce CGo dependencies (Arrow C++ bindings, `mattn/go-sqlite3`, ...) — they break
   the container build and cross-compilation.

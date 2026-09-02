@@ -1,5 +1,5 @@
 // Storage quotas: what a namespace is allowed to keep in object storage, and
-// how much of it is already spent (migrations/postgres/0032, sqlite/0026).
+// how much of it is already spent (namespaces.storage_quota_bytes).
 //
 // The allowance is namespaces.storage_quota_bytes, NULL for a namespace with
 // no override of its own. Resolving NULL against the instance-wide default is
@@ -146,28 +146,25 @@ func (s *Store) ListNamespaceQuotas(ctx context.Context, search string, limit, o
 	// already case-insensitive for ASCII -- namespace names are ASCII by
 	// construction (api/repos.go's nameRe). The search text is a substring,
 	// not a pattern, so it goes through like.go's pair.
-	var countArgs []any
-	countBind := binder(&countArgs)
+	var args []any
+	bind := binder(&args)
 	where := ""
-	if search != "" {
-		where = ` WHERE ` + likeAnyOf(countBind(likeContains(search)), "name")
+	if c := searchClause(bind, search, "name"); c != "" {
+		where = ` WHERE ` + c
 	}
+	// The count runs on the clause's own parameters; the page window is
+	// bound after it so this prefix is exactly them (see searchClause).
+	countArgs := append([]any{}, args...)
 
 	var total int64
 	if err := s.db.QueryRow(ctx, `SELECT count(*) FROM namespaces`+where, countArgs...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
-	var args []any
-	bind := binder(&args)
-	listWhere := ""
-	if search != "" {
-		listWhere = ` WHERE ` + likeAnyOf(bind(likeContains(search)), "name")
-	}
 	limitP, offsetP := bind(limit), bind(offset)
 
 	rows, err := s.db.Query(ctx,
-		`SELECT id, name, kind, storage_quota_bytes FROM namespaces`+listWhere+
+		`SELECT id, name, kind, storage_quota_bytes FROM namespaces`+where+
 			` ORDER BY name LIMIT `+limitP+` OFFSET `+offsetP, args...)
 	if err != nil {
 		return nil, 0, err

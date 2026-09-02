@@ -1,6 +1,9 @@
 // Settings pages: access tokens, storage usage, webhooks.
 export const settings = {
   errorTitle: "読み込めませんでした",
+  loginRequiredTitle: "ログインが必要です",
+  loginRequiredMessage: "この設定の表示・管理にはログインが必要です。",
+  login: "ログイン",
   nav: {
     profile: "プロフィール",
     tokens: "アクセストークン",
@@ -14,9 +17,6 @@ export const settings = {
   profile: {
     title: "プロフィール",
     description: "thinkingface 上でのあなたの見え方。",
-    loginRequiredTitle: "ログインが必要です",
-    loginRequiredMessage: "プロフィールの表示・編集にはログインが必要です。",
-    login: "ログイン",
     loadFailed: "プロフィールの読み込みに失敗しました",
     loadFailedHint:
       "バックエンド API に接続できない可能性があります。ページを再読み込みしてください。",
@@ -60,9 +60,6 @@ export const settings = {
     // 対象名を明示する。
     confirmDeleteNamed:
       "アクセストークン「{name}」を削除しますか？ このトークンを使用しているものは動作しなくなります。",
-    loginRequiredTitle: "ログインが必要です",
-    loginRequiredMessage: "アクセストークンの表示・管理にはログインが必要です。",
-    login: "ログイン",
     loadFailed: "トークンの読み込みに失敗しました",
     loadFailedHint:
       "バックエンド API に接続できない可能性があります。ページを再読み込みしてください。",
@@ -107,9 +104,6 @@ export const settings = {
       "セッションの有効期限が切れました。このキーを削除するには再度ログインしてください。",
     confirmDeleteTitle: "SSH キーを削除しますか？",
     confirmDelete: "この SSH キーを削除しますか？ このキーを使用しているものは動作しなくなります。",
-    loginRequiredTitle: "ログインが必要です",
-    loginRequiredMessage: "SSH キーの表示・管理にはログインが必要です。",
-    login: "ログイン",
     loadFailed: "SSH キーの読み込みに失敗しました",
     loadFailedHint:
       "バックエンド API に接続できない可能性があります。ページを再読み込みしてください。",
@@ -128,9 +122,6 @@ export const settings = {
     title: "ストレージ使用量",
     description:
       "アクセスできる名前空間ごとの GCS 課金対象ストレージ（LFS オブジェクトのバイト数）を、名前空間別・リポジトリ別に表示します。",
-    loginRequiredTitle: "ログインが必要です",
-    loginRequiredMessage: "ストレージ使用量の表示にはログインが必要です。",
-    login: "ログイン",
     loadFailed: "ストレージ使用量の読み込みに失敗しました",
     loadFailedHint:
       "バックエンド API に接続できない可能性があります。ページを再読み込みしてください。",
@@ -155,9 +146,6 @@ export const settings = {
     description:
       "リポジトリへの push・作成・削除、あるいはトラッキング中の実験 run の完了・失敗を、指定した URL に通知します。すべての配信には",
     descriptionSuffix: "が署名として付くため、このサーバーからの配信であることを検証できます。",
-    loginRequiredTitle: "ログインが必要です",
-    loginRequiredMessage: "Webhook の管理にはログインが必要です。",
-    login: "ログイン",
     accountLoadFailed: "アカウント情報の読み込みに失敗しました",
     accountLoadFailedHint: "バックエンド API に接続できない可能性があります。",
     noNamespaceTitle: "管理できる名前空間がありません",
@@ -233,9 +221,6 @@ export const settings = {
   transfers: {
     title: "リポジトリの移管",
     description: "他のユーザーから提案された移管と、自分が開始した移管の一覧です。",
-    loginRequiredTitle: "ログインが必要です",
-    loginRequiredMessage: "リポジトリの移管を見るにはログインが必要です。",
-    login: "ログイン",
     loadFailed: "移管情報の読み込みに失敗しました",
     loadFailedHint:
       "バックエンド API に接続できない可能性があります。ページを再読み込みしてください。",
@@ -259,9 +244,6 @@ export const settings = {
   organizations: {
     title: "組織",
     description: "自分が所属している組織と、それぞれでのロール。",
-    loginRequiredTitle: "ログインが必要です",
-    loginRequiredMessage: "所属組織を表示するにはログインが必要です。",
-    login: "ログイン",
     loadFailed: "所属組織を読み込めませんでした",
     loadFailedHint: "バックエンド API に接続できない可能性があります。再読み込みしてください。",
     emptyTitle: "所属している組織がありません",
@@ -293,9 +275,6 @@ export const settings = {
     statusFailed: "失敗",
     redeliver: "再配信",
     redelivering: "再配信中…",
-    pageInfo: "{from}–{to} / {total}",
-    prev: "前へ",
-    next: "次へ",
   },
   // アカウント（パスワード変更）とサイト管理者向けのユーザー一覧。
   account: {
@@ -316,9 +295,6 @@ export const settings = {
     tooShort: "8 文字以上で入力してください。",
     sameAsCurrent: "新しいパスワードは現在のパスワードと異なるものにしてください。",
     wrongCurrentPassword: "現在のパスワードが違います。",
-    loginRequiredTitle: "ログインが必要です",
-    loginRequiredMessage: "パスワードの変更にはログインが必要です。",
-    login: "ログイン",
     loadFailed: "アカウント情報の読み込みに失敗しました",
     loadFailedHint:
       "バックエンド API に接続できない可能性があります。ページを再読み込みしてください。",

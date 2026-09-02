@@ -16,9 +16,9 @@
  */
 
 /** Reserved config key holding the run's environment snapshot. */
-export const META_KEY = "_meta";
+const META_KEY = "_meta";
 /** Reserved config key holding the HF Trainer's TrainingArguments. */
-export const ARGS_KEY = "_args";
+const ARGS_KEY = "_args";
 
 /** One leaf of a config, keyed by its dotted path. */
 export type ConfigEntry = { key: string; value: unknown };

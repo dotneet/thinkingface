@@ -1,16 +1,17 @@
 "use client";
 
 import { ChevronDown, ChevronRight, KeyRound, Trash2 } from "lucide-react";
-import Link from "next/link";
 import { Fragment, useEffect, useState } from "react";
+import { LoginRequiredState } from "@/components/settings/login-required-state";
 import { Alert } from "@/components/ui/alert";
-import { Button, buttonClass } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { CodeBlock } from "@/components/ui/code-block";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { Field, Input, Textarea } from "@/components/ui/field";
 import { SkeletonLines } from "@/components/ui/skeleton";
+import { Table, TBody, Td, THead, Th, Tr } from "@/components/ui/table";
 import { TimeText } from "@/components/ui/time-text";
 import { isUnauthorized } from "@/lib/api";
 import { errorMessage } from "@/lib/api-error-message";
@@ -154,18 +155,7 @@ export function SSHKeysManager() {
       {keys === null && !error ? (
         <SkeletonLines lines={3} />
       ) : keys === null && needsLogin ? (
-        <ErrorState
-          title={t("settings.sshKeys.loginRequiredTitle")}
-          message={t("settings.sshKeys.loginRequiredMessage")}
-          action={
-            <Link
-              href="/login?next=/settings/ssh-keys"
-              className={buttonClass({ variant: "primary" })}
-            >
-              {t("settings.sshKeys.login")}
-            </Link>
-          }
-        />
+        <LoginRequiredState next="/settings/ssh-keys" />
       ) : keys === null ? (
         <ErrorState
           title={t("settings.errorTitle")}
@@ -179,99 +169,95 @@ export function SSHKeysManager() {
           description={t("settings.sshKeys.emptyDescription")}
         />
       ) : (
-        <div className="scroll-x rounded-lg border border-border">
-          <table className="w-full min-w-[820px] border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-xs font-medium text-fg-subtle">
-                <th className="px-3 py-2 font-medium">{t("settings.sshKeys.colTitle")}</th>
-                <th className="px-3 py-2 font-medium">{t("settings.sshKeys.colType")}</th>
-                <th className="px-3 py-2 font-medium">{t("settings.sshKeys.colFingerprint")}</th>
-                <th className="px-3 py-2 font-medium">{t("settings.sshKeys.colAdded")}</th>
-                <th className="px-3 py-2 font-medium">{t("settings.sshKeys.colLastUsed")}</th>
-                <th className="px-3 py-2"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {keys.map((key) => {
-                const expanded = expandedKeyId === key.id;
-                const panelId = `ssh-key-${key.id}-public-key`;
-                return (
-                  <Fragment key={key.id}>
-                    <tr className={expanded ? undefined : "border-b border-border last:border-0"}>
-                      <td className="px-3 py-2 font-medium">{key.title}</td>
-                      <td className="px-3 py-2 font-mono text-xs text-fg-muted">{key.key_type}</td>
-                      <td className="px-3 py-2 font-mono text-xs text-fg-muted">
-                        {key.fingerprint}
-                      </td>
-                      <td className="px-3 py-2 text-fg-subtle">
-                        <TimeText iso={key.created_at} style="dateTime" />
-                      </td>
-                      <td className="px-3 py-2 text-fg-subtle">
-                        {key.last_used_at ? (
-                          <TimeText iso={key.last_used_at} style="dateTime" />
-                        ) : (
-                          t("settings.sshKeys.neverUsed")
-                        )}
-                      </td>
-                      <td className="px-3 py-2">
-                        <div className="flex items-center justify-end gap-2">
-                          {/* The label never changes and the two chevrons are
+        <Table minWidth={820}>
+          <THead>
+            <Th>{t("settings.sshKeys.colTitle")}</Th>
+            <Th>{t("settings.sshKeys.colType")}</Th>
+            <Th>{t("settings.sshKeys.colFingerprint")}</Th>
+            <Th>{t("settings.sshKeys.colAdded")}</Th>
+            <Th>{t("settings.sshKeys.colLastUsed")}</Th>
+            <Th />
+          </THead>
+          <TBody>
+            {keys.map((key) => {
+              const expanded = expandedKeyId === key.id;
+              const panelId = `ssh-key-${key.id}-public-key`;
+              return (
+                <Fragment key={key.id}>
+                  {/* An expanded row runs straight into its panel below, so
+                        it drops the divider the shell would otherwise draw. */}
+                  <Tr className={expanded ? "border-b-0" : undefined}>
+                    <Td className="font-medium">{key.title}</Td>
+                    <Td className="font-mono text-xs text-fg-muted">{key.key_type}</Td>
+                    <Td className="font-mono text-xs text-fg-muted">{key.fingerprint}</Td>
+                    <Td className="text-fg-subtle">
+                      <TimeText iso={key.created_at} style="dateTime" />
+                    </Td>
+                    <Td className="text-fg-subtle">
+                      {key.last_used_at ? (
+                        <TimeText iso={key.last_used_at} style="dateTime" />
+                      ) : (
+                        t("settings.sshKeys.neverUsed")
+                      )}
+                    </Td>
+                    <Td>
+                      <div className="flex items-center justify-end gap-2">
+                        {/* The label never changes and the two chevrons are
                               the same size, so toggling cannot resize this
                               button and nudge the destructive Delete next to
                               it out from under the pointer (DESIGN.md §8).
                               The panel opens *below* this row, so the toggle
                               itself also stays put. */}
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            aria-expanded={expanded}
-                            aria-controls={panelId}
-                            aria-label={t("settingsDetail.sshKeys.publicKeyToggleAria", {
-                              title: key.title,
-                            })}
-                            onClick={() => setExpandedKeyId(expanded ? null : key.id)}
-                          >
-                            {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                            {t("settingsDetail.sshKeys.publicKeyToggle")}
-                          </Button>
-                          <Button
-                            variant="danger"
-                            size="sm"
-                            disabled={deletingId !== null}
-                            onClick={() => {
-                              setDeleteError(null);
-                              setConfirmDeleteId(key.id);
-                            }}
-                          >
-                            <Trash2 size={12} />
-                            {deletingId === key.id
-                              ? t("settings.sshKeys.deleting")
-                              : t("settings.sshKeys.delete")}
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                    {expanded && (
-                      <tr className="border-b border-border last:border-0">
-                        <td id={panelId} colSpan={6} className="px-3 pb-3">
-                          {/* CodeBlock's unlabelled layout: the key line is a
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-expanded={expanded}
+                          aria-controls={panelId}
+                          aria-label={t("settingsDetail.sshKeys.publicKeyToggleAria", {
+                            title: key.title,
+                          })}
+                          onClick={() => setExpandedKeyId(expanded ? null : key.id)}
+                        >
+                          {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                          {t("settingsDetail.sshKeys.publicKeyToggle")}
+                        </Button>
+                        <Button
+                          variant="danger"
+                          size="sm"
+                          disabled={deletingId !== null}
+                          onClick={() => {
+                            setDeleteError(null);
+                            setConfirmDeleteId(key.id);
+                          }}
+                        >
+                          <Trash2 size={12} />
+                          {deletingId === key.id
+                            ? t("settings.sshKeys.deleting")
+                            : t("settings.sshKeys.delete")}
+                        </Button>
+                      </div>
+                    </Td>
+                  </Tr>
+                  {expanded && (
+                    <Tr>
+                      <Td id={panelId} colSpan={6} className="py-0 pb-3">
+                        {/* CodeBlock's unlabelled layout: the key line is a
                               flex item with `overflow-x: auto`, so its
                               automatic minimum size collapses to 0 and the
                               line scrolls inside this cell instead of
                               stretching the table (and the page) sideways. */}
-                          <CodeBlock
-                            value={key.public_key}
-                            copyLabel={t("settingsDetail.sshKeys.copyPublicKey")}
-                          />
-                        </td>
-                      </tr>
-                    )}
-                  </Fragment>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                        <CodeBlock
+                          value={key.public_key}
+                          copyLabel={t("settingsDetail.sshKeys.copyPublicKey")}
+                        />
+                      </Td>
+                    </Tr>
+                  )}
+                </Fragment>
+              );
+            })}
+          </TBody>
+        </Table>
       )}
 
       <ConfirmDialog
