@@ -17,8 +17,13 @@ administer, the organization one is pinned to that organization.
 
 **Webhooks are admin-only.** In an organization that means the `admin` role, not `write` — a
 webhook carries a namespace secret to an external URL, which is treated as an administrative act
-rather than a content change. A `write` member gets a 403 from the API and does not see the
-namespace offered in the picker. In your own namespace you are the admin, so nothing changes.
+rather than a content change. A `write` member does not see the namespace offered in the picker,
+and gets a 403 from listing or creating webhooks for it (`GET`/`POST
+/api/v1/namespaces/{ns}/webhooks`). Every `/api/v1/webhooks/{id}` route (get, update, delete,
+deliveries, redeliver) instead answers 404 for a webhook that member may not administer, exactly
+as it does for one that does not exist — a 403 there would let anyone walk the small sequential
+ids and read back who owns each webhook. In your own namespace you are the admin, so nothing
+changes.
 
 Each webhook has a **scope**: leave it blank and it fires for every repository in the namespace,
 or pick a single repository and it fires only for that one. It can also be created (or later
@@ -26,7 +31,7 @@ toggled) inactive, which parks it without deleting it.
 
 ## Events { #events }
 
-There are nine events. All nine are offered in the UI and accepted by the API; anything else is
+There are ten events. All ten are offered in the UI and accepted by the API; anything else is
 rejected as an unknown event rather than silently stored.
 
 | Event | Fires when |
@@ -38,6 +43,7 @@ rejected as an unknown event rather than silently stored.
 | `repo.transfer_requested` | A transfer is waiting for the destination's approval. Delivered to the **destination** namespace |
 | `repo.archived` | A repository was frozen read-only |
 | `repo.unarchived` | An archived repository was thawed |
+| `repo.ref_deleted` | A branch or tag was removed. Fires for a branch deleted either by `git push --delete` or through the API, but for a *tag* only through the API (`DELETE .../tag/{tag}`) — `git push --delete` on a tag is invisible to the server the same way creating a tag through a push is, and produces no webhook of any kind |
 | `run.finished` | A tracked experiment run transitioned into `finished` |
 | `run.failed` | A tracked experiment run transitioned into `failed` |
 
@@ -101,6 +107,24 @@ does not have to infer it from the event name:
   "full_name": "acme/sentiment-base", "archived": true
 }
 ```
+
+`repo.ref_deleted`:
+
+```json
+{
+  "namespace": "acme",
+  "repo": "sentiment-base",
+  "full_name": "acme/sentiment-base",
+  "kind": "model",
+  "ref": "old-experiment",
+  "ref_type": "branch",
+  "old_sha": "0a1b2c3…",
+  "new_sha": ""
+}
+```
+
+`ref_type` is `"branch"` or `"tag"`, since a short ref name can name either. `new_sha` is
+always the empty string — there is no new value once a ref is gone.
 
 `repo.moved`:
 

@@ -455,13 +455,19 @@ locals {
       GCS_BUCKET          = google_storage_bucket.main.name
       GCS_PREFIX          = ""
       TF_PUBLIC_URL       = local.api_public_url
-      TF_SIGNED_URL_TTL   = "1h"
-      TF_SYNC_WORKERS     = "4"
-      TF_ALLOW_SIGNUP     = "false"
-      TF_ADMIN_USERNAME   = "admin"
-      TF_ADMIN_EMAIL      = "admin@example.com"
-      TF_WAL_MODE         = "authoritative"
-      TF_GIT_HOOKS_PATH   = "/opt/thinkingface/hooks" # baked into the image, see backend/Dockerfile
+      # web and api are two separate Cloud Run services on two different
+      # origins; without this, backend/internal/config's parseOrigins only
+      # auto-allows TF_PUBLIC_URL's own origin (plus localhost dev ports),
+      # so every credentialed non-GET request from the browser (token
+      # management, repo settings, webhooks, ...) gets rejected by CORS.
+      TF_ALLOWED_ORIGINS = var.web_public_url != "" ? var.web_public_url : google_cloud_run_v2_service.web.uri
+      TF_SIGNED_URL_TTL  = "1h"
+      TF_SYNC_WORKERS    = "4"
+      TF_ALLOW_SIGNUP    = "false"
+      TF_ADMIN_USERNAME  = "admin"
+      TF_ADMIN_EMAIL     = "admin@example.com"
+      TF_WAL_MODE        = "authoritative"
+      TF_GIT_HOOKS_PATH  = "/opt/thinkingface/hooks" # baked into the image, see backend/Dockerfile
       # The materialised-repository cache lives on the memory-backed
       # filesystem and shares the 8 GiB instance memory with the
       # git/pack-objects processes: budget it explicitly (2 GiB) instead of
@@ -989,6 +995,17 @@ resource "google_cloud_run_v2_service" "web" {
         name  = "API_URL"
         value = local.api_public_url
       }
+      # NEXT_PUBLIC_API_URL has no effect here: Next.js inlines
+      # process.env.NEXT_PUBLIC_* into both the browser bundle and every
+      # server-side code path at `docker build` time (frontend/lib/api.ts,
+      # frontend/Dockerfile), so a Cloud Run *runtime* env var for it is
+      # never read back -- see "After apply" in infra/README.md for the
+      # actual mechanism (`docker build --build-arg NEXT_PUBLIC_API_URL=...`
+      # before pushing the frontend image). Kept here only so the value
+      # shown by `gcloud run services describe` / the console matches what
+      # was actually baked into the currently deployed image, for humans
+      # comparing the two -- remove it if that turns out to be more
+      # confusing than helpful.
       env {
         name  = "NEXT_PUBLIC_API_URL"
         value = local.api_public_url

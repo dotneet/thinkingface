@@ -252,8 +252,14 @@ terraform {
 
 ## After `apply`
 
-1. Build and push images to the Artifact Registry repo (`terraform output
-   artifact_registry_repository`):
+The `web` (Next.js) image needs the api's public URL *at build time* --
+`NEXT_PUBLIC_API_URL` is inlined into the browser bundle by `bun run build`
+(see `frontend/lib/api.ts` and `frontend/Dockerfile`), unlike every other
+setting here which is a plain Cloud Run runtime env var. That forces this
+order: deploy `api` (and learn its URL) before you build `web`.
+
+1. Build and push the backend image to the Artifact Registry repo
+   (`terraform output artifact_registry_repository`):
    ```bash
    gcloud auth configure-docker ${REGION}-docker.pkg.dev
    docker build -t ${REGION}-docker.pkg.dev/${PROJECT}/thinkingface/backend:latest ../backend
@@ -275,30 +281,57 @@ terraform {
      --image ${REGION}-docker.pkg.dev/${PROJECT}/thinkingface/backend:latest \
      --region ${REGION}
    ```
-3. Point Cloud Run's `web` service at the real frontend image (same
+3. Decide where `api` is actually reachable: either its Cloud Run-assigned
+   `*.run.app` URL (`terraform output -raw api_url`), or a custom domain once
+   you've wired up a domain mapping / LB in front of it. Set `TF_PUBLIC_URL`
+   (`api_public_url` var, defaults to a placeholder
+   `https://api.{environment}.example.com`) to that value and re-apply --
+   this also updates `api`'s CORS allow-list for the `web` origin (see
+   `web_public_url` below) and its LFS / HF-compatible resolve redirects,
+   both of which otherwise still point at the placeholder:
+   ```bash
+   terraform apply -var="project_id=${PROJECT}" \
+     -var="api_public_url=$(terraform output -raw api_url)"
+   ```
+4. Build and push the frontend image, baking in `api`'s now-final public URL
+   as a build arg:
+   ```bash
+   docker build \
+     --build-arg NEXT_PUBLIC_API_URL=$(terraform output -raw api_url) \
+     -t ${REGION}-docker.pkg.dev/${PROJECT}/thinkingface/frontend:latest \
+     ../frontend
+   docker push ${REGION}-docker.pkg.dev/${PROJECT}/thinkingface/frontend:latest
+   ```
+5. Point Cloud Run's `web` service at the real frontend image (same
    ignore-drift pattern):
    ```bash
-   gcloud run deploy $(terraform output -raw web_service_name 2>/dev/null || echo thinkingface-web) \
+   gcloud run deploy $(terraform output -raw web_service_name) \
      --image ${REGION}-docker.pkg.dev/${PROJECT}/thinkingface/frontend:latest \
      --region ${REGION}
    ```
-4. Set `TF_PUBLIC_URL` (`api_public_url` var, defaults to a placeholder
-   `https://api.{environment}.example.com`) to wherever `api` is actually
-   reachable — either the `*.run.app` URL from `terraform output api_url`,
-   or a custom domain once you've wired up a domain mapping / LB in front of
-   it — and re-apply.
-5. Sanity-check the compact Job runs on schedule:
+6. `api`'s CORS allow-list (`TF_ALLOWED_ORIGINS`) already defaults to `web`'s
+   `*.run.app` URL (`google_cloud_run_v2_service.web.uri`) once step 3's
+   apply has run, so cookie-authenticated writes from the browser (token
+   management, repo settings, webhooks, ...) work out of the box. If you put
+   a custom domain in front of `web` instead, set `web_public_url` to that
+   domain and re-apply so the allow-list follows it.
+7. Sanity-check the compact Job runs on schedule:
    ```bash
    gcloud scheduler jobs run thinkingface-compact-${ENVIRONMENT} --location ${REGION}   # manual trigger
    gcloud run jobs executions list --job $(terraform output -raw compact_job_name) --region ${REGION}
    ```
-6. Sanity-check the gc Job's dry-run report before ever setting
+8. Sanity-check the gc Job's dry-run report before ever setting
    `gc_delete_enabled = true` (see "Reference-counted GC" above):
    ```bash
    gcloud scheduler jobs run thinkingface-gc-${ENVIRONMENT} --location ${REGION}   # manual trigger, dry-run by default
    gcloud run jobs executions list --job $(terraform output -raw gc_job_name) --region ${REGION}
    # then read the execution's logs to see what it would have deleted
    ```
+
+If `api`'s public URL changes later (a new custom domain, a regenerated
+`*.run.app` name, etc.), both step 3 (re-apply with the new `api_public_url`)
+and step 4 (rebuild+redeploy `web` with the new build arg) need to be redone
+-- the frontend value is baked into the image, not read at container start.
 
 ## Notes on the runtime filesystem
 

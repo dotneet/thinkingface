@@ -210,9 +210,13 @@ Open the file and press **Delete**, then confirm. The file is removed in a commi
 every commit before it still contains the file, so nothing disappears from the history.
 
 LFS-tracked files can be deleted this way too, even though they cannot be edited. Deleting
-one removes the pointer from the tree — the stored object stays in the bucket until nothing
-references it any more and garbage collection reclaims it, so the space is not freed at the
-moment you delete.
+one removes the pointer from the tree, but **not the storage usage**: the commit that added
+the file is still in the repository's history, so the object stays retrievable at that
+revision (`git checkout`, `git lfs fetch --all`) for as long as the repository exists, and the
+bucket keeps the bytes and your namespace's usage keeps counting them accordingly. Only an
+upload that never made it into a commit at all (an interrupted `tf up` or `huggingface_hub`
+upload) is ever reclaimed automatically. See the `TF_DEFAULT_STORAGE_QUOTA_BYTES` row in
+[Configuration](../self-hosting/configuration.md) for how to actually free the space.
 
 ## Edit a file in the browser
 
@@ -277,7 +281,7 @@ the client gets a signed URL and transfers directly with the bucket.
 Uploading is not quite the end of the story. When a branch changes, a background worker picks
 the push up and, for that revision:
 
-1. Publishes every non-LFS file to `blobs/{sha}` in object storage. (LFS objects are already
+1. Publishes every non-LFS file to `blobs/{sha[0:2]}/{sha[2:4]}/{sha}` in object storage. (LFS objects are already
    there — that is where the client uploaded them.)
 2. Rebuilds the file index, which is what the file tree, the size totals, and the
    `gcloud storage cp` script are generated from.

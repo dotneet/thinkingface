@@ -61,16 +61,21 @@ jobs:
           echo "changed files:"
           echo "$changed"
           # Anything the compatibility suite actually exercises: the server
-          # itself, the suite, the compose files it is run against, and the
-          # Makefile that defines how it is run. A false positive here costs
-          # one job; a false negative lets an HF-compatibility regression
-          # through (CLAUDE.md invariant 5).
+          # itself, the suite, the compose files it is run against, the
+          # Makefile that defines how it is run, and .env.example -- CI's e2e
+          # step does `cp .env.example .env` before `docker compose up`
+          # (docker-compose.yml's `env_file: .env`), and e2e/conftest.py /
+          # test_gcs_export.py read TF_ADMIN_*, GCS_BUCKET, GCS_PREFIX,
+          # TF_SSH_ENABLED and TF_WAL_MODE straight out of it, so a PR that
+          # only edits .env.example would otherwise skip the suite entirely.
+          # A false positive here costs one job; a false negative lets an
+          # HF-compatibility regression through (CLAUDE.md invariant 5).
           #
           # A here-string rather than a pipe: under `set -o pipefail`, a `grep
           # -q` that matches early exits and leaves `echo` writing into a
           # closed pipe, so the pipeline reports 141 and the match is read as
           # a miss -- the failure direction that skips the job.
-          if grep -qE '^(backend/|e2e/|docker-compose[^/]*\.yml$|Makefile$|\.github/workflows/ci\.yml$)' <<<"$changed"; then
+          if grep -qE '^(backend/|e2e/|docker-compose[^/]*\.yml$|Makefile$|\.env\.example$|\.github/workflows/ci\.yml$)' <<<"$changed"; then
             echo "e2e=true" >> "$GITHUB_OUTPUT"
           else
             echo "e2e=false" >> "$GITHUB_OUTPUT"

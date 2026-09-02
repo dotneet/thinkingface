@@ -68,7 +68,9 @@ directly), which deletes the named volumes along with the containers.
     fine on a laptop reachable only by you. Before putting the instance on a network anyone
     else can reach, set `TF_ADMIN_PASSWORD` and `TF_SESSION_SECRET` in `.env` — see
     [Configuration](configuration.md) for both. The server also refuses to start on these
-    defaults at all once `TF_PUBLIC_URL` is an `https://` URL.
+    defaults at all once `TF_PUBLIC_URL` is anything other than `localhost`/`127.0.0.1` (or
+    a `.localhost` name) — including a plain `http://` instance on an internal hostname or
+    IP, not just `https://` ones.
 
 ## Choosing a database backend
 
@@ -178,9 +180,26 @@ terraform apply -var="project_id=my-gcp-project"
 
 Terraform provisions the infrastructure but deliberately ignores drift on the container
 image field afterwards, so pushing new images and pointing the Cloud Run service and job at
-them is a separate step (`gcloud run deploy` / `gcloud run jobs update`). See
-`infra/README.md` in the repository for the full apply-then-deploy walkthrough, including
-how to wire a real backend for Terraform state.
+them is a separate step (`gcloud run deploy` / `gcloud run jobs update`). This first `apply`
+alone is **not** enough to reach a working instance — two things still need doing, both
+covered in full in `infra/README.md`'s "After `apply`" walkthrough:
+
+- **The api's public URL is a placeholder (`https://api.{environment}.example.com`) until
+  you set it.** LFS href generation and the HF-compatible resolve redirects are wrong
+  against the default. Deploy `api`, read its real URL back with `terraform output -raw
+  api_url` (or point a custom domain at it), pass that as `-var="api_public_url=..."`, and
+  re-apply. The CORS allow-list is a separate variable (`TF_ALLOWED_ORIGINS`, derived from
+  `web_public_url` — see `infra/README.md`) that already defaults to the `web` service's
+  own `*.run.app` URL once it exists, so it works out of the box without this step; set
+  `web_public_url` explicitly only once you put a custom domain in front of `web`.
+- **The web frontend image must be built *after* you know the api's URL**, because
+  `NEXT_PUBLIC_API_URL` is compiled into the Next.js browser bundle at `docker build` time,
+  not read from the container's environment at startup — unlike every other setting here.
+  Build it with `docker build --build-arg NEXT_PUBLIC_API_URL=$(terraform output -raw
+  api_url) ...` before deploying `web`; building it earlier (or without the build arg) bakes
+  in `frontend/lib/api.ts`'s `http://localhost:8080` fallback, and every client-side feature
+  that talks to the API (tokens, account/profile/SSH key settings, webhooks, repo creation,
+  the Parquet viewer) fails for every visitor.
 
 Not provisioned by this Terraform: a custom domain or TLS front end. Cloud Run terminates
 TLS itself and serves each service on its own `*.run.app` URL, which is enough to get
@@ -212,6 +231,18 @@ the API and its scheduled maintenance job persist metadata:
   deploying with `--no-traffic` and a manual traffic cutover, or accept the small window if
   deploys are infrequent. If you need strict consistency, use the Cloud SQL configuration
   instead.
+
+  **There is no garbage collection in this mode, ever.** `thinkingface gc` reclaims orphaned
+  `lfs/`/`blobs/` objects (deleted repositories, superseded files) by reading the database's
+  reference counts, and it needs to see the same live data the serving process does. Under
+  `sqlite` that isn't possible — `gc` would only ever see a Litestream-restored *snapshot*,
+  and could delete objects uploaded after that snapshot was taken while still live and
+  referenced. `backend/entrypoint.sh` refuses to run `gc` at all in this mode (it exits
+  immediately rather than risk that), and the Terraform `sqlite` configuration does not even
+  create the scheduled `gc` Cloud Run Job in the first place. In practice this means `lfs/`,
+  `blobs/` and `tmp/uploads/` in the bucket only ever grow for the life of a `sqlite`
+  deployment — factor that into your storage cost expectations, and pick the `postgres`
+  configuration instead if reclaiming storage from deleted/superseded content matters to you.
 
 ### The Continuity / WAL migration
 

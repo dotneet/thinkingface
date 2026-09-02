@@ -122,7 +122,7 @@ psql: ## Open a psql shell against the postgres service
 # a code problem rather than a missing install -- so each frontend target
 # bootstraps rather than assuming somebody ran `bun install` first.
 frontend-deps: ## Install the frontend dependency tree if it is missing
-	@cd frontend && [ -d node_modules ] || $(BUN) install
+	@cd frontend && [ -d node_modules ] || $(BUN) install --frozen-lockfile
 
 dev-web: frontend-deps ## Run the Next.js dev server on the host, against the compose api (WEB_DEV_PORT, default 3100)
 	@cd frontend && $(BUN) scripts/copy-duckdb-assets.mjs
@@ -268,7 +268,7 @@ check-types: ## Verify frontend/types/api.gen.ts is in sync with the Go wire str
 		exit 1; \
 	fi
 
-check-backend: ## gofmt check + go vet + go test
+check-backend: ## gofmt check + go vet + golangci-lint + go test
 	@echo "==> backend: gofmt"
 	@cd backend && unformatted="$$(gofmt -l .)" && \
 		if [ -n "$$unformatted" ]; then \
@@ -276,6 +276,16 @@ check-backend: ## gofmt check + go vet + go test
 		fi
 	@echo "==> backend: go vet"
 	cd backend && go vet ./...
+	@echo "==> backend: golangci-lint"
+	@if ! golangci-lint --version >/dev/null 2>&1; then \
+		echo "golangci-lint not found. CI (.github/workflows/ci.yml) runs it as a blocking"; \
+		echo "check on every PR (currently pinned to v2.4.0), so a local 'make check' that"; \
+		echo "silently skipped it would go green while CI's backend job still fails."; \
+		echo "Install it (ideally the same version CI pins) and re-run:"; \
+		echo "  https://golangci-lint.run/welcome/install/"; \
+		exit 1; \
+	fi
+	cd backend && golangci-lint run ./...
 	@echo "==> backend: go test"
 	cd backend && go test ./...
 

@@ -41,6 +41,14 @@ at the end of this document.
 | Renovate itself | `renovatebot/github-action` by commit SHA, and the Renovate image by tag **and** digest in the `renovate-version` input | `docker run`, from inside the action | Renovate reports (via `customManagers`), a human bumps |
 | Terraform providers | `infra/.terraform.lock.hcl` | `terraform init` | Renovate |
 
+**One deliberate exception**: `scripts/docs-demo/` (the throwaway-instance seeding used to
+capture `docs/users/images/` screenshots, see `docs/dev/docs-screenshots.md`) is run with `uv
+run --isolated --with <pkg> ...`, which resolves each package's newest version from PyPI at
+run time rather than reading a lockfile. It is a manually-invoked, one-off developer tool —
+never part of a build, a container image, or CI — so it is out of scope for the "every install
+resolves from a lockfile, a digest, or a commit SHA" rule above, but it is worth naming here
+rather than leaving it as an unexplained inconsistency.
+
 ### Minimum release age
 
 `frontend/bunfig.toml` sets `minimumReleaseAge = 604800` (7 days). It changes

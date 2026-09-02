@@ -84,13 +84,20 @@ cd e2e      && uv run --locked pytest -v
 
 **Always run `make check` after code changes.**
 
-`make check` breaks down into `check-backend` (gofmt / go vet / go test), `check-frontend`
-(typecheck / lint / format:check / check:ui / test), `check-python` (ruff check +
-ruff format --check, then the `clients/python` pytest suite via `uv run --locked`),
+`make check` breaks down into `check-backend` (gofmt / go vet / golangci-lint / go test),
+`check-frontend` (typecheck / lint / format:check / check:ui / test), `check-python` (ruff
+check + ruff format --check, then the `clients/python` pytest suite via `uv run --locked`),
 `check-types` (tygo regeneration + zero-diff verification), and
 `check-terraform` (terraform fmt -check + init -backend=false + validate on `infra/`; skipped
 when terraform is not installed, since it is an optional prerequisite). It is kept aligned with
-the backend / frontend / python / contract / terraform jobs in CI (`.github/workflows/ci.yml`).
+the backend / frontend / python / contract / terraform jobs in CI (`.github/workflows/ci.yml`),
+but it is not a perfect mirror: `go test` here only covers the SQLite path of
+`backend/internal/store`'s integration tests (`make test-store-pg` covers the PostgreSQL
+path CI also runs), and neither `bun run build` (CI's separate `build` step) nor
+`uv lock --check` for `e2e/`/`clients/python` (CI's `python` job) run as part of `make
+check`. `check-backend`'s golangci-lint step fails loudly rather than skipping when the
+binary isn't installed — install it (CI pins the version in `ci.yml`'s `golangci-lint` step)
+so a green local `make check` isn't followed by a red CI backend job on lint alone.
 Note that `terraform validate` only checks the config against the provider schemas — it never
 contacts GCP, so server-side limits (e.g. Cloud Run's 4 GiB of memory per vCPU) still only
 surface at apply time. `terraform plan` / `apply` need credentials and are not run in CI.
@@ -312,9 +319,16 @@ instruction, read it first before re-deriving the steps yourself.
   (since the emulator is started with `-public-host=gcs:4443`, connecting directly to
   `localhost:4443` returns 404 on object reads). `scripts/gcs-host-proxy.py`
   (`make gcs-proxy`) handles this, and `make dev-api` starts it automatically.
-- Add DB migrations as sequentially numbered SQL files to both
+- A change to the schema needs one SQL file added to *each* of
   `backend/internal/store/migrations/postgres/` and
-  `backend/internal/store/migrations/sqlite/`.
+  `backend/internal/store/migrations/sqlite/` (same descriptive name suffix, e.g.
+  `NNNN_content_addressed_storage.sql`). **The two directories are independently numbered,
+  not a shared 1:1 sequence** — they diverged early on and were never renumbered back into
+  step, so `postgres/`'s next number and `sqlite/`'s next number are almost never the same
+  integer (e.g. `content_addressed_storage` landed as postgres `0027` / sqlite `0021`). Pick
+  the next available number *within each directory on its own*; do not try to make the two
+  numbers match. The pairing between a postgres migration and its sqlite counterpart is
+  tracked by the shared descriptive suffix, not by number.
 - The DB backend is selected by the `DATABASE_URL` scheme (`postgres://` / `postgresql://`
   → PostgreSQL, `sqlite://` → SQLite). `backend/internal/config` validates this at startup.
 - `backend/internal/store`'s integration tests always run against SQLite (a temp file). The

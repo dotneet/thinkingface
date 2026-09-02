@@ -81,10 +81,10 @@ Three layers hold your files:
 ordinary git blobs. This is what `git clone` gives you.
 
 **2. Git LFS.** Large files are not stored in git history at all. Git holds a small pointer file;
-the payload goes to object storage at `lfs/{oid}`, keyed by the SHA-256 of its contents.
+the payload goes to object storage at `lfs/{oid[0:2]}/{oid[2:4]}/{oid}`, keyed by the SHA-256 of its contents.
 
 **3. Published blobs.** After every push, the server also publishes the bytes of the *non*-LFS
-files to `blobs/{sha}`, keyed by their git blob SHA. That way, everything in a revision — big and
+files to `blobs/{sha[0:2]}/{sha[2:4]}/{sha}`, keyed by their git blob SHA. That way, everything in a revision — big and
 small — is reachable in the bucket, not only the LFS half.
 
 What decides whether a file goes through LFS is `.gitattributes`, exactly as on the Hub. The

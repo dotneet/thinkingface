@@ -97,8 +97,11 @@ tf login [ENDPOINT]
          [--username USER] [--password-stdin] [--name NAME]
 ```
 
-- If `ENDPOINT` is omitted, the config file's default endpoint is used. If there is none
-  either, and stdin is a terminal, it prompts interactively.
+- If `ENDPOINT` is omitted, `login` resolves it the same way every other command does
+  (`--endpoint` positional aside) — `TF_ENDPOINT` > `THINKINGFACE_ENDPOINT` > `HF_ENDPOINT` >
+  the config file's default endpoint (`resolveEndpoint` in
+  `backend/internal/tfcli/login.go`) — and only falls back to an interactive prompt, when
+  stdin is a terminal, if none of those resolve anything.
 - Passing `--token` verifies that token via `whoami` and saves it as-is
   (`--token -` reads one line from stdin as the token).
 - Without `--token`, it logs in with username/password and issues and saves a new
@@ -158,14 +161,14 @@ tf up PATH [--to NS/NAME|NAME] [--kind dataset|model] [--rev BRANCH]
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--to NS/NAME` or `NAME` | your namespace + PATH's directory name | The destination repository. Adding a `datasets/` or `models/` prefix also pins the kind |
+| `--to NS/NAME` or `NAME` | your namespace + a name derived from PATH | The destination repository. Adding a `datasets/` or `models/` prefix also pins the kind. The derived name is PATH's directory name when PATH is a directory, or its file name **with the extension stripped** when PATH is a single file (`RepoNameFromPath` in `backend/internal/tfcli/local/local.go`) |
 | `--kind dataset\|model` | inferred from contents | Explicitly pins the kind (takes priority over the `--to` prefix) |
 | `--rev` | `main` | Branch to push to |
-| `-m`, `--message` | `Upload N files with tf` | Commit summary |
+| `-m`, `--message` | `Upload N files with tf` (`Upload 1 file with tf` for exactly one file; `Delete N files with tf` when the run only deletes and uploads nothing — `commitSummary` in `backend/internal/tfcli/hub/upload.go`) | Commit summary |
 | `--license` | (unset) | The repository card's `license` |
 | `--tag` | (unset) | The repository card's `tags` (repeatable; comma-separated values can also be given together: `--tag a,b --tag c`) |
 | `--desc` | (unset) | The repository card's `description` (also becomes the opening paragraph of the body in a generated README) |
-| `--include` / `--exclude` | include everything | Narrows the file set via shell globs (repeatable) |
+| `--include` / `--exclude` | include everything | Narrows the file set (repeatable). These are **not** shell globs expanded by the shell — `tf` matches each pattern itself (`Match` in `backend/internal/tfcli/local/local.go`), with `**` matching any number of path segments (`data/**`, `**/*.parquet`) and a pattern with no `/` also tried against just the file's base name |
 | `--delete` | off | Deletes remote files that don't exist anywhere on disk under PATH (excludes `.gitattributes` and `README.md` at the repository root — the former is server-generated LFS rules, and the latter may be a card generated from `--license` etc., so neither is removed just because it's absent locally). Independent of `--include`/`--exclude`: a file those flags kept out of this run's upload but that is still on disk is never deleted |
 | `--dry-run` | off | Only shows what would happen; changes nothing |
 | `--workers` | 4 | Number of parallel LFS transfers |
@@ -182,12 +185,30 @@ in case, for an existing repository under the other kind (e.g. inference says da
 a model repository of the same name already happens to exist — that one is used instead).
 If neither exists, a new repository is created under the inferred kind.
 
-**README handling**: if any of `--license`/`--tag`/`--desc` is given and there's no local
-`README.md`, a `README.md` with a repository card is generated from those values and
-included in the upload. If a local `README.md` exists, only the specified values are
-merged into it while the existing frontmatter is preserved (the body and key ordering are
-kept as-is). If none of the card flags are given, the README is left untouched entirely
-(for a brand-new repository, the server's initial README is simply left as-is).
+**README handling**: this only concerns the README's *content*, and works off the filtered
+file set (after `--include`/`--exclude`), not off what physically exists on disk
+(`buildUploadFiles` in `backend/internal/tfcli/hub/upload.go`). If none of
+`--license`/`--tag`/`--desc` is given, no README content is generated or merged — a local
+`README.md` uploads exactly as it is on disk, if it's part of this run's filtered set. If any
+of those flags is given and `README.md` is in the filtered set, only the given values are
+merged into its existing frontmatter (body and key ordering are preserved). If any of those
+flags is given and `README.md` is **not** in the filtered set — either because there is truly
+no local `README.md`, or `--include`/`--exclude` excluded it — a brand-new `README.md` is
+generated from the card flags and included in the upload, silently replacing whatever
+`README.md` exists on the remote.
+
+**`--delete` and symlinked directories**: the local scan does not follow a symlink that
+points at a directory (to avoid loops), a broken symlink, or a non-regular file (a socket, a
+fifo, ...) — `.git` and `__pycache__` directories are skipped the same way, silently. `tf up`
+prints a warning to stderr for every skip that isn't `.git`/`__pycache__`, up to
+`maxSkipWarnings = 10` (then a count of the rest) — see `warnSkipped` in
+`backend/internal/tfcli/up.go`. **This warning is not suppressed by `--quiet`**: `--quiet`
+only suppresses progress output, and silently leaving content out of an upload is not
+progress. A symlinked directory in particular is a blind spot for `--delete`: since the scan
+never read what's inside it, `tf` cannot tell whether a remote path under that directory
+still exists locally, so it leaves everything under it alone rather than guess — a remote
+file whose local counterpart is now behind a directory symlink is never deleted, even with
+`--delete`, until the symlink is resolved into a real directory (or removed) on a later run.
 
 The shape of the JSON that `tf up --json` prints:
 

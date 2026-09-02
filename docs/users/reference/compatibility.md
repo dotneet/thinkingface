@@ -74,7 +74,7 @@ obscurely.
 ## `gcloud storage` / plain GCS access
 
 After a push, files are published to a content-addressed object store: non-LFS blobs at
-`blobs/{sha}` (keyed by the git blob SHA-1) and LFS objects at `lfs/{oid}` (keyed by the
+`blobs/{sha[0:2]}/{sha[2:4]}/{sha}` (keyed by the git blob SHA-1) and LFS objects at `lfs/{oid[0:2]}/{oid[2:4]}/{oid}` (keyed by the
 SHA-256 content hash) — both deduplicated across every repository, so nothing in the bucket
 is named after a namespace or path. A repository page's sidebar has a **GCS access** dialog
 that generates the mapping from repository paths to these keys as a ready-to-run

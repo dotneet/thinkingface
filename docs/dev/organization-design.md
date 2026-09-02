@@ -134,6 +134,8 @@ consistently "the user themself in a user namespace, OR a member of the organiza
 | Create a repository | × | × | ○ | ○ | ○ |
 | push / commit / web edit / experiment ingest | × | × | ○ | ○ | ○ |
 | Accept a repository transfer (organization as destination) | × | × | ○ (unchanged) | ○ | ○ |
+| Change repository settings (rename, description, default branch — `PATCH /api/v1/repos/{kind}/{ns}/{name}`) | × | × | × | ○ | ○ |
+| Archive / unarchive a repository | × | × | × | ○ | ○ |
 | Delete a repository | × | × | **×** (changed) | ○ | ○ |
 | Transfer a repository out of the organization | × | × | × (unchanged) | ○ | ○ |
 | Manage webhooks | × | × | **×** (changed) | ○ | ○ |
