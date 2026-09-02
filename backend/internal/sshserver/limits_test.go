@@ -339,6 +339,22 @@ func TestShutdown_ClosesEverythingWhenTheDeadlinePasses(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 
+	// Dialling is not enough to make Shutdown wait for anything. gliderlabs
+	// registers a connection with connWg only *after* gossh.NewServerConn
+	// returns on its side (server.go, HandleConn), while the client's Dial
+	// returns as soon as its own half of the handshake is done — so the two
+	// can be ordered either way, and on a loaded machine connWg is still
+	// empty when Shutdown looks at it. It then waits for nothing, returns the
+	// listener error (nil), and this test reads that as "Shutdown reported
+	// success while a connection was still open". It failed exactly that way
+	// on CI while passing twenty times in a row locally.
+	//
+	// Running a command is the synchronisation: the server cannot answer a
+	// channel request on a connection it has not finished registering.
+	if _, _, status := run(t, client, "git-upload-pack 'acme/widgets'", nil); status != 0 {
+		t.Fatalf("exit status = %d, want 0", status)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	start := time.Now()
