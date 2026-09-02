@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useState } from "react";
+import { useId, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
@@ -32,11 +32,19 @@ export function RunTagsDialog({
   const [value, setValue] = useState("");
   const formId = useId();
 
-  // Reset the field whenever a different run's tags are opened, so the dialog
-  // never shows the previous run's edits.
-  useEffect(() => {
-    setValue((run?.tags ?? []).join(", "));
-  }, [run]);
+  // Seed on open / run-name switch only. `run` is a new object on every live
+  // refetch (last_step moves; tags usually do not), and an effect keyed on
+  // the object itself would wipe whatever is being typed every 15 seconds —
+  // the same class of stale-buffer bug as webhook-row / default-branch, just
+  // the other direction. Adjusted during render rather than in an effect so
+  // the first paint of a newly opened dialog already shows this run's tags
+  // (mirrors AdminUserResetDialog).
+  const seedKey = open && run ? run.name : null;
+  const [shownKey, setShownKey] = useState<string | null>(null);
+  if (seedKey !== shownKey) {
+    setShownKey(seedKey);
+    if (run) setValue(run.tags.join(", "));
+  }
 
   if (!run) return null;
   const tags = parseTagInput(value);

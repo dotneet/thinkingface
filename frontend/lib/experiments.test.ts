@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { expArtifactHref, expRunHref, expRunModelHref, formatMetricValue } from "@/lib/experiments";
+import {
+  annotationClosesTagEditor,
+  expArtifactHref,
+  expRunHref,
+  expRunModelHref,
+  formatMetricValue,
+} from "@/lib/experiments";
 import { decodeRouteParams } from "@/lib/paths";
 import type { ExpArtifact, ExpRunModelRef, PreviewKind } from "@/types/api";
 
@@ -69,6 +75,16 @@ describe("expRunModelHref", () => {
   it("refuses to link a malformed repo id", () => {
     expect(expRunModelHref(model({ repo_id: "bert-ja" }))).toBeNull();
     expect(expRunModelHref(model({ repo_id: "alice/" }))).toBeNull();
+  });
+});
+
+describe("annotationClosesTagEditor", () => {
+  it("closes only when the write actually sent tags", () => {
+    expect(annotationClosesTagEditor({ tags: ["lr-sweep"] })).toBe(true);
+    expect(annotationClosesTagEditor({ tags: [] })).toBe(true);
+    expect(annotationClosesTagEditor({ archived: true })).toBe(false);
+    expect(annotationClosesTagEditor({ is_baseline: true })).toBe(false);
+    expect(annotationClosesTagEditor({ note: "keep" })).toBe(false);
   });
 });
 
