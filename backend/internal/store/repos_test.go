@@ -68,10 +68,10 @@ func TestBuildRepoWhereTagsIsSingleContainmentCheck(t *testing.T) {
 func TestBuildRepoWhereLicenseAndTask(t *testing.T) {
 	f := RepoFilter{License: "mit", Task: "text-classification"}
 	clause, args := buildRepoWhere(pgDialect{}, f, repoFilterScopeAll)
-	if !strings.Contains(clause, `r.card->>'license' = $1`) {
+	if !strings.Contains(clause, `(r.card->>'license') = $1`) {
 		t.Errorf("clause = %q, missing license filter", clause)
 	}
-	if !strings.Contains(clause, `r.card->>'pipeline_tag' = $2`) ||
+	if !strings.Contains(clause, `(r.card->>'pipeline_tag') = $2`) ||
 		!strings.Contains(clause, `r.card->'task_categories' @> to_jsonb($2::text)`) {
 		t.Errorf("clause = %q, missing task filter across pipeline_tag/task_categories", clause)
 	}

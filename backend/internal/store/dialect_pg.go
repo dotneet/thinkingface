@@ -49,6 +49,12 @@ func (pgDialect) jsonArrayElements(column, key string) (string, string) {
 		) elem`, `elem`
 }
 
+// jsonScalarText is just `->>`: jsonb renders every scalar as text, so
+// numbers, booleans and strings all compare against a bound string.
+func (pgDialect) jsonScalarText(column, key string) string {
+	return column + `->>'` + key + `'`
+}
+
 func (pgDialect) searchPredicate(bind func(any) string, text string) string {
 	q := BuildPrefixTSQuery(text)
 	if q == "" {
@@ -100,10 +106,10 @@ func (pgDialect) queries() dialectQueries {
 			   note        = COALESCE($6::text, note)
 			 WHERE project_id = $1 AND name = $2
 			 RETURNING ` + runColumns,
-		linkLFSObjectsInsert: `INSERT INTO repo_lfs_objects (repo_id, oid)
-			 SELECT $1, o FROM unnest($2::text[]) AS o
+		linkLFSObjectsInsert: `INSERT INTO repo_lfs_objects (repo_id, oid, created_at, committed_at)
+			 SELECT $1, o, now(), now() FROM unnest($2::text[]) AS o
 			 WHERE EXISTS (SELECT 1 FROM lfs_objects WHERE oid = o)
-			 ON CONFLICT DO NOTHING`,
+			 ON CONFLICT (repo_id, oid) DO UPDATE SET committed_at = now()`,
 	}
 }
 

@@ -511,7 +511,10 @@ type PendingFlush struct {
 
 // ListPendingFlushProjects groups the unflushed points by project. Archived
 // repositories are excluded: every other write path refuses them, and a
-// machine-generated commit must not be the one exception.
+// machine-generated commit must not be the one exception. So is a project
+// blocked within the last flushBlockRetryAfter (see SetProjectFlushBlock),
+// which is what stops one unflushable project from occupying the front of the
+// order below for ever.
 //
 // The order is oldest-unflushed-point first, not project id first, and the
 // difference is starvation. exp_points holds only what has not been written to
@@ -538,9 +541,10 @@ func (s *Store) ListPendingFlushProjects(ctx context.Context, limit int) ([]Pend
 		 JOIN exp_projects p ON p.id = r.project_id
 		 JOIN repositories repo ON repo.id = p.repo_id
 		 WHERE repo.archived_at IS NULL
+		   AND (p.flush_blocked_at IS NULL OR p.flush_blocked_at < $2)
 		 GROUP BY p.repo_id, p.id, p.name
 		 ORDER BY MIN(pt.id), p.id
-		 LIMIT $1`, limit)
+		 LIMIT $1`, limit, time.Now().Add(-flushBlockRetryAfter))
 	if err != nil {
 		return nil, err
 	}
@@ -668,4 +672,98 @@ func (s *Store) DeleteProjectRunsNotIn(ctx context.Context, projectID int64, kee
 		   AND NOT EXISTS (SELECT 1 FROM exp_points p WHERE p.run_id = exp_runs.id)`,
 		projectID, s.d.stringArrayArg(keep))
 	return err
+}
+
+// flushBlockRetryAfter is how long a project stays out of the flush poller's
+// candidate list after a flush found a condition it cannot get past. It is
+// long enough that a wedged project costs one attempt an hour instead of one
+// every ten seconds, and short enough that an operator who fixes the cause
+// does not have to tell anything about it: the next poll after the window
+// simply succeeds and clears the mark.
+//
+// A var only so tests can shorten it; nothing changes it at runtime.
+var flushBlockRetryAfter = time.Hour
+
+// SetProjectFlushBlock records why a project's buffered points could not be
+// written to its parquet, or clears the record when reason is "".
+//
+// It exists because the alternative was deleting the points. Two conditions
+// -- a project name no path can hold, and a metrics file with more rows than
+// a flush can rebuild in memory -- are properties of the repository, so every
+// retry fails identically, and the poller's oldest-point-first order means a
+// project that never drains climbs to the front and starves every other one.
+// The old answer was to drop the batch, log it, and move on: silent loss of
+// points the ingest API had already answered 200 for, against a limit no
+// user-facing document mentions. Marking the project keeps the data and gets
+// the same starvation guarantee, at the cost of a buffer that grows without a
+// ceiling until somebody acts on flush_error -- and, as
+// ListBlockedFlushProjects below records, nothing yet puts flush_error in
+// front of anybody.
+func (s *Store) SetProjectFlushBlock(ctx context.Context, projectID int64, reason string) error {
+	if reason == "" {
+		_, err := s.db.Exec(ctx,
+			`UPDATE exp_projects SET flush_blocked_at = NULL, flush_error = ''
+			 WHERE id = $1 AND (flush_blocked_at IS NOT NULL OR flush_error <> '')`, projectID)
+		return err
+	}
+	_, err := s.db.Exec(ctx,
+		`UPDATE exp_projects SET flush_blocked_at = now(), flush_error = $2 WHERE id = $1`,
+		projectID, sanitizeText(reason))
+	return err
+}
+
+// BlockedFlushProject is one project the flusher has given up on for now,
+// with the repository it belongs to.
+type BlockedFlushProject struct {
+	RepoID    int64
+	ProjectID int64
+	Project   string
+	Error     string
+	BlockedAt time.Time
+	NumPoints int64
+}
+
+// ListBlockedFlushProjects reports the projects whose buffer is not being
+// written, with the reason and how many points are waiting.
+//
+// **Nothing calls it yet outside its own test.** There is no API endpoint, no
+// admin screen and no `thinkingface` subcommand behind it, so as things stand
+// an operator finds out about a blocked project from one of two places: the
+// ERROR line experiments.blockFlush writes at the moment of blocking
+// ("experiment project cannot be flushed; its buffered points are being
+// kept"), or a query against exp_projects.flush_blocked_at / flush_error by
+// hand. Neither is a monitor, and the first scrolls away.
+//
+// It is written and kept because the exposure is the small half of the job:
+// the query is the part that has to agree with SetProjectFlushBlock and with
+// ListPendingFlushProjects' skip, and it belongs next to them. Where it should
+// surface is the operator settings area that already lists parked sync jobs
+// (ListFailedSyncJobs -> /settings/admin), since a blocked flush is the same
+// kind of fault: work that has stopped and will not restart on its own.
+//
+// The points are still there -- NumPoints says how many -- which is the whole
+// difference from the behaviour this replaced.
+func (s *Store) ListBlockedFlushProjects(ctx context.Context) ([]BlockedFlushProject, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT p.repo_id, p.id, p.name, p.flush_error, p.flush_blocked_at,
+		        (SELECT count(*) FROM exp_points pt
+		         JOIN exp_runs r ON r.id = pt.run_id
+		         WHERE r.project_id = p.id)
+		 FROM exp_projects p
+		 WHERE p.flush_blocked_at IS NOT NULL
+		 ORDER BY p.flush_blocked_at DESC, p.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []BlockedFlushProject{}
+	for rows.Next() {
+		var b BlockedFlushProject
+		if err := rows.Scan(&b.RepoID, &b.ProjectID, &b.Project, &b.Error, &b.BlockedAt, &b.NumPoints); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
 }

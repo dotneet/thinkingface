@@ -3,6 +3,7 @@ package experiments
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"os/exec"
@@ -12,6 +13,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/parquet-go/parquet-go/encoding/thrift"
+	"github.com/parquet-go/parquet-go/format"
 
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
 	"github.com/dotneet/thinkingface/backend/internal/storage"
@@ -596,32 +600,42 @@ func TestMergePoints_MetricsCannotOverwriteStructuralColumns(t *testing.T) {
 	}
 }
 
-// TestFlush_AbandonsAProjectThatCanNeverBeCommitted covers the rows an older
+// TestFlush_BlocksAProjectThatCanNeverBeCommitted covers the rows an older
 // build accepted before the ingest API rejected the name: `.git/metrics.parquet`
 // is a path Commit always refuses, so without this the project would sit in
 // the flush queue forever, warning every ten seconds and holding one of the
 // hundred slots the poller has.
-func TestFlush_AbandonsAProjectThatCanNeverBeCommitted(t *testing.T) {
+//
+// The answer is to mark the project, not to throw its points away: they were
+// accepted with a 200 and deleting them was silent data loss.
+func TestFlush_BlocksAProjectThatCanNeverBeCommitted(t *testing.T) {
 	h := newExpHarness(t)
 	projectID := h.ingest(".git", "run-1", "running", []int64{1, 2, 3}, "loss")
 
 	result, err := h.flusher.Flush(h.ctx, h.repo, projectID, ".git")
-	if err != nil {
-		t.Fatalf("flush: %v, want the buffer abandoned rather than an error retried forever", err)
+	if !errors.Is(err, ErrFlushBlocked) {
+		t.Fatalf("flush error = %v, want ErrFlushBlocked", err)
 	}
 	if result != nil {
 		t.Fatalf("flush committed %+v, want nothing (the path is not committable)", result)
 	}
-	if n := h.pointCount(projectID); n != 0 {
-		t.Errorf("buffered points after an abandoned flush = %d, want 0", n)
+	if n := h.pointCount(projectID); n != 3 {
+		t.Errorf("buffered points after a blocked flush = %d, want all 3 kept", n)
 	}
+	assertFlushBlocked(t, h, projectID, "refusing to write inside .git")
 }
 
-// TestFlush_AbandonsAFileTooLargeToRebuild pins the memory bound: a flush
-// rebuilds the whole file, so a metrics parquet past maxExistingFlushRows is
-// refused from its footer -- before a single row is decoded -- instead of
-// loading every row into a map and taking the API process down with it.
-func TestFlush_AbandonsAFileTooLargeToRebuild(t *testing.T) {
+// TestFlush_BlocksAFileTooLargeToRebuild pins the memory bound on its cheap
+// path: a flush rebuilds the whole file, so a metrics parquet past
+// maxExistingFlushRows is refused from its footer -- before a single row is
+// decoded -- instead of loading every row into a map and taking the API
+// process down with it. The buffered points survive the refusal.
+//
+// The footer is not a guarantee, only an optimisation; the guard that does not
+// trust it is TestFlush_BlocksAFileWhoseFooterUnderstatesItsRows below. The two
+// are told apart by the wording of flush_error, which is why the assertions
+// here quote the row count the footer declared.
+func TestFlush_BlocksAFileTooLargeToRebuild(t *testing.T) {
 	h := newExpHarness(t)
 
 	// A first, ordinary flush is what puts rows in the file at all.
@@ -640,21 +654,179 @@ func TestFlush_AbandonsAFileTooLargeToRebuild(t *testing.T) {
 
 	h.ingest("demo", "run-1", "running", []int64{4, 5}, "loss")
 	result, err := h.flusher.Flush(h.ctx, h.repo, projectID, "demo")
-	if err != nil {
-		t.Fatalf("flush: %v, want the buffer abandoned rather than an error retried forever", err)
+	if !errors.Is(err, ErrFlushBlocked) {
+		t.Fatalf("flush error = %v, want ErrFlushBlocked", err)
 	}
 	if result != nil {
 		t.Fatalf("flush committed %+v, want nothing (the file is too large to rebuild)", result)
 	}
-	if n := h.pointCount(projectID); n != 0 {
-		t.Errorf("buffered points after an abandoned flush = %d, want 0", n)
+	if n := h.pointCount(projectID); n != 2 {
+		t.Errorf("buffered points after a blocked flush = %d, want both kept", n)
 	}
+	// "has 3 rows" is the footer path's wording and only the footer path's:
+	// the scan path cannot quote a count, because the count it would quote is
+	// the one that lied.
+	assertFlushBlocked(t, h, projectID, "has 3 rows, more than the 2 a flush can rebuild")
 
-	// What was already committed must be untouched: abandoning a flush drops
-	// the buffer, it does not rewrite the file.
+	// What was already committed must be untouched: blocking a flush leaves
+	// everything alone, it does not rewrite the file. The chart still shows
+	// all five points, because the two that could not be committed are still
+	// in the buffer Series reads -- which is the visible difference from the
+	// behaviour this replaced, where they were simply gone.
 	h.reindex()
 	got := h.series("demo")
-	if len(got) != 1 || len(got[0].Points) != 3 {
-		t.Fatalf("series = %#v, want the 3 points of the first flush", got)
+	if len(got) != 1 || len(got[0].Points) != 5 {
+		t.Fatalf("series = %#v, want 3 committed points plus the 2 still buffered", got)
 	}
+
+	// Raising the bound again is the operator's fix, and nothing has to be
+	// told about it: the block simply stops mattering on the next attempt,
+	// and a successful flush clears the mark.
+	maxExistingFlushRows = restore
+	if _, err := h.flusher.Flush(h.ctx, h.repo, projectID, "demo"); err != nil {
+		t.Fatalf("flush after the cause was fixed: %v", err)
+	}
+	blocked, err := h.st.ListBlockedFlushProjects(h.ctx)
+	if err != nil {
+		t.Fatalf("list blocked: %v", err)
+	}
+	if len(blocked) != 0 {
+		t.Errorf("blocked projects after a successful flush = %+v, want none", blocked)
+	}
+}
+
+// TestFlush_BlocksAFileWhoseFooterUnderstatesItsRows covers the guard the
+// footer check cannot provide. A parquet's file-level num_rows and its
+// per-row-group num_rows are separate thrift fields and no reader is obliged to
+// check that one is the sum of the others, so a file can declare three rows and
+// hand the scan a million. Nothing between the object store and readExisting
+// re-derives the count, so if only the footer were trusted, such a file would
+// walk straight into the row-by-row rebuild this bound exists to prevent -- and
+// the project would go back to retrying it at full rate for ever, which is the
+// starvation blockFlush was written to stop.
+//
+// The fixture is a real flushed metrics parquet whose footer is rewritten to
+// claim one row while its row groups still hold three; the bound is then set
+// between the two, so only the scan can catch it.
+func TestFlush_BlocksAFileWhoseFooterUnderstatesItsRows(t *testing.T) {
+	h := newExpHarness(t)
+
+	// An ordinary flush is what puts rows in the file at all. No reindex
+	// afterwards, so nothing has read (and cached) the object before it is
+	// rewritten below.
+	projectID := h.ingest("demo", "run-1", "running", []int64{1, 2, 3}, "loss")
+	first := h.flush(projectID, "demo")
+	if err := h.st.DeletePoints(h.ctx, first.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+	understateFooterRows(t, h, "demo/metrics.parquet", 1)
+
+	// One is under the bound, three is over it: the footer check passes and
+	// only the scan can refuse the file.
+	restore := maxExistingFlushRows
+	maxExistingFlushRows = 2
+	t.Cleanup(func() { maxExistingFlushRows = restore })
+
+	h.ingest("demo", "run-1", "running", []int64{4, 5}, "loss")
+	result, err := h.flusher.Flush(h.ctx, h.repo, projectID, "demo")
+	if !errors.Is(err, ErrFlushBlocked) {
+		t.Fatalf("flush error = %v, want ErrFlushBlocked -- the scan trusted the footer", err)
+	}
+	if result != nil {
+		t.Fatalf("flush committed %+v, want nothing (the file is too large to rebuild)", result)
+	}
+	if n := h.pointCount(projectID); n != 2 {
+		t.Errorf("buffered points after a blocked flush = %d, want both kept", n)
+	}
+	// The scan path's wording, and only the scan path's: it does not quote a
+	// row count, because the count it could quote is the one that lied.
+	assertFlushBlocked(t, h, projectID, "its footer declares fewer than it contains")
+}
+
+// understateFooterRows rewrites the footer of the LFS-stored parquet at path so
+// its file-level num_rows reads numRows, leaving every row group -- and so
+// every row a scan produces -- exactly as it was. Only the trailing metadata is
+// replaced, so the row groups' recorded offsets stay valid.
+func understateFooterRows(t *testing.T, h *expHarness, path string, numRows int64) {
+	t.Helper()
+	gitRepo, err := h.git.Open(h.repo.StoragePath)
+	if err != nil {
+		t.Fatalf("open git repo: %v", err)
+	}
+	entry, _, err := gitRepo.Stat(h.repo.DefaultBranch, path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if entry.LFS == nil {
+		t.Fatalf("%s is not an LFS file; the fixture assumes .gitattributes routes parquet to LFS", path)
+	}
+	key := storage.LFSKey(entry.LFS.OID)
+	rc, err := h.obj.Get(h.ctx, key)
+	if err != nil {
+		t.Fatalf("get %s: %v", key, err)
+	}
+	data, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		t.Fatalf("read %s: %v", key, err)
+	}
+
+	// [row groups][FileMetaData thrift][uint32 footer length][PAR1]
+	if len(data) < 8 || string(data[len(data)-4:]) != "PAR1" {
+		t.Fatalf("%s is not a parquet file", path)
+	}
+	size := int64(binary.LittleEndian.Uint32(data[len(data)-8 : len(data)-4]))
+	start := int64(len(data)) - 8 - size
+	if start < 0 {
+		t.Fatalf("footer length %d does not fit in %d bytes", size, len(data))
+	}
+	var proto thrift.CompactProtocol
+	var meta format.FileMetaData
+	if err := thrift.NewDecoder(proto.NewReader(bytes.NewReader(data[start : start+size]))).Decode(&meta); err != nil {
+		t.Fatalf("decode footer: %v", err)
+	}
+	if meta.NumRows <= numRows {
+		t.Fatalf("footer already declares %d rows, want more than %d", meta.NumRows, numRows)
+	}
+	meta.NumRows = numRows
+
+	var footer bytes.Buffer
+	if err := thrift.NewEncoder(proto.NewWriter(&footer)).Encode(&meta); err != nil {
+		t.Fatalf("encode footer: %v", err)
+	}
+	out := make([]byte, 0, int(start)+footer.Len()+8)
+	out = append(out, data[:start]...)
+	out = append(out, footer.Bytes()...)
+	var n [4]byte
+	binary.LittleEndian.PutUint32(n[:], uint32(footer.Len()))
+	out = append(out, n[:]...)
+	out = append(out, "PAR1"...)
+
+	if err := h.obj.Put(h.ctx, key, bytes.NewReader(out), "application/octet-stream"); err != nil {
+		t.Fatalf("put forged %s: %v", key, err)
+	}
+}
+
+// assertFlushBlocked checks that the project was marked rather than emptied,
+// and that the reason travelled with the mark -- an operator has to be able to
+// find out why a buffer is not draining.
+func assertFlushBlocked(t *testing.T, h *expHarness, projectID int64, wantReason string) {
+	t.Helper()
+	blocked, err := h.st.ListBlockedFlushProjects(h.ctx)
+	if err != nil {
+		t.Fatalf("list blocked flush projects: %v", err)
+	}
+	for _, b := range blocked {
+		if b.ProjectID != projectID {
+			continue
+		}
+		if !strings.Contains(b.Error, wantReason) {
+			t.Errorf("flush_error = %q, want it to mention %q", b.Error, wantReason)
+		}
+		if b.NumPoints == 0 {
+			t.Errorf("blocked project reports %d buffered points, want the buffer kept", b.NumPoints)
+		}
+		return
+	}
+	t.Fatalf("project %d is not listed as blocked (%+v)", projectID, blocked)
 }

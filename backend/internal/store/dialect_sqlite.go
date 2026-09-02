@@ -101,6 +101,19 @@ func (sqliteDialect) jsonArrayElements(column, key string) (string, string) {
 		) elem`, `elem.value`
 }
 
+// jsonScalarText restores the Postgres answer. SQLite's `->>` yields the
+// value in its own type -- an integer for `license: 2`, 1 or 0 for a boolean
+// -- so `r.card->>'license' = $1` never matched a non-string license and the
+// facet that listed it led to an empty page. CAST fixes the numbers; the two
+// booleans have to be spelled out, because casting SQLite's 1 would give "1"
+// where jsonb gives "true".
+func (sqliteDialect) jsonScalarText(column, key string) string {
+	return `CASE json_type(` + column + `, ` + jsonPath(key) + `)
+			WHEN 'true' THEN 'true'
+			WHEN 'false' THEN 'false'
+			ELSE CAST(` + column + `->>'` + key + `' AS TEXT) END`
+}
+
 func (sqliteDialect) searchPredicate(bind func(any) string, text string) string {
 	q := BuildFTS5PrefixQuery(text)
 	if q == "" {
@@ -156,10 +169,10 @@ func (sqliteDialect) queries() dialectQueries {
 			   note        = COALESCE($6, note)
 			 WHERE project_id = $1 AND name = $2
 			 RETURNING ` + runColumns,
-		linkLFSObjectsInsert: `INSERT INTO repo_lfs_objects (repo_id, oid)
-			 SELECT $1, o.value FROM json_each($2) AS o
+		linkLFSObjectsInsert: `INSERT INTO repo_lfs_objects (repo_id, oid, created_at, committed_at)
+			 SELECT $1, o.value, now(), now() FROM json_each($2) AS o
 			 WHERE EXISTS (SELECT 1 FROM lfs_objects WHERE oid = o.value)
-			 ON CONFLICT DO NOTHING`,
+			 ON CONFLICT (repo_id, oid) DO UPDATE SET committed_at = now()`,
 	}
 }
 

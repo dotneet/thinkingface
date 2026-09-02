@@ -10,9 +10,27 @@
 // GET /api/v1/usage reports, and the check is against the batch as a whole:
 // one object at a time would let a push of a hundred files land a hundred
 // times the remaining allowance, since every one of them fits on its own.
-// Objects the bucket already holds are not counted, because a deduplicated
-// hit transfers nothing and adds nothing to the bill -- they never reach the
-// pending list this looks at.
+//
+// A deduplicated hit is counted too, whenever it is about to earn this
+// repository a link it does not already have. It moves no bytes, but usage is
+// summed over repo_lfs_objects (store.UsageByRepo), so the link is exactly
+// what the number is made of -- and an oid is public, every LFS pointer in
+// every readable repository is one. Exempting dedup therefore did not exempt
+// "content the namespace already pays for", it exempted "content anybody on
+// the instance ever uploaded": a batch naming three existing oids added three
+// gigabytes to a namespace 500 GiB past a 1 MiB quota without the check
+// reading a single row. What genuinely costs nothing, and is genuinely not
+// counted, is an object this repository is already linked to.
+//
+// Known limitation, deliberate: this reads usage and compares, without
+// reserving anything and without locking the namespace. Usage only moves when
+// a transfer completes (verify -> promote -> link), so the window between a
+// batch being allowed and its bytes being counted is as long as the transfer
+// -- two concurrent pushes of 80 GiB each are both admitted under a 100 GiB
+// quota. Closing it properly means a reservation ledger with expiry, since a
+// batch that is never transferred must not hold its bytes for ever; that is a
+// larger change than this file, and the overshoot is bounded by how much one
+// client can push at once.
 
 package lfs
 
@@ -53,45 +71,52 @@ func (h *Handler) EnforceNamespaceQuota(src QuotaSource, defaultBytes int64) {
 	h.defaultQuota = defaultBytes
 }
 
-// withinQuota is the gate between a batch's upload objects and the transfer
-// URLs that would let them be written. It returns the actions that may still
-// be minted: every one of them when the batch fits, and none at all when it
-// does not -- in which case each rejected object carries the refusal instead
-// (RFC 4918's 507 Insufficient Storage, in the per-object error the LFS batch
-// protocol reserves for exactly this: a value the server will not act on,
-// reported without failing the request itself).
+// withinQuota is the gate between a batch's upload objects and everything
+// that would add to the namespace's footprint: the transfer URLs for objects
+// that must be uploaded (transfer), and the links for objects the bucket
+// already holds (dedup). It reports whether the batch as a whole fits. When
+// it does not, nothing at all is authorised and each charged object carries
+// the refusal instead (RFC 4918's 507 Insufficient Storage, in the per-object
+// error the LFS batch protocol reserves for exactly this: a value the server
+// will not act on, reported without failing the request itself).
 //
 // The refusal is all-or-nothing on purpose. Handing out URLs for the objects
 // that happen to fit and refusing the rest would leave the push half
 // transferred and the commit impossible, which is a worse place to be than a
 // push that fails cleanly before a byte moves.
-func (h *Handler) withinQuota(ctx context.Context, repoID int64, resp *BatchResponse, pending []pendingAction) ([]pendingAction, error) {
-	if h.quota == nil || len(pending) == 0 {
-		return pending, nil
+func (h *Handler) withinQuota(ctx context.Context, repoID int64, resp *BatchResponse, transfer, dedup []pendingAction) (bool, error) {
+	if h.quota == nil || len(transfer)+len(dedup) == 0 {
+		return true, nil
 	}
 	q, err := h.quota.NamespaceQuotaForRepo(ctx, repoID, h.defaultQuota)
 	if err != nil {
-		return nil, fmt.Errorf("read namespace storage quota: %w", err)
+		return false, fmt.Errorf("read namespace storage quota: %w", err)
 	}
 	limit := store.EffectiveQuota(q.QuotaBytes, h.defaultQuota)
 	if limit == nil {
-		return pending, nil
+		return true, nil
 	}
 
 	var add int64
-	for _, p := range pending {
+	for _, p := range transfer {
+		add = addSaturating(add, p.obj.Size)
+	}
+	for _, p := range dedup {
 		add = addSaturating(add, p.obj.Size)
 	}
 	want := addSaturating(q.UsedBytes, add)
 	if want <= *limit {
-		return pending, nil
+		return true, nil
 	}
 
 	msg := quotaMessage(q.Namespace, q.UsedBytes, *limit, add, want-*limit)
-	for _, p := range pending {
+	for _, p := range transfer {
 		resp.Objects[p.index].Error = &ObjectError{Code: http.StatusInsufficientStorage, Message: msg}
 	}
-	return nil, nil
+	for _, p := range dedup {
+		resp.Objects[p.index].Error = &ObjectError{Code: http.StatusInsufficientStorage, Message: msg}
+	}
+	return false, nil
 }
 
 // quotaMessage is what the person running `git push` reads. It names the

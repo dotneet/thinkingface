@@ -121,28 +121,28 @@ func TestBatchAcceptsAnUploadThatFitsTheQuota(t *testing.T) {
 	}
 }
 
-// A deduplicated object transfers nothing and adds nothing to the bill, so it
-// must not be charged against the allowance -- otherwise re-pushing a
-// repository that is already stored would refuse itself.
-func TestBatchDoesNotCountObjectsTheBucketAlreadyHas(t *testing.T) {
-	rec := &fakeRecorder{}
-	// The first two Stat calls hit: the presence check for oidA and the
-	// re-check RecordLFSObject makes under the row lock. Everything after
-	// that misses, so oidB really does have to be uploaded.
-	st := &stubStorage{presentFor: 2, size: 10}
+// An object this repository is *already linked to* costs nothing: re-pushing
+// content the namespace is already charged for adds no bytes to the number
+// UsageByRepo produces, so a repository at its limit must still be able to
+// push what it already holds.
+func TestBatchDoesNotCountObjectsTheRepositoryAlreadyHolds(t *testing.T) {
+	rec := &fakeRecorder{owned: ownedBy(1, oidA)}
+	// The presence check for oidA hits; everything after that misses, so oidB
+	// really does have to be uploaded.
+	st := &stubStorage{presentFor: 1, size: 10}
 	q := &fakeQuota{q: store.NamespaceQuota{
 		Namespace: "acme", QuotaBytes: ptrInt64(55), UsedBytes: 0,
 	}}
 	h := quotaHandler(rec, st, q, 0)
 
 	resp, err := h.Batch(context.Background(), 1, uploadBatch(
-		ObjectRef{OID: oidA, Size: 10}, // already in the bucket
+		ObjectRef{OID: oidA, Size: 10}, // already linked to this repository
 		ObjectRef{OID: oidB, Size: 50}, // has to be transferred
 	), "")
 	if err != nil {
 		t.Fatalf("Batch: %v", err)
 	}
-	// 50 of the 55 are needed. Had the deduplicated 10 been counted too, the
+	// 50 of the 55 are needed. Had the already-held 10 been counted too, the
 	// batch would be 5 bytes over and both objects refused.
 	for i, obj := range resp.Objects {
 		if obj.Error != nil {
@@ -150,10 +150,82 @@ func TestBatchDoesNotCountObjectsTheBucketAlreadyHas(t *testing.T) {
 		}
 	}
 	if resp.Objects[0].Actions != nil {
-		t.Errorf("the deduplicated object was handed transfer actions")
+		t.Errorf("the object the repository already holds was handed transfer actions")
 	}
 	if resp.Objects[1].Actions["upload"].Href == "" {
 		t.Errorf("the new object got no upload action")
+	}
+}
+
+// A deduplicated hit on an object this repository does *not* hold is a new
+// link, and a new link is new usage: it is exactly what UsageByRepo sums, so
+// it has to pass the same gate a transfer does.
+//
+// The hole this closes: an oid is public (every LFS pointer in every readable
+// repository is one), the old code linked such an object and `continue`d
+// before the pending list existed, and withinQuota returned early on an empty
+// pending list -- so a namespace hundreds of gigabytes past its quota could
+// keep adding content by naming oids it had merely read somewhere, without the
+// quota being read even once.
+func TestBatchChargesDedupHitsTheRepositoryDoesNotHold(t *testing.T) {
+	rec := &fakeRecorder{}
+	// Both objects are already in the bucket, and neither is linked here.
+	st := &stubStorage{presentFor: 8, size: 10}
+	q := &fakeQuota{q: store.NamespaceQuota{
+		Namespace: "acme", QuotaBytes: ptrInt64(15), UsedBytes: 0,
+	}}
+	h := quotaHandler(rec, st, q, 0)
+
+	resp, err := h.Batch(context.Background(), 1, uploadBatch(
+		ObjectRef{OID: oidA, Size: 10},
+		ObjectRef{OID: oidB, Size: 10},
+	), "")
+	if err != nil {
+		t.Fatalf("Batch: %v", err)
+	}
+	if q.calls != 1 {
+		t.Fatalf("the quota was consulted %d times, want 1 -- dedup must not skip the gate", q.calls)
+	}
+	for i, obj := range resp.Objects {
+		if obj.Error == nil || obj.Error.Code != http.StatusInsufficientStorage {
+			t.Errorf("object %d error = %+v, want a 507", i, obj.Error)
+		}
+	}
+	if rec.calls != 0 {
+		t.Errorf("RecordLFSObject calls = %d, want 0 -- nothing may be linked once the batch is refused", rec.calls)
+	}
+	if len(rec.owned) != 0 {
+		t.Errorf("owned = %v, want nothing linked", rec.owned)
+	}
+}
+
+// The other half of the same rule: when the dedup hits do fit, they are linked
+// and no bytes are asked for.
+func TestBatchLinksDedupHitsThatFitTheQuota(t *testing.T) {
+	rec := &fakeRecorder{}
+	st := &stubStorage{presentFor: 8, size: 10}
+	q := &fakeQuota{q: store.NamespaceQuota{
+		Namespace: "acme", QuotaBytes: ptrInt64(100), UsedBytes: 0,
+	}}
+	h := quotaHandler(rec, st, q, 0)
+
+	resp, err := h.Batch(context.Background(), 1, uploadBatch(
+		ObjectRef{OID: oidA, Size: 10},
+		ObjectRef{OID: oidB, Size: 10},
+	), "")
+	if err != nil {
+		t.Fatalf("Batch: %v", err)
+	}
+	for i, obj := range resp.Objects {
+		if obj.Error != nil {
+			t.Fatalf("object %d refused (%d %s), want it accepted", i, obj.Error.Code, obj.Error.Message)
+		}
+		if obj.Actions != nil {
+			t.Errorf("object %d was handed transfer actions for content already in the bucket", i)
+		}
+	}
+	if rec.calls != 2 {
+		t.Errorf("RecordLFSObject calls = %d, want both dedup hits linked", rec.calls)
 	}
 }
 

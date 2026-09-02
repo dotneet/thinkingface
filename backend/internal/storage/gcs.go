@@ -101,7 +101,7 @@ func (g *GCS) SignedGetURL(ctx context.Context, key string, ttl time.Duration, d
 	}
 	if downloadName != "" {
 		opts.QueryParameters = map[string][]string{
-			"response-content-disposition": {fmt.Sprintf("attachment; filename=%q", downloadName)},
+			"response-content-disposition": {ContentDisposition(downloadName)},
 		}
 	}
 	// Uses the ambient service account via IAM signBlob when no private key is

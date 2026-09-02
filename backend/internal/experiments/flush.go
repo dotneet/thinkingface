@@ -55,12 +55,20 @@ var maxExistingFlushRows int64 = 1_000_000
 // file, not a transient failure -- see abandonPoints for what happens to the
 // buffered points.
 type tooManyExistingRowsError struct {
-	Path    string
+	Path string
+	// NumRows is what the file's footer declared, or -1 when the count came
+	// from the scan overrunning the cap -- which is the case where the footer
+	// was not telling the truth, so quoting it would be worse than saying
+	// nothing.
 	NumRows int64
 	Max     int64
 }
 
 func (e *tooManyExistingRowsError) Error() string {
+	if e.NumRows < 0 {
+		return fmt.Sprintf("metrics parquet %s holds more rows than the %d a flush can rebuild in memory "+
+			"(its footer declares fewer than it contains)", e.Path, e.Max)
+	}
 	return fmt.Sprintf("metrics parquet %s has %d rows, more than the %d a flush can rebuild in memory",
 		e.Path, e.NumRows, e.Max)
 }
@@ -149,19 +157,19 @@ func (f *Flusher) Flush(ctx context.Context, repo *store.Repo, projectID int64, 
 		return nil, err
 	}
 	// A project whose name cannot be a path segment (".git", ".", "..") makes
-	// a file Commit will always refuse, so the buffer is abandoned here rather
+	// a file Commit will always refuse, so the project is blocked here rather
 	// than failing at the end of every tick from now on. Ingest rejects such a
 	// name today (api.validateIngestProject); this is for the rows an older
 	// build already accepted.
 	if perr := gitrepo.ValidatePath(path); perr != nil {
-		return nil, f.abandonPoints(ctx, project, points, perr)
+		return nil, f.blockFlush(ctx, projectID, project, points, perr)
 	}
 
 	existing, baseOID, err := f.readExisting(ctx, repo, gitRepo, ref, path)
 	if err != nil {
 		var tooMany *tooManyExistingRowsError
 		if errors.As(err, &tooMany) {
-			return nil, f.abandonPoints(ctx, project, points, err)
+			return nil, f.blockFlush(ctx, projectID, project, points, err)
 		}
 		return nil, err
 	}
@@ -191,6 +199,16 @@ func (f *Flusher) Flush(ctx context.Context, repo *store.Repo, projectID int64, 
 		return nil, err
 	}
 
+	// Whatever blocked this project before is evidently gone: the commit is
+	// in. Clearing the mark is what makes the block self-healing -- an
+	// operator who shrinks the metrics file or renames the project never has
+	// to tell anything about it. The statement matches nothing for a project
+	// that was never blocked, which is every ordinary flush.
+	if err := f.store.SetProjectFlushBlock(ctx, projectID, ""); err != nil {
+		slog.Warn("could not clear an experiment project's flush block",
+			"project", project, "project_id", projectID, "error", err)
+	}
+
 	ids := make([]int64, 0, len(points))
 	for _, p := range points {
 		ids = append(ids, p.ID)
@@ -202,39 +220,58 @@ func (f *Flusher) Flush(ctx context.Context, repo *store.Repo, projectID int64, 
 	}, nil
 }
 
-// abandonPoints drops buffered points that can never reach the parquet, after
-// saying so as loudly as this layer can. It returns the error from the delete
-// (or nil), so its caller reports "there was nothing to flush" rather than a
-// failure that would be retried.
+// ErrFlushBlocked reports a project whose buffered points cannot be written
+// to its parquet for a reason the next attempt would hit identically. The
+// points are still there; what has changed is that the project is marked, so
+// the poller stops picking it up until the block expires.
+var ErrFlushBlocked = errors.New("experiments: this project's metrics cannot be flushed")
+
+// blockFlush marks the project as unflushable and returns why, wrapped in
+// ErrFlushBlocked.
 //
-// Deleting them is a deliberate departure from what every *transient* failure
-// here does, which is to leave the buffer alone and try again next tick. The
-// two conditions routed here -- a project name no path can hold, and a file
-// too large to rebuild in memory -- are properties of the repository, not of
-// this attempt: nothing about the next tick is different. Retrying forever
-// would be tolerable if the damage stayed inside the one project, but it does
-// not. exp_points grows without bound for it (and Series loads all of it to
-// draw the live chart), and the poller takes its candidates from
+// The two conditions routed here -- a project name no path can hold, and a
+// metrics file too large to rebuild in memory -- are properties of the
+// repository, not of this attempt: nothing about the next tick is different.
+// What made retrying forever intolerable was that the damage did not stay
+// inside the one project: the poller takes its candidates from
 // ListPendingFlushProjects, which takes the hundred projects whose oldest
-// unflushed point has waited longest -- and a wedged project's oldest point
-// only ever gets older, so a hundred of them sit at the front of that order
-// forever and *no* project on the instance is flushed again. A buffer that
-// can never drain is not a harmless buffer.
+// unflushed point has waited longest, and a wedged project's oldest point only
+// ever gets older -- so a hundred of them sit at the front of that order
+// forever and *no* project on the instance is flushed again.
 //
-// The cost is real, which is why this is an error and carries the counts: the
-// points were accepted with a 200 and are now gone from the chart as well.
-// Only the batch this flush read is dropped, so the log says exactly how much
-// was lost each time, and the operator's fix -- shrink or move the metrics
-// file, or use a project name that can be committed -- takes effect on the
-// next points ingested rather than on the ones already thrown away.
-func (f *Flusher) abandonPoints(ctx context.Context, project string, points []store.PendingPoint, reason error) error {
-	ids := make([]int64, 0, len(points))
-	for _, p := range points {
-		ids = append(ids, p.ID)
+// **The mark solves that one problem and deliberately accepts the other.**
+// This used to be answered by deleting the buffered points, which stopped the
+// starvation and lost the data: the ingest API had already returned 200 for
+// every one of those points, no user-facing document mentions
+// maxExistingFlushRows, and a run that crossed it simply found its metrics
+// missing from both the chart and the parquet. The trade made here is that
+// risk for an unbounded one: exp_points for a blocked project now grows for as
+// long as the client keeps logging and nobody intervenes, with no ceiling and
+// no eviction. That is the intended outcome, not an oversight -- see
+// store.SetProjectFlushBlock, which names the same cost -- but it is a real
+// one, and on an instance nobody is watching it is a table that grows until
+// the disk says no.
+//
+// The chart is not the pressure point it once was: scanLiveSeries reads the
+// buffer through ListProjectPoints with maxLiveSeriesPoints, so a runaway
+// buffer degrades the chart rather than the process. The database is.
+//
+// What the mark buys is time: ListPendingFlushProjects skips a project blocked
+// within flushBlockRetryAfter, so the cost of a wedged project is one attempt
+// an hour instead of one every ten seconds, the rest of the instance keeps
+// draining, and the buffer survives until somebody acts on it.
+//
+// Marking is best effort: if the mark itself cannot be written the flush
+// still fails with the same error, so nothing is silently retried at full
+// rate without anybody being told why.
+func (f *Flusher) blockFlush(ctx context.Context, projectID int64, project string, points []store.PendingPoint, reason error) error {
+	slog.Error("experiment project cannot be flushed; its buffered points are being kept",
+		"project", project, "project_id", projectID, "points", len(points), "reason", reason)
+	if err := f.store.SetProjectFlushBlock(ctx, projectID, reason.Error()); err != nil {
+		slog.Error("could not record why an experiment project cannot be flushed",
+			"project", project, "project_id", projectID, "error", err)
 	}
-	slog.Error("dropping buffered experiment points that can never be flushed",
-		"project", project, "points", len(ids), "reason", reason)
-	return f.store.DeletePoints(ctx, ids)
+	return fmt.Errorf("%w: %w", ErrFlushBlocked, reason)
 }
 
 // metricsPath picks the file this project's points belong in: the metrics
@@ -293,6 +330,15 @@ func (f *Flusher) readExisting(ctx context.Context, repo *store.Repo, gitRepo *g
 	// no decoding: the file is refused *before* the scan below turns every one
 	// of its rows into a map. Checking it afterwards would be no check at all,
 	// since the scan is the allocation being guarded against.
+	//
+	// It is not, on its own, a guarantee. The footer's file-level num_rows and
+	// the per-row-group num_rows are separate thrift fields and nothing in the
+	// format makes a reader verify that one is the sum of the others, so a
+	// hand-written (or deliberately crafted) parquet can declare a small file
+	// and hand the scan millions of rows -- which is exactly the allocation
+	// this bounds. So the same cap is enforced again below, against rows
+	// actually produced. The footer check stays because it is the cheap one:
+	// an honest oversized file never reaches the scan at all.
 	if schema.NumRows > maxExistingFlushRows {
 		return nil, "", &tooManyExistingRowsError{Path: path, NumRows: schema.NumRows, Max: maxExistingFlushRows}
 	}
@@ -305,6 +351,13 @@ func (f *Flusher) readExisting(ctx context.Context, repo *store.Repo, gitRepo *g
 	}
 
 	err = f.viewer.Scan(ctx, key, viewer.ScanRequest{}, func(row map[string]any) error {
+		// The real guard: whatever the footer claimed, stop as soon as the
+		// scan has handed over more rows than a rebuild can hold. Returning
+		// an error aborts the scan, so the rows past the cap are never
+		// materialised.
+		if int64(len(out.rows)) >= maxExistingFlushRows {
+			return &tooManyExistingRowsError{Path: path, NumRows: -1, Max: maxExistingFlushRows}
+		}
 		copied := make(map[string]any, len(row))
 		for k, v := range row {
 			copied[k] = v
