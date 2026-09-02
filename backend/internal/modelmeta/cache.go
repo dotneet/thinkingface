@@ -7,11 +7,25 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// DefaultCacheEntries is how many inspected checkpoints a Cache keeps. Every
-// part of an entry that a file controls is capped -- the tensor listing by
-// maxTensors, the metadata map by maxMetadataBytes -- so an entry is a few
-// hundred kilobytes at most and a full cache stays inside a few hundred
-// megabytes.
+// DefaultCacheEntries is how many inspected checkpoints a Cache keeps.
+//
+// Every part of an entry that a file controls has a ceiling, so an entry's
+// worst case can be worked out rather than hoped for:
+//
+//   - the listing holds at most maxTensors (4096) tensors, and one tensor is
+//     at most maxTensorNameRunes of name and maxDTypeRunes of dtype (512 and
+//     128 bytes at four bytes a character) over maxShapeDims dimensions (512
+//     bytes), so about 1.2 KiB each -- 5 MiB of listing;
+//   - the dtype breakdown is at most maxDTypeStats buckets, a few kilobytes;
+//   - the metadata map is at most maxMetadataBytes (256 KiB);
+//   - the warnings are a fixed handful of fixed-format lines. None of them
+//     quotes a name out of the file, which is what would make their number and
+//     their length the file's business rather than ours.
+//
+// That 5 MiB is what a deliberately hostile file can force, and it is the
+// figure to multiply this constant by before raising it. A real checkpoint is
+// nowhere near it: a few hundred kilobytes an entry, so a full cache of them
+// is well under a hundred megabytes.
 const DefaultCacheEntries = 256
 
 // Cache memoises inspections. Keys are content-addressed -- an LFS OID or a

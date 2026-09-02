@@ -34,6 +34,23 @@ const (
 	maxWalkDepth = 8
 	// maxSequenceItems bounds how far into a list this reader descends.
 	maxSequenceItems = 1024
+	// maxTotalShapeDims bounds the dimensions every shape decoded out of one
+	// file adds up to. maxShapeDims alone is not enough: the cost here is not
+	// one huge shape but a small one rebuilt endlessly.
+	//
+	// A shape tuple lives in the pickle memo, and BINGET puts it back on the
+	// stack for a single byte, so one memoised tuple can be the argument to
+	// any number of _rebuild_tensor_v2 calls -- and toShape copies it afresh
+	// every time. None of the other ceilings see that: maxPickleStack counts
+	// stack slots, not values that have moved into a list, and
+	// maxCollectedTensors / maxWalkVisits only apply to the walk that runs
+	// after the whole graph is already in memory. A 477 byte file (a memoised
+	// 100k-element shape, then BINGET+REDUCE repeated) allocated 783 MiB that
+	// way, and the result was cached.
+	//
+	// A million dimensions is 8 MiB and two orders of magnitude past what the
+	// largest published checkpoints need: ~10^4 tensors of ~4 dimensions each.
+	maxTotalShapeDims = 1 << 20
 	// maxWalkVisits bounds the *total* number of nodes the walk touches.
 	// Depth alone does not bound the work: the pickle memo lets a file point a
 	// container at itself, and a self-referential dict of N entries is then
@@ -61,15 +78,15 @@ func inspectPyTorch(ctx context.Context, size int64, fetch Fetcher) (*Info, erro
 		return nil, fmt.Errorf("modelmeta: read checkpoint magic: %w", err)
 	}
 	if bytes.HasPrefix(magic, []byte("PK\x03\x04")) {
-		return inspectTorchZip(src, size)
+		return inspectTorchZip(ctx, src, size)
 	}
-	return inspectTorchLegacy(src, size)
+	return inspectTorchLegacy(ctx, src, size)
 }
 
 // inspectTorchZip reads only the archive's central directory and its
 // `data.pkl` member, so the cost is a few ranged reads no matter how large
 // the weights are.
-func inspectTorchZip(src *rangeReaderAt, size int64) (*Info, error) {
+func inspectTorchZip(ctx context.Context, src *rangeReaderAt, size int64) (*Info, error) {
 	zr, err := zip.NewReader(src, size)
 	if err != nil {
 		return nil, fmt.Errorf("modelmeta: read checkpoint archive: %w", err)
@@ -93,13 +110,14 @@ func inspectTorchZip(src *rangeReaderAt, size int64) (*Info, error) {
 		return nil, fmt.Errorf("modelmeta: read %s: %w", member.Name, err)
 	}
 
-	root, err := newUnpickler(bytes.NewReader(data), torchReduce).load()
+	red := &torchReducer{}
+	root, err := newUnpickler(ctx, bytes.NewReader(data), red.reduce).load()
 	if err != nil {
 		return nil, fmt.Errorf("modelmeta: decode %s: %w", member.Name, err)
 	}
 
 	info := &Info{Format: FormatPyTorch, HeaderBytes: int64(len(data))}
-	buildTorchInfo(info, root)
+	buildTorchInfo(info, root, red)
 	return info, nil
 }
 
@@ -121,23 +139,32 @@ func findPickleMember(zr *zip.Reader) *zip.File {
 
 // inspectTorchLegacy handles pre-1.6 checkpoints, where the object pickle is
 // the fourth of a run of pickles at the head of the file.
-func inspectTorchLegacy(src *rangeReaderAt, size int64) (*Info, error) {
+func inspectTorchLegacy(ctx context.Context, src *rangeReaderAt, size int64) (*Info, error) {
 	n := size
 	if n > legacyPrefix {
 		n = legacyPrefix
 	}
-	u := newUnpickler(io.NewSectionReader(src, 0, n), torchReduce)
+	// One reducer for the whole run of pickles: its budgets are per file, and
+	// the leading pickles are part of the same file.
+	red := &torchReducer{}
+	u := newUnpickler(ctx, io.NewSectionReader(src, 0, n), red.reduce)
 
 	var fallback any
 	for i := 0; i < maxLegacyLoads; i++ {
 		root, err := u.load()
 		if err != nil {
+			// A load ending because the caller gave up is not the same as one
+			// ending on a malformed pickle: there is nothing to fall back to,
+			// and reporting partial metadata would be reporting a guess.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, fmt.Errorf("modelmeta: decode legacy checkpoint: %w", ctxErr)
+			}
 			break
 		}
 		// The magic number, protocol version and sys_info come first; the
 		// object graph is whichever pickle actually carries tensors.
 		info := &Info{Format: FormatPyTorch, HeaderBytes: n}
-		buildTorchInfo(info, root)
+		buildTorchInfo(info, root, red)
 		if info.NumTensors > 0 {
 			return info, nil
 		}
@@ -148,7 +175,7 @@ func inspectTorchLegacy(src *rangeReaderAt, size int64) (*Info, error) {
 
 	if fallback != nil {
 		info := &Info{Format: FormatPyTorch, HeaderBytes: n}
-		buildTorchInfo(info, fallback)
+		buildTorchInfo(info, fallback, red)
 		warn(info, "no tensors found: this file does not look like a PyTorch checkpoint")
 		return info, nil
 	}
@@ -164,11 +191,23 @@ func isContainer(v any) bool {
 	}
 }
 
-// torchReduce recognises the handful of `torch._utils` rebuild functions that
-// carry a tensor's dtype and shape. Everything else falls through to an inert
+// torchReducer holds the budgets that span a whole file's decode. A reducer
+// is called once per REDUCE, so anything it allocates has to be accounted for
+// across calls rather than checked one call at a time; a fresh one is made per
+// inspection so the budget never carries between files.
+type torchReducer struct {
+	// shapeDims counts the dimensions handed out by toShape so far, and
+	// shapeExhausted reports that the budget ran out and some shapes are
+	// therefore short. buildTorchInfo turns that into a warning.
+	shapeDims      int
+	shapeExhausted bool
+}
+
+// reduce recognises the handful of `torch._utils` rebuild functions that carry
+// a tensor's dtype and shape. Everything else falls through to an inert
 // placeholder, so an unfamiliar checkpoint degrades to "fewer tensors found"
 // rather than an error.
-func torchReduce(class pickleGlobal, args []any) (any, bool) {
+func (r *torchReducer) reduce(class pickleGlobal, args []any) (any, bool) {
 	switch {
 	case class.Module == "collections" && class.Name == "OrderedDict":
 		// Built empty and then filled by SETITEMS.
@@ -179,14 +218,14 @@ func torchReduce(class pickleGlobal, args []any) (any, bool) {
 		if len(args) < 3 {
 			return nil, false
 		}
-		return &torchTensor{DType: storageDType(args[0]), Shape: toShape(args[2])}, true
+		return &torchTensor{DType: storageDType(args[0]), Shape: r.toShape(args[2])}, true
 
 	case class.Name == "_rebuild_tensor_v3":
 		// Same prefix as v2, plus an explicit dtype at the end.
 		if len(args) < 3 {
 			return nil, false
 		}
-		t := &torchTensor{DType: storageDType(args[0]), Shape: toShape(args[2])}
+		t := &torchTensor{DType: storageDType(args[0]), Shape: r.toShape(args[2])}
 		if len(args) >= 7 {
 			if dtype := torchDTypeName(args[6]); dtype != "" {
 				t.DType = dtype
@@ -199,7 +238,7 @@ func torchReduce(class pickleGlobal, args []any) (any, bool) {
 		if len(args) < 2 {
 			return nil, false
 		}
-		return &torchTensor{DType: torchDTypeName(args[0]), Shape: toShape(args[1])}, true
+		return &torchTensor{DType: torchDTypeName(args[0]), Shape: r.toShape(args[1])}, true
 
 	case strings.HasPrefix(class.Name, "_rebuild_parameter"),
 		class.Name == "_rebuild_from_type_v2",
@@ -316,20 +355,42 @@ var torchDTypeBytes = map[string]int64{
 }
 
 // toShape reads a size tuple, which pickle may present as a tuple or a list.
-func toShape(v any) []int64 {
+//
+// It is bounded twice over: maxShapeDims caps one shape, and maxTotalShapeDims
+// caps every shape in the file put together, so the memory this allocates
+// stays linear in the pickle's own size no matter how often a single memoised
+// tuple is handed back to it. Hitting either ceiling yields a short shape and
+// raises shapeExhausted rather than failing the inspection: a truncated shape
+// with a warning beside it is more useful than no metadata at all, and it
+// matches how the walk reports its own budgets.
+func (r *torchReducer) toShape(v any) []int64 {
 	items := toSlice(v)
+	budget := maxTotalShapeDims - r.shapeDims
+	if budget > maxShapeDims {
+		budget = maxShapeDims
+	}
+	if budget < 0 {
+		budget = 0
+	}
+	if len(items) > budget {
+		items = items[:budget]
+		r.shapeExhausted = true
+	}
 	shape := make([]int64, 0, len(items))
 	for _, item := range items {
 		if n, ok := item.(int64); ok {
 			shape = append(shape, n)
 		}
 	}
+	// Charged by the slice's capacity, not its length: an item that is not an
+	// integer is dropped from the shape but was still paid for.
+	r.shapeDims += len(items)
 	return shape
 }
 
 // buildTorchInfo walks the decoded graph, pulling out tensors and the scalar
 // values stored beside them (epoch, global_step, and friends).
-func buildTorchInfo(info *Info, root any) {
+func buildTorchInfo(info *Info, root any, red *torchReducer) {
 	c := &collector{meta: map[string]string{}}
 	c.walk("", root, 0)
 	if c.overflowed {
@@ -337,6 +398,16 @@ func buildTorchInfo(info *Info, root any) {
 	}
 	if c.exhausted {
 		warn(info, "checkpoint's object graph is larger than %d nodes; the rest was skipped", maxWalkVisits)
+	}
+	if c.sequenceTruncated {
+		warn(info, "a list in this checkpoint holds more than %d entries; the rest were skipped and are not counted in the totals", maxSequenceItems)
+	}
+	if c.implausibleShape {
+		warn(info, "a tensor declares a shape whose element count does not fit a 64-bit integer; the parameter and byte totals are not reliable")
+	}
+	if red != nil && red.shapeExhausted {
+		warn(info, "this checkpoint declares more shape dimensions than the reader will decode (%d per tensor, %d in total); some shapes are truncated and their parameter counts are not reliable",
+			maxShapeDims, maxTotalShapeDims)
 	}
 	if _, isObject := root.(*pickleObject); isObject {
 		warn(info, "this checkpoint stores a pickled object rather than a plain state_dict")
@@ -354,6 +425,18 @@ type collector struct {
 	// visit budget ran out. Either one stops the walk.
 	overflowed bool
 	exhausted  bool
+	// sequenceTruncated reports that a list was longer than maxSequenceItems
+	// and its tail was never entered. Unlike the two above this does not stop
+	// the walk, but it does leave tensors out of the totals, so it has to be
+	// reported: a checkpoint whose state_dict is a long list (any model with a
+	// wide nn.Sequential) otherwise came back with a plausible-looking tensor
+	// count, no Truncated flag -- 1024 is under summarize's own 4096 cut-off
+	// -- and no warning at all.
+	sequenceTruncated bool
+	// implausibleShape reports that a shape's element count did not fit an
+	// int64, so a tensor's parameter count and size are clamped rather than
+	// real.
+	implausibleShape bool
 }
 
 // stopped reports whether the walk has hit one of its budgets and should
@@ -398,8 +481,9 @@ func (c *collector) walk(prefix string, v any, depth int) {
 	case *pickleObject:
 		// A pickled module keeps its parameters in its __setstate__ payload.
 		c.walk(prefix, node.State, depth+1)
-	case picklePersID, pickleGlobal, nil:
-		// Storage pointers and class references carry no metadata of their own.
+	case picklePersID, pickleGlobal, pickleOversizedLong, nil:
+		// Storage pointers, class references and integers too large to decode
+		// carry no metadata of their own.
 	default:
 		c.addMetadata(prefix, node, depth)
 	}
@@ -412,7 +496,11 @@ func (c *collector) walkSequence(prefix string, items []any, depth int) {
 		return
 	}
 	for i, item := range items {
-		if i >= maxSequenceItems || c.stopped() {
+		if i >= maxSequenceItems {
+			c.sequenceTruncated = true
+			return
+		}
+		if c.stopped() {
 			return
 		}
 		c.walk(joinKey(prefix, strconv.Itoa(i)), item, depth+1)
@@ -427,17 +515,21 @@ func (c *collector) addTensor(name string, t *torchTensor) {
 	if name == "" {
 		name = "<tensor>"
 	}
-	n := numElements(t.Shape)
+	n, exact := numElements(t.Shape)
 	dtype := t.DType
 	if dtype == "" {
 		dtype = "unknown"
+	}
+	size, sizeExact := mulSaturating(n, torchDTypeBytes[dtype])
+	if !exact || !sizeExact {
+		c.implausibleShape = true
 	}
 	c.tensors = append(c.tensors, Tensor{
 		Name:          name,
 		DType:         dtype,
 		Shape:         t.Shape,
 		NumParameters: n,
-		SizeBytes:     n * torchDTypeBytes[dtype],
+		SizeBytes:     size,
 	})
 }
 

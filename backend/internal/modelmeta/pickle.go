@@ -2,6 +2,7 @@ package modelmeta
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -67,6 +68,12 @@ type pickleObject struct {
 // tuple that points at a storage record.
 type picklePersID struct{ Value any }
 
+// pickleOversizedLong stands in for an arbitrary-precision integer this reader
+// declined to decode; see maxPickleLongBytes. It is inert: the graph walk has
+// no case for it, so it is neither reported as a tensor nor recorded as
+// metadata, exactly like the storage pointers and class references beside it.
+type pickleOversizedLong struct{ Bytes int64 }
+
 // maxPickleStack stops a malformed stream from growing the stack forever.
 const maxPickleStack = 1 << 20
 
@@ -102,7 +109,31 @@ const maxPickleMarks = maxPickleMemoEntries
 // false leaves the unpickler to build a generic pickleObject.
 type reducer func(class pickleGlobal, args []any) (any, bool)
 
+// maxPickleLongBytes bounds an arbitrary-precision integer this reader is
+// willing to decode, in the two's-complement bytes LONG1/LONG4 carry (and, for
+// the text form, in decimal digits).
+//
+// Neither big.Int.SetString nor big.Int.String is linear in its input:
+// converting between base 2 and base 10 is quadratic in the operand's size, so
+// a single 0x8b (LONG4) naming 64 MiB of 0xAB -- which readN happily allowed,
+// and which deflates to a few kilobytes on the wire -- burned nearly a minute
+// of CPU inside one call to String(). Nothing preempts that: it is one
+// arithmetic call, so neither the memo/stack ceilings nor the walk's budgets
+// ever get a turn, and it dwarfed the caller's request deadline.
+//
+// A checkpoint's metadata has no use for an integer this large. 4 KiB is
+// roughly a 9800-digit number, which is already several thousand digits past
+// anything torch.save writes, and the conversions on it are microseconds.
+const maxPickleLongBytes = 4 << 10
+
+// pickleCancelCheckInterval is how many opcodes run between context checks in
+// load(). Checking every opcode would put a channel read in the hot path of a
+// loop that is otherwise a few nanoseconds per step; a thousand opcodes of the
+// most expensive kind still land well inside a millisecond.
+const pickleCancelCheckInterval = 1024
+
 type unpickler struct {
+	ctx    context.Context
 	r      *bufio.Reader
 	stack  []any
 	marks  []int
@@ -110,8 +141,11 @@ type unpickler struct {
 	reduce reducer
 }
 
-func newUnpickler(r io.Reader, reduce reducer) *unpickler {
-	return &unpickler{r: bufio.NewReaderSize(r, 64<<10), memo: map[uint64]any{}, reduce: reduce}
+func newUnpickler(ctx context.Context, r io.Reader, reduce reducer) *unpickler {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return &unpickler{ctx: ctx, r: bufio.NewReaderSize(r, 64<<10), memo: map[uint64]any{}, reduce: reduce}
 }
 
 func (u *unpickler) push(v any) error {
@@ -179,6 +213,18 @@ func (u *unpickler) readN(n int64) ([]byte, error) {
 // maxPickleBytes bounds one length-prefixed value.
 const maxPickleBytes = 64 << 20
 
+// discardN skips n bytes of the stream without allocating them, for values
+// this reader has decided not to decode.
+func (u *unpickler) discardN(n int64) error {
+	if n < 0 {
+		return fmt.Errorf("pickle: negative length %d", n)
+	}
+	if _, err := io.CopyN(io.Discard, u.r, n); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (u *unpickler) readLine() (string, error) {
 	line, err := u.r.ReadString('\n')
 	if err != nil {
@@ -200,10 +246,21 @@ func (u *unpickler) readUint(size int) (uint64, error) {
 }
 
 // load runs the machine until STOP and returns the value left on the stack.
+//
+// The loop honours the caller's context. Every other budget in this file is a
+// ceiling on a *quantity* -- stack depth, memo entries, marks -- and a stream
+// can stay under all of them while still taking arbitrarily long, so the
+// request deadline is the only thing that bounds wall-clock cost.
 func (u *unpickler) load() (any, error) {
 	u.stack = u.stack[:0]
 	u.marks = u.marks[:0]
+	steps := 0
 	for {
+		if steps++; steps%pickleCancelCheckInterval == 0 {
+			if err := u.ctx.Err(); err != nil {
+				return nil, fmt.Errorf("pickle: %w", err)
+			}
+		}
 		op, err := u.r.ReadByte()
 		if err != nil {
 			return nil, err
@@ -308,6 +365,14 @@ func (u *unpickler) step(op byte) (bool, error) {
 		n, err := u.readUint(width)
 		if err != nil {
 			return false, err
+		}
+		if int64(n) > maxPickleLongBytes {
+			// The bytes are still consumed so the stream stays in step; only
+			// the base conversion is skipped. See maxPickleLongBytes.
+			if err := u.discardN(int64(n)); err != nil {
+				return false, err
+			}
+			return false, u.push(pickleOversizedLong{Bytes: int64(n)})
 		}
 		buf, err := u.readN(int64(n))
 		if err != nil {
@@ -701,7 +766,9 @@ func asString(v any) string {
 	}
 }
 
-// decodeLong reads pickle's little-endian two's complement integer.
+// decodeLong reads pickle's little-endian two's complement integer. Callers
+// must keep buf within maxPickleLongBytes: the String() below is quadratic in
+// its operand's size.
 func decodeLong(buf []byte) any {
 	if len(buf) == 0 {
 		return int64(0)
@@ -722,9 +789,16 @@ func decodeLong(buf []byte) any {
 	return n.String()
 }
 
+// parseBigDecimal reads the text form of a pickled integer. Protocol 0's LONG
+// opcode is a line of digits with no length prefix, so it needs the same
+// ceiling the binary form gets: base-10 to base-2 conversion is quadratic, and
+// a line of a few million digits costs minutes in SetString alone.
 func parseBigDecimal(s string) any {
 	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
 		return n
+	}
+	if len(s) > maxPickleLongBytes {
+		return pickleOversizedLong{Bytes: int64(len(s))}
 	}
 	if n, ok := new(big.Int).SetString(s, 10); ok {
 		return n.String()
