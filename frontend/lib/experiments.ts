@@ -212,8 +212,14 @@ export function getMetrics(
     `/api/v1/experiments/${encodeURIComponent(ns)}/${encodeURIComponent(repo)}/${encodeURIComponent(project)}/metrics`,
     {
       query: {
-        runs: params.runs?.length ? params.runs.join(",") : undefined,
-        keys: params.keys?.length ? params.keys.join(",") : undefined,
+        // Repeated `run=` / `key=` rather than comma-joined `runs=` / `keys=`:
+        // a run named `lr=0.1,bs=32` (or a metric key with a comma in it) was
+        // split into fragments that matched no run at all — and a fragment
+        // that happened to match another run silently plotted a series nobody
+        // selected. `apiFetch` sends a string[] as one key per entry, so each
+        // name travels percent-encoded and arrives byte-for-byte.
+        run: params.runs?.length ? params.runs : undefined,
+        key: params.keys?.length ? params.keys : undefined,
         x: params.x,
         max_points: params.max_points,
       },

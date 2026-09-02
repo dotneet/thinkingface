@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
+import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { chartDataEquals, planLogScale } from "@/lib/chart-scale";
 import { useT } from "@/lib/i18n/client";
 import {
   CHART_THEME_FALLBACKS,
@@ -72,11 +74,17 @@ export function UplotChart({
   const t = useT();
   const containerRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
+  // What a log y axis can actually be handed: uPlot draws a 0 or a negative
+  // value at scaleMin / 10 (below the axis, at a position that is not the
+  // value), and ranges an all-non-positive series from [Infinity, -Infinity],
+  // which paints nothing at all. Masked here, admitted to the reader below.
+  const plan = useMemo(() => planLogScale(data, logScale), [data, logScale]);
+  const plotData = plan.data;
   // Latest x column, read from the setScale hook to decide whether the x
   // scale still spans the full data range. A ref (not the `data` prop
   // closed over at plot-creation time) because data updates are applied via
   // plot.setData() below without recreating the plot/hooks.
-  const dataRef = useRef(data);
+  const dataRef = useRef(plotData);
   // Resolved axis/grid colours for the current theme. uPlot draws on a canvas,
   // and Canvas2D does not resolve CSS custom properties — see lib/theme-colors.
   // Kept in a ref and read through the axis stroke *functions* below, which
@@ -86,6 +94,10 @@ export function UplotChart({
   // `document` does not exist while this renders on the server.
   const themeColorsRef = useRef<ChartThemeColors>(CHART_THEME_FALLBACKS);
   const [isZoomed, setIsZoomed] = useState(false);
+  // The same value the state holds, readable from the data effect below
+  // without adding it to that effect's dependencies (which would re-run it,
+  // and re-running it is exactly what drops the zoom).
+  const isZoomedRef = useRef(false);
 
   // Identity of the plotted series as a single string: swapping run A for run B
   // with the same selection size, or restyling one as the baseline, changes it,
@@ -103,6 +115,10 @@ export function UplotChart({
     themeColorsRef.current = readChartThemeColors();
     const axisStroke = () => themeColorsRef.current.axis;
     const gridStroke = () => themeColorsRef.current.grid;
+    const markZoomed = (zoomed: boolean) => {
+      isZoomedRef.current = zoomed;
+      setIsZoomed(zoomed);
+    };
 
     const width = containerRef.current.clientWidth || 400;
 
@@ -132,7 +148,7 @@ export function UplotChart({
             const min = u.scales.x?.min;
             const max = u.scales.x?.max;
             if (fullMin == null || fullMax == null || min == null || max == null) {
-              setIsZoomed(false);
+              markZoomed(false);
               return;
             }
             // A single distinct x value (one point, or every point sharing an
@@ -140,17 +156,20 @@ export function UplotChart({
             // around that one value, which would otherwise read as "zoomed"
             // from the very first render and never clear.
             if (fullMin === fullMax) {
-              setIsZoomed(false);
+              markZoomed(false);
               return;
             }
             const tolerance = ZOOM_EPSILON * Math.max(1, Math.abs(fullMax - fullMin));
-            setIsZoomed(Math.abs(min - fullMin) > tolerance || Math.abs(max - fullMax) > tolerance);
+            markZoomed(Math.abs(min - fullMin) > tolerance || Math.abs(max - fullMax) > tolerance);
           },
         ],
       },
       scales: {
         x: { time: xIsTime },
-        y: { distr: logScale ? 3 : 1 },
+        // plan.logEnabled, not the prop: a request for log over data with no
+        // positive value at all falls back to linear rather than drawing an
+        // empty chart (the Alert below says so).
+        y: { distr: plan.logEnabled ? 3 : 1 },
       },
       axes: [
         {
@@ -186,7 +205,7 @@ export function UplotChart({
       ],
     };
 
-    const plot = new uPlot(opts, data as uPlot.AlignedData, containerRef.current);
+    const plot = new uPlot(opts, plotData as uPlot.AlignedData, containerRef.current);
     plotRef.current = plot;
 
     const resizeObserver = new ResizeObserver(() => {
@@ -202,10 +221,11 @@ export function UplotChart({
       plotRef.current = null;
     };
     // Recreate on the series signature rather than on `series` itself, whose
-    // array identity changes on every render; `data` is applied by the effect
-    // below instead of rebuilding the plot.
+    // array identity changes on every render; `plotData` is deliberately
+    // absent too — it is applied by the effect below instead of rebuilding
+    // the plot.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [title, xIsTime, logScale, mode, xLabel, yLabel, seriesSignature, height, t, syncKey]);
+  }, [title, xIsTime, plan.logEnabled, mode, xLabel, yLabel, seriesSignature, height, t, syncKey]);
 
   // Follow theme switches (the toggle's `data-theme` attribute, or the OS
   // changing `prefers-color-scheme` while the preference is "system"). Only a
@@ -221,12 +241,31 @@ export function UplotChart({
     [],
   );
 
+  // Apply new points without touching the scales the user chose.
+  //
+  // Two separate hazards, both of which used to clear a drag-zoom on every
+  // unrelated re-render (a keystroke in the metric filter, a tag select, the
+  // 15-second live poll — each of which rebuilds the `data` array):
+  //
+  //  1. an equal-but-new array still counts as an update, so compare by value
+  //     and do nothing when the numbers are the same;
+  //  2. `setData(d)` defaults to `_resetScales: true`, which calls
+  //     autoScaleX() and snaps x back to the full range. While the user is
+  //     zoomed the update goes in with `false` and is committed by redraw(),
+  //     which re-ranges x to the *current* window (and y to what it contains)
+  //     rather than to everything.
   useEffect(() => {
-    dataRef.current = data;
-    if (plotRef.current) {
-      plotRef.current.setData(data as uPlot.AlignedData);
+    const previous = dataRef.current;
+    dataRef.current = plotData;
+    const plot = plotRef.current;
+    if (!plot || chartDataEquals(previous, plotData)) return;
+    if (isZoomedRef.current) {
+      plot.setData(plotData as uPlot.AlignedData, false);
+      plot.redraw();
+      return;
     }
-  }, [data]);
+    plot.setData(plotData as uPlot.AlignedData);
+  }, [plotData]);
 
   // Re-dispatch uPlot's own double-click-to-reset gesture on the plotting
   // area: it already runs the exact reset logic (re-range x, drop the
@@ -250,6 +289,24 @@ export function UplotChart({
         >
           {t("experiments.chart.resetZoom")}
         </Button>
+      )}
+      {/* Below the plot, never above it: a note that appears when the log
+          toggle is flipped must not push the chart (and the Reset zoom button
+          on it) out from under the pointer (DESIGN.md §8). */}
+      {plan.unavailable && (
+        <Alert tone="warning" className="mt-2">
+          {t("experiments.chart.logUnavailable")}
+        </Alert>
+      )}
+      {plan.hiddenPoints > 0 && (
+        <Alert tone="warning" className="mt-2">
+          {t(
+            plan.hiddenPoints === 1
+              ? "experiments.chart.logHiddenPointsOne"
+              : "experiments.chart.logHiddenPointsOther",
+            { count: plan.hiddenPoints },
+          )}
+        </Alert>
       )}
     </div>
   );

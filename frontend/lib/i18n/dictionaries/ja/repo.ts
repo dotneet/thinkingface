@@ -161,9 +161,9 @@ export const repo = {
     producedByRun: "この run から生成",
     // {rev} is the revision (abbreviated) the run recorded.
     producedRevision: "リビジョン {rev}",
-    derivedFromThis: "これから派生",
+    derivedFromThis: "本リポジトリからの派生",
     evaluatedBy: "これで評価",
-    supersededVersions: "これが後継",
+    supersededVersions: "置き換え済みの旧バージョン",
     notFound: "このサーバーには見つかりません",
     fromRun: "run {run} から",
     newVersionTitle: "新しいバージョンがあります",
@@ -425,7 +425,7 @@ export const repo = {
   },
   editor: {
     conflict:
-      "編集中にこのファイルが変更されました。ページを再読み込みして変更を適用し直してください — 現在の編集内容はそのまま残っています。",
+      "編集中にこのファイルが変更されました。ページを再読み込みして変更を適用し直してください — 再読み込みするまでは、今の編集内容はこの画面にそのまま残っています。",
     editAria: "{file} を編集",
     commitMessageLabel: "コミットメッセージ",
     // Not translated, to match the server's default commit message (English).

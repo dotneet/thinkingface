@@ -107,6 +107,25 @@ export function validateNamespaceName(name: string): NamespaceNameError | null {
 }
 
 /**
+ * The `/login?next=…` URL that sends the user back to the page they are on.
+ *
+ * `usePathname()` alone is not that page: it drops the query string, so the
+ * header's "Log in" link used to send someone reading
+ * `/datasets?search=bert&tags=nlp` back to a bare `/datasets` with every
+ * filter cleared. `safeRedirectPath` already preserves `url.search`, so the
+ * only thing missing was passing it in — the caller hands over
+ * `useSearchParams().toString()`.
+ *
+ * `/login` itself never becomes its own `next`, and neither does an empty
+ * pathname (the router has not resolved one yet).
+ */
+export function loginHref(pathname: string | null | undefined, search?: string | null): string {
+  if (!pathname?.startsWith("/") || pathname === "/login") return "/login";
+  const query = search ? (search.startsWith("?") ? search : `?${search}`) : "";
+  return `/login?next=${encodeURIComponent(`${pathname}${query}`)}`;
+}
+
+/**
  * Narrows a caller-supplied `?next=` value to a path on this origin.
  *
  * Prefix checks alone are not enough: browsers follow the WHATWG URL parser,

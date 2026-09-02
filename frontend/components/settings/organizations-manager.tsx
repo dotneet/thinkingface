@@ -57,8 +57,11 @@ export function OrganizationsManager() {
     })();
   }, []);
 
+  // The dialog stays open — with its confirm button reading "Leaving…" —
+  // until the request has finished, and reports its own failure. Clearing the
+  // target first closed it the instant the request left, which also made
+  // `confirming` permanently false.
   async function handleLeave(org: Org) {
-    setConfirmTarget(null);
     setBusy(org.name);
     setActionError(null);
     const result = await removeMember(org.name, username);
@@ -68,6 +71,7 @@ export function OrganizationsManager() {
       setActionError(key ? t(key) : errorMessage(t, result));
       return;
     }
+    setConfirmTarget(null);
     await refresh();
   }
 
@@ -118,8 +122,6 @@ export function OrganizationsManager() {
 
   return (
     <div className="flex flex-col gap-4">
-      {actionError && <Alert tone="negative">{actionError}</Alert>}
-
       <div className="flex flex-col gap-3">
         {orgs.map((org) => (
           <div
@@ -181,6 +183,13 @@ export function OrganizationsManager() {
         ))}
       </div>
 
+      {/* Below the list, not above it: a failed leave reported here used to
+          push every remaining organisation's Leave and Manage controls down by
+          the Alert's height (DESIGN.md §8.1). While the confirmation dialog is
+          still up the failure is shown there instead, where the user is
+          actually looking — not in both places at once. */}
+      {actionError && confirmTarget === null && <Alert tone="negative">{actionError}</Alert>}
+
       <div className="flex flex-wrap gap-2">
         <Link href="/orgs/new" className={buttonClass({ variant: "primary", size: "sm" })}>
           <Plus size={14} />
@@ -205,7 +214,8 @@ export function OrganizationsManager() {
         }
         confirmLabel={t("settings.organizations.leave")}
         confirmingLabel={t("settings.organizations.leaving")}
-        confirming={busy !== null}
+        confirming={busy !== null && confirmTarget !== null}
+        error={confirmTarget !== null ? actionError : null}
       />
     </div>
   );

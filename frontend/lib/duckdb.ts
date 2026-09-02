@@ -102,9 +102,18 @@ async function instantiate(): Promise<AsyncDuckDB> {
     throw new Error("parquet.sql.noWorker");
   }
   const worker = new Worker(bundle.mainWorker);
-  const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING), worker);
-  await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
-  return db;
+  try {
+    const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING), worker);
+    await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+    return db;
+  } catch (err) {
+    // getDatabase() drops the rejected promise so the next attempt starts
+    // over — which is exactly why the worker of the failed attempt has to go
+    // with it. A failing .wasm fetch left one live worker per retry, each
+    // holding its own wasm heap, until the tab was reloaded.
+    worker.terminate();
+    throw err;
+  }
 }
 
 /**
@@ -129,11 +138,23 @@ export async function createParquetSession(
 ): Promise<SqlSession> {
   const db = await getDatabase();
   const tableName = safeName(filePath);
-  registrations.set(tableName, (registrations.get(tableName) ?? 0) + 1);
   // Note: this transfers the buffer to the worker, leaving `data` detached.
   // Callers must not reuse it afterwards.
+  //
+  // Registered *before* the refcount goes up, and the connection is opened
+  // under a rollback: a failure on either side used to leave the count raised
+  // for a session that never existed, so the buffer it named could never be
+  // dropped again and pinned the whole file in wasm memory for the life of
+  // the tab.
   await db.registerFileBuffer(tableName, data);
-  const conn = await db.connect();
+  registrations.set(tableName, (registrations.get(tableName) ?? 0) + 1);
+  let conn: AsyncDuckDBConnection;
+  try {
+    conn = await db.connect();
+  } catch (err) {
+    await release(db, tableName);
+    throw err;
+  }
 
   let closed = false;
   return {
@@ -166,17 +187,24 @@ export async function createParquetSession(
       if (closed) return;
       closed = true;
       await closeQuietly(conn);
-      const remaining = (registrations.get(tableName) ?? 1) - 1;
-      if (remaining > 0) {
-        registrations.set(tableName, remaining);
-        return;
-      }
-      registrations.delete(tableName);
-      // Frees the buffer; leaving it registered would pin the whole file in
-      // wasm memory for the lifetime of the tab.
-      await db.dropFile(tableName).catch(() => {});
+      await release(db, tableName);
     },
   };
+}
+
+/**
+ * Gives up one reference to a registered buffer, freeing it once the last one
+ * goes. Leaving it registered would pin the whole file in wasm memory for the
+ * lifetime of the tab.
+ */
+async function release(db: AsyncDuckDB, tableName: string): Promise<void> {
+  const remaining = (registrations.get(tableName) ?? 1) - 1;
+  if (remaining > 0) {
+    registrations.set(tableName, remaining);
+    return;
+  }
+  registrations.delete(tableName);
+  await db.dropFile(tableName).catch(() => {});
 }
 
 async function closeQuietly(conn: AsyncDuckDBConnection): Promise<void> {

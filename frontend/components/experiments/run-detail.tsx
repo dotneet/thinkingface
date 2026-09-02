@@ -39,6 +39,7 @@ import {
   listRuns,
   updateRunAnnotations,
 } from "@/lib/experiments";
+import { metricsQueryKey } from "@/lib/experiments-query-keys";
 import { formatNumber } from "@/lib/format";
 import { useT } from "@/lib/i18n/client";
 import { splitRunConfig } from "@/lib/run-config";
@@ -163,7 +164,9 @@ export function RunDetail({
   });
 
   const metrics = useQuery({
-    queryKey: ["exp-metrics", ns, repo, project, runName, xMode],
+    // Same helper as the dashboard, so a single-run selection there and this
+    // page share one cache entry instead of drifting apart.
+    queryKey: metricsQueryKey(ns, repo, project, [runName], xMode),
     queryFn: async () => {
       const result = await getMetrics(ns, repo, project, {
         runs: [runName],

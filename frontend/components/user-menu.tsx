@@ -13,8 +13,8 @@ import {
   Webhook,
 } from "lucide-react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { useRef, useState } from "react";
+import { usePathname, useSearchParams } from "next/navigation";
+import { Suspense, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonClass } from "@/components/ui/button";
 import { useOnClickOutside } from "@/hooks/use-on-click-outside";
@@ -22,7 +22,48 @@ import { errorMessage } from "@/lib/api-error-message";
 import { logout } from "@/lib/auth";
 import { useT } from "@/lib/i18n/client";
 import { namespaceHref } from "@/lib/namespace";
+import { loginHref } from "@/lib/validation";
 import type { User } from "@/types/api";
+
+/**
+ * The header's "Log in" link, pointed back at the page the reader is on.
+ *
+ * Split out (and Suspense-wrapped) because of `useSearchParams()`: the hook
+ * opts a route into client-side rendering unless it sits under its own
+ * boundary, which is the same reason `site-header.tsx` wraps `SearchBox` and
+ * `MobileNav`. `UserMenu` itself is not wrapped there, so the boundary lives
+ * here rather than in a file this component does not own. The fallback is the
+ * same link without the `next=`, so nothing moves when it resolves.
+ */
+function LoginLinkWithNext({ label }: { label: string }) {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  // `usePathname()` has no query string of its own, so the params are passed
+  // in separately — otherwise signing in from `/datasets?search=bert&tags=nlp`
+  // returns the reader to a bare `/datasets` with every filter cleared.
+  return (
+    <Link
+      href={loginHref(pathname, searchParams.toString())}
+      className={buttonClass({ variant: "primary" })}
+    >
+      {label}
+    </Link>
+  );
+}
+
+function LoginLink({ label }: { label: string }) {
+  return (
+    <Suspense
+      fallback={
+        <Link href="/login" className={buttonClass({ variant: "primary" })}>
+          {label}
+        </Link>
+      }
+    >
+      <LoginLinkWithNext label={label} />
+    </Suspense>
+  );
+}
 
 export function UserMenu({
   user,
@@ -37,18 +78,9 @@ export function UserMenu({
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
-  const router = useRouter();
-  const pathname = usePathname();
   useOnClickOutside(ref, () => setOpen(false));
 
-  if (!user) {
-    const next = pathname && pathname !== "/login" ? `?next=${encodeURIComponent(pathname)}` : "";
-    return (
-      <Link href={`/login${next}`} className={buttonClass({ variant: "primary" })}>
-        {t("userMenu.login")}
-      </Link>
-    );
-  }
+  if (!user) return <LoginLink label={t("userMenu.login")} />;
 
   async function handleLogout() {
     // Keep the menu open until this resolves: closing first means a failed
@@ -57,13 +89,31 @@ export function UserMenu({
     setLogoutError(null);
     setLoggingOut(true);
     const result = await logout();
-    setLoggingOut(false);
     if (!result.ok) {
+      setLoggingOut(false);
       setLogoutError(errorMessage(t, result));
       return;
     }
     setOpen(false);
-    router.refresh();
+    // A full document load, not `router.refresh()`. `refresh()` re-runs the
+    // Server Components — which is why the header flips back to "Log in" —
+    // but React deliberately *keeps* Client Component state across it, and
+    // every screen under /settings/* is a client component that fetches once
+    // on mount from `useEffect(…, [])`. So the previous user's access tokens,
+    // SSH keys and webhooks stayed on screen, fully readable, after logging
+    // out on a shared machine; only the next write revealed anything was
+    // wrong (401).
+    //
+    // Doing it on the logout path rather than in each manager is deliberate:
+    // replacing the document is the one thing that cannot leave a stale client
+    // cache behind, and it covers every current and future /settings/* screen
+    // at once. `replace` rather than `assign` so the authenticated page is not
+    // one Back press away (bfcache can still restore a page further back in
+    // the history, but every request it then makes answers 401).
+    //
+    // `loggingOut` is deliberately left true: the browser is navigating, and
+    // re-enabling the button first only flashes a live-looking menu.
+    window.location.replace("/");
   }
 
   return (

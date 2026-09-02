@@ -60,40 +60,49 @@ export function NamespaceAvailability({
     };
   }, [trimmed, localError]);
 
-  if (!trimmed) return null;
-
-  if (localError) {
-    return (
-      <p role="status" className="text-xs text-negative">
-        {t(errorKeys[localError])}
-      </p>
-    );
-  }
-
-  if (status === "checking") {
-    return (
-      <p role="status" className="flex items-center gap-1.5 text-xs font-medium text-fg-subtle">
+  let message: React.ReactNode = null;
+  if (!trimmed) {
+    message = null;
+  } else if (localError) {
+    message = <span className="text-xs text-negative">{t(errorKeys[localError])}</span>;
+  } else if (status === "checking") {
+    message = (
+      <span className="flex items-center gap-1.5 text-xs font-medium text-fg-subtle">
+        {/* No `label`: the live region around it already says what is being
+            checked, and a second announcement mixed the primitive's old
+            hardcoded English into the Japanese one. */}
         <Spinner size={12} />
         {t("auth.availability.checking")}
-      </p>
+      </span>
     );
-  }
-
-  if (status === "available") {
-    return (
-      <p role="status" className="text-xs text-positive">
+  } else if (status === "available") {
+    message = (
+      <span className="text-xs text-positive">
         {t("auth.availability.available", { name: trimmed })}
-      </p>
+      </span>
     );
-  }
-
-  if (status === "taken") {
-    return (
-      <p role="status" className="text-xs text-negative">
+  } else if (status === "taken") {
+    message = (
+      <span className="text-xs text-negative">
         {t("auth.availability.taken", { name: trimmed })}
-      </p>
+      </span>
     );
   }
 
-  return null;
+  // Always rendered, at the height of one `text-xs` line (12px × the 1.5
+  // leading globals.css sets), even while empty. This row sits directly above
+  // Email / Password / Sign up, and letting it appear 400ms after typing
+  // stopped pushed all three down mid-reach — DESIGN.md §8.3, "a control that
+  // appears on a condition reserves its space up front". `min-h` rather than a
+  // fixed height so a name long enough to wrap is not clipped.
+  //
+  // The live region is the container, not the message: `role="status"` on an
+  // element that mounts at the same moment its text appears is unreliably
+  // announced, whereas a region that is already in the tree announces every
+  // change to it.
+  return (
+    <div role="status" className="min-h-[1.125rem]">
+      {message}
+    </div>
+  );
 }

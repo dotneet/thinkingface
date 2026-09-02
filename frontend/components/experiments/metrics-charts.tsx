@@ -66,6 +66,28 @@ export function MetricsCharts({
     return map;
   }, [runOrder]);
 
+  // One chart's worth of plot input, built once per data change rather than
+  // once per render. Alignment and smoothing are the expensive part, but the
+  // identity of `data` matters more: UplotChart hands a new array to
+  // uPlot.setData, which re-ranges x and drops whatever the user had zoomed
+  // into. Rebuilding these arrays on every keystroke in the metric filter, on
+  // every tag select and on every 15-second live poll is what made a running
+  // project impossible to zoom (DESIGN.md §8 — the chart is a target too).
+  const charts = useMemo(
+    () =>
+      Array.from(grouped.entries()).map(([key, seriesForKey]) => {
+        const ordered = [...seriesForKey].sort(
+          (a, b) => runOrder.indexOf(a.run) - runOrder.indexOf(b.run),
+        );
+        const aligned = alignSeriesForKey(ordered);
+        const xs = aligned[0] ?? [];
+        const smoothed = aligned.slice(1).map((s) => emaSmooth(s, smoothing));
+        const data: (number | null)[][] = [xs, ...smoothed];
+        return { key, ordered, data };
+      }),
+    [grouped, runOrder, smoothing],
+  );
+
   return (
     <div className="flex flex-col gap-4">
       {hasSystemMetrics && (
@@ -90,37 +112,26 @@ export function MetricsCharts({
         <p className="text-sm text-fg-subtle">{t("experiments.chart.noSeries")}</p>
       ) : (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          {Array.from(grouped.entries()).map(([key, seriesForKey]) => {
-            const ordered = [...seriesForKey].sort(
-              (a, b) => runOrder.indexOf(a.run) - runOrder.indexOf(b.run),
-            );
-            const aligned = alignSeriesForKey(ordered);
-            const xs = aligned[0] ?? [];
-            const ySeries = aligned.slice(1);
-            const smoothed = ySeries.map((s) => emaSmooth(s, smoothing));
-            const data: (number | null)[][] = [xs, ...smoothed];
-
-            return (
-              <div key={key} className="rounded-lg border border-border bg-bg-raised p-3">
-                <UplotChart
-                  title={key}
-                  data={data}
-                  series={ordered.map((s) => ({
-                    label:
-                      s.run === baseline
-                        ? t("experiments.chart.baselineSuffix", { run: s.run })
-                        : s.run,
-                    color: runColor.get(s.run) ?? "#5b8def",
-                    dash: s.run === baseline ? BASELINE_DASH : undefined,
-                    width: s.run === baseline ? 2.5 : undefined,
-                  }))}
-                  xIsTime={xIsTime}
-                  logScale={logScale}
-                  syncKey={syncZoom ? syncId : undefined}
-                />
-              </div>
-            );
-          })}
+          {charts.map(({ key, ordered, data }) => (
+            <div key={key} className="rounded-lg border border-border bg-bg-raised p-3">
+              <UplotChart
+                title={key}
+                data={data}
+                series={ordered.map((s) => ({
+                  label:
+                    s.run === baseline
+                      ? t("experiments.chart.baselineSuffix", { run: s.run })
+                      : s.run,
+                  color: runColor.get(s.run) ?? "#5b8def",
+                  dash: s.run === baseline ? BASELINE_DASH : undefined,
+                  width: s.run === baseline ? 2.5 : undefined,
+                }))}
+                xIsTime={xIsTime}
+                logScale={logScale}
+                syncKey={syncZoom ? syncId : undefined}
+              />
+            </div>
+          ))}
         </div>
       )}
     </div>

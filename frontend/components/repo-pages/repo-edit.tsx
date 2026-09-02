@@ -78,7 +78,11 @@ export async function RepoEdit({
   if (dirResult.ok && !entry && !isNew) notFound();
 
   const trail = [
-    { label: `blob/${rev}`, href: repoTreeHref(kind, ns, name, rev, dirPath.join("/")) },
+    // `tree/`, not `blob/`: this crumb goes to the directory listing the file
+    // lives in, and the label has to say where it goes. Same shape as
+    // repo-viewer.tsx's `viewer/${rev}` — a route name plus the revision, not
+    // a translated string.
+    { label: `tree/${rev}`, href: repoTreeHref(kind, ns, name, rev, dirPath.join("/")) },
     ...dirPath.map((seg, i) => ({
       label: seg,
       href: repoTreeHref(kind, ns, name, rev, dirPath.slice(0, i + 1).join("/")),

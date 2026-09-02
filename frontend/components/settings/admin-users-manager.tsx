@@ -22,6 +22,7 @@ import { ErrorState } from "@/components/ui/error-state";
 import { Checkbox, Field, Input } from "@/components/ui/field";
 import { SearchInput } from "@/components/ui/search-input";
 import { SkeletonLines } from "@/components/ui/skeleton";
+import { SpinnerSlot } from "@/components/ui/spinner";
 import { TimeText } from "@/components/ui/time-text";
 import {
   adminUserErrorKey,
@@ -75,6 +76,11 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
   const [offset, setOffset] = useState(0);
 
   const [actionError, setActionError] = useState<string | null>(null);
+  // A failure from a confirmation dialog is shown *in* that dialog rather than
+  // in the page-level Alert below the table: the dialog is where the user is
+  // looking, and it stays open until the request it fired has finished (see
+  // the handlers).
+  const [dialogError, setDialogError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -229,33 +235,41 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
     setResetError(null);
   }
 
+  // Every handler below keeps its confirmation dialog open — and its confirm
+  // button in the "Working…" state — until the request has actually finished.
+  // Clearing the target first closed the dialog the instant the request left,
+  // which also made `confirming` permanently false: revoking somebody's
+  // credentials looked like nothing had happened at all, and on a slow link
+  // the natural response is to do it again.
   async function handleAdminToggle(target: AdminUser) {
-    setAdminTarget(null);
     setBusy(target.username);
+    setDialogError(null);
     setActionError(null);
     setNotice(null);
     const result = await updateAdminUser(target.username, { is_admin: !target.is_admin });
     setBusy(null);
     if (!result.ok) {
-      setActionError(describe(result));
+      setDialogError(describe(result));
       return;
     }
+    setAdminTarget(null);
     setNotice(t("settings.adminUsers.adminChanged", { username: target.username }));
     await refresh();
   }
 
   async function handleDisableToggle(target: AdminUser) {
     const disabled = !target.disabled;
-    setDisableTarget(null);
     setBusy(target.username);
+    setDialogError(null);
     setActionError(null);
     setNotice(null);
     const result = await setAdminUserDisabled(target.username, disabled);
     setBusy(null);
     if (!result.ok) {
-      setActionError(describe(result));
+      setDialogError(describe(result));
       return;
     }
+    setDisableTarget(null);
     setNotice(
       t(disabled ? "settings.adminUsers.suspendDone" : "settings.adminUsers.restoreDone", {
         username: target.username,
@@ -264,9 +278,12 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
     await refresh();
   }
 
+  // Approving has no dialog (it only grants), so its failure has nowhere to go
+  // but the page-level Alert; putting an account back on hold is confirmed,
+  // and reports into that dialog.
   async function handleApproval(target: AdminUser, approve: boolean) {
-    setHoldTarget(null);
     setBusy(target.username);
+    setDialogError(null);
     setActionError(null);
     setNotice(null);
     const result = await setAdminUserApproval(
@@ -275,9 +292,10 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
     );
     setBusy(null);
     if (!result.ok) {
-      setActionError(describe(result));
+      (approve ? setActionError : setDialogError)(describe(result));
       return;
     }
+    setHoldTarget(null);
     setNotice(
       t(approve ? "settings.adminUsers.approveDone" : "settings.adminUsers.holdDone", {
         username: target.username,
@@ -287,16 +305,17 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
   }
 
   async function handleRevoke(target: AdminUser) {
-    setRevokeTarget(null);
     setBusy(target.username);
+    setDialogError(null);
     setActionError(null);
     setNotice(null);
     const result = await revokeAdminUserCredentials(target.username);
     setBusy(null);
     if (!result.ok) {
-      setActionError(describe(result));
+      setDialogError(describe(result));
       return;
     }
+    setRevokeTarget(null);
     // The listing does not change — nothing on the wire type counts tokens or
     // keys — but it is reloaded anyway so the row cannot be acted on again
     // from a copy taken before somebody else touched the account.
@@ -342,27 +361,6 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
           {t("settings.adminUsers.addUser")}
         </Button>
       </div>
-
-      {actionError && <Alert tone="negative">{actionError}</Alert>}
-      {notice && <Alert tone="positive">{notice}</Alert>}
-
-      {/* A pending account authenticates on nothing at all, so somebody is
-          sitting locked out until an administrator acts. The listing already
-          sorts them to the top; this is what makes the reason visible without
-          reading the badges. Only ever rendered from a successful read, and it
-          counts what is on this page rather than the instance — the endpoint
-          reports no instance-wide pending total, and inventing one from a page
-          would state something the screen does not know (DESIGN.md §9). */}
-      {pendingHere > 0 && (
-        <Alert tone="warning">
-          {t(
-            pendingHere === 1
-              ? "settings.adminUsers.pendingNoticeOne"
-              : "settings.adminUsers.pendingNoticeOther",
-            { count: formatNumber(pendingHere) },
-          )}
-        </Alert>
-      )}
 
       {users === null && !loadError ? (
         <SkeletonLines lines={5} />
@@ -451,7 +449,16 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
                       )}
                     </td>
                     <td className="px-3 py-2">
-                      <div className="flex justify-end gap-2">
+                      <div className="flex items-center justify-end gap-2">
+                        {/* A reserved slot, not `{busy && <Spinner/>}`: it is
+                            the only sign that an action with no dialog
+                            (Approve) is in flight, and it must not shift the
+                            buttons beside it while it appears (DESIGN.md §8). */}
+                        <SpinnerSlot
+                          active={busy === user.username}
+                          size={14}
+                          label={t("settings.adminUsers.working")}
+                        />
                         <Button
                           size="sm"
                           disabled={busy === user.username}
@@ -484,7 +491,10 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
                             <Button
                               size="sm"
                               disabled={busy === user.username}
-                              onClick={() => setHoldTarget(user)}
+                              onClick={() => {
+                                setDialogError(null);
+                                setHoldTarget(user);
+                              }}
                             >
                               <Clock size={13} />
                               {t("settings.adminUsers.hold")}
@@ -499,7 +509,10 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
                             size="sm"
                             variant={user.disabled ? "secondary" : "danger"}
                             disabled={busy === user.username}
-                            onClick={() => setDisableTarget(user)}
+                            onClick={() => {
+                              setDialogError(null);
+                              setDisableTarget(user);
+                            }}
                           >
                             {user.disabled ? <UserCheck size={13} /> : <UserX size={13} />}
                             {user.disabled
@@ -511,7 +524,10 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
                           <Button
                             size="sm"
                             disabled={busy === user.username}
-                            onClick={() => setRevokeTarget(user)}
+                            onClick={() => {
+                              setDialogError(null);
+                              setRevokeTarget(user);
+                            }}
                           >
                             <KeyRound size={13} />
                             {t("settings.adminUsers.revokeCredentials")}
@@ -524,7 +540,10 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
                             size="sm"
                             variant={user.is_admin ? "danger" : "secondary"}
                             disabled={busy === user.username}
-                            onClick={() => setAdminTarget(user)}
+                            onClick={() => {
+                              setDialogError(null);
+                              setAdminTarget(user);
+                            }}
                           >
                             {user.is_admin ? <ShieldOff size={13} /> : <ShieldCheck size={13} />}
                             {busy === user.username
@@ -576,6 +595,34 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
             </Button>
           </div>
         </div>
+      )}
+
+      {/* Every banner on this screen lives *below* the table, and none of them
+          sits between the toolbar and the rows. Approving an account inserts a
+          success Alert and — once the last pending account is gone — removes
+          the waiting-room banner; from above the table each of those moved
+          every row by its own height, so the second click of a run of
+          approvals landed on a different account's Suspend or Revoke
+          credentials (DESIGN.md §8.1). */}
+      {actionError && <Alert tone="negative">{actionError}</Alert>}
+      {notice && <Alert tone="positive">{notice}</Alert>}
+
+      {/* A pending account authenticates on nothing at all, so somebody is
+          sitting locked out until an administrator acts. The listing already
+          sorts them to the top; this is what makes the reason visible without
+          reading the badges. Only ever rendered from a successful read, and it
+          counts what is on this page rather than the instance — the endpoint
+          reports no instance-wide pending total, and inventing one from a page
+          would state something the screen does not know (DESIGN.md §9). */}
+      {pendingHere > 0 && (
+        <Alert tone="warning">
+          {t(
+            pendingHere === 1
+              ? "settings.adminUsers.pendingNoticeOne"
+              : "settings.adminUsers.pendingNoticeOther",
+            { count: formatNumber(pendingHere) },
+          )}
+        </Alert>
       )}
 
       <Dialog
@@ -726,7 +773,10 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
 
       <ConfirmDialog
         open={adminTarget !== null}
-        onClose={() => setAdminTarget(null)}
+        onClose={() => {
+          setAdminTarget(null);
+          setDialogError(null);
+        }}
         onConfirm={() => {
           if (adminTarget) void handleAdminToggle(adminTarget);
         }}
@@ -754,12 +804,16 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
         )}
         confirmingLabel={t("settings.adminUsers.working")}
         confirming={busy !== null && adminTarget !== null}
+        error={dialogError}
       />
 
       {/* Reversible, so a plain yes/no dialog: no typed confirmation. */}
       <ConfirmDialog
         open={disableTarget !== null}
-        onClose={() => setDisableTarget(null)}
+        onClose={() => {
+          setDisableTarget(null);
+          setDialogError(null);
+        }}
         onConfirm={() => {
           if (disableTarget) void handleDisableToggle(disableTarget);
         }}
@@ -787,13 +841,17 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
         )}
         confirmingLabel={t("settings.adminUsers.working")}
         confirming={busy !== null && disableTarget !== null}
+        error={dialogError}
       />
 
       {/* Reversible like suspension, so a plain yes/no dialog — but it does
           revoke the account's sessions, so it is not silent either. */}
       <ConfirmDialog
         open={holdTarget !== null}
-        onClose={() => setHoldTarget(null)}
+        onClose={() => {
+          setHoldTarget(null);
+          setDialogError(null);
+        }}
         onConfirm={() => {
           if (holdTarget) void handleApproval(holdTarget, false);
         }}
@@ -807,13 +865,17 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
         confirmLabel={t("settings.adminUsers.holdConfirm")}
         confirmingLabel={t("settings.adminUsers.working")}
         confirming={busy !== null && holdTarget !== null}
+        error={dialogError}
       />
 
       {/* Irreversible, so it asks for the username to be typed — the same
           bar the repository and run deletions use. */}
       <ConfirmDialog
         open={revokeTarget !== null}
-        onClose={() => setRevokeTarget(null)}
+        onClose={() => {
+          setRevokeTarget(null);
+          setDialogError(null);
+        }}
         onConfirm={() => {
           if (revokeTarget) void handleRevoke(revokeTarget);
         }}
@@ -829,6 +891,7 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
         confirmLabel={t("settings.adminUsers.revokeConfirm")}
         confirmingLabel={t("settings.adminUsers.working")}
         confirming={busy !== null && revokeTarget !== null}
+        error={dialogError}
       />
     </div>
   );

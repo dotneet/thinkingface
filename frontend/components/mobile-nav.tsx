@@ -51,7 +51,10 @@ export function MobileNav() {
             })}
           </nav>
           <div className="mt-3">
-            <SearchBox />
+            {/* Closes the panel like every <Link> above it does: a search
+                navigates without ever firing a link click, so without this the
+                menu stayed open covering its own results. */}
+            <SearchBox onNavigate={() => setOpen(false)} />
           </div>
           <Link
             href="/new"

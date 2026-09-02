@@ -203,9 +203,6 @@ export function AdminNamespacesManager() {
         </p>
       )}
 
-      {actionError && <Alert tone="negative">{actionError}</Alert>}
-      {notice && <Alert tone="positive">{notice}</Alert>}
-
       {rows === null && !loadError ? (
         <SkeletonLines lines={5} />
       ) : rows === null ? (
@@ -314,6 +311,12 @@ export function AdminNamespacesManager() {
           </div>
         </div>
       )}
+
+      {/* Below the table: a quota save reported above it moved every row down
+          by the Alert's height, with the Edit control of the next namespace
+          landing where the pointer already was (DESIGN.md §8.1). */}
+      {actionError && <Alert tone="negative">{actionError}</Alert>}
+      {notice && <Alert tone="positive">{notice}</Alert>}
     </div>
   );
 }

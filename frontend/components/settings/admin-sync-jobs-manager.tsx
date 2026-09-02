@@ -150,13 +150,6 @@ export function AdminSyncJobsManager() {
         </Button>
       </div>
 
-      {actionError && <Alert tone="negative">{actionError}</Alert>}
-      {notice && (
-        <Alert tone="positive">
-          {notice} {t("settings.adminSyncJobs.retryNote")}
-        </Alert>
-      )}
-
       {jobs === null && !loadError ? (
         <SkeletonLines lines={5} />
       ) : jobs === null ? (
@@ -278,6 +271,16 @@ export function AdminSyncJobsManager() {
             </Button>
           </div>
         </div>
+      )}
+
+      {/* Below the table, never above it: a Retry result inserted here used to
+          push every remaining row down by the Alert's height, right as the
+          administrator was working down a list of failures (DESIGN.md §8.1). */}
+      {actionError && <Alert tone="negative">{actionError}</Alert>}
+      {notice && (
+        <Alert tone="positive">
+          {notice} {t("settings.adminSyncJobs.retryNote")}
+        </Alert>
       )}
     </div>
   );

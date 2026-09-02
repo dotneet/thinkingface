@@ -52,11 +52,14 @@ export function CellModal({
         headerAction={image.path ? <CopyButton value={image.path} /> : undefined}
       >
         <div className="flex flex-col items-center gap-3 p-4">
+          {/* No referrer for a third-party URL the dataset chose — see
+              ImageSource.external in lib/cell-value.ts. */}
           {/* eslint-disable-next-line @next/next/no-img-element -- next/image cannot optimise a data: URL, which is what an inlined `datasets` Image column is. */}
           <img
             src={image.src}
             alt={alt}
             decoding="async"
+            referrerPolicy={image.external ? "no-referrer" : undefined}
             className="max-h-[70vh] max-w-full rounded border border-border object-contain"
           />
           <div className="flex flex-wrap items-center justify-center gap-3 font-mono text-xs font-medium text-fg-subtle">

@@ -43,6 +43,10 @@ export function OrgMembersManager({
   const [offset, setOffset] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // A failed removal is reported inside the confirmation dialog, which stays
+  // open until the request finishes; the page-level Alert below the table
+  // carries the failures that have no dialog (a role change).
+  const [dialogError, setDialogError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   // Member whose removal is pending confirmation in the ConfirmDialog.
   const [confirmTarget, setConfirmTarget] = useState<OrgMember | null>(null);
@@ -128,17 +132,22 @@ export function OrgMembersManager({
     await refresh();
   }
 
+  // The dialog stays open — with its confirm button in the "Removing…" state —
+  // until the request has actually finished. Clearing the target first closed
+  // it the instant the request left, which also made `confirming` permanently
+  // false: the removal ran with nothing on screen to say so.
   async function handleRemove(member: OrgMember) {
-    setConfirmTarget(null);
     setBusy(member.username);
+    setDialogError(null);
     setActionError(null);
     const result = await removeMember(org, member.username);
     setBusy(null);
     if (!result.ok) {
       const key = orgErrorKey(result);
-      setActionError(key ? t(key) : errorMessage(t, result));
+      setDialogError(key ? t(key) : errorMessage(t, result));
       return;
     }
+    setConfirmTarget(null);
     await refresh();
   }
 
@@ -207,8 +216,6 @@ export function OrgMembersManager({
             right before the retry click (DESIGN.md §8). */}
         {addError && <Alert tone="negative">{addError}</Alert>}
       </form>
-
-      {actionError && <Alert tone="negative">{actionError}</Alert>}
 
       {members === null && !loadError ? (
         <SkeletonLines lines={4} />
@@ -289,7 +296,10 @@ export function OrgMembersManager({
                       variant="danger"
                       size="sm"
                       disabled={busy === member.username}
-                      onClick={() => setConfirmTarget(member)}
+                      onClick={() => {
+                        setDialogError(null);
+                        setConfirmTarget(member);
+                      }}
                     >
                       {busy === member.username
                         ? t("org.settings.members.removing")
@@ -337,9 +347,18 @@ export function OrgMembersManager({
         </div>
       )}
 
+      {/* Below the table, not above it: a failed role change or removal
+          reported here used to push every remaining row down by the Alert's
+          height, right where the next Role select or Remove button was
+          (DESIGN.md §8.1). */}
+      {actionError && <Alert tone="negative">{actionError}</Alert>}
+
       <ConfirmDialog
         open={confirmTarget !== null}
-        onClose={() => setConfirmTarget(null)}
+        onClose={() => {
+          setConfirmTarget(null);
+          setDialogError(null);
+        }}
         onConfirm={() => {
           if (confirmTarget) void handleRemove(confirmTarget);
         }}
@@ -356,7 +375,8 @@ export function OrgMembersManager({
         }
         confirmLabel={t("org.settings.members.remove")}
         confirmingLabel={t("org.settings.members.removing")}
-        confirming={busy !== null}
+        confirming={busy !== null && confirmTarget !== null}
+        error={dialogError}
       />
     </div>
   );

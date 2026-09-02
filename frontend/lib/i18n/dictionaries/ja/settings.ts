@@ -56,6 +56,10 @@ export const settings = {
     confirmDeleteTitle: "アクセストークンを削除しますか？",
     confirmDelete:
       "このアクセストークンを削除しますか？ このトークンを使用しているものは動作しなくなります。",
+    // 複数トークンがあると「このアクセストークン」ではどれか分からないため、
+    // 対象名を明示する。
+    confirmDeleteNamed:
+      "アクセストークン「{name}」を削除しますか？ このトークンを使用しているものは動作しなくなります。",
     loginRequiredTitle: "ログインが必要です",
     loginRequiredMessage: "アクセストークンの表示・管理にはログインが必要です。",
     login: "ログイン",
@@ -207,12 +211,12 @@ export const settings = {
     },
     repoDeleted: { label: "リポジトリの削除", hint: "リポジトリが削除された" },
     repoMoved: {
-      label: "リポジトリの移動",
-      hint: "リポジトリの名前変更または別の namespace への移譲が完了した",
+      label: "リポジトリの移管",
+      hint: "リポジトリの名前変更または別の namespace への移管が完了した",
     },
     repoTransferRequested: {
-      label: "リポジトリ移譲のリクエスト",
-      hint: "この namespace への移譲リクエストが承認待ちになった",
+      label: "リポジトリ移管のリクエスト",
+      hint: "この namespace への移管リクエストが承認待ちになった",
     },
     repoArchived: { label: "リポジトリのアーカイブ", hint: "リポジトリが読み取り専用になった" },
     repoUnarchived: {
@@ -337,7 +341,7 @@ export const settings = {
     addUser: "ユーザーを追加",
     addTitle: "ユーザーを追加",
     addDescription:
-      "このインスタンスでセルフサービスのサインアップが有効かどうかに関係なく、アカウントを直接作成します。パスワードは別の手段で本人に伝え、Settings → Account から本人に変更してもらってください。",
+      "このインスタンスでセルフサービスのサインアップが有効かどうかに関係なく、アカウントを直接作成します。パスワードは別の手段で本人に伝え、設定 → アカウント から本人に変更してもらってください。",
     addUsernameLabel: "ユーザー名",
     addUsernamePlaceholder: "例: dana",
     addUsernameHint: "これがその人の名前空間（dana/*）になり、後から変更できません。",
@@ -423,7 +427,7 @@ export const settings = {
       selfPending:
         "自分自身のアカウントを承認待ちに戻すことはできません。別の管理者に依頼してください。",
       selfRevoke:
-        "自分のトークンと SSH 鍵は Settings → Access tokens と Settings → SSH keys から失効してください。",
+        "自分のトークンと SSH 鍵は 設定 → アクセストークン と 設定 → SSH キー から失効してください。",
       sessionRequired: "セッションの有効期限が切れました。もう一度サインインしてください。",
       userNotFound: "そのユーザー名のアカウントはありません。",
       permissionDenied: "この操作を行う権限がありません。",
@@ -482,7 +486,7 @@ export const settings = {
     colQuota: "上限",
     colActions: "操作",
     kindUser: "アカウント",
-    kindOrg: "Organization",
+    kindOrg: "組織",
     unlimited: "無制限",
     inherited: "インスタンス既定値",
     overQuota: "上限超過",

@@ -65,6 +65,11 @@ export function SqlConsole({
   const [initError, setInitError] = useState<string | null>(null);
   const [sql, setSql] = useState("");
   const [result, setResult] = useState<SqlResult | null>(null);
+  // Which run produced `result`. Counted rather than derived from the query
+  // text: re-running the same SQL still replaces every row in the table (a
+  // `random()` or `LIMIT`-less query need not repeat itself), and a counter
+  // cannot collide the way a query string could. Feeds `scrollResetKey` below.
+  const [resultRun, setResultRun] = useState(0);
   const [queryError, setQueryError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const sessionRef = useRef<SqlSession | null>(null);
@@ -120,6 +125,7 @@ export function SqlConsole({
     setQueryError(null);
     try {
       setResult(withSchemaFeatures(await session.query(sql), schemaColumns));
+      setResultRun((n) => n + 1);
     } catch (err) {
       // Drop the previous result rather than leaving it on screen: its row
       // count/timing badge and table would otherwise sit next to the new
@@ -238,7 +244,18 @@ export function SqlConsole({
           description={t("parquet.sql.noRowsDescription")}
         />
       ) : (
-        <DataTable columns={result.columns} rows={result.rows} />
+        <DataTable
+          columns={result.columns}
+          rows={result.rows}
+          // Every run replaces the rows wholesale, so the box scrolls back to
+          // the top: a result up to SQL_MAX_RESULT_ROWS rows tall is far
+          // taller than the box, and re-running while scrolled down otherwise
+          // opened the new result part-way through it, with its first rows
+          // already scrolled past (DESIGN.md §8 — the rows the reader is
+          // looking at must not silently change under a scroll position that
+          // no longer means anything). Same reason as the Rows tab's paging.
+          scrollResetKey={resultRun}
+        />
       )}
 
       {queryError && (

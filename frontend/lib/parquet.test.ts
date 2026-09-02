@@ -57,19 +57,31 @@ describe("getParquetRows", () => {
     });
     const [path, opts] = lastCall();
     expect(path).toBe("/api/v1/parquet/dataset/acme/squad/rows/main/a.parquet");
-    expect(opts.query).toEqual({ offset: 100, limit: 50, columns: undefined });
+    expect(opts.query).toEqual({ offset: 100, limit: 50, column: undefined });
   });
 
-  it("joins the requested columns with commas", async () => {
+  it("sends the requested columns as a repeated key, never comma-joined", async () => {
     await getParquetRows("dataset", "acme", "squad", "main", ["a.parquet"], {
       columns: ["id", "text"],
     });
-    expect(lastCall()[1].query?.columns).toBe("id,text");
+    expect(lastCall()[1].query?.column).toEqual(["id", "text"]);
+    expect(lastCall()[1].query?.columns).toBeUndefined();
   });
 
-  it("omits the columns parameter when the list is empty", async () => {
+  // A comma-joined list is ambiguous the moment a column name contains a
+  // comma, and the server trimmed each piece, so a leading space was lost
+  // too: both produced names that match nothing and an endlessly failing
+  // Rows tab.
+  it("keeps a column name containing a comma or surrounding spaces intact", async () => {
+    await getParquetRows("dataset", "acme", "squad", "main", ["a.parquet"], {
+      columns: ["height,cm", " age", "text"],
+    });
+    expect(lastCall()[1].query?.column).toEqual(["height,cm", " age", "text"]);
+  });
+
+  it("omits the column parameter when the list is empty", async () => {
     await getParquetRows("dataset", "acme", "squad", "main", ["a.parquet"], { columns: [] });
-    expect(lastCall()[1].query?.columns).toBeUndefined();
+    expect(lastCall()[1].query?.column).toBeUndefined();
   });
 
   it("keeps an explicit zero offset distinguishable from an absent one", async () => {

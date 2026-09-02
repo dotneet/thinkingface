@@ -2,6 +2,7 @@ import { readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  loginHref,
   RESERVED_NAMESPACE_NAMES,
   safeRedirectPath,
   validateName,
@@ -161,5 +162,46 @@ describe("validateNamespaceName", () => {
     expect(missing, `app/ route(s) not in RESERVED_NAMESPACE_NAMES: ${missing.join(", ")}`).toEqual(
       [],
     );
+  });
+});
+
+describe("loginHref", () => {
+  it("carries the query string of the page the user is on", () => {
+    // The header's "Log in" link built this from usePathname() alone, which
+    // has no search params: someone reading a filtered listing came back to
+    // an unfiltered one after signing in.
+    expect(loginHref("/datasets", "search=bert&tags=nlp&sort=downloads")).toBe(
+      "/login?next=%2Fdatasets%3Fsearch%3Dbert%26tags%3Dnlp%26sort%3Ddownloads",
+    );
+  });
+
+  it("accepts useSearchParams().toString() with or without a leading ?", () => {
+    expect(loginHref("/models", "?search=bert")).toBe(loginHref("/models", "search=bert"));
+  });
+
+  it("omits next= when there is no query string", () => {
+    expect(loginHref("/settings/tokens")).toBe("/login?next=%2Fsettings%2Ftokens");
+    expect(loginHref("/settings/tokens", "")).toBe("/login?next=%2Fsettings%2Ftokens");
+    expect(loginHref("/settings/tokens", null)).toBe("/login?next=%2Fsettings%2Ftokens");
+  });
+
+  it("never points /login at itself, or at a pathname the router has not resolved", () => {
+    expect(loginHref("/login", "next=%2Fdatasets")).toBe("/login");
+    expect(loginHref(null)).toBe("/login");
+    expect(loginHref("")).toBe("/login");
+  });
+
+  it("round-trips through safeRedirectPath with the query intact", () => {
+    const href = loginHref("/datasets", "search=bert&tags=nlp");
+    const next = new URL(href, "http://redirect.invalid").searchParams.get("next");
+    expect(safeRedirectPath(next)).toBe("/datasets?search=bert&tags=nlp");
+  });
+
+  it("cannot smuggle another origin into next=", () => {
+    // Defence in depth: the value is caller-controlled only through the
+    // router, but safeRedirectPath is what actually enforces this.
+    const href = loginHref("//evil.example/path");
+    const next = new URL(href, "http://redirect.invalid").searchParams.get("next");
+    expect(safeRedirectPath(next)).toBe("/");
   });
 });

@@ -118,6 +118,10 @@ export function TokensManager() {
     await refresh();
   }
 
+  // The row the confirmation dialog is about, so it can name the token instead
+  // of asking about "this access token" on a screen showing several.
+  const confirmDeleteToken = tokens?.find((token) => token.id === confirmDeleteId);
+
   return (
     <div className="flex flex-col gap-6">
       {!needsLogin && (
@@ -274,7 +278,13 @@ export function TokensManager() {
         onClose={() => setConfirmDeleteId(null)}
         onConfirm={handleDelete}
         title={t("settings.tokens.confirmDeleteTitle")}
-        description={<p className="text-sm text-fg-muted">{t("settings.tokens.confirmDelete")}</p>}
+        description={
+          <p className="text-sm text-fg-muted">
+            {confirmDeleteToken
+              ? t("settings.tokens.confirmDeleteNamed", { name: confirmDeleteToken.name })
+              : t("settings.tokens.confirmDelete")}
+          </p>
+        }
         confirmLabel={t("settings.tokens.delete")}
         confirmingLabel={t("settings.tokens.deleting")}
         confirming={deletingId !== null}

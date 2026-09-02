@@ -119,6 +119,21 @@ describe("markdownSanitizeSchema", () => {
       expect(html).toContain("https://x.test/p.png");
     });
 
+    it("drops srcset, the one URL attribute nothing resolves or protocol-checks", () => {
+      // react-markdown's urlTransform only rewrites html-url-attributes
+      // (src / href / poster / …), and the protocol allowlist checks a single
+      // URL, not a candidate list — so a surviving `srcset` would reach the
+      // DOM unresolved and unexamined. `<picture>` falls back to the nested
+      // `<img>`, which gets both.
+      const html = render(
+        '<source media="(min-width: 800px)" srcset="./wide.png 2x" src="./wide.png" type="image/png">',
+      );
+      expect(html).not.toContain("srcset");
+      expect(html).not.toContain("srcSet");
+      expect(html).toContain("media");
+      expect(html).toContain("./wide.png");
+    });
+
     it("keeps the math classes rehype-katex looks for", () => {
       // remark-math emits these; rehype-katex runs after sanitising, so if the
       // classes were stripped here no formula would ever be typeset.
@@ -150,6 +165,18 @@ describe("markdownSanitizeSchema", () => {
       expect(html).toContain('id="user-content-fnref-1"');
       expect(html).toContain('id="footnote-label"');
       expect(html).not.toContain("user-content-user-content");
+    });
+
+    it("keeps sr-only on the footnote heading, which is meant to be invisible", () => {
+      // The default schema already allows `class="sr-only"` on h2; adding the
+      // footnote id used to *replace* that entry, so GFM's visually hidden
+      // "Footnotes" heading showed up as an ordinary heading in the card.
+      const html = render(
+        '<section class="footnotes"><h2 class="sr-only" id="footnote-label">Footnotes</h2>' +
+          '<li id="user-content-fn-1">note</li></section>',
+      );
+      expect(html).toContain('className="sr-only"');
+      expect(html).toContain('id="footnote-label"');
     });
 
     it("drops author-supplied ids (DOM clobbering), on any element", () => {
