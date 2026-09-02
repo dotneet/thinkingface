@@ -5,6 +5,21 @@ configuring an instance. The authoritative source is `.env.example` at the repos
 — copy it to `.env` and adjust. Values below are the defaults the server falls back to when
 a variable is unset.
 
+!!! note "How `.env` reaches the containers under `docker compose`"
+    `docker-compose.yml`'s `api` service loads `.env` two different ways at once: an
+    `env_file:` entry reads it directly, and its `environment:` block also sets most of the
+    same keys again, each as a `${VAR:-default}` expansion of the same top-level `.env`
+    (which `docker compose` auto-loads for variable substitution, independently of
+    `env_file:`). Where both define the same key, **`environment:` wins over `env_file:`**,
+    so it's that second, `${VAR:-default}`-expanded layer that actually makes setting a
+    value in `.env` take effect — a key present only via `env_file:` and not mirrored into
+    `environment:` would be silently shadowed by nothing, which is why every tunable key is
+    mirrored. A small number of settings (`GIT_ROOT`, `TF_GIT_HOOKS_PATH`) are hardcoded in
+    `docker-compose.yml`'s `environment:` block as bare literals instead of
+    `${VAR:-default}`, since they're tied to that file's own volume mount and baked-in image
+    path rather than meant to be tuned per instance — setting them in `.env` has no effect
+    under `make up` / `make up-sqlite`.
+
 !!! warning "Change these before exposing an instance to anyone else"
     `TF_ADMIN_PASSWORD` and `TF_SESSION_SECRET` both ship with public, well-known defaults
     (`admin` and a fixed development string, respectively). Leaving either one unset is fine
@@ -37,9 +52,9 @@ a variable is unset.
 | `GCS_BUCKET` | Target bucket name. | `thinkingface` | |
 | `GCS_PREFIX` | Optional key prefix inside the bucket, for sharing one bucket across environments. | *(empty)* | Leading/trailing slashes are stripped. |
 | `STORAGE_EMULATOR_HOST` | Address of the fake-gcs-server emulator. | *(empty)* | Required when `STORAGE_DRIVER=gcs-emulator`; startup fails without it. Not used, and should be left unset, with `STORAGE_DRIVER=gcs`. |
-| `TF_SIGNED_URL_TTL` | Floor of how long a signed GCS URL (LFS transfer, direct download) stays valid. The actual lifetime is derived from the object's size and clamped into `[TF_SIGNED_URL_TTL, TF_SIGNED_URL_MAX_TTL]`, so this mainly governs small transfers. | `1h` | Only meaningful with `STORAGE_DRIVER=gcs` — the emulator cannot verify signed URLs, so that mode proxies bytes through the server instead. |
-| `TF_SIGNED_URL_MAX_TTL` | Ceiling of the same clamp, for large transfers. | `12h` | Same `STORAGE_DRIVER=gcs`-only caveat as `TF_SIGNED_URL_TTL`. |
-| `TF_DEFAULT_STORAGE_QUOTA_BYTES` | Storage a namespace may use before uploads are refused, applied to every namespace without a quota of its own. `0` means unlimited. **It counts Git LFS objects only** — the same figure the storage page reports. A file pushed as an ordinary git object is still published to the bucket and is neither counted nor capped, so a repository whose `.gitattributes` does not route large files through LFS can exceed the intent of the quota. | `0` | Enforced when an LFS upload is requested: every upload object in a batch that would exceed the quota comes back with the per-object error `507` the LFS batch protocol defines (inside a `200`, which is how that protocol reports per-object failures), and `git push` / `huggingface_hub` surface its message. Per-namespace overrides are set by a site administrator under **Settings → Storage quotas**; lowering a quota never deletes anything, it refuses the next upload. |
+| `TF_SIGNED_URL_TTL` | Floor of how long a signed GCS URL (LFS transfer, direct download) stays valid. The actual lifetime is derived from the object's size and clamped into `[TF_SIGNED_URL_TTL, TF_SIGNED_URL_MAX_TTL]`, so this mainly governs small transfers. | `1h` | Only meaningful with `STORAGE_DRIVER=gcs` — the emulator cannot verify signed URLs, so that mode proxies bytes through the server instead. Must be positive: startup fails on a zero or negative value, since it would otherwise mint URLs that are already expired the moment they're handed out, with no error to say so. |
+| `TF_SIGNED_URL_MAX_TTL` | Ceiling of the same clamp, for large transfers. | `12h` | Same `STORAGE_DRIVER=gcs`-only caveat as `TF_SIGNED_URL_TTL`. Must not be negative, and — when set to a positive value — must not be shorter than `TF_SIGNED_URL_TTL`; either violation fails startup. `0` (or any non-positive value) instead means "no ceiling," leaving only the provider's own signing limit as the bound. |
+| `TF_DEFAULT_STORAGE_QUOTA_BYTES` | Storage a namespace may use before uploads are refused, applied to every namespace without a quota of its own. `0` means unlimited. **It counts Git LFS objects only** — the same figure the storage page reports. A file pushed as an ordinary git object is still published to the bucket and is neither counted nor capped, so a repository whose `.gitattributes` does not route large files through LFS can exceed the intent of the quota. | `0` | Enforced when an LFS upload is requested: every upload object in a batch that would exceed the quota comes back with the per-object error `507` the LFS batch protocol defines (inside a `200`, which is how that protocol reports per-object failures), and `git push` / `huggingface_hub` surface its message. Per-namespace overrides are set by a site administrator under **Settings → Storage quotas**; lowering a quota never deletes anything, it refuses the next upload. **Deleting a file, replacing it, or deleting a whole ref does *not* reduce usage**: once a commit has ever named an LFS object, its link is kept for as long as the repository exists, so that object stays retrievable at any historical revision (`git checkout <old sha>`, `git lfs fetch --all`, `resolve` at an old ref) — the same guarantee `git clone` gives you. The only links ever released are ones no commit ever named at all: an LFS transfer that completed but whose commit never arrived (an interrupted `tf up` or `huggingface_hub` upload), and only after a roughly 24h grace period (`PruneRepoLFSLinks` in `backend/internal/store/files.go`). The only ways to actually shrink usage are deleting the whole repository, or rewriting history to drop the commits that reference the object and then running `thinkingface gc` — which is not available at all in SQLite mode, see [Deployment](deployment.md#choosing-a-database-backend). |
 
 ## Database
 
@@ -122,7 +137,7 @@ git clone ssh://git@localhost:2222/admin/imdb-reviews.git
 
 | Variable | What it does | Default | Notes |
 |---|---|---|---|
-| `NEXT_PUBLIC_API_URL` | The API base URL the **browser** uses. Baked into the client bundle at build/runtime. | `http://localhost:8080` | Must be an address the browser itself can reach — not the internal Compose network name. |
+| `NEXT_PUBLIC_API_URL` | The API base URL the **browser** uses. Compiled into the client bundle at `docker build` time — it is *not* read from the container's environment at startup, so a runtime `environment:` entry for it has no effect on the browser bundle (Compose also passes it as a build `arg` for exactly this reason). | `http://localhost:8080` | Must be an address the browser itself can reach — not the internal Compose network name. Changing `.env` and re-running `docker compose up -d` alone does **not** pick up a new value: rebuild the image first with `docker compose up -d --build web`. |
 | `API_URL` | The API base URL Next.js **Server Components and route handlers** use, from inside the container. | *(unset — falls back to `NEXT_PUBLIC_API_URL`)* | Not listed in `.env.example`: `docker-compose.yml` sets it directly to `http://api:8080` in the `web` service's environment, since it is an internal, service-to-service address rather than something an operator tunes per deployment. Set it directly on the container if you run the frontend outside of this Compose file. |
 
 !!! note "Why two API URLs?"

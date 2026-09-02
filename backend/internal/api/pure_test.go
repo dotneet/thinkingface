@@ -18,35 +18,38 @@ import (
 func TestParseRange(t *testing.T) {
 	const size = int64(1000)
 	tests := []struct {
-		name       string
-		header     string
-		wantOffset int64
-		wantLength int64
-		wantOK     bool
+		name        string
+		header      string
+		wantOffset  int64
+		wantLength  int64
+		wantVerdict rangeVerdict
 	}{
-		{"simple range", "bytes=0-99", 0, 100, true},
-		{"open-ended range", "bytes=100-", 100, -1, true},
-		{"suffix range last 50 bytes", "bytes=-50", 950, 50, true},
-		{"suffix range larger than size clamps", "bytes=-5000", 0, size, true},
-		{"start beyond size is invalid", "bytes=1000-1050", 0, -1, false},
-		{"start equal to size is invalid", "bytes=1000-", 0, -1, false},
-		{"end clamped to size-1", "bytes=990-2000", 990, 10, true},
-		{"multiple ranges rejected", "bytes=0-99,200-299", 0, -1, false},
-		{"missing bytes= prefix", "0-99", 0, -1, false},
-		{"garbage", "not-a-range", 0, -1, false},
-		{"empty header", "", 0, -1, false},
-		{"end before start invalid", "bytes=100-50", 0, -1, false},
-		{"non-numeric start", "bytes=abc-100", 0, -1, false},
-		{"non-numeric end", "bytes=0-abc", 0, -1, false},
-		{"negative suffix length zero invalid", "bytes=-0", 0, -1, false},
+		{"simple range", "bytes=0-99", 0, 100, rangePartial},
+		{"open-ended range", "bytes=100-", 100, -1, rangePartial},
+		{"suffix range last 50 bytes", "bytes=-50", 950, 50, rangePartial},
+		{"suffix range larger than size clamps", "bytes=-5000", 0, size, rangePartial},
+		// Past the end is 416, not a whole-body 200: a resumed download that
+		// already holds the file would otherwise append a second copy of it.
+		{"start beyond size is unsatisfiable", "bytes=1000-1050", 0, -1, rangeUnsatisfiable},
+		{"start equal to size is unsatisfiable", "bytes=1000-", 0, -1, rangeUnsatisfiable},
+		{"end clamped to size-1", "bytes=990-2000", 990, 10, rangePartial},
+		{"multiple ranges rejected", "bytes=0-99,200-299", 0, -1, rangeNone},
+		{"missing bytes= prefix", "0-99", 0, -1, rangeNone},
+		{"garbage", "not-a-range", 0, -1, rangeNone},
+		{"empty header", "", 0, -1, rangeNone},
+		{"end before start invalid", "bytes=100-50", 0, -1, rangeNone},
+		{"non-numeric start", "bytes=abc-100", 0, -1, rangeNone},
+		{"non-numeric end", "bytes=0-abc", 0, -1, rangeNone},
+		{"negative start invalid", "bytes=-1-5", 0, -1, rangeNone},
+		{"negative suffix length zero invalid", "bytes=-0", 0, -1, rangeNone},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			offset, length, ok := parseRange(tt.header, size)
-			if ok != tt.wantOK {
-				t.Fatalf("parseRange(%q, %d) ok = %v, want %v (offset=%d length=%d)", tt.header, size, ok, tt.wantOK, offset, length)
+			offset, length, verdict := parseRange(tt.header, size)
+			if verdict != tt.wantVerdict {
+				t.Fatalf("parseRange(%q, %d) verdict = %v, want %v (offset=%d length=%d)", tt.header, size, verdict, tt.wantVerdict, offset, length)
 			}
-			if !ok {
+			if verdict != rangePartial {
 				return
 			}
 			if offset != tt.wantOffset {
@@ -399,4 +402,69 @@ func TestNormalizeNote(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ------------------------------------------------ handler deadline exemptions
+
+// The handler deadline is a bound on requests whose cost the request itself
+// describes. Two kinds of route are exempt, and each has to stay exactly as
+// wide as its reason: streamingRoute for bodies that are streamed or
+// arbitrarily large, cascadeDeleteRoute for the deletes whose cost is the
+// amount of data stored (a repository's whole file index and every metric
+// point under it) rather than anything in the request. A minute is not a
+// bound there, it is a ceiling on how much data may ever be deleted.
+func TestCascadeDeleteRoute(t *testing.T) {
+	tests := []struct {
+		method, path string
+		want         bool
+	}{
+		{"DELETE", "/api/v1/repos/models/alice/bert", true},
+		{"DELETE", "/api/v1/repos/datasets/alice/squad", true},
+		{"DELETE", "/api/repos/delete", true},
+		{"DELETE", "/api/v1/experiments/alice/exp/proj/runs/run-1", true},
+
+		// Same prefixes, but a single-row write in every case.
+		{"DELETE", "/api/v1/repos/models/alice/bert/archive", false},
+		{"DELETE", "/api/v1/repos/models/alice/bert/transfer", false},
+		{"DELETE", "/api/v1/experiments/alice/exp/proj/runs/run-1/artifacts", false},
+		// The exemption is for the delete, not for the route.
+		{"GET", "/api/v1/repos/models/alice/bert", false},
+		{"PATCH", "/api/v1/repos/models/alice/bert", false},
+		{"POST", "/api/v1/experiments/alice/exp/proj/log", false},
+		// Nothing else is exempt on this ground.
+		{"DELETE", "/api/v1/tokens/3", false},
+		{"DELETE", "/api/v1/webhooks/3", false},
+		{"DELETE", "/api/v1/orgs/acme", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			r := httptest.NewRequest(tt.method, tt.path, nil)
+			if got := cascadeDeleteRoute(r); got != tt.want {
+				t.Errorf("cascadeDeleteRoute(%s %s) = %v, want %v", tt.method, tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// boundHandlerTime must consult both exemptions, not just the streaming one.
+func TestBoundHandlerTime_ExemptsCascadeDeletes(t *testing.T) {
+	var timed bool
+	h := boundHandlerTime(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// TimeoutHandler hands the handler a ResponseWriter of its own, so
+		// the wrapper is detectable without waiting a minute for it.
+		_, plain := w.(*httptest.ResponseRecorder)
+		timed = !plain
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	check := func(method, path string, wantTimed bool) {
+		t.Helper()
+		timed = false
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(method, path, nil))
+		if timed != wantTimed {
+			t.Errorf("%s %s: timed = %v, want %v", method, path, timed, wantTimed)
+		}
+	}
+	check("GET", "/api/v1/repos", true)
+	check("DELETE", "/api/v1/repos/models/alice/bert", false)
+	check("GET", "/alice/bert/resolve/main/config.json", false)
 }

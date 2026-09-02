@@ -88,7 +88,9 @@ export function ParquetViewer({
       path.join("/"),
       offset,
       limit,
-      debouncedColumnNames.join(","),
+      // JSON, not a comma-join: a column literally named `a,b` would collide
+      // with the pair `a` + `b` in the cache key.
+      JSON.stringify(debouncedColumnNames),
     ],
     queryFn: async () => {
       const result = await getParquetRows(kind, ns, name, rev, path, {
@@ -283,7 +285,17 @@ export function ParquetViewer({
               ) : rows.length === 0 && !isFetching ? (
                 <EmptyState icon={Database} title={t("parquet.viewer.noRowsTitle")} />
               ) : (
-                <DataTable columns={columns} rows={rows} />
+                <DataTable
+                  columns={columns}
+                  rows={rows}
+                  // A new page is a different set of rows, so the box scrolls
+                  // back to the top: a 100-row page is taller than the box,
+                  // and paging while scrolled down otherwise opened the next
+                  // page part-way through it (DESIGN.md §8 — the rows the
+                  // reader is looking at must not silently change under a
+                  // scroll position that no longer means anything).
+                  scrollResetKey={`${offset}:${limit}`}
+                />
               )}
             </>
           )}

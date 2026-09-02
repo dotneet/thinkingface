@@ -5,7 +5,7 @@ Organization は、チームのための共有ネームスペースです。リ�
 メンバーの管理方法、そして `huggingface_hub` から見た Organization リポジトリの振る舞いについて
 説明します。
 
-## Users and organizations share one namespace { #users-and-organizations-share-one-namespace }
+## Organization とユーザーは同じネームスペースを共有する { #users-and-organizations-share-one-namespace }
 
 ネームスペースは 1 つしかありません。`admin`（ユーザー）と `acme`（Organization）は同じ種類の
 名前であり、どちらも Web UI では `/{name}` で応答します。Organization が所有するリポジトリは、
@@ -23,7 +23,7 @@ acme/sentiment-base    a repository in an organization namespace
 あらかじめ知っておくべき帰結が 1 つあります。名前は一度しか取得できません。`acme` がすでにユーザー
 アカウントとして存在する場合、Organization として使うことはできません。
 
-## Create an organization { #create-an-organization }
+## Organization を作成する { #create-an-organization }
 
 Web UI でアカウントメニューを開き、**New organization**
 (<http://localhost:3000/orgs/new>) を選択します。入力する項目は次のとおりです。
@@ -43,12 +43,12 @@ Web UI でアカウントメニューを開き、**New organization**
     `anyone` になっており、`admin` にすると作成をサイト管理者に限定できます。
     [設定](../self-hosting/configuration.md) を参照してください。
 
-## Roles { #roles }
+## ロール { #roles }
 
 各メンバーは、Organization 内で 3 つのロールのうちいずれか 1 つを必ず持ちます。ロールには順序が
 あり、それぞれ下位のロールが持つ権限をすべて含みます。
 
-| Operation | Non-member | `read` | `write` | `admin` |
+| 操作 | 非メンバー | `read` | `write` | `admin` |
 |---|---|---|---|---|
 | Organization のページとリポジトリ一覧を閲覧する | はい | はい | はい | はい |
 | 読み取り、クローン、ダウンロード、実験の閲覧 | はい | はい | はい | はい |
@@ -70,7 +70,7 @@ Web UI でアカウントメニューを開き、**New organization**
 サイト管理者は、メンバーになっていなくてもすべてのネームスペースに対して `admin` 権限を持ちます。
 メンバー一覧には決して現れず、その Organization は `whoami()["orgs"]` にも表示されません。
 
-!!! warning "There is no repository visibility"
+!!! warning "リポジトリの公開範囲という概念はありません"
 
     thinkingface には、リポジトリの公開・非公開という区別が意図的にありません。このインスタンス
     上のすべてのリポジトリは、サインアウトした訪問者を含め、インスタンスに到達できる全員が読み取
@@ -89,7 +89,7 @@ Web UI でアカウントメニューを開き、**New organization**
 はネームスペースの秘密情報を外部の URL に送り出しますし、削除は取り消せません — どちらもコンテン
 ツの変更というより管理的な行為だからです。
 
-## Manage members { #manage-members }
+## メンバーを管理する { #manage-members }
 
 メンバーは Organization の **Settings → Members**（`/orgs/acme/settings/members`）で管理し
 ます。
@@ -107,7 +107,7 @@ Organization には常に少なくとも 1 人の admin が残るようになっ
 うとしたり、降格させようとしたりすると、先に別の admin を任命するよう伝えるメッセージとともに拒
 否されます。
 
-### Who can see the member list { #who-can-see-the-member-list }
+### メンバー一覧を見られるのは誰か { #who-can-see-the-member-list }
 
 これは Organization の **Policy** 設定で制御します。
 
@@ -118,7 +118,7 @@ Organization には常に少なくとも 1 人の admin が残るようになっ
 
 メンバーでない人が公開された名簿を読む場合、メールアドレスを含まないユーザー名だけが表示されます。
 
-## Work with organization repositories from Python { #work-with-organization-repositories-from-python }
+## Python から Organization のリポジトリを操作する { #work-with-organization-repositories-from-python }
 
 変わるのはネームスペースの部分だけです。いつもどおりエンドポイントとトークンを設定してから、次の
 ようにします。
@@ -169,27 +169,31 @@ for member in api.list_organization_members("acme"):
 格させれば、同じ push が成功するようになります — それ以外に相手側で変更すべきことはなく、トーク
 ンもそのままで構いません。
 
-## Organization settings { #organization-settings }
+## Organization の設定 { #organization-settings }
 
 設定画面は `/orgs/{org}/settings` にあり、**admin のみ**アクセスできます。admin ロールを持たな
 いメンバーには、404 ではなく「admins only」という明示的なメッセージが表示されます。Organization
 の存在自体は公開情報だからです。
 
-| Screen | What it does |
+| 画面 | 内容 |
 |---|---|
 | **Profile** | 表示名、説明、Web サイト、アバター URL（画像を外部でホストしているものへのリンクで、アップロード機能はありません）。ネームスペース名は固定です。 |
 | **Policy** | 上で説明した `members_visibility`。 |
 | **Members** | 追加、昇格、降格、削除。上で説明したとおりです。 |
-| **Webhooks** | Organization のリポジトリで発生したイベント（プッシュ、リポジトリのライフサイクル、転送、実験 run のステータス）を通知する HTTP エンドポイント。9 種類のイベント全部、ペイロード、署名の検証、リトライ方針は [Webhook](webhooks.md) を参照してください。 |
+| **Webhooks** | Organization のリポジトリで発生したイベント（プッシュ、リポジトリのライフサイクル、転送、実験 run のステータス）を通知する HTTP エンドポイント。10 種類のイベント全部、ペイロード、署名の検証、リトライ方針は [Webhook](webhooks.md) を参照してください。 |
 | **Storage** | Organization のリポジトリがオブジェクトストレージ上に保持する LFS のバイト数を、リポジトリごとに内訳表示します。 |
 | **Audit log** | 管理上の変更とリポジトリのライフサイクルイベントを、新しい順に表示します。 |
 | **Delete organization** | 危険な操作です。詳しくは後述します。 |
 
 admin ロールを持たないメンバーも、Organization のストレージ使用量は閲覧できます。自分の
 **Storage usage** ページ（`/settings/storage`）に、所属するすべてのネームスペースが一覧表示され
-ます。
+ます。ファイルを削除・置き換えしただけでは、使用量は**減りません** — 一度でもコミットが参照した
+LFS オブジェクトは、そのリポジトリが存在する限り、どの過去のリビジョンからも取り出せるように保
+持され続けるためです。実際に回収されるのは、どのコミットからも一度も参照されなかったオブジェク
+ト（アップロードが中断されたもの）だけです。仕組みの詳細と、実際に使用量を減らす方法については
+[設定](../self-hosting/configuration.md) の `TF_DEFAULT_STORAGE_QUOTA_BYTES` を参照してください。
 
-### The audit log { #the-audit-log }
+### 監査ログ { #the-audit-log }
 
 各エントリには、いつ発生したか、誰が行ったか、何が行われ、何に対してだったかが記録されます。記録
 される操作は次のとおりです。
@@ -206,18 +210,25 @@ Organization の削除自体は、その監査ログには記録されません 
 Organization と一緒に削除されるためです。このイベントは代わりにサーバーのプロセスログに記録され
 ます。
 
-### Deleting an organization { #deleting-an-organization }
+### Organization を削除する { #deleting-an-organization }
 
 削除すると、Organization のメンバー、webhook、監査ログが失われ、名前は再利用できるようになりま
 す。**リポジトリは決して削除されません**。そのため、Organization に所属するリポジトリが 1 つで
 も残っている間は削除が拒否されます。先にリポジトリを削除するか移管してください。
 
-## Transfer a repository between namespaces { #transfer-a-repository-between-namespaces }
+## リポジトリをネームスペース間で移管する { #transfer-a-repository-between-namespaces }
 
 リポジトリはネームスペース間を移動できます — 自分の個人ネームスペースから Organization へ、2 つ
 の Organization の間、あるいは個人ネームスペースへ戻すこともできます。リポジトリの **Settings**
-タブを開き、**Transfer ownership** を使います。同じフォームから、同一ネームスペース内でのリネー
-ムも行えます。
+タブを開き、**Transfer ownership** を使います。
+
+同一ネームスペース内でのリネームには、同じ Settings ページの Transfer ownership の上に専用の
+**Rename** セクションがあり、型入力での確認は不要です。Transfer ownership フォームにも引き続き
+オプションの「new name」欄があり、こちらは移管と同時にリポジトリ名を変更したい場合(移管先に同名
+のものがすでにある場合など)に使えます。誤字を直すだけといった同一ネームスペース内のリネームには、
+型入力の確認が不要な専用の Rename セクションを使ってください。どちらの方法でも、リネームは
+transfer と同様にリダイレクトを残すため、古い URL・clone のリモート・モデルカードの参照は引き続き
+解決できます。
 
 Git の履歴、LFS オブジェクト、ダウンロード数はそのまま引き継がれ、オブジェクトストレージ上でバイ
 トが移動することもありません — オブジェクトキーはリポジトリ名ではなくコンテンツから導出されてい
@@ -249,7 +260,7 @@ api.move_repo(from_id="admin/sentiment-base", to_id="acme/sentiment-base", repo_
 
 アーカイブされたリポジトリは移管できません。先にアーカイブを解除してください。
 
-## Related pages { #related-pages }
+## 関連ページ { #related-pages }
 
 - [基本コンセプト](../concepts.md) — ネームスペース、リポジトリ、リビジョン
 - [ファイルのアップロード](uploading.md) — `write` を持っている状態でリポジトリに push する

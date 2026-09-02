@@ -420,7 +420,11 @@ func TestUploadEndToEnd(t *testing.T) {
 		t.Fatalf("second upload err = %v, want ErrNothingToDo", err)
 	}
 	if res == nil {
+		// The explicit return is redundant after t.Fatal, but staticcheck's
+		// SA5011 does not model Fatal as terminating: without it the two
+		// dereferences below are reported as possible nil derefs.
 		t.Fatal("Result must still be returned alongside ErrNothingToDo")
+		return
 	}
 	if got := res.Unchanged; !equalStrings(got, []string{"README.md", "data/train.bin"}) {
 		t.Errorf("Unchanged = %v", got)
@@ -689,4 +693,72 @@ func equalStrings(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// TestUploadDeleteMissingKeepsUnknownDirectories is the regression test for
+// the `tf up --delete` data-loss bug where a directory that turned into a
+// symlink took its whole remote subtree with it. The scanner refuses to walk
+// a symlinked directory, so it can say nothing about what is inside; a delete
+// pass must treat that as "unknown", not as "empty".
+func TestUploadDeleteMissingKeepsUnknownDirectories(t *testing.T) {
+	hub := newFakeHub(t)
+	hub.seedRegular(t, ".gitattributes", "*.bin filter=lfs\n")
+	hub.seedRegular(t, "data/train.parquet", "behind a symlinked directory\n")
+	hub.seedRegular(t, "data/nested/b.csv", "also behind it\n")
+	hub.seedRegular(t, "data", "a remote file sharing the blind spot's own name\n")
+	hub.seedRegular(t, "database/keep.txt", "a sibling that merely shares a prefix\n")
+	hub.seedRegular(t, "gone.txt", "no longer on disk\n")
+	c := hub.client()
+
+	res, err := Upload(context.Background(), c, Plan{
+		Ref:   testRef(),
+		Rev:   "main",
+		Files: []LocalFile{localFile("README.md", []byte("hello\n"))},
+		// The scan found README.md and the "data" symlink, and never
+		// looked inside the latter.
+		LocalPaths:       []string{"README.md"},
+		LocalUnknownDirs: []string{"data"},
+		DeleteMissing:    true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if !equalStrings(res.Deleted, []string{"database/keep.txt", "gone.txt"}) {
+		t.Fatalf("Deleted = %v, want [database/keep.txt gone.txt]: nothing at or below the unscanned \"data\" may be deleted", res.Deleted)
+	}
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	for _, p := range []string{"data", "data/train.parquet", "data/nested/b.csv"} {
+		if _, ok := hub.files[p]; !ok {
+			t.Errorf("%s was deleted even though the scan never looked inside data/", p)
+		}
+	}
+}
+
+func TestUnderUnknownDir(t *testing.T) {
+	dirs := []string{"data", "a/b"}
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"data", true},
+		{"data/train.parquet", true},
+		{"data/nested/b.csv", true},
+		{"database/keep.txt", false},
+		{"datax", false},
+		{"a/b/c.txt", true},
+		{"a/bc.txt", false},
+		{"README.md", false},
+	}
+	for _, tt := range tests {
+		if got := underUnknownDir(tt.path, dirs); got != tt.want {
+			t.Errorf("underUnknownDir(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+	if underUnknownDir("anything", nil) {
+		t.Error("underUnknownDir with no unknown dirs must be false")
+	}
+	if underUnknownDir("", []string{""}) {
+		t.Error(`an empty unknown dir must not swallow every path`)
+	}
 }

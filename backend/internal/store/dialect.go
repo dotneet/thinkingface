@@ -52,6 +52,16 @@ type dialect interface {
 	// per element of the array at column.key (nothing when it is not an
 	// array) and the expression that yields the element's text.
 	jsonArrayElements(column, key string) (from string, value string)
+	// jsonScalarText renders the scalar at column.key as text, with the same
+	// answer on both engines whatever JSON type the value has. Postgres'
+	// `->>` already does that; SQLite's returns the value in its own storage
+	// type, so an integer compares unequal to the text it is filtered
+	// against and a boolean comes back as 1 rather than 'true'. That is what
+	// made a SQLite instance list `license: 2` in the license facet and then
+	// return nothing when the value was clicked -- a card key is whatever
+	// YAML front matter decoded to, and `license: yes` / `license: 2.0` are
+	// not strings.
+	jsonScalarText(column, key string) string
 
 	// --- search --------------------------------------------------------
 
@@ -94,7 +104,18 @@ type dialectQueries struct {
 	// $6 note (nil = keep). RETURNING runColumns.
 	updateExpRunAnnotation string
 	// linkLFSObjectsInsert: $1 repo_id, $2 oid array. Inserts one
-	// repo_lfs_objects row per oid that exists in lfs_objects, ignoring
-	// duplicates.
+	// repo_lfs_objects row per oid that exists in lfs_objects. created_at and
+	// committed_at are stamped explicitly rather than left to column
+	// defaults: SQLite could not be given a non-constant one when either
+	// column was added (migrations/sqlite/0028, 0030).
+	//
+	// The conflict clause updates rather than doing nothing, and that is the
+	// point of it: every caller of this statement is saying "a commit of this
+	// repository names this oid", so a row an *upload* created earlier
+	// (RecordLFSObject, which leaves committed_at NULL) has to be promoted.
+	// committed_at is what PruneRepoLFSLinks keeps its hands off, so a link
+	// that is not promoted here is one a later prune may release while a
+	// commit still names it. The oid array is deduplicated by the caller,
+	// which is what keeps PostgreSQL from refusing to touch one row twice.
 	linkLFSObjectsInsert string
 }

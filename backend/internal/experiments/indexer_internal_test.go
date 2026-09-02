@@ -1,9 +1,13 @@
 package experiments
 
 import (
+	"errors"
 	"math"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/dotneet/thinkingface/backend/internal/store"
 )
 
 func TestToFloat_RejectsNaNAndInf(t *testing.T) {
@@ -165,5 +169,30 @@ func TestToTime_RejectsSmallNumbers(t *testing.T) {
 func TestToTime_UnsupportedType(t *testing.T) {
 	if _, ok := toTime([]byte("x")); ok {
 		t.Errorf("toTime(unsupported type) ok = true, want false")
+	}
+}
+
+// A run that already exists keeps its own status, a run that does not is
+// "finished", and a database failure is neither. The last case is the
+// regression: `err == nil` used to decide this, so any transient error made
+// the indexer declare a live run finished -- a state nothing moves it back
+// out of.
+func TestIndexedRunStatus(t *testing.T) {
+	if got, err := indexedRunStatus("r", nil); err != nil || got != "" {
+		t.Errorf(`indexedRunStatus(nil) = (%q, %v), want ("", nil)`, got, err)
+	}
+	if got, err := indexedRunStatus("r", store.ErrNotFound); err != nil || got != "finished" {
+		t.Errorf(`indexedRunStatus(ErrNotFound) = (%q, %v), want ("finished", nil)`, got, err)
+	}
+	boom := errors.New("connection reset by peer")
+	got, err := indexedRunStatus("r", boom)
+	if !errors.Is(err, boom) {
+		t.Fatalf("indexedRunStatus(%v) error = %v, want it to wrap the cause", boom, err)
+	}
+	if got == "finished" {
+		t.Error("a database failure was read as a new run and would have finished a live one")
+	}
+	if !strings.Contains(err.Error(), `"r"`) {
+		t.Errorf("error %q does not name the run", err)
 	}
 }

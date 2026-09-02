@@ -465,7 +465,7 @@ traffic remain.
 | **3** | materialize implementation + **cross-check verification**: does PD's content match what's restored from the WAL | Matches for all repositories |
 | **4** | Switch the source of truth to the WAL. Demote PD to a cache (still on GKE) | `make test-e2e` passes |
 | **5** | Move to Cloud Run (HTTP/2, tmpfs, min-instances=1) | Stable under production traffic (**Terraform code completed 2026-08-21**: `google_cloud_run_v2_service.api` in `infra/main.tf`. Applying it and running stably under production traffic are not yet done) |
-| **6** | compaction Job + GKE teardown | PD removal (**Terraform code completed 2026-08-21**: `google_cloud_run_v2_job.compact` + Cloud Scheduler; `infra/k8s/` already removed. The `thinkingface compact` subcommand itself is not yet implemented — see `cmd/thinkingface/main.go`. Actual PD removal via apply has not been done) |
+| **6** | compaction Job + GKE teardown | PD removal (**Terraform code completed 2026-08-21**: `google_cloud_run_v2_job.compact` + Cloud Scheduler; `infra/k8s/` already removed. The `thinkingface compact` subcommand is implemented — `cmd/thinkingface/main.go`'s `case "compact":` dispatches to `runCompact` in `cmd/thinkingface/walops.go`. Actual PD removal via apply has not been done) |
 
 Phases 2-3 are the essence of this. **Write the WAL while PD remains the source of truth, confirm
 the two match, and only then** switch over. Don't skip this dual-write period.

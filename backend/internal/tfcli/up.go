@@ -137,13 +137,18 @@ func runUp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// allPaths is every file actually on disk under path, ignoring
 	// --include/--exclude; it feeds Plan.LocalPaths below so --delete only
 	// ever removes remote files that are truly gone locally, not ones this
-	// run simply chose not to upload. One scan produces both files (what
-	// gets uploaded) and allPaths (what disk-vs-remote comparisons use).
-	files, allPaths, err := local.Scan(path, local.Options{Include: opt.include.values, Exclude: opt.exclude.values})
+	// run simply chose not to upload. skipped covers the rest of that
+	// question: paths the walk left out, and (its Dir entries) directories
+	// it never looked inside, which --delete must not treat as empty. One
+	// scan produces all three.
+	files, allPaths, skipped, err := local.Scan(path, local.Options{Include: opt.include.values, Exclude: opt.exclude.values})
 	if err != nil {
 		fmt.Fprintf(stderr, "tf: %s\n", err)
 		return exitError
 	}
+	// Warnings survive --quiet: --quiet suppresses progress, and content
+	// silently left out of the upload is not progress.
+	warnSkipped(stderr, skipped)
 	if len(files) == 0 {
 		fmt.Fprintf(stderr, "tf: no files found under %s\n", path)
 		return exitError
@@ -276,14 +281,15 @@ func runUp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	plan := hub.Plan{
-		Ref:           ref,
-		Rev:           opt.rev,
-		Files:         uploadFiles,
-		LocalPaths:    allPaths,
-		DeleteMissing: opt.del,
-		Summary:       opt.message,
-		Workers:       opt.workers,
-		DryRun:        opt.dryRun,
+		Ref:              ref,
+		Rev:              opt.rev,
+		Files:            uploadFiles,
+		LocalPaths:       allPaths,
+		LocalUnknownDirs: local.SkippedDirs(skipped),
+		DeleteMissing:    opt.del,
+		Summary:          opt.message,
+		Workers:          opt.workers,
+		DryRun:           opt.dryRun,
 	}
 
 	result, uerr := hub.Upload(ctx, client, plan, progress)
@@ -313,6 +319,40 @@ func runUp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	return exitOK
+}
+
+// maxSkipWarnings bounds the per-path skip warnings; a tree full of sockets
+// should say so once, not scroll the real output away.
+const maxSkipWarnings = 10
+
+// warnSkipped tells the user about content the scan left out of the upload.
+// A symlinked directory is the case that matters: it is not followed (a link
+// back up the tree would loop), so its files simply never appear -- which,
+// without a word on stderr, looks exactly like an upload that had nothing to
+// do. The routine exclusions (.git, __pycache__) are not Notable and stay
+// quiet. Nothing here is deleted from the remote either: hub.Plan's
+// LocalUnknownDirs keeps --delete away from those paths.
+func warnSkipped(stderr io.Writer, skipped []local.Skipped) {
+	shown := 0
+	hidden := 0
+	for _, s := range skipped {
+		if !s.Notable() {
+			continue
+		}
+		if shown >= maxSkipWarnings {
+			hidden++
+			continue
+		}
+		shown++
+		if s.Dir {
+			fmt.Fprintf(stderr, "tf: warning: not uploading %s or anything below it (%s)\n", s.RepoPath, s.Reason)
+			continue
+		}
+		fmt.Fprintf(stderr, "tf: warning: not uploading %s (%s)\n", s.RepoPath, s.Reason)
+	}
+	if hidden > 0 {
+		fmt.Fprintf(stderr, "tf: warning: %d more path(s) skipped\n", hidden)
+	}
 }
 
 // reportNewRepoDryRun prints and (with --json) writes the dry-run result for

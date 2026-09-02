@@ -140,6 +140,12 @@ func (s *Server) Handler() http.Handler {
 	r.Use(s.identify)
 	// After identify, because it only applies to cookie-authenticated calls.
 	r.Use(s.requireSameOrigin)
+	// Innermost, so that every middleware above has already written its
+	// headers onto the real ResponseWriter: http.TimeoutHandler buffers what a
+	// handler sets and discards it when the deadline fires, and the security
+	// headers, the CORS decision and the access log line all have to survive
+	// that.
+	r.Use(boundHandlerTime)
 
 	// Unmatched routes must still answer JSON: huggingface_hub parses every
 	// response body, and chi's plain-text default breaks it with a decode
@@ -336,6 +342,143 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	return r
+}
+
+// handlerTimeout bounds how long one metadata request may hold a goroutine,
+// a database connection and (for anything CPU-bound) a core.
+//
+// The process has no other ceiling on that. cmd/thinkingface sets
+// ReadHeaderTimeout and IdleTimeout, which are the two that are safe to set on
+// a server that also carries git clones and multi-gigabyte LFS transfers, and
+// deliberately no ReadTimeout or WriteTimeout: either of those would cut a
+// large push or pull off mid-transfer, since both are measured from the start
+// of the request rather than from the last byte moved. What was left
+// unbounded was the handler itself, so a single request that never finishes --
+// a checkpoint header parse that spins on hostile input, a storage read that
+// hangs, a query behind a stalled lock -- occupied a goroutine indefinitely
+// and could be repeated until the process fell over.
+//
+// A minute is far past anything on the routes it applies to (the slowest are
+// a recursive tree listing and a parquet row read over object storage, both of
+// which are seconds) and short enough to matter as a bound. The routes where
+// that is not true are exempt: streamingRoute for the transfers, and
+// cascadeDeleteRoute for the two deletes whose cost is the amount of data
+// stored rather than anything in the request.
+const handlerTimeout = 60 * time.Second
+
+// handlerTimeoutBody is what a request that hits the deadline is answered
+// with. It is written by net/http rather than by writeError, so it is spelled
+// out here in the same shape every other error in this package has -- and
+// without the Content-Type or X-Error-Message those would carry, which
+// net/http gives no way to set. It is JSON so a client that parses every
+// response body still finds a message in it.
+const handlerTimeoutBody = `{"error":{"message":"the server took too long to answer this request","type":"timeout"}}`
+
+// streamingRoute reports whether a path belongs to a route that must never be
+// wrapped in a handler deadline. Two properties disqualify a route, and these
+// have both:
+//
+//   - the response is streamed. http.TimeoutHandler buffers the entire body in
+//     memory before writing a byte of it, which for a clone or an LFS download
+//     is the difference between a constant amount of memory and the size of
+//     the object;
+//   - the request body is arbitrarily large. The deadline covers reading it,
+//     so a slow uploader on a big push would be cut off by a timer that has
+//     nothing to do with the server being stuck.
+//
+// Everything else -- the JSON API, the HF metadata endpoints, the viewer, the
+// UI's reads -- carries a bounded body in both directions and is timed.
+func streamingRoute(p string) bool {
+	switch {
+	case strings.Contains(p, "/resolve/"):
+		// File downloads, git blobs and LFS alike; also the 302 to a signed
+		// URL, whose object is fetched from storage directly.
+		return true
+	case strings.HasSuffix(p, "/info/refs"),
+		strings.HasSuffix(p, "/git-upload-pack"),
+		strings.HasSuffix(p, "/git-receive-pack"):
+		// git smart HTTP: a clone is one long streamed response, a push one
+		// long streamed request.
+		return true
+	case strings.Contains(p, "/info/lfs/"):
+		// The LFS batch protocol, whose verify step can wait on a large
+		// staged object being hashed.
+		return true
+	case strings.HasPrefix(p, "/api/v1/lfs/"):
+		// The emulator transfer proxy: whole objects, in both directions.
+		return true
+	case strings.HasPrefix(p, "/api/v1/upload/"):
+		// Multipart file upload from the browser.
+		return true
+	case strings.Contains(p, "/commit/"):
+		// The NDJSON commit endpoint, whose body may carry up to maxCommitBody
+		// of inline file content.
+		return true
+	case strings.HasPrefix(p, "/api/v1/experiments/") && strings.HasSuffix(p, "/log"):
+		// Live metric ingest, bounded only by maxIngestBody.
+		return true
+	}
+	return false
+}
+
+// cascadeDeleteRoute reports whether a request is one of the deletes whose
+// cost is set by how much data is stored rather than by what the request
+// says. They are exempt for a different reason from streamingRoute's: the
+// body is small in both directions, but the work is one SQL statement whose
+// ON DELETE CASCADE walks every dependent row.
+//
+//   - deleting a repository takes out its file index, its LFS links and every
+//     experiment project, run and metric point under it (a training run logs
+//     a point per step, so this is millions of rows on a repository that has
+//     been used for what this hub is for), and then removes the bare
+//     repository from disk;
+//   - deleting one experiment run takes out that run's points.
+//
+// Neither has an upper bound that a minute can be reasoned about against, and
+// a deadline there does not merely fail the request: it makes the operation
+// impossible. The transaction is rolled back when the context is cancelled,
+// so a repository too large to delete in a minute could never be deleted at
+// all, no matter how often it was retried.
+//
+// Letting them run is the lesser risk. Both are gated on namespace admin
+// (loadRepoForDelete / loadRepoForWrite), so this is not a goroutine an
+// anonymous caller can pin, and the work is a database statement the server
+// is waiting on rather than a loop of its own.
+func cascadeDeleteRoute(r *http.Request) bool {
+	if r.Method != http.MethodDelete {
+		return false
+	}
+	switch {
+	case r.URL.Path == "/api/repos/delete":
+		// The HF-compatible spelling (huggingface_hub.delete_repo); the same
+		// handler as the one below.
+		return true
+	case strings.HasPrefix(r.URL.Path, "/api/v1/repos/") && strings.Count(r.URL.Path, "/") == 6:
+		// /api/v1/repos/{kind}/{ns}/{name} exactly. The segment count is what
+		// keeps the sub-routes on the same prefix -- DELETE .../archive
+		// (unarchive) and DELETE .../transfer (cancel) -- timed: both are a
+		// single-row update.
+		return true
+	case strings.HasPrefix(r.URL.Path, "/api/v1/experiments/") &&
+		strings.Contains(r.URL.Path, "/runs/") && strings.Count(r.URL.Path, "/") == 8:
+		// /api/v1/experiments/{ns}/{repo}/{project}/runs/{run} exactly; the
+		// run's name is percent-encoded, so it holds no slash of its own.
+		return true
+	}
+	return false
+}
+
+// boundHandlerTime applies handlerTimeout to every route streamingRoute and
+// cascadeDeleteRoute do not exempt.
+func boundHandlerTime(next http.Handler) http.Handler {
+	timed := http.TimeoutHandler(next, handlerTimeout, handlerTimeoutBody)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if streamingRoute(r.URL.Path) || cascadeDeleteRoute(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		timed.ServeHTTP(w, r)
+	})
 }
 
 // mountRepoTransport registers the download, git, and LFS routes shared by

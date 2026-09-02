@@ -27,6 +27,11 @@ const (
 	// ctxKeyAuthRecord carries the mutable *authRecord requestLogger installs
 	// and identify fills in (see authRecord in server.go).
 	ctxKeyAuthRecord
+	// ctxKeyTokenName carries the name of the access token a request
+	// authenticated with, for /api/whoami-v2 to report. Empty for every other
+	// credential: a session cookie and an HTTP Basic password have no token
+	// behind them to name.
+	ctxKeyTokenName
 )
 
 // authMethod names the credential a request arrived with. It is recorded on
@@ -47,11 +52,14 @@ const (
 func (s *Server) identify(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		user, scope, method := s.resolveIdentity(r)
+		user, scope, method, tokenName := s.resolveIdentity(r)
 		if user != nil {
 			ctx = context.WithValue(ctx, ctxKeyUser, user)
 			ctx = context.WithValue(ctx, ctxKeyScope, scope)
 			ctx = context.WithValue(ctx, ctxKeyCookieAuth, method == authSession)
+			if tokenName != "" {
+				ctx = context.WithValue(ctx, ctxKeyTokenName, tokenName)
+			}
 			// Hand the access log the subject it could not otherwise see:
 			// requestLogger runs upstream of this middleware, so it holds a
 			// pointer that is filled in here rather than a value it read.
@@ -77,8 +85,11 @@ func (s *Server) identify(next http.Handler) http.Handler {
 // store.LookupSSHKey, since internal/sshserver authenticates before any of
 // this package runs) and handleLogin's own checkPassword call (which answers
 // passwordDisabled / passwordPending).
-func (s *Server) resolveIdentity(r *http.Request) (*store.User, string, authMethod) {
-	user, scope, method := s.resolveCredential(r)
+//
+// The fourth return value is the name of the access token the request
+// authenticated with, or "" when it did not use one.
+func (s *Server) resolveIdentity(r *http.Request) (*store.User, string, authMethod, string) {
+	user, scope, method, tokenName := s.resolveCredential(r)
 	if user.Blocked() {
 		// Warn rather than Info: a credential for a barred account is still
 		// being presented, which is worth seeing in a log even though the
@@ -91,25 +102,25 @@ func (s *Server) resolveIdentity(r *http.Request) (*store.User, string, authMeth
 			"username", user.Username, "user_id", user.ID,
 			"auth", string(method), "client_ip", s.clientIP(r),
 			"path", r.URL.Path)
-		return nil, "", authNone
+		return nil, "", authNone, ""
 	}
-	return user, scope, method
+	return user, scope, method, tokenName
 }
 
-func (s *Server) resolveCredential(r *http.Request) (*store.User, string, authMethod) {
+func (s *Server) resolveCredential(r *http.Request) (*store.User, string, authMethod, string) {
 	ctx := r.Context()
 
 	if header := r.Header.Get("Authorization"); header != "" {
 		if token, ok := strings.CutPrefix(header, "Bearer "); ok {
-			u, sc := s.userForToken(ctx, strings.TrimSpace(token))
-			return u, sc, authToken
+			u, sc, name := s.userForToken(ctx, strings.TrimSpace(token))
+			return u, sc, authToken, name
 		}
 		// git and git-lfs authenticate with Basic; the password carries the
 		// token and the username is ignored.
 		if username, password, ok := r.BasicAuth(); ok {
 			if strings.HasPrefix(password, auth.TokenPrefix) {
-				u, sc := s.userForToken(ctx, password)
-				return u, sc, authToken
+				u, sc, name := s.userForToken(ctx, password)
+				return u, sc, authToken, name
 			}
 			// Basic-with-a-real-password is accepted on every route, so this
 			// is the cheapest place in the server to force bcrypt work. Both
@@ -117,27 +128,27 @@ func (s *Server) resolveCredential(r *http.Request) (*store.User, string, authMe
 			// hash is computed, and nothing is written to the response: a
 			// throttled request simply looks anonymous, which every handler
 			// already knows how to answer.
-			u, outcome := s.checkPassword(ctx, username, password)
+			u, outcome := s.checkPassword(ctx, s.clientAddrKey(r), username, password)
 			switch outcome {
 			case passwordOK:
-				return u, "write", authPassword
+				return u, "write", authPassword, ""
 			case passwordDisabled, passwordPending:
 				// Carried out so resolveIdentity can log it by name; the
 				// gate there is what turns it into an anonymous request.
-				return u, "", authPassword
+				return u, "", authPassword, ""
 			}
-			return nil, "", authNone
+			return nil, "", authNone, ""
 		}
 	}
 
 	if cookie, err := r.Cookie(auth.SessionCookieName); err == nil {
 		if userID, epoch, err := s.sessions.Verify(cookie.Value); err == nil {
 			if u, err := s.store.GetUserByID(ctx, userID); err == nil && u.SessionEpoch == epoch {
-				return u, "write", authSession
+				return u, "write", authSession, ""
 			}
 		}
 	}
-	return nil, "", authNone
+	return nil, "", authNone, ""
 }
 
 // checkPassword resolves a username/password pair under the brute-force and
@@ -158,8 +169,9 @@ const (
 	// passwordWrong is a genuine credential failure: no such user, or the
 	// hash did not match. Only this outcome deserves a penalty.
 	passwordWrong
-	// passwordThrottled means this username has already spent its failure
-	// budget; the caller should be told to come back later.
+	// passwordThrottled means this attempt's failure budget -- the caller's
+	// address, or the username, whichever ran out first -- is already spent;
+	// the caller should be told to come back later.
 	passwordThrottled
 	// passwordOverloaded means no bcrypt slot came free in time. It says
 	// nothing about the password -- the hash was never compared.
@@ -180,8 +192,22 @@ const (
 	passwordPending
 )
 
-func (s *Server) checkPassword(ctx context.Context, username, password string) (*store.User, passwordOutcome) {
-	if s.authGuard.retryAfter(usernameKey(username)) > 0 {
+// checkPassword takes addrKey, the caller's address bucket (s.clientAddrKey),
+// alongside the credentials. Both buckets are consulted and both are charged
+// here, which is what makes the HTTP Basic
+// branch of resolveCredential cost an attacker something: it is accepted on
+// every route, so it used to be the way to guess passwords -- one attempt per
+// username, from one address, forever -- without ever touching the address
+// budget that /auth/login is metered against. Only the username bucket was
+// read, and a fresh username has a full one.
+//
+// The callers that already hold the address bucket (handleLogin,
+// handleChangeMyPassword) therefore must not penalize it a second time for the
+// same failure; they only reset it on success, which this cannot do for them
+// because they alone know the attempt is finished.
+func (s *Server) checkPassword(ctx context.Context, addrKey, username, password string) (*store.User, passwordOutcome) {
+	userKey := usernameKey(username)
+	if s.authGuard.retryAfter(addrKey, userKey) > 0 {
 		return nil, passwordThrottled
 	}
 	if !s.authGuard.acquireBcrypt() {
@@ -192,14 +218,14 @@ func (s *Server) checkPassword(ctx context.Context, username, password string) (
 	user, err := s.store.GetUserByUsername(ctx, username)
 	if err != nil {
 		_ = auth.CheckPasswordMiss(password)
-		s.authGuard.penalize(usernameKey(username))
+		s.authGuard.penalize(addrKey, userKey)
 		return nil, passwordWrong
 	}
 	if auth.CheckPassword(user.PasswordHash, password) != nil {
-		s.authGuard.penalize(usernameKey(username))
+		s.authGuard.penalize(addrKey, userKey)
 		return nil, passwordWrong
 	}
-	s.authGuard.reset(usernameKey(username))
+	s.authGuard.reset(userKey)
 	// The two account gates sit *after* the comparison rather than before it,
 	// so a barred account takes exactly as long to answer as an active one
 	// and they are not distinguishable by timing.
@@ -212,13 +238,16 @@ func (s *Server) checkPassword(ctx context.Context, username, password string) (
 	return user, passwordOK
 }
 
-func (s *Server) userForToken(ctx context.Context, token string) (*store.User, string) {
+// The third return value is the token's own name, which /api/whoami-v2
+// reports as auth.accessToken.displayName -- the string `hf auth whoami` and
+// the HF client libraries print to say *which* of a user's tokens is in use.
+func (s *Server) userForToken(ctx context.Context, token string) (*store.User, string, string) {
 	if token == "" {
-		return nil, ""
+		return nil, "", ""
 	}
 	user, tok, err := s.store.LookupToken(ctx, auth.HashToken(token))
 	if err != nil {
-		return nil, ""
+		return nil, "", ""
 	}
 	go func() {
 		// Detached from the request so a slow write never delays the response.
@@ -226,7 +255,7 @@ func (s *Server) userForToken(ctx context.Context, token string) (*store.User, s
 		defer cancel()
 		_ = s.store.TouchToken(writeCtx, tok.ID)
 	}()
-	return user, tok.Scope
+	return user, tok.Scope, tok.Name
 }
 
 // detachedWriteTimeout bounds a database write that has been cut loose from
@@ -263,6 +292,13 @@ func currentUser(ctx context.Context) *store.User {
 func currentScope(ctx context.Context) string {
 	scope, _ := ctx.Value(ctxKeyScope).(string)
 	return scope
+}
+
+// currentTokenName is the name of the access token this request authenticated
+// with, or "" for a session, a password, or an anonymous request.
+func currentTokenName(ctx context.Context) string {
+	name, _ := ctx.Value(ctxKeyTokenName).(string)
+	return name
 }
 
 // cookieAuthenticated reports whether this request's identity came from the
@@ -389,13 +425,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		tooManyAttempts(w, wait)
 		return
 	}
-	user, outcome := s.checkPassword(r.Context(), req.Username, req.Password)
+	user, outcome := s.checkPassword(r.Context(), addrKey, req.Username, req.Password)
 	switch outcome {
 	case passwordThrottled:
 		// The username bucket is spent even though the address bucket was
-		// not. Do not penalize the address for it.
+		// not (checkPassword reads both, and the address one was still open a
+		// moment ago). Do not penalize the address for it.
 		slog.Warn("login rate limited", "username", req.Username, "client_ip", clientIP)
-		tooManyAttempts(w, s.authGuard.retryAfter(userKey))
+		tooManyAttempts(w, s.authGuard.retryAfter(addrKey, userKey))
 		return
 	case passwordOverloaded:
 		// The password was never compared, so this is the server's problem,
@@ -404,7 +441,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		serviceOverloaded(w, bcryptWait)
 		return
 	case passwordWrong:
-		s.authGuard.penalize(addrKey)
+		// No penalize() here: checkPassword charges both buckets itself, so
+		// repeating it would count one failed sign-in twice against the
+		// address.
+		//
 		// The one log line an operator needs to notice a guessing run. Never
 		// the password, not even its length.
 		slog.Warn("login failed", "username", req.Username, "client_ip", clientIP,
@@ -648,18 +688,18 @@ func (s *Server) handleChangeMyPassword(w http.ResponseWriter, r *http.Request) 
 		tooManyAttempts(w, wait)
 		return
 	}
-	// checkPassword applies the username bucket and the bcrypt cap, exactly
+	// checkPassword applies both failure buckets and the bcrypt cap, exactly
 	// as the login form does -- holding a session is not a reason to let
-	// someone brute-force the current password for free.
-	switch _, outcome := s.checkPassword(r.Context(), user.Username, req.CurrentPassword); outcome {
+	// someone brute-force the current password for free. It charges the
+	// address bucket itself, so this handler must not charge it again.
+	switch _, outcome := s.checkPassword(r.Context(), addrKey, user.Username, req.CurrentPassword); outcome {
 	case passwordThrottled:
-		tooManyAttempts(w, s.authGuard.retryAfter(usernameKey(user.Username)))
+		tooManyAttempts(w, s.authGuard.retryAfter(addrKey, usernameKey(user.Username)))
 		return
 	case passwordOverloaded:
 		serviceOverloaded(w, bcryptWait)
 		return
 	case passwordWrong:
-		s.authGuard.penalize(addrKey)
 		slog.Warn("password change failed", "username", user.Username, "user_id", user.ID,
 			"client_ip", s.clientIP(r), "reason", "invalid_credentials")
 		// writeError rather than unauthorized(): this is a form submitted by
@@ -741,6 +781,16 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := currentScope(r.Context())
+	// The name the caller gave the token they are holding, which is what
+	// `hf auth whoami` prints under "access token" and the only way somebody
+	// with several tokens can tell which one a client picked up. A constant
+	// here (it used to be "thinkingface", the same string for everyone) makes
+	// that line say nothing at all. There is no token behind a session cookie
+	// or an HTTP Basic password, so those keep the instance's name.
+	tokenName := currentTokenName(r.Context())
+	if tokenName == "" {
+		tokenName = "thinkingface"
+	}
 	// fullname and avatarUrl come from the caller's profile, the same rule
 	// whoamiOrgs already applies to organisations
 	// (docs/dev/namespace-design.md §5.3). `hf auth whoami` prints fullname.
@@ -760,7 +810,7 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 		"auth": map[string]any{
 			"type": "access_token",
 			"accessToken": map[string]any{
-				"displayName": "thinkingface",
+				"displayName": tokenName,
 				"role":        scope,
 			},
 		},

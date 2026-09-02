@@ -123,8 +123,8 @@ Three things to know about these URLs:
 
 ## Restore a revision straight from the bucket
 
-Objects in the bucket are stored by **content address** — an LFS object at `lfs/{oid}`, an
-ordinary file at `blobs/{sha}`. Nothing in the bucket is named after a namespace, a
+Objects in the bucket are stored by **content address** — an LFS object at `lfs/{oid[0:2]}/{oid[2:4]}/{oid}`, an
+ordinary file at `blobs/{sha[0:2]}/{sha[2:4]}/{sha}`. Nothing in the bucket is named after a namespace, a
 repository or a path, so there is no directory tree to `cp -r`. What puts the names back is a
 script the server generates on demand, which maps each content-addressed object to the path
 it holds in that revision.

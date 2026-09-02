@@ -259,6 +259,11 @@ export const experiments = {
     time: "time",
     step: "step",
     resetZoom: "Reset zoom",
+    logUnavailable:
+      "Log scale is off for this chart: every value here is zero or negative, and a logarithmic axis cannot place those.",
+    logHiddenPointsOne: "1 point at or below zero is hidden — a logarithmic axis cannot place it.",
+    logHiddenPointsOther:
+      "{count} points at or below zero are hidden — a logarithmic axis cannot place them.",
     tabsLabel: "Metrics view",
     tabMetrics: "Metrics",
     tabSystemMetrics: "System metrics",

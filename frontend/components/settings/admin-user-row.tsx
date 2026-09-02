@@ -3,6 +3,7 @@
 import { Clock, KeyRound, ShieldCheck, ShieldOff, UserCheck, UserX } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { SpinnerSlot } from "@/components/ui/spinner";
 import { Td, Tr } from "@/components/ui/table";
 import { TimeText } from "@/components/ui/time-text";
 import { useT } from "@/lib/i18n/client";
@@ -85,7 +86,12 @@ export function AdminUserRow({
         )}
       </Td>
       <Td>
-        <div className="flex justify-end gap-2">
+        <div className="flex items-center justify-end gap-2">
+          {/* A reserved slot, not `{busy && <Spinner/>}`: it is the only sign
+              that an action with no dialog (Approve) is in flight, and it must
+              not shift the buttons beside it while it appears
+              (DESIGN.md §8.3). */}
+          <SpinnerSlot active={busy} size={14} label={t("settings.adminUsers.working")} />
           <Button size="sm" disabled={busy} onClick={() => actions.resetPassword(user)}>
             {t("settings.adminUsers.resetPassword")}
           </Button>

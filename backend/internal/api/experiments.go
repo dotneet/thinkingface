@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path"
 	"sort"
 	"strconv"
@@ -135,8 +136,8 @@ func (s *Server) handleExperimentMetrics(w http.ResponseWriter, r *http.Request)
 
 	series, err := s.experiments().Series(r.Context(), repo, experiments.SeriesRequest{
 		Project: chi.URLParam(r, "project"),
-		Runs:    splitCSV(q.Get("runs")),
-		Keys:    splitCSV(q.Get("keys")),
+		Runs:    selectedNames(q, "run", "runs"),
+		Keys:    selectedNames(q, "key", "keys"),
 		XAxis:   q.Get("x"),
 		Max:     maxPoints,
 	})
@@ -583,6 +584,41 @@ func numeric(v any) (float64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// selectedNames reads a list of run or metric names off the query string, in
+// either of the two spellings the metrics endpoint accepts: repeated keys
+// (`run=lr=0.1,bs=32&run=baseline`), where each value is one whole name taken
+// exactly as sent, or the original comma-joined single value
+// (`runs=a,b`), which is split and trimmed.
+//
+// A single repeated key wins outright and the comma-joined one is then
+// ignored; merging them would let a stale `runs=` in the same URL silently
+// widen the selection a caller narrowed with `run=`.
+//
+// The comma-joined spelling cannot be made correct, only kept for links that
+// already exist. Nothing stops a comma in a run name -- ingest validation
+// (validateIngestName) rejects control characters and anything over 256 bytes,
+// and a sweep names its runs after the parameters it varies, so "lr=0.1,bs=32"
+// is the normal case rather than a contrived one. Split, it selects two runs
+// that do not exist, and the chart comes back empty; worse, if a fragment
+// happens to match a *different* real run, the chart quietly draws a line for
+// a run nobody selected.
+func selectedNames(q url.Values, repeatedKey, csvKey string) []string {
+	if repeated := q[repeatedKey]; len(repeated) > 0 {
+		out := make([]string, 0, len(repeated))
+		for _, v := range repeated {
+			// Only an empty value is dropped: every other string is a name
+			// the caller means literally, commas and spaces included.
+			if v != "" {
+				out = append(out, v)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return splitCSV(q.Get(csvKey))
 }
 
 func splitCSV(raw string) []string {

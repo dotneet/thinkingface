@@ -94,6 +94,19 @@ func (s *Store) ReplaceRepoLineage(ctx context.Context, repoID int64, edges []Li
 		return fmt.Errorf("clear repo_lineage: %w", err)
 	}
 	for _, e := range edges {
+		// Every text field here is card text, so it carries whatever bytes
+		// the README had; PostgreSQL refuses the ones that are not UTF-8 and
+		// the refusal parks the sync job (see text.go). Sanitised before the
+		// insert, and consistently across the row: raw is part of the primary
+		// key, so normalising it and not the rest would split one edge in two
+		// on a re-index.
+		e.Raw = sanitizeText(e.Raw)
+		e.Namespace = sanitizeText(e.Namespace)
+		e.Name = sanitizeText(e.Name)
+		e.Rev = sanitizeText(e.Rev)
+		e.Project = sanitizeText(e.Project)
+		e.Run = sanitizeText(e.Run)
+		e.Relation = sanitizeText(e.Relation)
 		// ON CONFLICT rather than a plain insert: (repo_id, edge_kind, raw) is
 		// the primary key and a card may well repeat a reference across the
 		// singular and plural spellings of the same key.

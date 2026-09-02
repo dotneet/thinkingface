@@ -60,6 +60,11 @@ export const settings = {
     sessionExpiredDelete: "Your session expired. Log in again to delete this token.",
     confirmDeleteTitle: "Delete access token?",
     confirmDelete: "Delete this access token? Anything using it will stop working.",
+    // Names the row that is about to go: "this access token" is ambiguous the
+    // moment the list holds more than one. `confirmDelete` above stays as the
+    // fallback for the (impossible in practice) case where the row is gone by
+    // the time the dialog renders.
+    confirmDeleteNamed: 'Delete the access token "{name}"? Anything using it will stop working.',
     loadFailed: "Failed to load tokens",
     loadFailedHint: "The backend API may be unreachable. Try reloading the page.",
     emptyTitle: "No access tokens",

@@ -127,9 +127,44 @@ The comment at the top of the package is itself a summary of the design:
 > — there is no mirror to prune, no key to vacate, and transferring, renaming
 > or deleting a repository moves nothing at all.
 
-- **LFS files require no action.** Regardless of which path uploaded them (an LFS batch
-  upload or the HF preupload proxy), the real copy is written directly to
-  `storage.LFSKey(oid)`, so there is nothing to re-copy after a push
+- **LFS files require no action on the storage side.** Regardless of which path uploaded
+  them (an LFS batch upload or the HF preupload proxy), the real copy is written directly to
+  `storage.LFSKey(oid)`, so there is nothing to re-copy after a push. What the Worker does
+  maintain is the `repo_lfs_objects` link table -- the reference count §5's "Unreferenced"
+  GC pass reads. `LinkLFSObjects` adds a link for every oid a commit names (the HF-compatible
+  commit handler calls it for one commit's pointers; the syncer's post-push pipeline calls it
+  again for the whole indexed revision) and stamps that link's `committed_at`, marking it as
+  confirmed rather than merely uploaded.
+  **`store.PruneRepoLFSLinks`** (called from `Syncer.pruneLFSLinks`, after the file index for
+  the pushed ref has been rebuilt and once the repository's sync queue is quiet) removes
+  **only the links no commit has ever named** (`committed_at IS NULL`), gated by a 24h age
+  floor (`lfsLinkGrace`) for the same reason the `blobs/` grace period below exists -- a link
+  can be younger than the commit that will reference it. In practice that is one thing: an LFS
+  transfer that completed and whose commit never arrived (a `tf up` or `huggingface_hub`
+  upload interrupted between the upload and the commit).
+  - **This deliberately does not touch history.** An earlier revision of this pass instead
+    reconciled a repository's links against `repo_files` -- which holds one row per file of
+    each *ref tip* -- releasing every link no current tip named any more. That broke `git
+    checkout <old sha>`, `git lfs fetch --all`, and `resolve` at a historical revision: an LFS
+    file deleted from the tip, or one that only ever existed on an older commit, lost its
+    entitlement (`store.RepoHasLFSObject`) even though the commit that names it was still
+    reachable, and `thinkingface gc` would then delete the bytes for real. `committed_at`
+    (migration `0002_repo_lfs_link_lifecycle.sql`, which adds the link's `created_at`
+    alongside it) fixed this: an object any commit ever named now keeps
+    its link for as long as the repository exists, matching what git and the HuggingFace Hub
+    both do. Existing rows were stamped rather than left `NULL` at migration time, so an
+    abandoned upload from before the migration is not retroactively collectable -- the safe
+    reading of "unknown" is "keep."
+  - **The consequence, stated plainly: deleting a file does not reduce a namespace's usage.**
+    `UsageByRepo` sums these links and `NamespaceQuotaForRepo` divides by that sum, and none of
+    those numbers move when a file is deleted from the tip, because the commit that added it is
+    still in the repository's history and cloning that revision still has to work. This is not
+    a leak an earlier revision of this pass tried to fix reappearing -- it is the correct
+    accounting for a versioned store, the same one `git clone` costs you. Deleting the whole
+    repository, or rewriting history to drop the commits that reference the object and then
+    running `thinkingface gc`, is what actually frees the bytes. See the
+    `TF_DEFAULT_STORAGE_QUOTA_BYTES` row in `docs/users/self-hosting/configuration.md` for the
+    user-facing version of this
 - **`publishBlobs`** publishes the non-LFS files of a pushed ref to `blobs/`
   (`internal/syncer/syncer.go`). The per-file "Stat, and Put if absent" logic is unified
   into `gitrepo.Repo.PublishBlob`; other code paths that need to read an unpublished
@@ -162,7 +197,10 @@ with the same command.
 
 - **`lfs/` side**: two passes, because the layer leaks in two shapes.
   - **Unreferenced** (`gcLFSUnreferenced`): among all oids in `lfs_objects`, any that appear
-    in no repository's `repo_lfs_objects` are detected as orphans. Deletion is done by
+    in no repository's `repo_lfs_objects` are detected as orphans. This is what makes §4's
+    `PruneRepoLFSLinks` load-bearing for this pass rather than just for usage/quota
+    accounting: an oid a repository deleted only becomes visible here once its link is
+    pruned. Deletion is done by
     `store.DeleteOrphanedLFSObject`, which `FOR UPDATE`-locks the `lfs_objects` row and then
     deletes storage before the row (to re-check, while holding the lock, whether some other
     push/verify has just added a reference)

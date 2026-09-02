@@ -46,6 +46,135 @@ describe("errorMessage", () => {
     }
   });
 
+  it("keeps the backend reason for forbidden instead of flattening it", () => {
+    // A sign-up on an instance with registration closed answers `forbidden`
+    // with the actual reason; rendering the generic "you don't have
+    // permission" made that read as a permissions bug.
+    const result = failed({
+      status: 403,
+      type: "forbidden",
+      message: "sign-up is disabled on this instance",
+    });
+    expect(errorMessage(en, result)).toBe("Not allowed: sign-up is disabled on this instance");
+    expect(errorMessage(ja, result)).toBe(
+      "許可されていません: sign-up is disabled on this instance",
+    );
+  });
+
+  it("keeps the backend reason for conflict instead of contradicting it", () => {
+    // "That already exists." was not just vague for these two, it was false.
+    const defaultBranch = failed({
+      status: 409,
+      type: "conflict",
+      message: "main is the default branch of acme/bert and cannot be deleted",
+    });
+    expect(errorMessage(en, defaultBranch)).toBe(
+      "Conflict: main is the default branch of acme/bert and cannot be deleted",
+    );
+    expect(errorMessage(ja, defaultBranch)).toBe(
+      "競合が発生しました: main is the default branch of acme/bert and cannot be deleted",
+    );
+
+    const notABranch = failed({
+      status: 409,
+      type: "conflict",
+      message: "v1.0 is a tag, not a branch; uploads must target a branch",
+    });
+    for (const t of [en, ja]) {
+      expect(errorMessage(t, notABranch)).toContain(
+        "v1.0 is a tag, not a branch; uploads must target a branch",
+      );
+      expect(errorMessage(t, notABranch)).not.toBe(t("errors.conflict"));
+    }
+  });
+
+  it("falls back to the generic wording when a detail type carries no message", () => {
+    // The bug this guards: `t("errors.badRequest")` called with no params
+    // returns its template verbatim (createTranslator's `if (!params) return
+    // template`), so a bad_request with an empty message printed the literal
+    // "Invalid request: {detail}" on screen. Assert the placeholder is gone,
+    // not just that the sentence doesn't end in a colon — "…: {detail}"
+    // passes both of those and is exactly the string we shipped.
+    for (const type of ["forbidden", "bad_request", "conflict"]) {
+      for (const message of ["", "   "]) {
+        const result = failed({ status: 409, type, message });
+        for (const t of [en, ja]) {
+          const rendered = errorMessage(t, result);
+          expect(rendered, `${type} / ${JSON.stringify(message)}`).not.toMatch(/\{\w+\}/);
+          expect(rendered, type).not.toContain(":  ");
+          expect(rendered, type).not.toMatch(/: *$/);
+          expect(rendered.trim().length, type).toBeGreaterThan(0);
+        }
+      }
+    }
+  });
+
+  it("never renders an unfilled placeholder for any known type", () => {
+    // ERROR_TYPE_KEYS is rendered with `t(key)` — no params — so every key it
+    // points at has to be a complete sentence. This is the general form of the
+    // bad_request bug above: adding another `…Detail` template to that map
+    // would leak "{detail}" onto the page the same way.
+    const types = [
+      "bad_request",
+      "unauthorized",
+      "forbidden",
+      "not_found",
+      "conflict",
+      "payload_too_large",
+      "internal_error",
+      "repository_archived",
+      "repo_moved",
+      "transfer_not_pending",
+      "method_not_allowed",
+      "xet_not_supported",
+      "account_disabled",
+      "approval_pending",
+      "account_pending",
+      "rate_limited",
+      "overloaded",
+      "range_not_satisfiable",
+      "timeout",
+    ];
+    for (const type of types) {
+      // An empty message is what forces the generic branch for the detail
+      // types; the rest ignore the message entirely.
+      const result = failed({ status: 400, type, message: "" });
+      for (const t of [en, ja]) {
+        expect(errorMessage(t, result), type).not.toMatch(/\{\w+\}/);
+      }
+    }
+  });
+
+  it("translates the types added after the first audit pass", () => {
+    // range_not_satisfiable (resolve.go) and timeout (server.go's
+    // handlerTimeoutBody) reached the client before they were mapped, which
+    // dropped the caller through to `result.message` — backend English.
+    const cases: Array<[string, number, string]> = [
+      ["range_not_satisfiable", 416, "the requested range starts at or past the end"],
+      ["timeout", 504, "the server took too long to answer this request"],
+    ];
+    for (const [type, status, message] of cases) {
+      const result = failed({ status, type, message });
+      for (const t of [en, ja]) {
+        const rendered = errorMessage(t, result);
+        expect(rendered, type).not.toBe(message);
+        expect(rendered, type).not.toContain(message);
+        expect(rendered.length, type).toBeGreaterThan(0);
+      }
+      expect(errorMessage(en, result), type).not.toBe(errorMessage(ja, result));
+    }
+  });
+
+  it("never leaks a server-side message for types written for an operator", () => {
+    // The line DETAIL_KEYS draws: an internal error's text is written for
+    // whoever reads the logs, not for the person on the page.
+    for (const type of ["internal_error", "overloaded", "unauthorized", "not_found"]) {
+      const result = failed({ status: 500, type, message: "pq: relation tokens does not exist" });
+      expect(errorMessage(en, result), type).not.toContain("pq:");
+      expect(errorMessage(ja, result), type).not.toContain("pq:");
+    }
+  });
+
   it("keeps the backend detail for bad_request, interpolated into translated copy", () => {
     const result = failed({
       status: 400,
@@ -70,9 +199,11 @@ describe("errorMessage", () => {
 
 describe("queryErrorMessage / ApiResultError", () => {
   it("unwraps an ApiResultError through errorMessage", () => {
-    const result = failed({ status: 403, type: "forbidden" });
+    const result = failed({ status: 403, type: "forbidden", message: "this token is read-only" });
     const error = new ApiResultError(result);
-    expect(queryErrorMessage(en, error, "fallback")).toBe(en("errors.forbidden"));
+    expect(queryErrorMessage(en, error, "fallback")).toBe(
+      en("errors.forbiddenDetail", { detail: "this token is read-only" }),
+    );
   });
 
   it("uses the fallback for a non-API error", () => {

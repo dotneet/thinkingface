@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-git/go-git/v5/plumbing/filemode"
@@ -185,6 +186,31 @@ func looksLikeSHA(rev string) bool {
 	return true
 }
 
+// checkOpPath refuses a commit operation whose path gitrepo.Commit would
+// refuse anyway, before anything is committed.
+//
+// The check is not new -- Commit calls ValidatePath on every op it applies --
+// but its failure used to reach the handler as an unclassified error from
+// commitThroughWAL and become a 500 internal_error. That is wrong three times
+// over for what is only ever the caller's mistake: huggingface_hub's
+// http_backoff retries a 5xx, so a permanently invalid request is re-sent
+// until it gives up; the sentence in X-Error-Message says "create commit
+// failed" instead of what to fix; and every typo lands in the log as
+// slog.Error. The upload endpoint has always answered 400 for the identical
+// check (cleanUploadPath), so the same input got two different statuses
+// depending on which route it arrived through.
+//
+// what names the operation ("file", "deletedFolder", "copyFile srcPath", ...)
+// so a caller sending a batch can see which line is wrong.
+func checkOpPath(w http.ResponseWriter, what, path string) bool {
+	if err := gitrepo.ValidatePath(path); err != nil {
+		badRequest(w, what+": invalid path "+strconv.Quote(path)+
+			"; paths are relative to the repository root and may not escape it or write inside .git")
+		return false
+	}
+	return true
+}
+
 // ensureBranchRev refuses a write whose {rev} names something in this
 // repository that is not a branch. Every write path commits to
 // refs/heads/{rev}, while every read resolves {rev} through go-git's
@@ -209,6 +235,23 @@ func looksLikeSHA(rev string) bool {
 // what names the operation in the message ("commits" / "uploads" / ...), as in
 // the looksLikeSHA messages it sits next to.
 func ensureBranchRev(w http.ResponseWriter, gitRepo *gitrepo.Repo, rev, what string) bool {
+	// A name git could not hold as a branch under any circumstances is the
+	// caller's mistake, and it is refused before the repository is consulted:
+	// go-git's ref lookup answers some of these ("..") with an error rather
+	// than a miss, which used to surface as 500 "read branch ref failed", and
+	// the rest reached gitrepo.Commit and became 500 "create commit failed".
+	//
+	// "HEAD" is deliberately exempt. ValidateRefName reserves it, but it also
+	// resolves in every repository, and the answer the contract fixes for it
+	// (docs/dev/api-contract.md §"{rev} is a branch name") is the 409 below --
+	// the same one a tag gets, for the same reason: the request is
+	// well-formed and only this repository's state refuses it.
+	if rev != "HEAD" {
+		if err := gitrepo.ValidateRefName(rev); err != nil {
+			badRequest(w, what+" must target a branch: "+strconv.Quote(rev)+" "+err.Error())
+			return false
+		}
+	}
 	isBranch, err := gitRepo.HasBranch(rev)
 	if err != nil {
 		internalError(w, "read branch ref", err)

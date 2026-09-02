@@ -81,8 +81,9 @@ func TestResolve_RangeServesPartialContent(t *testing.T) {
 }
 
 // A range this server cannot make sense of degrades to the whole file, the
-// same fallback the LFS path has. 416 would be the stricter answer, but it
-// would change behaviour on both paths at once.
+// same fallback the LFS path has (RFC 9110 §14.2 allows ignoring a Range that
+// cannot be understood). A range that *is* understood but starts past the end
+// is different -- see TestResolve_RangePastEndIsNotSatisfiable.
 func TestResolve_UnusableRangeReturnsWholeBody(t *testing.T) {
 	f := newRangeFixture(t)
 
@@ -94,7 +95,6 @@ func TestResolve_UnusableRangeReturnsWholeBody(t *testing.T) {
 	}{
 		{"malformed", "rows.csv", "bytes=abc", rangeBlob},
 		{"no unit", "rows.csv", "0-4", rangeBlob},
-		{"start past eof", "rows.csv", "bytes=99-", rangeBlob},
 		{"end before start", "rows.csv", "bytes=9-4", rangeBlob},
 		{"multi range", "rows.csv", "bytes=0-1,4-5", rangeBlob},
 		{"negative suffix of empty file", "empty.txt", "bytes=-4", ""},
@@ -123,6 +123,51 @@ func TestResolve_UnusableRangeReturnsWholeBody(t *testing.T) {
 			want := strconv.Itoa(len(tt.wantBody))
 			if got := rec.Header().Get("Content-Length"); got != want {
 				t.Errorf("Content-Length = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// A well-formed range whose first byte is at or past the end of the file is
+// 416, never a 200 carrying the whole body.
+//
+// This is the one Range case that cannot be answered leniently.
+// huggingface_hub's http_get resumes a download by sending `Range: bytes=N-`
+// and appending the response to the ".incomplete" file it already holds --
+// without checking that the status is 206. If the previous attempt had already
+// transferred everything, N equals the file's size, and a 200 makes it append
+// a second whole copy to a complete file. The result fails its hash check, and
+// each retry doubles the file again.
+func TestResolve_RangePastEndIsNotSatisfiable(t *testing.T) {
+	f := newRangeFixture(t)
+
+	tests := []struct {
+		name     string
+		rangeHdr string
+	}{
+		// Exactly the resume case: the client already holds all 26 bytes.
+		{"open ended at eof", "bytes=26-"},
+		{"open ended past eof", "bytes=99-"},
+		{"closed past eof", "bytes=30-40"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := f.do(secRequest{
+				method:  "GET",
+				path:    "/datasets/alice/data/resolve/main/rows.csv",
+				headers: map[string]string{"Range": tt.rangeHdr},
+			})
+			if rec.Code != http.StatusRequestedRangeNotSatisfiable {
+				t.Fatalf("status = %d, want 416; body = %q", rec.Code, rec.Body.String())
+			}
+			// The real length, so a client that was resuming can see it
+			// already holds the whole file (RFC 9110 §14.4).
+			want := "bytes */" + strconv.Itoa(len(rangeBlob))
+			if got := rec.Header().Get("Content-Range"); got != want {
+				t.Errorf("Content-Range = %q, want %q", got, want)
+			}
+			if got := rec.Body.String(); strings.Contains(got, rangeBlob) {
+				t.Errorf("body = %q, want no file content in a 416", got)
 			}
 		})
 	}

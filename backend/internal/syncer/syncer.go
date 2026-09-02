@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -32,7 +33,31 @@ import (
 	"github.com/dotneet/thinkingface/backend/internal/viewer"
 )
 
+// maxReadmeBytes is how much of a README.md the indexer reads. The card is
+// YAML front matter at the very top of the file, so the prefix is enough:
+// a model card whose benchmark tables run to a megabyte still gets indexed,
+// where reading it whole would have refused it. See readCard.
 const maxReadmeBytes = 256 << 10
+
+// lfsLinkGrace is how long a repository's LFS link is left alone before
+// PruneRepoLFSLinks will consider it an abandoned upload.
+//
+// It only ever applies to a link no commit has named (store.PruneRepoLFSLinks
+// touches nothing else), so what it has to outlast is exactly the gap between
+// an object being uploaded and the commit naming it being pushed: the link is
+// written at the end of the transfer, the commit arrives whenever the client
+// gets round to it. For `tf up` or a huggingface_hub upload of a large model
+// that gap is however long the transfer takes -- hours on an ordinary uplink
+// -- so this is generous on purpose. It also covers a second ref of the same
+// repository being indexed concurrently: ref locks are per ref, so that job
+// may have linked its objects without having written its files yet.
+//
+// The cost of a long grace is only that an interrupted upload stays charged
+// for a day. The cost of a short one is unlinking an upload in flight, which
+// turns into a 404 on a push the client is still making.
+//
+// A var only so the tests can shorten it; nothing changes it at runtime.
+var lfsLinkGrace = 24 * time.Hour
 
 const (
 	// syncLease is how long a claimed job is held before the sweeper is
@@ -416,25 +441,41 @@ func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *sto
 		return nil, fmt.Errorf("update file index: %w", err)
 	}
 
-	card := repocard.Card{Data: map[string]any{}}
-	if readme, err := gitRepo.ReadFile(job.Ref, "README.md", maxReadmeBytes); err == nil {
-		card = repocard.Parse(readme)
-	}
+	card, cardOK := readCard(gitRepo, repo, job.Ref, entries)
 
 	if job.Ref == repo.DefaultBranch {
-		if err := s.store.UpdateRepoIndex(ctx, repo.ID, commit.String(), totalSize,
-			card.Data, card.Description(), card.IsExperiment() || looksLikeExperiment(files)); err != nil {
-			return nil, fmt.Errorf("update repository index: %w", err)
-		}
-		// Lineage follows the card, so it is rebuilt from the same parse: an
-		// edge removed from the README disappears from the index on this push.
-		if err := s.store.ReplaceRepoLineage(ctx, repo.ID, lineageEdges(repo.Kind, card, files)); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return nil, nil
+		if !cardOK {
+			// The README defeated the reader, so nothing derived from it is
+			// known this time round. Record the push without touching the
+			// card, the description, the experiment flag or the lineage: an
+			// unreadable README is not a README that says nothing, and
+			// treating the two alike wiped a repository's whole metadata
+			// index on the day its model card grew past the read limit.
+			if err := s.store.UpdateRepoIndexKeepingCard(ctx, repo.ID, commit.String(), totalSize); err != nil {
+				return nil, fmt.Errorf("update repository index: %w", err)
 			}
-			return nil, fmt.Errorf("update lineage index: %w", err)
+		} else {
+			if err := s.store.UpdateRepoIndex(ctx, repo.ID, commit.String(), totalSize,
+				card.Data, card.Description(), card.IsExperiment() || looksLikeExperiment(files)); err != nil {
+				return nil, fmt.Errorf("update repository index: %w", err)
+			}
+			// Lineage follows the card, so it is rebuilt from the same parse: an
+			// edge removed from the README disappears from the index on this push.
+			if err := s.store.ReplaceRepoLineage(ctx, repo.ID, lineageEdges(repo.Kind, card, files)); err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					return nil, nil
+				}
+				return nil, fmt.Errorf("update lineage index: %w", err)
+			}
 		}
 	}
+
+	// Links for objects that were uploaded and never committed are released
+	// here, after LinkLFSObjects above has stamped everything this revision
+	// names as committed. Links a commit has named are kept for good -- see
+	// store.PruneRepoLFSLinks for why deleting a file does not, and must not,
+	// give the bytes back.
+	s.pruneLFSLinks(ctx, repo, job)
 
 	if err := s.indexParquet(ctx, repo, gitRepo, job.Ref, files); err != nil {
 		return nil, fmt.Errorf("index parquet files: %w", err)
@@ -568,7 +609,11 @@ func (s *Syncer) indexParquet(ctx context.Context, repo *store.Repo, gitRepo *gi
 		if !strings.HasSuffix(strings.ToLower(f.Path), ".parquet") {
 			continue
 		}
-		seen[f.Path] = true
+		// Keyed by the folded path, because that is what the index stores
+		// and what ListParquetFiles below returns (store.SanitizeIndexPath).
+		// Comparing a raw git path against a folded stored one would call
+		// every non-UTF-8 name stale and delete the row just written.
+		seen[store.SanitizeIndexPath(f.Path)] = true
 
 		var key string
 		if f.LFSOID != nil {
@@ -625,4 +670,120 @@ func plumbingHash(s string) plumbing.Hash {
 		return plumbing.ZeroHash
 	}
 	return plumbing.NewHash(s)
+}
+
+// readCard parses the repository card out of the revision's README.md and
+// reports whether the answer can be trusted.
+//
+// The second return is the whole point. This used to be
+//
+//	card := repocard.Card{Data: map[string]any{}}
+//	if readme, err := gitRepo.ReadFile(ref, "README.md", maxReadmeBytes); err == nil {
+//	    card = repocard.Parse(readme)
+//	}
+//
+// which treats "could not read it" and "it said nothing" as the same fact.
+// ReadFile refuses a blob over the limit with ErrBlobTooLarge -- distinct from
+// missing, deliberately so -- and the empty card that fell out then went
+// straight into UpdateRepoIndex and ReplaceRepoLineage. Pushing a README that
+// crossed 256 KiB, with its front matter untouched, silently erased the
+// repository's license, tags, pipeline tag and every lineage edge. Model
+// cards with benchmark tables cross it routinely.
+//
+// The size limit is now applied to the *read* rather than to the file: the
+// front matter lives at the top, so a prefix answers the question and a large
+// README is indexed like any other. Only one case is genuinely unreadable --
+// front matter that opens within the prefix and does not close inside it --
+// and that, along with an object database error, is what false reports.
+//
+// The entry comes from the tree listing the caller already has, so no second
+// tree is resolved. A README.md that is a directory, or absent, is a repository
+// with no card: true, with the empty card, which is what clears an index whose
+// README really was deleted.
+func readCard(gitRepo *gitrepo.Repo, repo *store.Repo, ref string, entries []gitrepo.Entry) (repocard.Card, bool) {
+	empty := repocard.Card{Data: map[string]any{}}
+
+	var hash plumbing.Hash
+	found := false
+	for _, e := range entries {
+		if e.Path == "README.md" {
+			if e.IsDir {
+				return empty, true
+			}
+			hash, found = e.Hash, true
+			break
+		}
+	}
+	if !found {
+		return empty, true
+	}
+
+	rc, size, err := gitRepo.BlobReader(hash)
+	if err != nil {
+		slog.Warn("syncer: repository card left as it was; README.md could not be read",
+			"repo", repo.FullName(), "ref", ref, "error", err)
+		return empty, false
+	}
+	defer rc.Close()
+
+	head, err := io.ReadAll(io.LimitReader(rc, maxReadmeBytes))
+	if err != nil {
+		slog.Warn("syncer: repository card left as it was; README.md could not be read",
+			"repo", repo.FullName(), "ref", ref, "error", err)
+		return empty, false
+	}
+	if size > int64(len(head)) && frontMatterUnclosed(head) {
+		slog.Warn("syncer: repository card left as it was; README.md front matter does not close within the read limit",
+			"repo", repo.FullName(), "ref", ref, "size", size, "limit", maxReadmeBytes)
+		return empty, false
+	}
+	return repocard.Parse(head), true
+}
+
+// frontMatterUnclosed reports whether b opens a YAML front matter block and
+// does not close it. It mirrors repocard.Parse's own delimiters, including the
+// CRLF normalisation, because the question being asked is precisely "would
+// Parse find the end of the block in these bytes".
+func frontMatterUnclosed(b []byte) bool {
+	text := strings.ReplaceAll(string(b), "\r\n", "\n")
+	if !strings.HasPrefix(text, "---\n") {
+		return false
+	}
+	return !strings.Contains(text[len("---\n"):], "\n---")
+}
+
+// pruneLFSLinks releases the repository's links to LFS objects that were
+// uploaded but that no commit ever named -- a transfer whose commit never
+// arrived (store.PruneRepoLFSLinks). Objects history still names keep their
+// links, and keep costing the namespace, because cloning that history has to
+// keep working.
+//
+// It waits for the repository's sync queue to be quiet. The syncer is what
+// stamps an object as committed, so a ref whose job is queued or parked has
+// pointers nothing has vouched for yet; pruning around one would unlink live
+// objects and let gc delete their bytes.
+//
+// Best effort, and deliberately so: this is bookkeeping that the next push
+// redoes, and failing an otherwise successful sync over it would freeze the
+// file index -- a far worse outcome than an over-counted namespace.
+func (s *Syncer) pruneLFSLinks(ctx context.Context, repo *store.Repo, job *store.SyncJob) {
+	busy, err := s.store.HasUnsettledSyncJobs(ctx, repo.ID, job.ID)
+	if err != nil {
+		slog.Warn("syncer: could not check the sync queue before releasing lfs links",
+			"repo", repo.FullName(), "error", err)
+		return
+	}
+	if busy {
+		return
+	}
+	n, err := s.store.PruneRepoLFSLinks(ctx, repo.ID, time.Now().Add(-lfsLinkGrace))
+	if err != nil {
+		slog.Warn("syncer: could not release uncommitted lfs links",
+			"repo", repo.FullName(), "error", err)
+		return
+	}
+	if n > 0 {
+		slog.Info("syncer: released lfs links for objects no commit ever named",
+			"repo", repo.FullName(), "ref", job.Ref, "links", n)
+	}
 }

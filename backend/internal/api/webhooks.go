@@ -122,6 +122,17 @@ func (s *Server) requireNamespaceAdmin(w http.ResponseWriter, r *http.Request, n
 	return user, true
 }
 
+// webhookNotFound is the single answer for "no such webhook" and "not yours",
+// and they must stay indistinguishable. Webhook ids are small sequential
+// integers in the URL, so an answer that differed between the two would let
+// anyone walk 1..N and read back the list of every webhook on the instance
+// together with the namespace that owns it -- the 403's own message named it
+// ("you do not have admin access to namespace alice"). handleDecideTransfer
+// avoids the same trap deliberately (transfers.go).
+func webhookNotFound(w http.ResponseWriter) {
+	notFound(w, "webhook not found")
+}
+
 // loadWebhookForAdmin loads the webhook named in the URL and checks the
 // caller may administer it (same bar as its owning namespace).
 //
@@ -135,11 +146,13 @@ func (s *Server) requireNamespaceAdmin(w http.ResponseWriter, r *http.Request, n
 //     the lookup first, an existing id answered 401 from the namespace check
 //     while a missing one answered 404.
 //   - A caller who *is* authenticated but may not administer the owning
-//     namespace gets 404 rather than 403. A 403 would confirm the row is
-//     there, and name its namespace in the message; the caller is not
-//     supposed to know either. Only somebody who could already administer
-//     the webhook can tell "no such webhook" from "not yours", and for them
-//     the two are the same statement.
+//     namespace gets 404 rather than 403 -- the single answer webhookNotFound
+//     writes. A 403 would confirm the row is there, and name its namespace in
+//     the message; the caller is not supposed to know either. Only somebody
+//     who could already administer the webhook can tell "no such webhook"
+//     from "not yours", and for them the two are the same statement. That is
+//     also why this cannot simply call requireNamespaceAdmin, which answers
+//     403 with the namespace's name in it.
 //
 // requireWrite rather than plain authentication, because that is already the
 // bar administering a webhook applies: an admin holding a read-only token may
@@ -150,12 +163,19 @@ func (s *Server) loadWebhookForAdmin(w http.ResponseWriter, r *http.Request) (*s
 	if !ok {
 		return nil, false
 	}
+	// Authentication still answers for itself: an anonymous or read-scoped
+	// caller gets 401/403 without any webhook being looked up, which says
+	// nothing about which ids exist.
 	user, ok := s.requireWrite(w, r)
 	if !ok {
 		return nil, false
 	}
 	hook, err := s.store.GetWebhook(r.Context(), id)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			webhookNotFound(w)
+			return nil, false
+		}
 		handleStoreError(w, "load webhook", err)
 		return nil, false
 	}
@@ -168,7 +188,7 @@ func (s *Server) loadWebhookForAdmin(w http.ResponseWriter, r *http.Request) (*s
 		// Deliberately the same call the miss above makes, rather than a
 		// notFound of its own: two 404s that differ in their message are
 		// still two answers, and the point is that there is only one.
-		handleStoreError(w, "load webhook", store.ErrNotFound)
+		webhookNotFound(w)
 		return nil, false
 	}
 	return hook, true

@@ -66,10 +66,18 @@ services:
       #   TF_WAL_MODE=authoritative docker compose up -d api
       TF_WAL_MODE: ${TF_WAL_MODE:-shadow}
       TF_GIT_HOOKS_PATH: /opt/thinkingface/hooks
-      STORAGE_DRIVER: gcs-emulator
+      # Every var below uses ${VAR:-default} rather than a bare literal, even
+      # ones nobody normally overrides, so that setting it in .env actually
+      # takes effect: `environment:` here wins over `env_file: .env` for any
+      # key both define, so a bare literal would silently discard whatever
+      # the same-named key in .env says (docs/users/self-hosting/configuration.md
+      # notes this compose-specific precedence; GIT_ROOT/TF_GIT_HOOKS_PATH above are
+      # the deliberate exception -- they're tied to this file's own volume
+      # mount and baked-in image path, not meant to be overridden).
+      STORAGE_DRIVER: ${STORAGE_DRIVER:-gcs-emulator}
       GCS_BUCKET: ${GCS_BUCKET:-thinkingface}
       GCS_PREFIX: ${GCS_PREFIX:-}
-      STORAGE_EMULATOR_HOST: http://gcs:4443
+      STORAGE_EMULATOR_HOST: ${STORAGE_EMULATOR_HOST:-http://gcs:4443}
       TF_SIGNED_URL_TTL: ${TF_SIGNED_URL_TTL:-1h}
       TF_ADMIN_USERNAME: ${TF_ADMIN_USERNAME:-admin}
       TF_ADMIN_PASSWORD: ${TF_ADMIN_PASSWORD:-admin}
@@ -78,15 +86,15 @@ services:
       # Scratch space for WAL compaction (backend/cmd/thinkingface/walops.go);
       # the parquet viewer no longer uses this directory (§9 of
       # docs/dev/thinkingface-design.md).
-      TF_VIEWER_CACHE_DIR: /data/cache
+      TF_VIEWER_CACHE_DIR: ${TF_VIEWER_CACHE_DIR:-/data/cache}
       TF_SYNC_WORKERS: ${TF_SYNC_WORKERS:-2}
       TF_ALLOW_SIGNUP: ${TF_ALLOW_SIGNUP:-true}
       # git over SSH (docs/dev/thinkingface-design.md §5). The host key lives on
       # the git-data volume so it survives `docker compose down`; a fresh key
       # on every restart would make every client warn about a mismatch.
       TF_SSH_ENABLED: ${TF_SSH_ENABLED:-true}
-      TF_SSH_ADDR: ":2222"
-      TF_SSH_HOST_KEY_PATH: /data/ssh/host_ed25519
+      TF_SSH_ADDR: ${TF_SSH_ADDR:-:2222}
+      TF_SSH_HOST_KEY_PATH: ${TF_SSH_HOST_KEY_PATH:-/data/ssh/host_ed25519}
     volumes:
       - git-data:/data
     ports:
@@ -101,11 +109,20 @@ services:
   web:
     build:
       context: ./frontend
+      args:
+        # NEXT_PUBLIC_API_URL is inlined into the client bundle by `bun run
+        # build` (Next.js build-time env), so it must be passed as a build
+        # arg here, not (only) as a runtime `environment:` var below -- a
+        # runtime-only value would never reach the browser bundle. See
+        # frontend/Dockerfile and infra/README.md for the non-compose case.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
     restart: unless-stopped
     environment:
       # Server-side (SSR/route handlers) talk to the api container directly.
       API_URL: http://api:8080
-      # Browser-side code talks to the host-published port.
+      # Kept for reference/consistency with the build arg above; the browser
+      # bundle already has the value baked in from the build arg and does not
+      # read this at runtime.
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
     ports:
       - "3000:3000"

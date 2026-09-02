@@ -259,6 +259,10 @@ export const experiments = {
     time: "時刻",
     step: "ステップ",
     resetZoom: "ズームをリセット",
+    logUnavailable:
+      "このチャートでは対数スケールを無効にしています（値がすべて 0 以下で、対数軸には配置できません）。",
+    logHiddenPointsOne: "0 以下の点を 1 件非表示にしています（対数軸には配置できません）。",
+    logHiddenPointsOther: "0 以下の点を {count} 件非表示にしています（対数軸には配置できません）。",
     tabsLabel: "メトリクス表示",
     tabMetrics: "メトリクス",
     tabSystemMetrics: "システムメトリクス",

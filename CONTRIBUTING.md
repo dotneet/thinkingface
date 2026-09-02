@@ -27,7 +27,10 @@ make check       # every quality gate — run this after any change
 ## Pull requests
 
 1. Branch from `main` and keep the change focused.
-2. Run `make check` (it mirrors CI). If you touched an HF-compatible endpoint, also run
+2. Run `make check` (covers most of what CI runs, including golangci-lint — see
+   [`docs/dev/development.md`](docs/dev/development.md#quality-gates) for the parts it
+   doesn't cover, notably the PostgreSQL half of the backend integration tests
+   (`make test-store-pg`)). If you touched an HF-compatible endpoint, also run
    `make test-e2e` against a running `make up` stack.
 3. Keep the generated and mirrored artifacts in sync — `frontend/types/api.gen.ts`
    (`make gen-types`), both migration directories, and `docs/dev/api-contract.md`. See

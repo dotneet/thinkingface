@@ -25,8 +25,14 @@ func (h *Handler) Batch(ctx context.Context, repoID int64, req *BatchRequest, au
 	// depends on the size of the *whole* batch: the client transfers these
 	// objects one after another over a single connection, so the URL for the
 	// last one has to still be valid after every earlier one has gone across.
+	// dedup is kept apart from pending because the two cost different things:
+	// a pending object costs a transfer (and so a signed URL, and so time on
+	// the batch's TTL budget), while a dedup hit costs only the link. Both
+	// cost the namespace its bytes, which is why the quota check below sees
+	// them together.
 	var (
 		pending    []pendingAction
+		dedup      []pendingAction
 		totalBytes int64
 	)
 
@@ -48,19 +54,27 @@ func (h *Handler) Batch(ctx context.Context, repoID int64, req *BatchRequest, au
 				return nil, err
 			}
 			if exists {
-				// Deduplicated: the client uploads nothing and the commit still
-				// references the same content. RecordLFSObject re-checks
-				// storage under the row lock; if a concurrent GC already
-				// deleted the bytes, ErrLFSObjectGone means we must ask
-				// the client to upload rather than treat the oid as present.
-				err := h.link(ctx, repoID, obj.OID, obj.Size)
-				if err != nil && !errors.Is(err, store.ErrLFSObjectGone) {
-					return nil, err
+				// Deduplicated: the client uploads nothing and the commit
+				// still references the same content. Whether that is free
+				// depends on one thing -- does this repository already hold
+				// the link? If it does, nothing changes and nothing is
+				// charged. If it does not, the link about to be written adds
+				// the object's full size to what UsageByRepo attributes to
+				// this namespace, so it is charged like any other object and
+				// decided after the quota check below. Linking here was how a
+				// namespace 500 GiB over a 1 MiB quota could still take on
+				// gigabytes: the quota path was never even reached.
+				linked, err := h.store.RepoHasLFSObject(ctx, repoID, obj.OID)
+				if err != nil {
+					return nil, fmt.Errorf("check lfs object ownership: %w", err)
 				}
-				if err == nil {
+				if linked {
 					resp.Objects = append(resp.Objects, item)
 					continue
 				}
+				dedup = append(dedup, pendingAction{index: len(resp.Objects), op: "dedup", obj: obj})
+				resp.Objects = append(resp.Objects, item)
+				continue
 			}
 			// Only objects that actually get transferred count towards the
 			// batch's byte total; a deduplicated hit costs no wall clock.
@@ -104,10 +118,45 @@ func (h *Handler) Batch(ctx context.Context, repoID int64, req *BatchRequest, au
 	// appetite is known and no URL has been handed out. Downloads cost the
 	// namespace nothing and are never gated.
 	if req.Operation == "upload" {
-		var err error
-		if pending, err = h.withinQuota(ctx, repoID, resp, pending); err != nil {
+		ok, err := h.withinQuota(ctx, repoID, resp, pending, dedup)
+		if err != nil {
 			return nil, err
 		}
+		if !ok {
+			// withinQuota has written the refusal onto every charged object;
+			// nothing is linked and no URL is minted.
+			pending, dedup = nil, nil
+		}
+	}
+
+	// The links the dedup hits earn are written only now, on the far side of
+	// the quota gate: no link is made for a batch the quota refused. A gone
+	// object -- collected between the Stat above and this call -- becomes an
+	// ordinary upload instead, and its bytes were already counted against the
+	// quota either way, so nothing slips through by taking that path.
+	//
+	// The loop is not atomic, and does not need to be. If h.link fails part
+	// way through for any other reason the handler returns 500 with the
+	// earlier links already committed, so the namespace is charged for objects
+	// the client was never handed a URL for. That is recoverable from both
+	// ends: the client retries the same batch and the surviving links are
+	// re-derived rather than duplicated (repo_lfs_objects is keyed on
+	// (repo_id, oid), and RecordLFSObject short-circuits on a link that is
+	// already there), and a link no commit ever names is released by
+	// store.PruneRepoLFSLinks a grace period later. Wrapping the batch in one
+	// transaction would instead mean holding SQLite's single writer across a
+	// storage round trip per object, which is the trade RecordLFSObject's own
+	// comment declines to make.
+	for _, p := range dedup {
+		err := h.link(ctx, repoID, p.obj.OID, p.obj.Size)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, store.ErrLFSObjectGone) {
+			return nil, err
+		}
+		pending = append(pending, pendingAction{index: p.index, op: "upload", obj: p.obj})
+		totalBytes += p.obj.Size
 	}
 
 	ttl := TTLFor(h.ttl, h.maxTTL, totalBytes)
@@ -140,9 +189,15 @@ func (h *Handler) Batch(ctx context.Context, repoID int64, req *BatchRequest, au
 	return resp, nil
 }
 
-// pendingAction is an object the batch decided to hand transfer actions for,
-// held back until the batch's total transfer size (and so the URL lifetime) is
-// known.
+// pendingAction is an object the batch has decided about but not yet acted
+// on, held back until the whole batch is known: transfer actions because
+// their URL lifetime depends on the batch's total size, and dedup links
+// because the quota is checked against the batch as a whole.
+//
+// op is "upload" or "download" for an action to mint, and "dedup" for an
+// object already in the bucket that only needs linking. A dedup entry whose
+// link turns out to be impossible (the bytes were collected in between) is
+// re-filed as an "upload".
 type pendingAction struct {
 	index int
 	op    string

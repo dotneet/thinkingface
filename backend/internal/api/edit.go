@@ -65,7 +65,8 @@ func lfsEditRejection(path string) string {
 //
 // One function rather than four lines copied per handler because every one of
 // the four fails *open* when it is left out. A missing path check writes at
-// the repository root; a missing looksLikeSHA check "commits" to a hash,
+// the repository root, or lets a path gitrepo.Commit will refuse anyway reach
+// it and come back as a 500; a missing looksLikeSHA check "commits" to a hash,
 // creating a branch named after a commit that every later read resolves to
 // the commit instead -- so the caller is told the write succeeded and then
 // never sees it again.
@@ -81,6 +82,12 @@ func (s *Server) uiWriteTarget(w http.ResponseWriter, r *http.Request, what stri
 	path = wildcardPath(r)
 	if path == "" {
 		badRequest(w, "no file path given")
+		return nil, "", "", false
+	}
+	// The same check handleRenameFile already applies to new_path, and
+	// handleUploadFiles to every part's name: a path the commit would refuse
+	// is a 400 here rather than a 500 out of gitrepo.Commit (see checkOpPath).
+	if !checkOpPath(w, "path", path) {
 		return nil, "", "", false
 	}
 	rev, ok = revParam(w, r, "rev", repo)

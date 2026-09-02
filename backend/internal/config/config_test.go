@@ -410,3 +410,110 @@ func TestLoad_SignupEmailDomainsEmptyMeansUnrestricted(t *testing.T) {
 		t.Fatalf("SignupEmailDomains = %q, want empty", c.SignupEmailDomains)
 	}
 }
+
+// A signed URL is minted as `now + TF_SIGNED_URL_TTL`, and lfs.TTLFor only ever
+// clamps that value down -- so a zero or negative base hands out URLs that are
+// already expired and every LFS transfer fails against GCS with a 403 that
+// names no cause. Nothing in the logs would say why, which is what makes this
+// a startup check rather than something to notice in production.
+func TestLoad_SignedURLTTLMustBePositive(t *testing.T) {
+	for _, v := range []string{"-1h", "0"} {
+		t.Run(v, func(t *testing.T) {
+			setBase(t)
+			t.Setenv("TF_SIGNED_URL_TTL", v)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TF_SIGNED_URL_TTL") {
+				t.Fatalf("Load() err = %v, want TF_SIGNED_URL_TTL validation error", err)
+			}
+		})
+	}
+}
+
+// The ceiling is different: lfs.TTLFor reads "<= 0" as "no ceiling of my own",
+// which is a documented way to run it (the signing limit still applies). Only a
+// negative value is refused, since as a ceiling it can only mean "expired".
+func TestLoad_SignedURLMaxTTLZeroMeansNoCeiling(t *testing.T) {
+	setBase(t)
+	t.Setenv("TF_SIGNED_URL_MAX_TTL", "0")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.SignedURLMaxTTL != 0 {
+		t.Fatalf("SignedURLMaxTTL = %v, want 0", c.SignedURLMaxTTL)
+	}
+
+	setBase(t)
+	t.Setenv("TF_SIGNED_URL_MAX_TTL", "-30m")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TF_SIGNED_URL_MAX_TTL") {
+		t.Fatalf("Load() err = %v, want TF_SIGNED_URL_MAX_TTL validation error", err)
+	}
+}
+
+// A ceiling below the base means one of the two values is not doing what it was
+// set for: TTLFor honours the ceiling, so the base is never reached.
+func TestLoad_SignedURLMaxTTLMustNotBeBelowTheBase(t *testing.T) {
+	setBase(t)
+	t.Setenv("TF_SIGNED_URL_TTL", "6h")
+	t.Setenv("TF_SIGNED_URL_MAX_TTL", "1h")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TF_SIGNED_URL_MAX_TTL") {
+		t.Fatalf("Load() err = %v, want a base/ceiling ordering error", err)
+	}
+}
+
+// The deployment this check actually stops is not one with a contradictory
+// pair of values: it is one that set TF_SIGNED_URL_TTL above 12h alone,
+// years ago, and is being upgraded onto a server that now refuses to start.
+// Refusing is deliberate -- resolving it by raising the ceiling would
+// lengthen the life of every signed URL the instance issues, silently, during
+// an upgrade -- so the whole burden falls on the message, which has to name
+// the *other* variable and the value that would make this one legal.
+func TestLoad_SignedURLTTLAboveTheDefaultCeilingSaysHowToFixIt(t *testing.T) {
+	setBase(t)
+	t.Setenv("TF_SIGNED_URL_TTL", "24h")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() succeeded, want a base/ceiling ordering error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		// Both variables, so the operator knows which pair is in conflict...
+		"TF_SIGNED_URL_TTL",
+		"TF_SIGNED_URL_MAX_TTL",
+		// ...that the ceiling they never set is the default one...
+		"not set",
+		DefaultSignedURLMaxTTL.String(),
+		// ...and both ways out, with the values that would work.
+		"raise TF_SIGNED_URL_MAX_TTL to 24h0m0s or more",
+		"lower TF_SIGNED_URL_TTL to 12h0m0s or less",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q does not mention %q", msg, want)
+		}
+	}
+
+	// An explicitly set ceiling gets the same refusal without the "not set"
+	// aside, which would be a lie.
+	setBase(t)
+	t.Setenv("TF_SIGNED_URL_TTL", "24h")
+	t.Setenv("TF_SIGNED_URL_MAX_TTL", DefaultSignedURLMaxTTL.String())
+	_, err = Load()
+	if err == nil {
+		t.Fatal("Load() succeeded with an explicit ceiling below the base")
+	}
+	if strings.Contains(err.Error(), "not set") {
+		t.Errorf("error %q claims TF_SIGNED_URL_MAX_TTL is unset", err)
+	}
+}
+
+// The defaults have to satisfy their own rules, or every deployment that sets
+// neither would be refused.
+func TestLoad_SignedURLDefaultsAreValid(t *testing.T) {
+	setBase(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.SignedURLTTL != time.Hour || c.SignedURLMaxTTL != 12*time.Hour {
+		t.Fatalf("defaults = %v / %v, want 1h / 12h", c.SignedURLTTL, c.SignedURLMaxTTL)
+	}
+}

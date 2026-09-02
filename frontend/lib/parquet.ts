@@ -38,7 +38,14 @@ export function getParquetRows(
       query: {
         offset: params.offset,
         limit: params.limit,
-        columns: params.columns?.length ? params.columns.join(",") : undefined,
+        // Repeated `column=` rather than a single comma-joined `columns=`:
+        // the server splits the joined form on "," and trims each piece, so a
+        // column literally named `height,cm` split into two names that match
+        // nothing and ` age` lost its space — the Rows tab then failed forever
+        // while the schema panel (which never round-trips the name) looked
+        // fine. `apiFetch` sends a string[] as one key per entry, so the name
+        // travels percent-encoded and arrives byte-for-byte.
+        column: params.columns?.length ? params.columns : undefined,
       },
       headers: opts?.headers,
     },

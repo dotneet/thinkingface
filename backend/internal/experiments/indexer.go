@@ -2,6 +2,7 @@ package experiments
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -135,15 +136,14 @@ func (ix *Indexer) indexProject(ctx context.Context, repo *store.Repo, gitRepo *
 			ts := agg.firstTS
 			startedAt = &ts
 		}
-		// "finished" is only correct for a run this index is meeting for the
-		// first time: a batch export (route A) only ever appears once the run
-		// is over. A run that already has a row owns its own status -- the
-		// ingest API is authoritative for it -- and since a flush re-indexes
-		// the repository mid-run (flush.go), forcing "finished" here would
-		// flip every live run to finished once a minute. "" means "keep".
-		status := "finished"
-		if _, err := ix.store.GetExpRun(ctx, projectID, run); err == nil {
-			status = ""
+		// What status this run is written with turns entirely on whether it
+		// already has a row -- and on that question being answered honestly
+		// even when the database is the thing that failed. See
+		// indexedRunStatus.
+		_, lookupErr := ix.store.GetExpRun(ctx, projectID, run)
+		status, err := indexedRunStatus(run, lookupErr)
+		if err != nil {
+			return err
 		}
 		if _, err := ix.store.UpsertExpRunWith(ctx, projectID, store.ExpRunUpsert{
 			Name:       run,
@@ -444,4 +444,32 @@ func groupingFromConfig(config map[string]any, key string) *string {
 		}
 	}
 	return &s
+}
+
+// indexedRunStatus decides what status a re-indexed run is written with, from
+// the result of looking the run up: "" to keep whatever it already has, and
+// "finished" for a run this index is meeting for the first time.
+//
+// The distinction it draws is the point. The lookup used to be tested with
+// `err == nil`, which folded every failure -- a dropped connection, a
+// cancelled context, a statement timeout -- into "there is no such run", and
+// that answer is destructive rather than merely wrong: the run is written as
+// finished, the ingest API is no longer authoritative for it, and nothing
+// ever marks it back. A live training run ended, permanently, because the
+// database blinked. Only ErrNotFound means new; anything else fails the
+// index, which is a job that already retries.
+func indexedRunStatus(run string, lookupErr error) (string, error) {
+	switch {
+	case lookupErr == nil:
+		// The run has a row and owns its own status: the ingest API is
+		// authoritative for it, and a flush re-indexes the repository
+		// mid-run, so forcing "finished" here would flip every live run to
+		// finished once a minute.
+		return "", nil
+	case errors.Is(lookupErr, store.ErrNotFound):
+		// A batch export (route A) only ever appears once the run is over.
+		return "finished", nil
+	default:
+		return "", fmt.Errorf("read experiment run %q: %w", run, lookupErr)
+	}
 }

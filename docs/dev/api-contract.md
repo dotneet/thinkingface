@@ -14,7 +14,10 @@ The confirmed specification between the backend (Go) and frontend (Next.js), and
   reads this header before it ever looks at the body, and this API spells `error` as an *object*
   rather than upstream HF's plain string — without the header, the only text `huggingface_hub` can
   pull out of the body is that object's Python `repr()` (`"{'message': '...', 'type': '...'}"`),
-  which is what a caller used to see in place of the actual sentence. **Exception:**
+  which is what a caller used to see in place of the actual sentence. The promise holds for the two
+  error shapes that are *not* `writeError`'s and set the header by hand: the LFS protocol's
+  `{"message": "..."}` (`writeLFSError`, where the body shape is git-lfs's to dictate) and the Web
+  UI's `repo_moved` 404, whose body carries an extra `moved_to` field. **Exception:**
   `POST /api/repos/create`'s duplicate-name 409 keeps HF's own error body
   (`{"error": "You already created this model repo"}`, a plain string, exactly what
   `huggingface_hub` expects there) instead of going through `writeError`, so that one route alone
@@ -42,6 +45,23 @@ The confirmed specification between the backend (Go) and frontend (Next.js), and
 - **Security headers attached to every response** (`internal/api.securityHeaders`):
   `X-Content-Type-Options: nosniff` / `X-Frame-Options: DENY` /
   `Referrer-Policy: strict-origin-when-cross-origin`
+- **Metadata requests carry a one-minute handler deadline.** A request that reaches it is answered
+  **503** with `{"error":{"message":"the server took too long to answer this request","type":"timeout"}}`
+  (written by `net/http`'s `TimeoutHandler`, so this is the one error body without a
+  `Content-Type` of its own or an `X-Error-Message`). Nothing legitimate comes near it: the
+  slowest routes it covers are a recursive tree listing and a parquet row read, both seconds. The
+  **transfer routes are deliberately exempt**, since a deadline there would either buffer a whole
+  clone in memory or cut off a slow upload — `resolve`, the git smart-HTTP endpoints, the LFS batch
+  and proxy routes, `POST .../commit/{rev}`, `POST /api/v1/upload/...` and the experiment ingest
+  `.../log`. So are the two **cascading deletes**, `DELETE /api/v1/repos/{kind}/{ns}/{name}`
+  (with its HF spelling `DELETE /api/repos/delete`) and
+  `DELETE /api/v1/experiments/{ns}/{repo}/{project}/runs/{run}`: their cost is the amount of data
+  stored — a repository's file index, LFS links and every experiment point under it — not anything
+  in the request, so a deadline there would not bound a request but make a large repository
+  undeletable, since the cancelled transaction rolls back on every retry. Both require namespace
+  admin. The process also sets `ReadHeaderTimeout` and `IdleTimeout` and deliberately sets
+  neither `ReadTimeout` nor `WriteTimeout`, both of which are measured from the start of the
+  request and so would cut a large push or clone off mid-transfer.
 - **CORS uses an allowlist approach.** Only an `Origin` matching `TF_ALLOWED_ORIGINS`
   (comma-separated) gets `Access-Control-Allow-Origin` and `Access-Control-Allow-Credentials: true`
   back. A non-matching `Origin` gets no CORS headers at all (the request itself still goes through).
@@ -175,6 +195,12 @@ site admin — only rows that exist in `org_members`). `roleInOrg` is `admin` / 
 `avatar_url` (`""` if unset). Same convention already used for `orgs[].fullname` / `avatarUrl`
 against organizations (`docs/dev/namespace-design.md` §5.3). What `hf auth whoami` displays follows this.
 
+`auth.accessToken.displayName` is **the name of the token the request authenticated with** — the
+one the user typed when they created it, which is what `hf auth whoami` prints and the only way
+somebody holding several tokens can tell which one a client picked up. A caller that authenticated
+with the session cookie or with HTTP Basic has no token to name and gets `"thinkingface"`.
+`role` is the token's scope (`read` / `write`; a session or password is always `write`).
+
 ### `GET /api/organizations/{org}/members`  (HF-compatible)
 Called by `HfApi.list_organization_members()`. Authorization is the same as the UI-facing
 `GET /api/v1/orgs/{org}/members` (§1.1). res 200 (an array; HF doesn't return a role either):
@@ -233,8 +259,10 @@ experiment repository is a dataset, and it also appears in `GET /api/datasets`. 
   Includes expired tokens (`expires_at` in the past) -- the list never filters on expiry, so the
   owner can see why a token stopped working and still delete it.
 - `POST /api/v1/tokens` req `{"name","scope":"read"|"write","expires_in_days"?: number | null}` →
-  `{id, name, scope, expires_at, token}` (`token` is returned only at creation time, with a `tf_`
-  prefix)
+  a whole `TokenItem` plus the secret: `{id, name, scope, created_at, last_used_at, expires_at,
+  token}` (`token` is returned only at creation time, with a `tf_` prefix; `last_used_at` is
+  necessarily `null` here). The response embeds the same item the list returns, so a client can
+  append it to the table it already has without re-fetching.
 - `DELETE /api/v1/tokens/{id}` → 204. Works on an expired token the same as a live one.
 
 `expires_in_days` omitted, `null`, or `0` means the token never expires (`expires_at` is `null`).
@@ -289,7 +317,7 @@ type OrgAuditEntry = {
 | Endpoint | Permission | req | res |
 |---|---|---|---|
 | `GET /api/v1/orgs` | Anyone | query `search?` `limit?` `offset?` | 200 `{"items": Org[], "total": number}` (`viewer_role` is attached to each row) |
-| `POST /api/v1/orgs` | Anyone when `TF_ORG_CREATION=anyone` (default); site admin only when `=admin` | `{"name","display_name?","description?"}` | 201 `{"org": Org}` / 400 `reserved_name` / 403 `org_creation_disabled` / 409 (name collision — checked case-insensitively; must not collide with a user namespace or another org either) |
+| `POST /api/v1/orgs` | Any authenticated caller with a `write` credential when `TF_ORG_CREATION=anyone` (default); site admin only when `=admin`. `requireWrite` runs first, so anonymous is 401 and a `read` token 403 — "anyone" never meant "unauthenticated" | `{"name","display_name?","description?"}` | 201 `{"org": Org}` / 400 `reserved_name` / 403 `org_creation_disabled` / 409 (name collision — checked case-insensitively; must not collide with a user namespace or another org either) |
 | `GET /api/v1/me/orgs` | Auth required | – | 200 `{"items": Org[], "total": number}` (only the caller's own memberships, with role) |
 | `GET /api/v1/orgs/{org}` | Anyone (200 even for non-members; `viewer_role` is `""`) | – | 200 `{"org": Org}` / 404 (a `kind=user` name, or not yet created) |
 | `PATCH /api/v1/orgs/{org}` | admin | `OrgUpdateRequest` (a partial update where every field is optional: `display_name` `description` `website` `avatar_url` `members_visibility`) | 200 `{"org": Org}` |
@@ -438,9 +466,11 @@ type AdminUser = {
   id: number
   username: string
   email: string
-  is_admin: boolean        // the instance-wide flag, not an organization role
-  disabled: boolean        // suspended: authenticates on no path at all
+  is_admin: boolean          // the instance-wide flag, not an organization role
+  disabled: boolean          // suspended: authenticates on no path at all
   created_at: string
+  last_login_at: string | null  // last password sign-in; null for an account that never had one
+  approval: "approved" | "pending"
 }
 ```
 
@@ -937,7 +967,11 @@ query:
 - `base_only` (`true`|`false`. Only repositories that carry no `base_model` edge at all. Equivalent
   to HF's "Base only". Logically exclusive with `base_model` / `relation` — combining them yields
   0 results)
-- `sort` (`updated`|`created`|`name`|`downloads`, default `updated`)
+- `experiment` (`true`|`false`. Only (or never) repositories the experiment indexer has written
+  runs into — `repositories.is_experiment`. When omitted, both are listed. This is what the
+  Experiments listing filters on)
+- `sort` (`updated`|`created`|`name`|`downloads`|`size`, default `updated`. `size` orders by
+  `repositories.total_size` descending)
 - `archived` (`true`|`false`. When omitted, archived repositories are included too. Since the badge
   is meant to distinguish them, removing them from the listing would make them look deleted, so
   the default doesn't filter them out)
@@ -1035,12 +1069,17 @@ it), so `limit=500` walks five pages of 100.
 parameter is enough, and their values are read Python-style (`True` counts). Without them the key
 is absent rather than `null`.
 
-**Refused parameters.** `expand`, `gated`, `inference` and `emissions_thresholds` return
-**400**. Each of them narrows a listing in a way this server cannot reproduce, so ignoring one
-would answer with a *superset* of what was asked for — `gated=True` would come back full of
-repositories that are not gated, `expand=[...]` missing exactly the fields the caller asked to be
-given — and a wrong result set is indistinguishable from a right one at the call site. `facets`
-are never computed for these endpoints.
+**Refused parameters.** `expand`, `inference` and `emissions_thresholds` return **400**, and so
+does `gated` with a true-ish value. Each of them narrows a listing in a way this server cannot
+reproduce, so ignoring one would answer with a *superset* of what was asked for — `gated=True`
+would come back full of repositories that are not gated, `expand=[...]` missing exactly the fields
+the caller asked to be given — and a wrong result set is indistinguishable from a right one at the
+call site. `facets` are never computed for these endpoints.
+
+`gated` is the one of these with a value that *can* be honoured: nothing on this instance is
+gated, so `gated=False` (or `0` / `no` — Python's spelling included, since `strconv.ParseBool` does
+not know `False`) asks for exactly what the endpoint returns anyway and is accepted by doing
+nothing. Only a true-ish value is a 400.
 
 `config` (`list_models(fetch_config=True)`) is the one parameter that is accepted and does
 nothing: it only ever *adds* a field, and no entry carries a model `config` either way, so the
@@ -1294,15 +1333,26 @@ is created under the old name.
 res 200:
 ```json
 { "_id": "1", "id": "ns/name", "modelId": "ns/name", "author": "ns",
-  "sha": "<commit sha>", "lastModified": "2026-08-21T00:00:00.000Z",
+  "sha": "<commit sha>", "lastModified": "2026-08-21T00:00:00Z",
   "private": false, "disabled": false, "gated": false,
   "tags": ["parquet"], "downloads": 0, "likes": 0,
   "cardData": { ... }, "config": {},
+  "pipeline_tag": "text-generation", "library_name": "transformers",
   "siblings": [ { "rfilename": "data/train.parquet", "size": 123,
                   "blobId": "<sha1>", "lfs": {"oid":"<sha256>","size":123,"pointerSize":130} } ],
-  "createdAt": "2026-08-21T00:00:00.000Z" }
+  "createdAt": "2026-08-21T00:00:00Z" }
 ```
-(models uses `modelId`; datasets don't need it, but returning it does no harm)
+
+`lastModified` and `createdAt` are plain RFC 3339 in UTC, **without a fractional part** —
+`time.RFC3339`, so `2026-08-21T00:00:00Z`. Only the commits endpoint below formats its `date` with
+milliseconds (`hfDateFormat`), and it has to: `huggingface_hub` parses that one field with a
+literal `%Y-%m-%dT%H:%M:%S.%fZ`. The dates here go through `parse_datetime`, which accepts both
+spellings, so nothing is gained by padding them.
+`modelId` and `config` are present **only when the repository is a model**; a dataset's response
+omits both (`huggingface_hub` builds a `DatasetInfo` there, which has no field for either).
+A model also carries `pipeline_tag` and `library_name`, copied from the repo card and `null` when
+the card does not name them — that is where the client's `ModelInfo.pipeline_tag` comes from.
+`config` is always `{}`: nothing here computes one.
 
 - A repository that does not exist at all (or isn't visible to the caller) is **404 +
   `X-Error-Code: RepoNotFound`**, distinct from the `RevisionNotFound` case just below — see the
@@ -1318,7 +1368,10 @@ res 200:
   must not break on a repository that has nothing in it yet.
 
 ### `GET /api/{datasets|models}/{ns}/{name}/tree/{rev}/{path...}`  (HF-compatible)
-query: `recursive=true|false`, `expand=true|false`, `limit`, `cursor`
+query: `recursive=true|false` (`1` is accepted for `true`). The upstream Hub also takes `expand`,
+`limit` and `cursor`; this endpoint reads none of them and answers the whole listing in one
+response — there is no pagination to resume, so a `cursor` a caller carries over from the Hub is
+simply ignored rather than refused.
 res 200 (an array):
 ```json
 [ {"type":"directory","oid":"<sha1>","size":0,"path":"data"},
@@ -1335,6 +1388,9 @@ res 200 (an array):
   case: **404 + `X-Error-Code: EntryNotFound`**, not `RevisionNotFound`. `HfFileSystem.glob` — and
   so `datasets.push_to_hub`, which globs `data/*` before uploading — depends on being able to tell
   the two apart.
+- `{path...}` naming a **file** answers **200 with a one-element array** describing that file, the
+  way the Hub does — not a 404. `HfApi.list_repo_tree(path_in_repo=<a file>)` is written against
+  that, and the entry carries the same fields it would have in its directory's listing.
 
 ### `POST /api/{datasets|models}/{ns}/{name}/paths-info/{rev}`  (HF-compatible)
 req: `{"paths": ["a.txt", "data/"], "expand": false}` → res 200: `hfTreeEntry[]` (same shape as `tree`)
@@ -1730,22 +1786,43 @@ type DiffFile = {
   binary: boolean              // Content holds a NUL byte or is not valid UTF-8
   lfs: boolean                 // Either side is a Git LFS pointer
   has_patch: boolean
+  no_patch_reason: "" | "lfs" | "binary" | "too_large" | "no_text_change" | "unsupported" | "budget_spent"
   patch: string                // Hunks only (`@@ …`), no `diff --git` / `index` / `---` / `+++`
   patch_truncated: boolean     // patch was cut off mid-diff
-  old_size: number             // Blob size on each side; 0 where the path wasn't there.
-  size: number                 // For an LFS file this is the pointer's own size.
+  old_size: number             // Size on each side; 0 where the path wasn't there.
+  size: number                 // For an LFS file this is the *object's* size, not the pointer's.
 }
 ```
 
 - **`additions` / `deletions` are only counts when `has_patch` is true.** For a binary, LFS or
   size-skipped path they stay 0 because nothing was counted, not because nothing changed — read
   `binary` / `lfs` / `has_patch` before rendering "+0 −0" as a fact (`frontend/DESIGN.md` §9).
-  `has_patch` false with `binary` and `lfs` both false means the patch was skipped for size.
+- **`no_patch_reason` says *why* there is no patch, and is always present** (never omitted; it is
+  `""` exactly when `has_patch` is true). It exists because the reason cannot be inferred from the
+  other flags — "`binary` and `lfs` both false therefore it was too large" is wrong for three of
+  the six values:
+  - `lfs` — a Git LFS pointer. The two sizes say more than an oid changing would.
+  - `binary` — not text on either side.
+  - `too_large` — a blob over `DiffPatchMaxBlobBytes`.
+  - `no_text_change` — nothing to render as lines: an added or deleted *empty* file, or a mode
+    change with identical bytes. The change is real.
+  - `unsupported` — not a regular file on either side (a submodule).
+  - `budget_spent` — the response's overall patch budget ran out before this file. Nothing is
+    wrong with it; the commit changed more text than one response renders.
+- **`old_size` / `size` are the sizes of what the path *holds*, so for an LFS pointer they are the
+  object's size rather than the ~130-byte pointer blob's.** That is the whole point on an LFS row,
+  which carries no patch: reporting the pointer would render a 5 GB checkpoint being replaced as
+  "132 B → 133 B".
 - **Caps** (named constants in `backend/internal/gitrepo/patch.go`): a patch is generated only
   when both sides are at most `DiffPatchMaxBlobBytes` (1 MiB); a rendered patch longer than
   `DiffPatchMaxBytes` (256 KiB) is cut at a line boundary with `patch_truncated: true`; at most
   `CommitDiffMaxFiles` (200) files are listed, with `num_files` still the true total and
-  `files_truncated: true`.
+  `files_truncated: true`. On top of the per-file limits, the **sum** of the rendered patches in
+  one response is capped at `CommitDiffPatchBudgetBytes` (1 MiB): 200 files each just under the
+  per-file ceiling would otherwise be a ~50 MiB document, and each patch is a Myers diff with its
+  own one-second deadline, all of it reachable without credentials. The budget is checked *before*
+  each patch is computed, so it bounds the CPU as well as the bytes; files past it are still
+  listed, with `no_patch_reason: "budget_spent"`.
 - `{rev}` may be a branch, a tag or a commit SHA. Unlike the UI `tree` / `commits` endpoints, a
   repository with **zero commits is a 404** here (+ `X-Error-Code: RevisionNotFound`), the same as
   an unresolvable `{rev}`: this response describes one commit, and there is none to describe.
@@ -1844,7 +1921,8 @@ Failure modes, none of which commit anything:
 - `srcPath` does not exist at that revision → **404** with `X-Error-Code: EntryNotFound`
   (`EntryNotFoundError` / `RevisionNotFoundError` in the client, rather than a bare HTTP error).
 - `srcPath` is a directory, or a symlink (whose blob holds a path, not content, so copying it
-  elsewhere would silently change what it resolves to), or either path is missing → **400**.
+  elsewhere would silently change what it resolves to), or either path is missing or invalid
+  (see the path rules below) → **400**.
 
 `parentCommit` in the `header` is the optimistic lock behind
 `create_commit(..., parent_commit=<sha>)`: the commit applies only if the branch's head is that
@@ -1860,7 +1938,22 @@ request can only fail again — they have to look at what landed in between and 
 change still applies. `huggingface_hub` raises `HfHubHTTPError` for both and reads the sentence out
 of `X-Error-Message` either way, so the distinction costs the client nothing.
 
-`{rev}` is a **branch name**. A full commit SHA returns 400, and a `{rev}` that resolves to
+**Every path an operation names is validated before anything is committed**, and a path the commit
+could never apply is a **400** naming the operation and the path: one that escapes the repository
+(`../escape.txt`, `dir/../../x`), an absolute one, one with an empty or `.` segment, an empty one,
+and any path with a `.git` component (matched case-insensitively, since a checkout onto a
+case-insensitive filesystem would otherwise land in the real `.git`). `copyFile` validates
+`srcPath` as well as `path`. The check itself is `gitrepo.ValidatePath`, the same one
+`POST /api/v1/upload/...` has always applied — it used to run only *inside* `gitrepo.Commit`, where
+its failure became a 500 `internal_error`, so identical input got two different statuses depending
+on which route it arrived through. Nothing was ever written either way; what changed is that the
+caller is now told what to fix, and that `huggingface_hub` stops retrying a permanently invalid
+request (`http_backoff` retries 5xx).
+
+`{rev}` is a **branch name**, and one that git could not hold as a branch under any circumstances
+— whitespace, `..`, a leading `-`, `^`, `~`, `:`, `@{`, a `.lock` suffix, a component starting with
+`.` (`gitrepo.ValidateRefName`) — is a **400**, for the same reason and on every write endpoint.
+A full commit SHA returns 400, and a `{rev}` that resolves to
 something in this repository that is *not* a branch — a tag, an abbreviated SHA, `HEAD` — returns
 **409 `conflict`** (`{rev} is a tag, not a branch; commits must target a branch`). Without this,
 the write would create `refs/heads/{rev}` as a parentless root commit while every read of `{rev}`
@@ -2133,10 +2226,21 @@ Constraints and status codes:
   answered 304 without any signing at all.
 - Range requests are supported on both paths: a regular file streams the requested slice straight
   out of the git blob (never buffered — these run to gigabytes), LFS uses a storage range read. One
-  range per request (`bytes=a-b` / `bytes=a-` / `bytes=-n`); a satisfiable one answers 206 with
-  `Content-Range`, while an unparseable, multi-range or unsatisfiable one falls back to 200 with the
-  whole body rather than 416. A HEAD ignores `Range` and always reports the full `Content-Length`,
-  which is what `hf_hub_download` reads the size from.
+  range per request (`bytes=a-b` / `bytes=a-` / `bytes=-n`), and three possible answers:
+  - **satisfiable → 206** with `Content-Range`. A closed range running past the end clamps to the
+    last byte, and a suffix longer than the file is the whole file — both still 206.
+  - **unparseable, a unit other than bytes, or several ranges → 200** with the whole body. RFC 9110
+    §14.2 allows ignoring a `Range` that cannot be understood, and that is the friendlier answer.
+  - **a first position at or past the end of the file → 416** with `Content-Range: bytes */{size}`.
+    This one cannot be answered leniently: `huggingface_hub`'s `http_get` resumes a download by
+    sending `Range: bytes=N-` and **appends the response to the `.incomplete` file it already
+    holds without checking that the status is 206**. When a previous attempt finished the transfer
+    and died before the rename, `N` equals the file's size, so a 200 makes it append a second whole
+    copy to a complete file — a doubled file that fails its hash check, and doubles again on every
+    retry. The 416 stops that, and its `Content-Range` tells the client the real length.
+
+  A HEAD ignores `Range` entirely and always reports the full `Content-Length`, which is what
+  `hf_hub_download` reads the size from.
 - Download stats: once a request is known not to be for a directory, it counts as 1 request = 1
   count, and **the same single count advances both counters** — the running total
   `repositories.downloads` and today's row in `repo_download_stats(repo_id, date, count)`
@@ -2182,7 +2286,6 @@ res:
   num_row_groups: number
   compression: string
   columns: Column[]
-  columns: Column[]
 }
 
 Column:
@@ -2205,8 +2308,30 @@ string), unmodified. The Web UI uses this to switch to things like an image thum
 (a column with `logical_type: "JSON"` gets a JSON tree display).
 
 ### `GET /api/v1/parquet/{kind}/{ns}/{name}/rows/{rev}/{path...}`
-query: `offset` (default 0) / `limit` (default 50, max 500) / `columns` (comma-separated; all
-columns when omitted)
+query: `offset` (default 0) / `limit` (default 50, max 500) / the column projection, in either of
+two spellings (all columns when neither is given):
+
+- **`column`, repeated once per column** (`?column=height,cm&column=age`). Each value is one whole
+  column name, taken exactly as sent — never split, never trimmed. **This is the spelling to use.**
+- `columns`, one comma-joined value (`?columns=a,b`), split on commas and trimmed. Kept for links
+  and bookmarks that already carry it.
+
+A single `column` wins outright and `columns` is then ignored; they are never merged, so a stale
+`columns=` left in the same URL cannot silently widen a projection narrowed with `column=`.
+
+The comma-joined spelling cannot express every legal column name and is not a matter of taste: a
+parquet written by `pandas.to_parquet` from a CSV whose header reads `height,cm` has a column of
+that exact name, and splitting it asks for two columns that do not exist — a permanent 400 on that
+file's Rows tab. A leading space (`" age"`) is lost the same way, and a split fragment that happens
+to match some *other* real column is worse than an error, because it answers 200 with a projection
+nobody asked for.
+
+**A column the file does not have is a 400**, naming the column, not a 500 — as is a file whose
+bytes are not readable parquet (truncated, corrupt, or an encrypted footer), on this endpoint and
+on `schema` alike. Those are the request's problem: answering 5xx makes a caller's typo look like
+an outage and gets it retried by `huggingface_hub`'s `http_backoff`. The error text never repeats
+the object-storage key the bytes were read from.
+
 res:
 ```ts
 {
@@ -2389,10 +2514,22 @@ to it directly. While archived, both ingest (`log` / `finish`) and PATCH/DELETE 
   export, the export is the true source of record, so it comes back on the next index (since the
   git history isn't rewritten). To remove it permanently, delete the whole repository.
 - `GET /api/v1/experiments/{ns}/{repo}/{project}/metrics`
-  query: `runs` (comma-separated; all runs when omitted) / `keys` (comma-separated; all keys when
-  omitted) / `x` (`step`|`time`, default `step`) / `max_points` (default 1000, **clamped to 5000**;
+  query: the run and metric selections, each in either of two spellings (everything when neither is
+  given) / `x` (`step`|`time`, default `step`) / `max_points` (default 1000, **clamped to 5000**;
   the ceiling exists because downsampling is the only thing bounding this response and the
   endpoint needs no authentication — a larger value is silently reduced, not rejected)
+
+  - **`run` and `key`, repeated once per name** (`?run=lr%3D0.1,bs%3D32&run=baseline&key=loss`).
+    Each value is one whole name, taken exactly as sent. **These are the spellings to use.**
+  - `runs` / `keys`, one comma-joined value each, split on commas and trimmed. Kept for links that
+    already carry them.
+
+  A single `run` wins over `runs` (and `key` over `keys`); they are never merged. The comma-joined
+  spelling is not merely awkward, it is wrong for names this server accepts: ingest validation only
+  refuses control characters and anything over 256 bytes, and a sweep names its runs after the
+  parameters it varies, so `lr=0.1,bs=32` is the ordinary case. Split, it selects two runs that do
+  not exist and the chart comes back empty — and if a fragment happens to match a *different* real
+  run, the chart quietly draws a line for a run nobody selected.
   res:
   ```ts
   { series: { run: string; key: string; points: [number, number][] }[] }
@@ -2420,6 +2557,19 @@ to it directly. While archived, both ingest (`log` / `finish`) and PATCH/DELETE 
   - `{project}` must also be usable as a directory inside the repository, since the flush writes
     `{project}/metrics.parquet`: `.`, `..` and `.git` (matched case-insensitively) return 400
     rather than being buffered into points that could never be committed.
+  - **Two size limits, both 400 when exceeded:**
+    - `points` may carry at most **10000** entries in one request (`maxIngestPoints`). A client
+      logging more than that in one go splits it; the cap is what stops a single request from
+      becoming an unbounded insert into `exp_points`.
+    - A run may carry at most **1000** distinct metric names (`maxIngestKeys`). This is a
+      **lifetime limit on the run, not a per-request one**: the names in the batch are merged with
+      the run's stored `metric_keys` and the merged total is what is checked, so the limit cannot
+      be walked past a batch at a time. Re-sending names the run already has is always fine — the
+      count is of distinct names, and what is refused is *growth* past the ceiling, so a run that
+      is already over it (data written before the check counted stored keys) can still be logged
+      to and finished, just not widened. The error message reports how many the run already has and how
+      many the batch would add. A batch rejected for either limit writes nothing at all, not even
+      the project row.
 - `POST /api/v1/experiments/{ns}/{repo}/{project}/finish`
   req `{"run":"run-1","status":"finished","group":"lr-sweep","job_type":"eval"}` → 200
   - `group` / `job_type` are handled the same as in `log` (optional, empty means keep). A run that
@@ -2539,11 +2689,20 @@ different name already exists) and deletes it from `exp_points`. See `docs/dev/t
     (`store.LinkLFSObjects`).
 - `PUT  /api/v1/lfs/{repo_id}/{oid}` — proxy upload for the emulator
 - `GET  /api/v1/lfs/{repo_id}/{oid}` — proxy download for the emulator. On the fallback path used
-  when an href's signature doesn't validate, both read permission on the repository and **the
-  oid's ownership** are checked. The response carries `X-Content-Type-Options: nosniff` and
+  when an href's signature doesn't validate, **the oid's ownership** is checked: the object must be
+  linked to the repository named in the path, or the answer is the same 404 a missing repository
+  gets. Repository *readability* is not checked, and does not need to be while nothing here is
+  private (`docs/dev/thinkingface-design.md` §11) — but this route hands out object bytes without
+  going through `loadRepoForRead`, so it is where that check has to be added the day visibility
+  exists. The response carries `X-Content-Type-Options: nosniff` and
   `Content-Disposition: attachment`.
 - `POST /api/v1/lfs/{repo_id}/verify`
 - `POST /{...}.git/info/lfs/objects/verify`
+
+Every response on the LFS routes — the batch answer, both verifies, and every error — carries
+`Content-Type: application/vnd.git-lfs+json`, the media type the protocol names. Errors are the
+protocol's own `{"message": "..."}` at the top level rather than this API's `{"error": {...}}`,
+and carry `X-Error-Message` as well (see the preamble).
 
 **The LFS file locking API is not implemented, and there is no plan to implement it.** None of
 `POST/GET /{...}.git/info/lfs/locks`, `POST /{...}.git/info/lfs/locks/verify` or
@@ -2634,10 +2793,25 @@ belonging to it)
 
 ### `POST /api/v1/namespaces/{ns}/webhooks`
 req: `{"repo": "dataset/my-metrics" | undefined, "url": "https://...", "events": WebhookEvent[], "active": true}`
-res: `{"webhook": Webhook, ..., "secret": "whsec_..."}` (`secret` is returned only here)
-Only http/https URLs are allowed. Local/private addresses (`localhost`, `127.0.0.0/8`, `10/8`,
+res: the `Webhook`'s own fields **flat at the top level**, plus the secret —
+`{id, namespace, repo_full_name, url, events, active, created_at, updated_at, secret}`.
+`secret` is returned only here. (`GET` below is the one that nests it under `"webhook"`; create and
+update embed it instead, and the difference is in the wire types themselves —
+`CreateWebhookResponse` / `UpdateWebhookResponse` embed `Webhook`, `WebhookResponse` has it as a
+field.)
+
+Only http/https URLs are allowed, and a URL carrying **userinfo** (`https://user:pw@host/hook`) is
+refused: the credentials would be stored in a column the settings UI shows back, and
+`https://legitimate-host@attacker.example/` reads as a URL for the wrong host to every human who
+reviews it. Deliveries authenticate with their HMAC signature, not with HTTP credentials.
+Local/private addresses (`localhost` and anything under `.localhost`, `127.0.0.0/8`, `10/8`,
 `172.16/12`, `192.168/16`, `169.254/16`, `::1`, etc.) are rejected by default, and allowed only
-when `TF_WEBHOOKS_ALLOW_PRIVATE_TARGETS=true`.
+when `TF_WEBHOOKS_ALLOW_PRIVATE_TARGETS=true`. The two IPv6 prefixes that *carry* an IPv4 address
+— NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) — are not blocked outright, since both are
+legitimate routes to public IPv4 hosts; the embedded address is extracted and judged on its own, so
+`http://[2002:7f00:1::]/hook` is refused as the loopback it is. The same verdict is applied again
+at delivery time to the address actually connected to, which is what closes the DNS-rebinding gap
+a write-time check cannot.
 
 ### `GET /api/v1/webhooks/{id}`
 res: `{"webhook": Webhook}`
@@ -2645,8 +2819,8 @@ res: `{"webhook": Webhook}`
 ### `PUT /api/v1/webhooks/{id}`
 req: `{"url": "...", "events": [...], "active": false, "rotate_secret": true}` (every field
 optional; omitted fields keep their current value)
-res: `{"webhook": Webhook, ..., "secret": "whsec_..."}` (`secret` is returned only when
-`rotate_secret:true`)
+res: the `Webhook`'s fields flat at the top level (as with create), plus `secret` **only** when
+`rotate_secret:true`
 
 ### `DELETE /api/v1/webhooks/{id}`
 res: 204
@@ -2658,6 +2832,13 @@ res: `{"items": WebhookDelivery[], "total": number}` (newest first)
 ### `POST /api/v1/webhooks/{id}/deliveries/{deliveryId}/redeliver`
 Re-enqueues a new delivery with the same event/payload as an existing one. res: `WebhookDelivery`
 
+**Every `/api/v1/webhooks/{id}` route answers 404 for an id the caller may not administer, exactly
+as it does for one that does not exist.** Ids are small sequential integers in the URL, so a 403
+that names the owning namespace — which is what these used to return — lets any account walk
+`1..N` and read back the list of every webhook on the instance together with who owns it. Only
+authentication answers for itself: an anonymous or `read`-scoped caller still gets 401/403, since
+that says nothing about which ids exist.
+
 ### How delivery works
 
 - A lightweight worker (`internal/webhooks`, the same pattern as `sync_jobs` /
@@ -2666,8 +2847,11 @@ Re-enqueues a new delivery with the same event/payload as an existing one. res: 
 - Headers: `Content-Type: application/json` / `X-Thinkingface-Event: <event>` /
   `X-Thinkingface-Delivery: <delivery id>` /
   `X-Thinkingface-Signature: sha256=<hex of HMAC-SHA256(secret, body)>`
-- On failure (non-2xx or unreachable), it retries with exponential backoff (30s, 1m, 2m, 4m,
-  8m... capped at 15m) up to 5 times; if it still fails, it's finalized with `status: "failed"`.
+- On failure (non-2xx or unreachable), a delivery is retried with exponential backoff. **`MaxAttempts`
+  (5) counts attempts in total, not retries**, so one delivery is tried at most five times and waits
+  four times in between: 30s, 1m, 2m, 4m. The doubling is capped at 15m, which only a change to
+  `MaxAttempts` could ever reach. After the fifth attempt it is finalized with `status: "failed"`,
+  and `attempts` on the row is what it says.
 - Events fired, and their payloads:
   - `repo.push` (when post-push processing completes): `{namespace, repo, full_name, kind, ref, old_sha, new_sha, changed_files}`
   - `repo.created` / `repo.deleted`: `{namespace, name, kind, full_name}`
@@ -2714,8 +2898,11 @@ GCS storage usage for the namespaces the caller can access (the same set as `Nam
 LFS object shared across multiple repositories is counted separately in each repository's
 breakdown). Plain git blobs (like README) never reach GCS, so they're not included.
 
-`quota_bytes` is the ceiling that namespace's uploads are actually checked against — its own
-override if it has one, otherwise `TF_DEFAULT_STORAGE_QUOTA_BYTES`, `null` for unlimited. Only a
+`effective_quota_bytes` is the ceiling that namespace's uploads are actually checked against — its
+own override if it has one, otherwise `TF_DEFAULT_STORAGE_QUOTA_BYTES`, `null` for unlimited. The
+name is the whole point: the unresolved override is `quota_bytes` on the *admin* endpoints (§1.3),
+and one field carrying both meanings is how a member came to read an empty override as
+"unlimited". Only a
 site administrator can change it (§1.3, "Namespace storage quotas"); it is reported here so the
 namespace's own members can see the limit before an LFS upload is refused with a 507 rather than
 after.
@@ -3116,7 +3303,13 @@ nothing (with an empty `models`).
 ## 13. Storage operations (CLI subcommands)
 
 In addition to `serve` / `migrate` / `seed`, `backend/cmd/thinkingface` has the following
-operational subcommands (like the existing three, each runs `db.Migrate` first before branching).
+operational subcommands (like the existing three, each runs `db.Migrate` first before branching):
+**`admin`** (the break-glass account CLI — `admincli.go`; it runs before the storage driver and the
+git manager are built, so an instance that cannot reach its bucket can still reset a password),
+**`gc`** and **`resync`** (below), **`compact`**, and **`wal-seed`** / **`wal-verify`**
+(`docs/dev/continuity-design.md`). One more, **`hook`**, is dispatched *before* `run()` and is not
+one of these: it is the `git receive-pack` hook child process, so it must not require
+`DATABASE_URL` and never opens the store (`docs/dev/continuity-design.md` §14).
 
 ### `thinkingface gc`
 For each of the two content-addressed store layers on GCS (`lfs/` `blobs/`), detects and deletes

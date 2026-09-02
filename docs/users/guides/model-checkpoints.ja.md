@@ -4,7 +4,7 @@ thinkingface は、重み本体をダウンロードすることなく、モデ�
 テンソル、shape、dtype — を表示できます。このページでは、どの形式に対応しているか、インスペクタが
 何を読み取るか、そして Web UI 上で何が表示されるかを説明します。
 
-## Which formats are understood { #which-formats-are-understood }
+## 対応している形式 { #which-formats-are-understood }
 
 インスペクタは、ファイル拡張子でチェックポイントを識別します。
 
@@ -17,7 +17,7 @@ thinkingface は、重み本体をダウンロードすることなく、モデ�
 はしません。モデルリポジトリ・データセットリポジトリのどちらにあるチェックポイントファイルにも動作
 し、`/models` 配下のファイルに限定されません。
 
-## The weights are never downloaded { #the-weights-are-never-downloaded }
+## 重み本体はダウンロードされない { #the-weights-are-never-downloaded }
 
 どちらの形式も、既知の位置にある小さなヘッダーに構造情報を保持しています。safetensors ファイルは
 すべてのテンソル名を記した JSON ヘッダーで始まり、PyTorch のチェックポイントは、pickle 化された
@@ -29,14 +29,14 @@ thinkingface は、重み本体をダウンロードすることなく、モデ�
 結果はコンテンツハッシュでキャッシュされるため、同じファイルを再度開いた場合（バイト列が同一であれ
 ば、リビジョンやパスが異なっていても）は即座に応答が返ります。
 
-## Open the inspector { #open-the-inspector }
+## インスペクタを開く { #open-the-inspector }
 
 チェックポイントファイルの blob ページ（ファイルツリーから、あるいは `/blob/{revision}/{path}`
 から）を開くと、テキストプレビューの代わりにインスペクタが読み込まれます。
 
 ![チェックポイントのメタデータパネル。フォーマット、パラメータ数、dtype の内訳、テンソルの一覧を表示している](../images/model-metadata.png)
 
-## What you see { #what-you-see }
+## 表示される内容 { #what-you-see }
 
 サマリー行には **Format**（safetensors または PyTorch）、合計 **Parameters**、合計
 **Tensors**、そしてファイルの **File size** が表示されます。
@@ -61,7 +61,7 @@ thinkingface は、重み本体をダウンロードすることなく、モデ�
 検査リクエスト自体が失敗した場合（例えば、拡張子が主張する形式と実際のファイルが異なる場合）は、
 インスペクタの代わりに、フォールバックのダウンロードリンク付きのエラーがパネルに表示されます。
 
-## Lineage and model versioning { #lineage-and-model-versioning }
+## Lineage とモデルのバージョン管理 { #lineage-and-model-versioning }
 
 モデルリポジトリのカードには、チェックポイントファイル自体から読み取られるメタデータとは独立に、
 その重みがどこから来て、何によって置き換えられるのかを記述できます。リポジトリページの Card タブ

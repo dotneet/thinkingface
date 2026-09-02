@@ -383,7 +383,9 @@ func TestBatchDownloadRefusesLinkedButMissingObject(t *testing.T) {
 }
 
 // Upload dedup is what creates the link in the first place, so it must not
-// start depending on one.
+// start *depending* on one. It does now ask whether the link already exists --
+// that is how the quota tells a free re-push from a new charge -- but the
+// answer "no" has to mean "link it", never "refuse it".
 func TestBatchUploadDedupDoesNotRequireExistingLink(t *testing.T) {
 	rec := &fakeRecorder{}
 	st := &stubStorage{presentFor: 2, size: 10}
@@ -396,11 +398,14 @@ func TestBatchUploadDedupDoesNotRequireExistingLink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Batch: %v", err)
 	}
-	if rec.ownCalls != 0 {
-		t.Errorf("RepoHasLFSObject calls on upload = %d, want 0", rec.ownCalls)
-	}
 	if resp.Objects[0].Actions != nil || resp.Objects[0].Error != nil {
 		t.Fatalf("object = %+v, want a deduplicated hit with no actions", resp.Objects[0])
+	}
+	if rec.calls != 1 {
+		t.Errorf("RecordLFSObject calls = %d, want the dedup hit to have been linked once", rec.calls)
+	}
+	if !rec.owned[fmt.Sprintf("1/%s", goodOID)] {
+		t.Errorf("the deduplicated object was not linked to the repository")
 	}
 }
 

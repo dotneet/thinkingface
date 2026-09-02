@@ -7,7 +7,7 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { ValueCell } from "@/components/ui/value-cell";
 import type { CellFeature } from "@/lib/cell-value";
 import { cn } from "@/lib/cn";
@@ -38,7 +38,9 @@ export type DataTableColumn = {
  *
  * The caller owns paging and sorting; this component only draws what it is
  * given, and renders nothing when `columns` is empty (callers already have a
- * meaningful EmptyState for that case).
+ * meaningful EmptyState for that case). It owns the scroll box, though, so a
+ * caller that replaces the rows wholesale passes `scrollResetKey` — see the
+ * prop.
  */
 export function DataTable({
   columns,
@@ -46,6 +48,7 @@ export function DataTable({
   rowHeight = 39,
   minColumnWidth = 140,
   className,
+  scrollResetKey,
 }: {
   columns: DataTableColumn[];
   rows: DataTableRow[];
@@ -53,6 +56,15 @@ export function DataTable({
   minColumnWidth?: number;
   /** Overrides the default `max-h-[70vh]` scroll box. */
   className?: string;
+  /**
+   * Identifies *which* rows these are (a page offset, a query). When it
+   * changes the scroll box jumps back to the top, because the rows underneath
+   * are a different set: a 100-row page is ~3900px tall, so paging while
+   * scrolled down used to open the next page halfway through it, with the
+   * first few dozen rows already scrolled past and never seen. Leave unset
+   * for a table whose rows only ever grow in place.
+   */
+  scrollResetKey?: string | number;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const columnHelper = useMemo(() => createColumnHelper<DataTableRow>(), []);
@@ -87,6 +99,14 @@ export function DataTable({
     estimateSize: () => rowHeight,
     overscan: 12,
   });
+
+  // Scrolling the element (rather than only the virtualizer) is what the
+  // virtualizer itself listens to, so both end up at the top.
+  useEffect(() => {
+    if (scrollResetKey === undefined) return;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = 0;
+  }, [scrollResetKey]);
 
   const virtualRows = virtualizer.getVirtualItems();
   const paddingTop = virtualRows.length > 0 ? virtualRows[0]!.start : 0;

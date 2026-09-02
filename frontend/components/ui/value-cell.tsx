@@ -49,12 +49,16 @@ export function ValueCell({ value, feature }: { value: unknown; feature?: CellFe
           className="block cursor-pointer rounded-none px-0 py-0 hover:bg-transparent"
           title={t("ui.cell.viewImage")}
         >
+          {/* An `external` src is a third-party URL the dataset chose: no
+              referrer, so that server is never told which repository,
+              revision and file the reader is looking at. */}
           {/* eslint-disable-next-line @next/next/no-img-element -- next/image cannot optimise a data: URL, which is what an inlined `datasets` Image column is. */}
           <img
             src={image.src}
             alt={alt}
             loading="lazy"
             decoding="async"
+            referrerPolicy={image.external ? "no-referrer" : undefined}
             onError={() => setFailedSrc(image.src)}
             className="h-8 max-w-[160px] rounded border border-border bg-bg-sunken object-contain"
           />

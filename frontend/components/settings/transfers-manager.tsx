@@ -147,8 +147,6 @@ export function TransfersManager() {
 
   return (
     <div className="flex flex-col gap-8">
-      {actionError && <Alert tone="negative">{actionError}</Alert>}
-
       <section className="flex flex-col gap-3">
         <h2 className="text-sm font-semibold text-fg">{t("settings.transfers.incomingTitle")}</h2>
         {incoming.length === 0 ? (
@@ -233,9 +231,23 @@ export function TransfersManager() {
         )}
       </section>
 
+      {/* Below both lists, never above them: a failed Reject or Cancel
+          reported at the top pushed every remaining request's buttons down by
+          the Alert's height, so the next click landed on the wrong row's
+          Accept (DESIGN.md §8.1). Accepting reports inside its own
+          confirmation dialog instead. */}
+      {actionError && <Alert tone="negative">{actionError}</Alert>}
+
       <ConfirmDialog
         open={confirmAccept !== null}
-        onClose={() => setConfirmAccept(null)}
+        // Clear the previous attempt's failure along with the selection: the
+        // dialog is reused for every incoming request, so a stale Alert
+        // otherwise greeted the *next* transfer before it had been confirmed
+        // at all. Matches org-members-manager / admin-users-manager.
+        onClose={() => {
+          setConfirmAccept(null);
+          setAcceptError(null);
+        }}
         onConfirm={() => {
           if (confirmAccept) void handleAccept(confirmAccept);
         }}
@@ -252,7 +264,7 @@ export function TransfersManager() {
         confirmLabel={t("settings.transfers.accept")}
         confirmingLabel={t("settings.transfers.accepting")}
         tone="primary"
-        confirming={busyId !== null}
+        confirming={busyId !== null && confirmAccept !== null}
         error={acceptError}
       />
     </div>

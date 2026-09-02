@@ -119,8 +119,11 @@ func TestBuildRepoWhereSQLiteDialect(t *testing.T) {
 		`json_type(r.card, '$.tags') = 'array'`,
 		`EXISTS (SELECT 1 FROM json_each(r.card, '$.tags') WHERE value = $2)`,
 		`EXISTS (SELECT 1 FROM json_each(r.card, '$.tags') WHERE value = $3)`,
-		`r.card->>'license' = $4`,
-		`r.card->>'pipeline_tag' = $5 OR EXISTS (SELECT 1 FROM json_each(r.card, '$.task_categories') WHERE value = $5)`,
+		// The scalar comparisons go through jsonScalarText, so a card whose
+		// license or pipeline_tag decoded to a number or a boolean is still
+		// compared as the text Postgres would have produced.
+		`CAST(r.card->>'license' AS TEXT) END) = $4`,
+		`CAST(r.card->>'pipeline_tag' AS TEXT) END) = $5 OR EXISTS (SELECT 1 FROM json_each(r.card, '$.task_categories') WHERE value = $5)`,
 	} {
 		if !strings.Contains(clause, want) {
 			t.Errorf("clause %q does not contain %q", clause, want)

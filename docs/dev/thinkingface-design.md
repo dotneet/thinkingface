@@ -116,7 +116,16 @@ gs://{bucket}/
   `repo_files.blob_sha` for `blobs/`). Both prefixes are also scanned from the bucket, so an
   object whose bytes were written and whose index row never was — every write path stores before
   it records — is reclaimed too, rather than being charged for forever
-  (`docs/dev/content-addressed-storage-design.md` §5)
+  (`docs/dev/content-addressed-storage-design.md` §5). **This only holds in `postgres` mode.**
+  `thinkingface gc` is a separate process reading a point-in-time snapshot of the database, which
+  is safe against Postgres (the live writer) but not against a `sqlite` deployment's own
+  Litestream-restored copy — `backend/entrypoint.sh` refuses to run `gc` at all under
+  `database_backend = "sqlite"` (exit 64), and `infra/main.tf` does not even create the `gc` Job
+  in that mode (`count = var.database_backend == "postgres" ? 1 : 0`). There is no in-process
+  reclaimer to substitute for it — reclaiming storage under sqlite would have to happen inside
+  the serving process itself, which does not exist today. §14.1's SQLite configuration therefore
+  has no GC at all: `lfs/`, `blobs/`, and `tmp/uploads/` grow monotonically for the life of the
+  deployment. See `infra/README.md`'s "Reference-counted GC" section for the full reasoning.
 - A signed PUT URL for an LFS upload targets `tmp/uploads/lfs/{repoID}/{oid}`, never `lfs/` directly.
   Where the bytes stream through the server instead (the browser upload endpoint, and the
   emulator's transfer proxy) the staging key is random rather than named after the oid, so two
@@ -275,7 +284,7 @@ sequenceDiagram
     S-->>C: OK -> record in lfs_objects in PG
 ```
 
-- Downloads similarly return a signed GET URL (TTL of roughly 1 hour)
+- Downloads similarly return a signed GET URL. The TTL is not a flat "roughly 1 hour": `TF_SIGNED_URL_TTL` (default 1h) is a *floor*, `TF_SIGNED_URL_MAX_TTL` (default 12h) is a *ceiling*, and `lfs.TTLFor` derives the actual value from the object's byte count between them (a 0-byte object gets the floor, a large one gets scaled up to the ceiling). Setting the ceiling to 0 removes it entirely, up to the hard `signingLimit` of 7 days GCS itself allows for V4 signing. See the `TF_SIGNED_URL_TTL` / `TF_SIGNED_URL_MAX_TTL` rows in `configuration.md` for the user-facing version
 - Signing on Cloud Run/GKE uses a service account + the IAM Credentials API's signBlob (no key file needed); locally it uses **proxy mode** (described below)
 - A single basic-transfer PUT works up to 5TB on GCS, so no multipart transfer adapter is needed initially. Resumable support via `x-goog-resumable` can be added later if needed
 - **Locally (fake-gcs-server), the API server proxies instead of using signed URLs.** The storage layer is abstracted behind a `Storage` interface (`SignedGetURL / SignedPutURL / Copy / Get / GetRange / Put / Stat / List`) with two drivers: `gcs` and `gcs-emulator(proxy)`
@@ -304,7 +313,7 @@ In addition, thinkingface's own APIs:
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/v1/parquet/{kind}/{ns}/{name}/rows/{rev}/{path}?offset=&limit=&columns=` | Parquet row browsing |
+| `GET /api/v1/parquet/{kind}/{ns}/{name}/rows/{rev}/{path}?offset=&limit=&column=` | Parquet row browsing (column projection also accepts the comma-joined `columns=`, kept for old links; `column=` wins when both are given — see api-contract.md) |
 | `GET /api/v1/parquet/{kind}/{ns}/{name}/schema/{rev}/{path}` | Schema, row count, column list |
 | `POST /api/v1/experiments/{ns}/{repo}/{project}/log` | Real-time ingest (§8 path B) |
 | `GET /api/v1/experiments/...` | Run listing / metrics retrieval (for the UI) |
@@ -347,6 +356,19 @@ purely a buffer — the source of truth is always the Parquet inside the dataset
   double-write. The chart API (`experiments/series.go`) also uses this same id to dedupe between
   the Parquet side and the live side, so **the chart is never doubled or missing a point, no
   matter which moment during a flush you look at**.
+- Because a flush rebuilds the whole file in memory, an existing metrics parquet past
+  `maxExistingFlushRows` (1,000,000 rows, `backend/internal/experiments/flush.go`) cannot be
+  flushed within the process's memory budget. A project name that no filesystem path can hold
+  hits the same wall. Neither is retried at full rate: `Flusher.blockFlush` records the reason on
+  `exp_projects.flush_blocked_at` / `flush_error` (migration `0003_exp_project_flush_block.sql`),
+  and `ListPendingFlushProjects` skips a project blocked within the last `flushBlockRetryAfter`
+  (one hour, `backend/internal/store/experiments.go`) — capping a wedged project to one attempt an
+  hour instead of one every ten seconds, so it stops starving every other project's turn in the
+  poller's oldest-unflushed-point ordering. Critically, **the buffered points are kept, not
+  dropped**: the ingest API already answered 200 for each of them, so silently deleting them would
+  be undocumented data loss. The block clears itself on the next attempt after the retry window
+  once the underlying cause is gone (the file shrinks, or the project is renamed) — there is no
+  manual unblock step.
 
 So path B's data also rides on git history, is readable from `gcloud storage` / DuckDB / BigQuery
 via the script returned by `GET .../gcs/{rev}`, and comes along automatically when you clone the
@@ -441,10 +463,11 @@ This is solved with two pieces: **write-side layout** and **read-side pruning**.
   8192-65536 rows each, with splits generally falling on run boundaries. This keeps each row
   group's `run_name` column min/max narrow, letting the reader skip whole row groups per run
   (the "value-based skipping" described in §9).
-- **Read side (`experiments/series.go`)**: when `runs=` is given, a `viewer.Predicate` (`AnyOf`)
-  on the run column is passed to `viewer.Scan`; when `keys=` is given, a column projection is
-  passed instead. On files where neither helps (below), it just falls back to a full read — the
-  result is unchanged.
+- **Read side (`experiments/series.go`)**: when `run=` (repeated) or the comma-joined `runs=` is
+  given, a `viewer.Predicate` (`AnyOf`) on the run column is passed to `viewer.Scan`; when `key=`
+  (repeated) or `keys=` is given, a column projection is passed instead — same `selectedNames`
+  singular/plural pairing as the Parquet viewer's `column=`/`columns=` (§7, api-contract.md). On
+  files where neither helps (below), it just falls back to a full read — the result is unchanged.
 
 **The reordering never touches the order within a run.** This isn't cosmetic — the following
 three readers all depend on "file order within a run," while nothing depends on the relative
@@ -552,7 +575,7 @@ Lines, tested with vitest).
 
 ```sql
 users            (id, username, email, password_hash, created_at)
-access_tokens    (id, user_id, name, token_hash, scopes, expires_at)
+access_tokens    (id, user_id, name, token_hash, scope, expires_at)   -- scope is singular: one of read|write
 user_ssh_keys    (id, user_id, title, public_key, fingerprint unique,
                   last_used_at, created_at)                    -- git-over-SSH authentication (§5)
 namespaces       (id, name, kind: user|org, owner_user_id)
@@ -567,12 +590,19 @@ repositories     (id, namespace_id, name, kind: dataset|model, default_branch,
 repo_files       (repo_id, ref, path, size, mode,
                   lfs_oid nullable, blob_sha, updated_at)      -- file tree cache
 lfs_objects      (oid pk, size, created_at)
-repo_lfs_objects (repo_id, oid)                                -- linkage for access control
+repo_lfs_objects (repo_id, oid, created_at)                    -- linkage for access control
 parquet_files    (repo_id, ref, path, num_rows, num_row_groups,
                   schema jsonb, column_stats jsonb)
-exp_projects     (id, repo_id, name)
+exp_projects     (id, repo_id, name, flush_blocked_at nullable,
+                  flush_error)                               -- flush_blocked_at/flush_error:
+                                                               -- why a project's metrics buffer
+                                                               -- cannot currently be flushed,
+                                                               -- and since when (see §8's "Path
+                                                               -- B's Flush" and migration 0003)
 exp_runs         (id, project_id, name, status, config jsonb,
-                  started_at, finished_at, last_step)
+                  started_at, last_step)                     -- no finished_at column; a
+                                                               -- finished/failed run is
+                                                               -- distinguished by status alone
 repo_lineage     (repo_id, edge_kind: dataset|base_model|run, raw,
                   target_namespace, target_name, target_rev,
                   target_project, target_run, ordinal)            -- lineage derived from the card
@@ -670,7 +700,10 @@ Constraints:
     an archived repository does not answer differently to a caller who could not write to it
     anyway (`loadRepoForWrite` in `backend/internal/api/auth.go`). This is a 403
     `repository_archived`, deliberately *not* a 404 — see `docs/dev/api-contract.md` §1.
-  - Authorization is evaluated when signed URLs are issued (the URLs themselves are short-lived).
+  - Authorization is evaluated when signed URLs are issued. The window a leaked URL stays valid
+    for is bounded, but not tightly by default: `TF_SIGNED_URL_MAX_TTL` defaults to 12h (not
+    "short-lived" in the sense of minutes), and an operator can set it to 0 to remove the
+    ceiling entirely (up to GCS's own 7-day V4 signing limit) — see the TTL note in §6 above.
 
   This is a deliberate product decision, not a gap waiting to be filled: thinkingface is a
   single-tenant, internal system whose **only read boundary is the network boundary around the
@@ -707,8 +740,8 @@ App Router, Bun runtime. Data fetching uses Server Components + TanStack Query (
 /datasets/{ns}/{name}/tree/{rev}/*  # File tree
 /datasets/{ns}/{name}/viewer        # Parquet table view (virtual scroll, column selection, schema panel)
 /models/{ns}/{name}[...same shape]  # Models. safetensors get a tensor listing (header-only read)
-/experiments/{ns}/{project}         # Run list
-/experiments/{ns}/{project}/{run}   # Metric charts, config, logs
+/experiments/{ns}/{repo}/{project}         # Run list
+/experiments/{ns}/{repo}/{project}/{run}   # Metric charts, config, logs
 /{ns}                               # Namespace page (shared by users/orgs: profile, Models/Datasets/Experiments tabs, members for orgs)
 /orgs                               # Organization directory
 /orgs/{name}                        # -> permanent redirect to /{name} (legacy URL compatibility)
@@ -850,8 +883,13 @@ creating a Cloud SQL instance and instead produces the following configuration:
   reaching the new instance's Litestream replica (Litestream's replication assumes a single
   writer and doesn't reconcile multiple writers). Choose the Cloud SQL configuration for
   deployments that need strict consistency
-- Everything else (the HF-compatible API surface, git's consistency path = the WAL) is identical
-  to the Postgres configuration. See also the type mapping and constraints in §10 "SQLite Mode"
+- The HF-compatible API surface and git's consistency path (the WAL) are identical to the
+  Postgres configuration. See also the type mapping and constraints in §10 "SQLite Mode". **One
+  thing is not identical: there is no `gc` Job in this mode.** `infra/main.tf` only creates
+  `google_cloud_run_v2_job.gc` when `database_backend = "postgres"`, and
+  `backend/entrypoint.sh` refuses to run `gc` at all under sqlite (see the caveat on
+  `thinkingface gc` in §4 "Storage Design" above). Orphaned `lfs/`/`blobs/` objects are
+  therefore never reclaimed in this configuration.
 
 ## 15. Monorepo Layout
 
@@ -882,9 +920,9 @@ thinkingface/
 |---|---|---|
 | **1. Core** | PG schema, auth/PAT, repository CRUD, HF-compatible commit/resolve/tree API, two GCS drivers, full compose setup | ✅ Done |
 | **2. Direct git operations** | Smart HTTP, LFS Batch + signed URLs, Sync Worker, the two content-addressed layers (`lfs/` + `blobs/`) | ✅ Done |
-| **3. Viewer** | Parquet schema/row API, table UI | ✅ Done (safetensors inspector not yet implemented) |
+| **3. Viewer** | Parquet schema/row API, table UI | ✅ Done, including the safetensors/PyTorch checkpoint inspector (`backend/internal/modelmeta`, header-only reads — see the model listing route above and `docs/users/guides/model-checkpoints.md`) |
 | **4. Experiments** | Indexing for trackio path A, ingest API (path B), chart UI | ✅ Done |
-| **5. Operations** | Organizations/roles, search improvements, Terraform, backups, E2E compatibility test CI | ✅ Organizations are done end to end — the `/api/v1/orgs*` routes in `backend/internal/api/server.go`, the directory/settings screens under `frontend/app/orgs/`, roles, audit log, webhooks and transfers (design: `docs/dev/organization-design.md`). ⚠️ Terraform is written and `fmt`/`init`/`validate`-checked by the `terraform` job in CI, but never `apply`-ed there (that needs GCP credentials), so server-side limits only surface at apply time. ⚠️ The E2E suite has a CI job (`e2e`, a postgres/sqlite matrix in `.github/workflows/ci.yml`) but it **does not run on pull requests** — it brings the whole compose stack up, so it is gated to pushes on `main` and to `workflow_dispatch`. On a PR it reports as skipped, which means E2E is effectively a local gate before merge (`make test-e2e` after `make up`) and a post-merge one on `main` |
+| **5. Operations** | Organizations/roles, search improvements, Terraform, backups, E2E compatibility test CI | ✅ Organizations are done end to end — the `/api/v1/orgs*` routes in `backend/internal/api/server.go`, the directory/settings screens under `frontend/app/orgs/`, roles, audit log, webhooks and transfers (design: `docs/dev/organization-design.md`). ⚠️ Terraform is written and `fmt`/`init`/`validate`-checked by the `terraform` job in CI, but never `apply`-ed there (that needs GCP credentials), so server-side limits only surface at apply time. ✅ The E2E suite has a CI job (`e2e`, a postgres/sqlite matrix in `.github/workflows/ci.yml`) that **does** run on pull requests, but only when the `changes` job's diff-based filter decides the PR could affect HF compatibility (backend/, e2e/, the compose files, the Makefile, `.env.example`, or the workflow itself); it always runs on pushes to `main` and on `workflow_dispatch`. A PR outside that filter reports the job as skipped, so `make test-e2e` locally (after `make up`) is still the faster feedback loop and the only one that sees a change before it's pushed |
 | **6. Namespace unification** | Unify username = personal namespace and organization ID = organization namespace into a single `/{ns}` (with `/orgs/{name}` redirecting), and give users a profile too (display name, bio, website, avatar URL). Includes making reserved names a single source of truth, plus the HF-compatible `users/{u}/overview` / `organizations/{o}/overview` | ✅ Done — `frontend/app/[ns]/page.tsx` is the one namespace page, `frontend/app/orgs/[name]/page.tsx` is a `permanentRedirect` to it (settings stay under `/orgs/{name}/settings`), and `/api/users/{username}/overview` / `/api/organizations/{org}/overview` are served from `backend/internal/api/server.go`. Design and phase breakdown: `docs/dev/namespace-design.md` (§13) |
 
 The goal of this ordering was for the system to already be useful from the Python ecosystem as

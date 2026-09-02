@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -765,5 +766,203 @@ func writeTestJSON(t *testing.T, w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		t.Errorf("write response: %v", err)
+	}
+}
+
+// TestRedactedURLStripsQueryString is the regression test for signed URLs
+// leaking into logs: on a GCS (or emulator) upload target the query string is
+// the credential, and PutLFSObject/VerifyLFSObject interpolate the URL into
+// every transport error `tf up` prints.
+func TestRedactedURLStripsQueryString(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "gcs signed url",
+			raw:  "https://storage.googleapis.com/bucket/lfs/ab/cd?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=svc%40proj.iam.gserviceaccount.com&X-Goog-Signature=deadbeefsecret",
+			want: "https://storage.googleapis.com/bucket/lfs/ab/cd?[redacted]",
+		},
+		{
+			name: "emulator proxy url",
+			raw:  "http://localhost:8080/lfs-proxy/objects/abc?op=upload&exp=1780000000&sig=0123456789abcdef",
+			want: "http://localhost:8080/lfs-proxy/objects/abc?[redacted]",
+		},
+		{
+			name: "userinfo is still masked",
+			raw:  "https://user:hunter2@example.com/path?sig=secret",
+			want: "https://user:xxxxx@example.com/path?[redacted]",
+		},
+		{
+			name: "no query is left alone",
+			raw:  "https://example.com/bucket/lfs/ab/cd",
+			want: "https://example.com/bucket/lfs/ab/cd",
+		},
+		{
+			name: "empty query still says there was one",
+			raw:  "https://example.com/path?",
+			want: "https://example.com/path?[redacted]",
+		},
+		{
+			name: "unparseable url keeps nothing past the question mark",
+			raw:  "://not a url?X-Goog-Signature=deadbeefsecret",
+			want: "://not a url?[redacted]",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := redactedURL(tt.raw)
+			if got != tt.want {
+				t.Fatalf("redactedURL() = %q, want %q", got, tt.want)
+			}
+			if strings.Contains(got, "secret") || strings.Contains(got, "sig=") {
+				t.Fatalf("redactedURL() = %q still carries the credential", got)
+			}
+		})
+	}
+}
+
+// TestPutLFSObjectErrorHidesSignedQuery checks the redaction where it
+// actually matters: the error text a failed transfer hands the CLI.
+func TestPutLFSObjectErrorHidesSignedQuery(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"signature expired"}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tf_token", WithHTTPClient(srv.Client()))
+	href := srv.URL + "/o/abc?X-Goog-Credential=svc%40proj&X-Goog-Signature=deadbeefsecret"
+	err := c.PutLFSObject(context.Background(), LFSAction{Href: href}, openBytes([]byte("x")), 1)
+	if err == nil {
+		t.Fatal("PutLFSObject: want an error")
+	}
+	if strings.Contains(err.Error(), "deadbeefsecret") || strings.Contains(err.Error(), "X-Goog-Signature") {
+		t.Fatalf("error text leaks the signed query: %v", err)
+	}
+	if !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("error text = %v, want the redaction marker", err)
+	}
+}
+
+// TestRedirectDropsCredentialsAcrossOrigins pins the redirect policy: the
+// write-scoped token must not follow a redirect to another origin. net/http's
+// own rule only compares host names, so a redirect to a different port on the
+// same host (or an https -> http downgrade) would otherwise carry it.
+func TestRedirectDropsCredentialsAcrossOrigins(t *testing.T) {
+	var gotAuth string
+	var authSeen bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth, authSeen = r.Header.Get("Authorization"), true
+		_, _ = io.WriteString(w, `{"name":"alice","orgs":[],"auth":{"accessToken":{"role":"write"}}}`)
+	}))
+	defer target.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/api/whoami-v2", http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	// The default client, not the test server's: the policy under test is
+	// the one New installs.
+	c := New(origin.URL, "tf_token")
+	if _, err := c.Whoami(context.Background()); err != nil {
+		t.Fatalf("Whoami: %v", err)
+	}
+	if !authSeen {
+		t.Fatal("the redirect was not followed at all")
+	}
+	if gotAuth != "" {
+		t.Fatalf("Authorization = %q on a cross-origin redirect, want it dropped", gotAuth)
+	}
+}
+
+func TestRedirectKeepsCredentialsWithinOneOrigin(t *testing.T) {
+	var gotAuth string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/whoami-v2", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/api/whoami-v2/final", http.StatusTemporaryRedirect)
+	})
+	mux.HandleFunc("GET /api/whoami-v2/final", func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, `{"name":"alice","orgs":[],"auth":{"accessToken":{"role":"write"}}}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New(srv.URL, "tf_token")
+	if _, err := c.Whoami(context.Background()); err != nil {
+		t.Fatalf("Whoami: %v", err)
+	}
+	if gotAuth != "Bearer tf_token" {
+		t.Fatalf("Authorization = %q on a same-origin redirect, want it kept", gotAuth)
+	}
+}
+
+func TestRedirectLoopIsBounded(t *testing.T) {
+	hops := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hops++
+		http.Redirect(w, r, "/api/whoami-v2", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tf_token")
+	if _, err := c.Whoami(context.Background()); err == nil {
+		t.Fatal("Whoami: want an error from the redirect loop")
+	}
+	if hops > maxRedirects+1 {
+		t.Fatalf("followed %d hops, want at most %d", hops, maxRedirects+1)
+	}
+}
+
+func TestDefaultClientHasNoWholeRequestTimeout(t *testing.T) {
+	// A multi-gigabyte LFS PUT is one request that legitimately runs for a
+	// long time; the bounds belong on connect / TLS / response headers.
+	c := New("https://example.com", "tf_token")
+	if c.http.Timeout != 0 {
+		t.Fatalf("http.Client.Timeout = %v, want 0 (no whole-request deadline)", c.http.Timeout)
+	}
+	if c.http.CheckRedirect == nil {
+		t.Fatal("http.Client.CheckRedirect is nil: redirects would follow the default policy")
+	}
+	tr, ok := c.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport = %T, want *http.Transport", c.http.Transport)
+	}
+	if tr.ResponseHeaderTimeout != responseHeaderTimeout {
+		t.Errorf("ResponseHeaderTimeout = %v, want %v", tr.ResponseHeaderTimeout, responseHeaderTimeout)
+	}
+	if tr.TLSHandshakeTimeout == 0 {
+		t.Error("TLSHandshakeTimeout = 0, want the stdlib default")
+	}
+}
+
+func TestSameOrigin(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want bool
+	}{
+		{"https://hub.example.com/a", "https://hub.example.com/b", true},
+		{"https://hub.example.com:443/a", "https://hub.example.com/b", true},
+		{"http://hub.example.com:80/a", "http://hub.example.com/b", true},
+		{"https://hub.example.com/a", "http://hub.example.com/b", false},
+		{"https://hub.example.com/a", "https://hub.example.com:9999/b", false},
+		{"https://hub.example.com/a", "https://evil.example.com/b", false},
+		{"https://HUB.example.com/a", "https://hub.example.com/b", true},
+	}
+	for _, tt := range tests {
+		a, err := url.Parse(tt.a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := url.Parse(tt.b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sameOrigin(a, b); got != tt.want {
+			t.Errorf("sameOrigin(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+		}
 	}
 }

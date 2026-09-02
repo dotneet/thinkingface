@@ -32,11 +32,31 @@ export function RunTagsDialog({
   const [value, setValue] = useState("");
   const formId = useId();
 
-  // Reset the field whenever a different run's tags are opened, so the dialog
-  // never shows the previous run's edits.
+  // Reset the field every time the dialog is opened (and again when a
+  // *different* run is opened), so it never shows the previous session's
+  // unsaved edits or the raw text of a set of tags that has since been
+  // normalised and stored.
+  //
+  // Both `open` and the run's name are needed, and neither alone is enough:
+  //
+  // - Keying on the `run` object is what this used to do, and a running run is
+  //   re-fetched every LIVE_REFRESH_INTERVAL_MS with a new `updated_at` /
+  //   `last_step` / `summary`, so its identity changes on every poll and the
+  //   effect overwrote whatever the user had typed, mid-edit. `RunNoteCard`
+  //   keeps its draft the same way.
+  // - Keying on the name alone fixed that but broke the reset on `RunDetail`,
+  //   whose `run` comes from `runs.find(r => r.name === runName)`: that name is
+  //   fixed for the life of the page, so the effect ran once at mount and never
+  //   again — edit, cancel, reopen and the abandoned text was still there.
+  //
+  // `open` is the piece that carries "this is a fresh session"; it is false
+  // between two openings and never changes during a poll.
   useEffect(() => {
     setValue((run?.tags ?? []).join(", "));
-  }, [run]);
+    // Keyed on the dialog opening and on the run's identity (its name), not on
+    // the object every poll re-creates.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, run?.name]);
 
   if (!run) return null;
   const tags = parseTagInput(value);

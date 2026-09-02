@@ -122,6 +122,17 @@ type lfsRule struct {
 
 // ParseGitAttributes extracts the LFS filter rules from a .gitattributes file.
 // Later rules win, which is git's own precedence.
+//
+// Only one file is parsed: the caller reads the .gitattributes at the root of
+// the revision and nothing else. git also honours a .gitattributes in every
+// directory, applied to that subtree and taking precedence over the root's, so
+// a repository that puts its rules in `data/.gitattributes` is routed here as
+// if those rules did not exist -- while the contributor's own git-lfs obeys
+// them on push, which is how the same file ends up stored two different ways
+// depending on which client wrote it. Fixing that means reading a
+// .gitattributes per directory and matching against the nearest one, which is
+// a change to how callers load rules (internal/api/commit.go's loadLFSRules,
+// internal/experiments/flush.go) rather than to this function.
 func ParseGitAttributes(content []byte) *LFSRules {
 	r := &LFSRules{}
 	for _, line := range strings.Split(string(content), "\n") {
@@ -129,21 +140,156 @@ func ParseGitAttributes(content []byte) *LFSRules {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
+		pattern, attrs, ok := splitAttrLine(line)
+		if !ok {
 			continue
 		}
-		pattern := fields[0]
-		for _, attr := range fields[1:] {
-			switch attr {
-			case "filter=lfs":
-				r.patterns = append(r.patterns, lfsRule{pattern: pattern, lfs: true})
-			case "-filter=lfs", "filter=":
-				r.patterns = append(r.patterns, lfsRule{pattern: pattern, lfs: false})
+		for _, attr := range attrs {
+			if isFilter, lfs := parseFilterAttr(attr); isFilter {
+				r.patterns = append(r.patterns, lfsRule{pattern: pattern, lfs: lfs})
 			}
 		}
 	}
 	return r
+}
+
+// splitAttrLine separates a .gitattributes line into its pattern and its
+// attribute tokens.
+//
+// The pattern is double-quoted whenever it contains a space (git quotes it on
+// write and every git-lfs-generated file does the same), so splitting the
+// whole line on whitespace loses those lines entirely: `"my data.bin"
+// filter=lfs` came apart into the pattern `"my` and an attribute `data.bin"`,
+// and the rule vanished.
+func splitAttrLine(line string) (pattern string, attrs []string, ok bool) {
+	var rest string
+	if strings.HasPrefix(line, `"`) {
+		pattern, rest, ok = unquoteAttrPattern(line)
+		if !ok {
+			return "", nil, false
+		}
+	} else {
+		i := strings.IndexAny(line, " \t")
+		if i < 0 {
+			return "", nil, false
+		}
+		pattern, rest = line[:i], line[i:]
+	}
+	attrs = strings.Fields(rest)
+	if pattern == "" || len(attrs) == 0 {
+		return "", nil, false
+	}
+	return pattern, attrs, true
+}
+
+// unquoteAttrPattern reads the leading double-quoted pattern off a line and
+// returns it along with whatever follows the closing quote. git writes these
+// with the same C-style escapes as quote_c_style/unquote_c_style in git's own
+// quote.c: \" and \\, the named control escapes (\a \b \f \n \r \t \v), and a
+// \NNN octal byte for anything else -- the form core.quotePath's default
+// makes git fall back to for a non-ASCII byte in a path, so a pattern over a
+// file like "café.bin" is written as "caf\303\251.bin". Any other escape is
+// taken as the character it precedes rather than rejected -- guessing wrong
+// on a truly exotic one costs a match, while refusing the line costs the
+// whole rule.
+func unquoteAttrPattern(line string) (pattern, rest string, ok bool) {
+	var b strings.Builder
+	i := 1
+	for i < len(line) {
+		c := line[i]
+		if c == '"' {
+			return b.String(), line[i+1:], true
+		}
+		if c != '\\' {
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		i++
+		if i >= len(line) {
+			return "", "", false
+		}
+		e := line[i]
+		switch e {
+		case 'a':
+			b.WriteByte('\a')
+			i++
+		case 'b':
+			b.WriteByte('\b')
+			i++
+		case 'f':
+			b.WriteByte('\f')
+			i++
+		case 'n':
+			b.WriteByte('\n')
+			i++
+		case 'r':
+			b.WriteByte('\r')
+			i++
+		case 't':
+			b.WriteByte('\t')
+			i++
+		case 'v':
+			b.WriteByte('\v')
+			i++
+		case '0', '1', '2', '3', '4', '5', '6', '7':
+			// git always emits exactly three octal digits per escaped byte;
+			// read up to three here too, leniently, rather than demanding it.
+			n, digits := 0, 0
+			for digits < 3 && i < len(line) && line[i] >= '0' && line[i] <= '7' {
+				n = n*8 + int(line[i]-'0')
+				i++
+				digits++
+			}
+			b.WriteByte(byte(n))
+		default:
+			b.WriteByte(e)
+			i++
+		}
+	}
+	// Unterminated: not something git would have written, and there is no
+	// sensible pattern to guess at.
+	return "", "", false
+}
+
+// parseFilterAttr decides what one attribute token says about the filter
+// attribute, following git's own parser (attr.c): the leading `-` (unset) or
+// `!` (unspecified) sign is stripped before the `=` is looked at, so a value
+// on a negated token is discarded rather than becoming part of the name.
+//
+// isFilter is false for every attribute that is not `filter`, including the
+// `diff=lfs -text` that keeps it company on a git-lfs line.
+//
+// What this replaced recognised `filter=lfs`, `-filter=lfs` and `filter=` and
+// nothing else -- so the two spellings git-lfs's own documentation uses to
+// take a path back out of LFS, `-filter` and `!filter`, both read as "no rule
+// here" and the earlier `*.bin filter=lfs` went on winning. The file then went
+// to LFS through the upload API while the contributor's git-lfs, which obeyed
+// the exclusion, pushed it as a plain blob.
+func parseFilterAttr(tok string) (isFilter, lfs bool) {
+	if tok == "" {
+		return false, false
+	}
+	name, value := tok, ""
+	negated := tok[0] == '-' || tok[0] == '!'
+	if negated {
+		name = tok[1:]
+	}
+	if i := strings.IndexByte(name, '='); i >= 0 {
+		name, value = name[:i], name[i+1:]
+	}
+	if name != "filter" {
+		return false, false
+	}
+	if negated {
+		// Unset and unspecified both mean no filter driver runs, so the path
+		// is an ordinary blob however large it is.
+		return true, false
+	}
+	// A bare `filter` sets the attribute to true rather than to a driver
+	// name, and `filter=clean-something-else` names another driver; only
+	// `filter=lfs` is LFS.
+	return true, value == "lfs"
 }
 
 // ShouldUseLFS decides how a file is stored. Explicit .gitattributes rules take

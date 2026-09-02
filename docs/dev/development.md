@@ -18,6 +18,7 @@ For *what* the system does and *why* it is built this way, read
 | [bun](https://bun.sh) and Node.js 20+ | Frontend (the Makefile resolves both to absolute paths via [mise](https://mise.jdx.dev); see "Toolchain notes" below) |
 | [uv](https://docs.astral.sh/uv/) | Python checks, E2E tests, and the docs site — all run in disposable environments |
 | `git` and `git-lfs` | Exercising the git transport locally |
+| [golangci-lint](https://golangci-lint.run/welcome/install/) (pinned to the version CI uses, currently v2.4.0) | `backend/`. Unlike the Terraform gate below, `check-backend` (part of `make check`) **hard-fails with `exit 1`** when the binary is missing (`Makefile:279-288`) rather than skipping it — it would otherwise be easy for a local `make check` to go green while CI's backend job still fails |
 | Terraform (optional) | `infra/`. `make check` skips its Terraform gate when the binary is absent; CI always runs it |
 
 ## Repository layout
@@ -126,16 +127,30 @@ Command reference and internals: [`tf-cli.md`](tf-cli.md).
 make check
 ```
 
-**Run this after every code change.** It is the same set of checks CI runs
+**Run this after every code change.** It covers most of the checks CI runs
 (`.github/workflows/ci.yml`) and breaks down into:
 
 | Target | What it runs |
 |---|---|
-| `make check-backend` | `gofmt` check, `go vet`, `go test ./...` in `backend/` |
+| `make check-backend` | `gofmt` check, `go vet`, `golangci-lint run` (pinned to the same version CI pins if you install that version yourself — see `.github/workflows/ci.yml`'s `golangci-lint` step; the local run otherwise just uses whatever version is on `PATH` and fails loudly rather than skipping if `golangci-lint` isn't installed at all), `go test ./...` in `backend/` |
 | `make check-frontend` | `bun run typecheck`, `lint` (ESLint), `format:check` (Biome), `check:ui` (`frontend/scripts/check-ui.mjs`, the UI conventions from `frontend/DESIGN.md`), `test` (vitest) |
 | `make check-python` | `ruff check` + `ruff format --check` for `e2e/`, `clients/python/`, `scripts/`, then the `clients/python` unit tests (`uv run --locked pytest`) |
 | `make check-types` | Regenerates `frontend/types/api.gen.ts` from `backend/internal/apitypes` with tygo and fails on any diff |
 | `make check-terraform` | `terraform fmt -check -recursive`, then `terraform init -backend=false` + `terraform validate` in `infra/` |
+
+What `make check` does **not** cover, so a green local run is not an absolute guarantee CI
+will also be green:
+
+- `go test ./...` here only exercises the SQLite path of `backend/internal/store`'s
+  integration tests; CI's `go test` step also runs them against a real PostgreSQL service
+  container (`TF_TEST_DATABASE_URL`). Run that path locally with `make test-store-pg` (needs
+  `make up` first).
+- `bun run build` (the Next.js production build) is CI's separate `build` job, deliberately
+  left out of `check-frontend` because it is the slowest gate — see `make build-web`.
+- `uv lock --check` (verifying `e2e/uv.lock` and `clients/python/uv.lock` haven't drifted
+  from their `pyproject.toml`) only runs as a step of CI's `python` job, not in
+  `check-python` — a lockfile edited by hand or left stale after a dependency bump will not
+  be caught locally short of running `uv lock --check` yourself in each directory.
 
 Formatting and linting on their own: `make fmt` (Go / TypeScript / Python / Terraform) and
 `make lint`.

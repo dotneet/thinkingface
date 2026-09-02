@@ -255,6 +255,21 @@ variable "api_public_url" {
   default     = ""
 }
 
+variable "web_public_url" {
+  description = <<-EOT
+    Public URL the web frontend is reachable at. Used only to set the api's
+    CORS allow-list (TF_ALLOWED_ORIGINS) so cookie-authenticated writes from
+    the browser aren't rejected -- web and api run as two separate Cloud Run
+    services on two different *.run.app origins, and backend/internal/config
+    only auto-allows the api's own origin (TF_PUBLIC_URL) plus localhost dev
+    ports. Leave unset to use the web service's own *.run.app URL (known only
+    after that service exists); set it once you put a custom domain in front
+    of web, same as api_public_url.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "labels" {
   description = "Common labels applied to resources that support them."
   type        = map(string)

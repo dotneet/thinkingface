@@ -98,6 +98,21 @@ describe("markdownUrlTransform — parent segments", () => {
       `${ROOT}/my%20docs/a.png`,
     );
   });
+
+  it("clamps a percent-encoded `..` too", () => {
+    // `%2e%2e` used to slip past the literal ".." test and be pushed as an
+    // ordinary segment, so the URL kept the `../` the browser then applied
+    // itself — an `![img](%2e%2e/…)` fired a GET outside the repository
+    // prefix with no click involved.
+    expect(markdownUrlTransform("%2e%2e/%2e%2e/%2e%2e/secret.png", ASSETS, ROOT)).toBe(
+      `${ROOT}/secret.png`,
+    );
+    expect(markdownUrlTransform("%2E%2E/plot.png", ASSETS, ROOT)).toBe(`${ROOT}/plot.png`);
+    // A percent-encoded separator must not smuggle a `..` through either.
+    expect(markdownUrlTransform("%2f..%2f..%2fsecret.png", ASSETS, ROOT)).toBe(
+      `${ROOT}/secret.png`,
+    );
+  });
 });
 
 describe("markdownHrefTransform", () => {
@@ -136,6 +151,28 @@ describe("markdownHrefTransform", () => {
     expect(markdownHrefTransform("../guides/./a.md", CTX)).toBe(
       "/models/acme/bert/blob/main/guides/a.md",
     );
+  });
+
+  it("normalises a percent-encoded parent segment before it reaches the browser", () => {
+    // `[go](%2e%2e/…/settings/tokens)` used to produce a href the app believed
+    // was a repo-relative blob link and the browser resolved to /settings/tokens.
+    expect(markdownHrefTransform("%2e%2e/%2e%2e/%2e%2e/settings/tokens", CTX)).toBe(
+      "/models/acme/bert/blob/main/settings/tokens",
+    );
+    expect(markdownHrefTransform("%2e%2e/LICENSE", CTX)).toBe(
+      "/models/acme/bert/blob/main/LICENSE",
+    );
+    expect(markdownHrefTransform("%2f..%2f..%2fLICENSE", CTX)).toBe(
+      "/models/acme/bert/blob/main/LICENSE",
+    );
+    // Whatever comes out, it never carries a `..` for the browser to apply.
+    for (const input of [
+      "%2e%2e/%2e%2e/x.md",
+      "%2E%2E/%2E%2E/%2E%2E/x.md",
+      "docs/%2e%2e/%2e%2e/x.md",
+    ]) {
+      expect(markdownHrefTransform(input, CTX), input).not.toContain("..");
+    }
   });
 
   it("sends a trailing slash to the tree page", () => {

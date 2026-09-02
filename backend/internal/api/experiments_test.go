@@ -13,10 +13,14 @@
 package api
 
 import (
+	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
 	"github.com/dotneet/thinkingface/backend/internal/experiments"
+	"github.com/dotneet/thinkingface/backend/internal/store"
 )
 
 // expFixture is archiveFixture under a name that fits this file: it already
@@ -248,6 +252,139 @@ func TestExperimentIngest_RejectsAProjectNameThatCannotBeCommitted(t *testing.T)
 			t.Errorf("finish in project %q status = %d, want 400 (body %s)",
 				project, resp.status(), resp.rec.Body.String())
 		}
+	}
+}
+
+// maxIngestKeys is a ceiling on the run, not on one request. It used to be
+// checked against the batch's own names only -- the stored ones were merged
+// in afterwards, and never re-checked -- so a client could walk past it a
+// batch at a time: two batches of 600 names left a run carrying 1200 keys and
+// a metric_keys array that grows without bound, while a single batch of 1200
+// was refused. The cap's own comment, the user documentation and the Python
+// client's warning all describe a lifetime limit, so the code is what was
+// wrong.
+func TestExperimentLog_MetricKeyCapIsPerRunNotPerBatch(t *testing.T) {
+	f := newExpFixture(t)
+	f.repo("alice", "exp", "dataset")
+	tok := f.token(f.alice, "write")
+
+	batch := func(from, count int) map[string]any {
+		metrics := map[string]any{}
+		for i := from; i < from+count; i++ {
+			metrics[fmt.Sprintf("m%05d", i)] = float64(i)
+		}
+		return map[string]any{"run": "run-1", "points": []map[string]any{point(1, metrics)}}
+	}
+
+	// Two batches that together stay inside the cap are both accepted.
+	f.logBatch(tok, batch(0, 600))
+	f.logBatch(tok, batch(600, maxIngestKeys-600))
+	if got := len(f.runNamed(t, tok, "run-1").MetricKeys); got != maxIngestKeys {
+		t.Fatalf("metric_keys = %d, want %d", got, maxIngestKeys)
+	}
+
+	// One more *new* name would take the run past it, however small the batch.
+	resp := f.do("POST", "/api/v1/experiments/alice/exp/proj/log", tok, batch(maxIngestKeys, 1))
+	if resp.status() != 400 {
+		t.Fatalf("status = %d, want 400 (body %s)", resp.status(), resp.rec.Body.String())
+	}
+	// The message has to say where the run stands, or a client cannot tell
+	// whether it sent too much or the run was already full.
+	body := resp.rec.Body.String()
+	for _, want := range []string{
+		fmt.Sprintf("at most %d", maxIngestKeys),
+		fmt.Sprintf("already has %d", maxIngestKeys),
+		"adds 1 more",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("error body %s does not mention %q", body, want)
+		}
+	}
+
+	// The rejected batch wrote nothing: the run still carries exactly the
+	// names it had.
+	if got := len(f.runNamed(t, tok, "run-1").MetricKeys); got != maxIngestKeys {
+		t.Fatalf("metric_keys = %d after the rejected batch, want %d", got, maxIngestKeys)
+	}
+
+	// Re-sending names the run already carries is still fine: the cap counts
+	// distinct names, not requests.
+	f.logBatch(tok, batch(0, 10))
+}
+
+// A run that grew past the cap while the check was still per-batch is data
+// that already exists on any instance running this branch's predecessor. The
+// fix must not turn those runs into runs that can never be written to again:
+// the ping that marks such a run finished adds no metric name at all, and
+// refusing it would leave the run "running" forever with no way out.
+func TestExperimentLog_ARunAlreadyOverTheCapCanStillBeFinished(t *testing.T) {
+	f := newExpFixture(t)
+	repo := f.repo("alice", "exp", "dataset")
+	tok := f.token(f.alice, "write")
+
+	// Seeded through the store, because the API is exactly what can no longer
+	// produce this state.
+	ctx := context.Background()
+	projectID, err := f.st.UpsertExpProject(ctx, repo.ID, "proj")
+	if err != nil {
+		t.Fatalf("upsert project: %v", err)
+	}
+	overCap := make([]string, 0, maxIngestKeys+200)
+	for i := range maxIngestKeys + 200 {
+		overCap = append(overCap, fmt.Sprintf("m%05d", i))
+	}
+	if _, err := f.st.UpsertExpRunWith(ctx, projectID, store.ExpRunUpsert{
+		Name: "legacy", Status: "running", MetricKeys: overCap,
+	}); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+
+	// A status ping carries no names, so it changes nothing about the run's
+	// size and is accepted.
+	f.logBatch(tok, map[string]any{"run": "legacy", "status": "finished", "points": []map[string]any{}})
+	if got := f.runNamed(t, tok, "legacy").Status; got != apitypes.RunStatusFinished {
+		t.Fatalf("status = %q, want finished", got)
+	}
+	// So is a point for a metric the run already carries.
+	f.logBatch(tok, map[string]any{
+		"run":    "legacy",
+		"points": []map[string]any{point(1, map[string]any{"m00000": 0.5})},
+	})
+
+	// Growing it further is not.
+	resp := f.do("POST", "/api/v1/experiments/alice/exp/proj/log", tok, map[string]any{
+		"run":    "legacy",
+		"points": []map[string]any{point(2, map[string]any{"brand-new": 0.5})},
+	})
+	if resp.status() != 400 {
+		t.Fatalf("status = %d, want 400 (body %s)", resp.status(), resp.rec.Body.String())
+	}
+}
+
+// A batch rejected for the metric-key cap must not leave a project row
+// behind, exactly like one rejected for a bad name: the check now reads the
+// stored keys before anything is written, and that ordering is the point.
+func TestExperimentLog_RejectedBatchCreatesNoProject(t *testing.T) {
+	f := newExpFixture(t)
+	f.repo("alice", "exp", "dataset")
+	tok := f.token(f.alice, "write")
+
+	metrics := map[string]any{}
+	for i := range maxIngestKeys + 1 {
+		metrics[fmt.Sprintf("m%05d", i)] = float64(i)
+	}
+	resp := f.do("POST", "/api/v1/experiments/alice/exp/fresh/log", tok,
+		map[string]any{"run": "run-1", "points": []map[string]any{point(1, metrics)}})
+	if resp.status() != 400 {
+		t.Fatalf("status = %d, want 400 (body %s)", resp.status(), resp.rec.Body.String())
+	}
+
+	resp = f.do("GET", "/api/v1/experiments/alice/exp", tok, nil)
+	if resp.status() != 200 {
+		t.Fatalf("experiment repo status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+	if strings.Contains(resp.rec.Body.String(), `"fresh"`) {
+		t.Errorf("a rejected batch created the project: %s", resp.rec.Body.String())
 	}
 }
 

@@ -12,10 +12,26 @@ export const errors = {
   // backend ("name must not contain spaces"), so it's appended rather than
   // discarded like the other types' raw text.
   badRequest: "Invalid request: {detail}",
+  // …and what to say when it carries no detail at all. `badRequest` is a
+  // template, so rendering it without params would print the literal
+  // "{detail}" on screen; ERROR_TYPE_KEYS maps bad_request here and only
+  // DETAIL_KEYS reaches for the interpolated sentence above.
+  badRequestGeneric: "The request was invalid.",
   unauthorized: "You need to be logged in to do this.",
   forbidden: "You don't have permission to do this.",
+  // forbidden messages name the thing that was refused ("sign-up is disabled
+  // on this instance", "you must have admin access to acme/bert"), so the
+  // reason is interpolated rather than dropped — see DETAIL_KEYS in
+  // lib/api-error-message.ts for why only some types get this treatment.
+  forbiddenDetail: "Not allowed: {detail}",
   notFound: "Not found.",
   conflict: "That already exists.",
+  // 409s name the thing they collided with ("main is the default branch of
+  // acme/bert and cannot be deleted"), which the flat sentence above does not
+  // merely blur but contradicts. Every conflict() call site in
+  // backend/internal/api was audited before trusting this text — see
+  // DETAIL_KEYS in lib/api-error-message.ts.
+  conflictDetail: "Conflict: {detail}",
   payloadTooLarge: "The request is too large.",
   internalError: "Something went wrong on the server. Try again in a moment.",
   repositoryArchived:
@@ -31,4 +47,11 @@ export const errors = {
   rateLimited: "Too many requests. Try again in a moment.",
   // 503 from the rate limiter's overload guard, not from a per-client quota.
   overloaded: "The server is busy right now. Try again in a moment.",
+  // 416 from a ranged file read (backend/internal/api/resolve.go): the range
+  // asked for starts at or past the end of the file, which for the UI means
+  // the copy it is paging through is not the one on the server any more.
+  rangeNotSatisfiable: "This file changed while it was being read. Reload the page and try again.",
+  // 504 written by net/http's TimeoutHandler, not by writeError
+  // (handlerTimeoutBody in backend/internal/api/server.go).
+  timeout: "The server took too long to answer. Try again in a moment.",
 };

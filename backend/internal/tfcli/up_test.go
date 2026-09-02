@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -73,7 +74,7 @@ func dirWithFiles(t *testing.T, names ...string) string {
 
 func TestResolveUpTargetDefaults(t *testing.T) {
 	dir := dirWithFiles(t, "data/train.parquet")
-	files, _, err := local.Scan(dir, local.Options{})
+	files, _, _, err := local.Scan(dir, local.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +100,7 @@ func TestResolveUpTargetDefaults(t *testing.T) {
 
 func TestResolveUpTargetToWithNamespace(t *testing.T) {
 	dir := dirWithFiles(t, "data/train.parquet")
-	files, _, _ := local.Scan(dir, local.Options{})
+	files, _, _, _ := local.Scan(dir, local.Options{})
 
 	ref, pinned, err := resolveUpTarget("myns/myname", "", dir, "alice", files)
 	if err != nil {
@@ -115,7 +116,7 @@ func TestResolveUpTargetToWithNamespace(t *testing.T) {
 
 func TestResolveUpTargetToWithoutNamespaceUsesSelf(t *testing.T) {
 	dir := dirWithFiles(t, "data/train.parquet")
-	files, _, _ := local.Scan(dir, local.Options{})
+	files, _, _, _ := local.Scan(dir, local.Options{})
 
 	ref, _, err := resolveUpTarget("myname", "", dir, "alice", files)
 	if err != nil {
@@ -128,7 +129,7 @@ func TestResolveUpTargetToWithoutNamespaceUsesSelf(t *testing.T) {
 
 func TestResolveUpTargetToPrefixPinsKind(t *testing.T) {
 	dir := dirWithFiles(t, "data/train.parquet") // would otherwise infer dataset anyway
-	files, _, _ := local.Scan(dir, local.Options{})
+	files, _, _, _ := local.Scan(dir, local.Options{})
 
 	ref, pinned, err := resolveUpTarget("models/myns/myname", "", dir, "alice", files)
 	if err != nil {
@@ -144,7 +145,7 @@ func TestResolveUpTargetToPrefixPinsKind(t *testing.T) {
 
 func TestResolveUpTargetKindFlagWinsOverInference(t *testing.T) {
 	dir := dirWithFiles(t, "model.safetensors") // would infer model
-	files, _, _ := local.Scan(dir, local.Options{})
+	files, _, _, _ := local.Scan(dir, local.Options{})
 
 	ref, pinned, err := resolveUpTarget("", "dataset", dir, "alice", files)
 	if err != nil {
@@ -160,7 +161,7 @@ func TestResolveUpTargetKindFlagWinsOverInference(t *testing.T) {
 
 func TestResolveUpTargetKindFlagWinsOverToPrefix(t *testing.T) {
 	dir := dirWithFiles(t, "data/train.parquet")
-	files, _, _ := local.Scan(dir, local.Options{})
+	files, _, _, _ := local.Scan(dir, local.Options{})
 
 	ref, pinned, err := resolveUpTarget("datasets/ns/name", "model", dir, "alice", files)
 	if err != nil {
@@ -176,7 +177,7 @@ func TestResolveUpTargetKindFlagWinsOverToPrefix(t *testing.T) {
 
 func TestResolveUpTargetInvalidToIsError(t *testing.T) {
 	dir := dirWithFiles(t, "data/train.parquet")
-	files, _, _ := local.Scan(dir, local.Options{})
+	files, _, _, _ := local.Scan(dir, local.Options{})
 
 	if _, _, err := resolveUpTarget("a/b/c", "", dir, "alice", files); err == nil {
 		t.Error("expected an error for a --to value with two slashes")
@@ -185,7 +186,7 @@ func TestResolveUpTargetInvalidToIsError(t *testing.T) {
 
 func TestBuildUploadFilesNoCardOptionsLeavesReadmeAlone(t *testing.T) {
 	dir := dirWithFiles(t, "README.md", "data.txt")
-	files, _, err := local.Scan(dir, local.Options{})
+	files, _, _, err := local.Scan(dir, local.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +202,7 @@ func TestBuildUploadFilesNoCardOptionsLeavesReadmeAlone(t *testing.T) {
 
 func TestBuildUploadFilesGeneratesReadmeWhenMissing(t *testing.T) {
 	dir := dirWithFiles(t, "data.txt")
-	files, _, err := local.Scan(dir, local.Options{})
+	files, _, _, err := local.Scan(dir, local.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +241,7 @@ func TestBuildUploadFilesMergesExistingReadme(t *testing.T) {
 	if err := os.WriteFile(readmePath, []byte("---\nlicense: apache-2.0\n---\n\n# Hello\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	files, _, err := local.Scan(dir, local.Options{})
+	files, _, _, err := local.Scan(dir, local.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,4 +543,128 @@ func equalStringSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestUpDeleteKeepsSubtreeBehindSymlinkedDirectory is the regression test for
+// the worst shape of the --delete data-loss bug: a directory that was
+// uploaded once and has since become a symlink. The scanner will not follow
+// it, so nothing under it is uploaded -- and that silence must not be read as
+// "the user deleted a thousand files". The remote subtree survives, and the
+// user is told on stderr why those files were not uploaded, --quiet or not.
+func TestUpDeleteKeepsSubtreeBehindSymlinkedDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require elevated privileges on windows")
+	}
+	isolateEnv(t)
+
+	realData := dirWithFiles(t, "train.parquet", "nested/b.csv")
+	dir := dirWithFiles(t, "README.md")
+	if err := os.Symlink(realData, filepath.Join(dir, "data")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	srv := newFakeUpDeleteServer(t, `[
+		{"type":"file","path":".gitattributes","oid":"a1","size":10},
+		{"type":"file","path":"data/train.parquet","oid":"b2","size":1},
+		{"type":"file","path":"data/nested/b.csv","oid":"c3","size":1},
+		{"type":"file","path":"gone.txt","oid":"d4","size":1}
+	]`)
+
+	var out, errOut bytes.Buffer
+	code := Main([]string{
+		"up", dir,
+		"--endpoint", srv.srv.URL,
+		"--token", "t",
+		"--to", "alice/x",
+		"--delete",
+		"--quiet",
+		"--json",
+	}, nil, &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut.String())
+	}
+	if !equalStringSlices(srv.deletedPaths, []string{"gone.txt"}) {
+		t.Fatalf("deletedFile ops = %v, want [gone.txt]: nothing behind the unscanned data/ symlink may be deleted", srv.deletedPaths)
+	}
+
+	var jr upResultJSON
+	if err := json.Unmarshal(out.Bytes(), &jr); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v (stdout=%s)", err, out.String())
+	}
+	if jr.Deleted != 1 {
+		t.Errorf("deleted count = %d, want 1", jr.Deleted)
+	}
+
+	warning := errOut.String()
+	if !strings.Contains(warning, "data") || !strings.Contains(warning, local.ReasonSymlinkDir) {
+		t.Errorf("stderr = %q, want a warning naming data and %q", warning, local.ReasonSymlinkDir)
+	}
+}
+
+// TestUpWarnsAboutSkippedContentWithoutDelete covers the same silence without
+// --delete: the files behind the symlink are simply not uploaded, which is a
+// data gap the user has to hear about.
+func TestUpWarnsAboutSkippedContentWithoutDelete(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require elevated privileges on windows")
+	}
+	isolateEnv(t)
+
+	realData := dirWithFiles(t, "train.parquet")
+	dir := dirWithFiles(t, "README.md")
+	if err := os.Symlink(realData, filepath.Join(dir, "data")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	srv := newFakeUpDeleteServer(t, `[{"type":"file","path":".gitattributes","oid":"a1","size":10}]`)
+
+	var out, errOut bytes.Buffer
+	code := Main([]string{
+		"up", dir,
+		"--endpoint", srv.srv.URL,
+		"--token", "t",
+		"--to", "alice/x",
+		"--quiet",
+	}, nil, &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut.String())
+	}
+	if len(srv.deletedPaths) != 0 {
+		t.Fatalf("deletedFile ops = %v, want none without --delete", srv.deletedPaths)
+	}
+	if !strings.Contains(errOut.String(), "not uploading data") {
+		t.Errorf("stderr = %q, want a warning that data/ was not uploaded", errOut.String())
+	}
+}
+
+func TestWarnSkippedIsQuietAboutRoutineExclusions(t *testing.T) {
+	var buf bytes.Buffer
+	warnSkipped(&buf, []local.Skipped{
+		{RepoPath: ".git", Dir: true, Reason: local.ReasonIgnoredDir},
+		{RepoPath: "__pycache__", Dir: true, Reason: local.ReasonIgnoredDir},
+	})
+	if buf.Len() != 0 {
+		t.Errorf("warnSkipped printed %q for documented exclusions, want silence", buf.String())
+	}
+}
+
+func TestWarnSkippedCapsTheList(t *testing.T) {
+	var skipped []local.Skipped
+	for i := range maxSkipWarnings + 3 {
+		skipped = append(skipped, local.Skipped{
+			RepoPath: fmt.Sprintf("sock-%02d", i),
+			Reason:   local.ReasonIrregular,
+		})
+	}
+	var buf bytes.Buffer
+	warnSkipped(&buf, skipped)
+	lines := strings.Count(buf.String(), "\n")
+	if lines != maxSkipWarnings+1 {
+		t.Fatalf("warnSkipped printed %d lines, want %d warnings plus one summary:\n%s", lines, maxSkipWarnings, buf.String())
+	}
+	if !strings.Contains(buf.String(), "3 more path(s) skipped") {
+		t.Errorf("stderr = %q, want it to count the paths it did not list", buf.String())
+	}
 }

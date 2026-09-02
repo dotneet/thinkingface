@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
@@ -95,9 +96,17 @@ func redirectMoved(w http.ResponseWriter, r *http.Request, mode redirectMode, ns
 	case redirectGit:
 		http.Redirect(w, r, movedLocation(r, ns, name, moved), http.StatusMovedPermanently)
 	default: // redirectUI
+		message := "repository moved to " + moved.Namespace + "/" + moved.Name
+		// Written by hand rather than through writeError, because the body
+		// carries a field that helper knows nothing about (moved_to, which is
+		// what the frontend redirects on). The header is set all the same:
+		// "every error response carries X-Error-Message" is a contract-level
+		// promise (docs/dev/api-contract.md §0), and this was the one UI error
+		// quietly not keeping it.
+		w.Header().Set("X-Error-Message", message)
 		writeJSON(w, http.StatusNotFound, apitypes.ApiErrorBody{Error: apitypes.ApiError{
 			Type:    "repo_moved",
-			Message: "repository moved to " + moved.Namespace + "/" + moved.Name,
+			Message: message,
 			MovedTo: &apitypes.RepoLocation{Namespace: moved.Namespace, Name: moved.Name},
 		}})
 	}
@@ -107,10 +116,31 @@ func redirectMoved(w http.ResponseWriter, r *http.Request, mode redirectMode, ns
 // repository's current name, preserving the rest of the path -- including a
 // ".git" suffix git clients append to the name segment -- and the query
 // string.
+//
+// It works on EscapedPath(), never on Path, and escapes the segment it splices
+// in. Path is decoded, so building a Location out of it destroys exactly the
+// two things this API cannot afford to lose:
+//
+//   - a "%2F" in the revision, which is how huggingface_hub sends every
+//     revision (quote(rev, safe="")) and the only way a branch called
+//     "feature/x" survives the URL at all. Decoded into a real "/", the
+//     redirect points at revision "feature" and the follow-up is a 404
+//     RevisionNotFound;
+//   - a literal "%" in a file name ("a%b.txt", encoded as "a%25b.txt"), which
+//     decodes to a Location that is not a valid URL. net/http refuses to
+//     follow it with `invalid URL escape "%b."`.
+//
+// Both 308 (redirectHF) and 301 (redirectGit) go through here, so a renamed or
+// transferred repository would otherwise be unreachable through its old name
+// for precisely the clients this server exists to serve.
 func movedLocation(r *http.Request, ns, name string, moved *repoMovedError) string {
-	path := r.URL.Path
+	path := r.URL.EscapedPath()
+	// Namespace and repository names are validated to characters that need no
+	// escaping (names.go), so the escaped form of the old segment is the
+	// segment itself; the new one is escaped anyway rather than trusting that
+	// rule to hold forever.
 	oldSeg := "/" + ns + "/" + name
-	newSeg := "/" + moved.Namespace + "/" + moved.Name
+	newSeg := "/" + url.PathEscape(moved.Namespace) + "/" + url.PathEscape(moved.Name)
 	if idx := strings.Index(path, oldSeg); idx >= 0 {
 		path = path[:idx] + newSeg + path[idx+len(oldSeg):]
 	} else if oldSegGit := oldSeg + ".git"; strings.Contains(path, oldSegGit) {

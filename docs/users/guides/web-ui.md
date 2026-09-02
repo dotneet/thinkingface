@@ -95,7 +95,11 @@ preview appropriate to the file:
   number is a link, so `#L42` in a URL scrolls to that line and highlights it — which is how
   you point a colleague at one line of a config.
 - Markdown renders as HTML, with a Rendered / Raw toggle.
-- Parquet files show a summary card with an "Open in viewer" link instead of raw content.
+- CSV, TSV and JSON Lines (`.jsonl`/`.ndjson`) files under 10 MiB render as a sortable table
+  with a Table / Raw toggle, up to 50,000 rows and 512 columns — past either limit, or when the
+  file doesn't actually parse as tabular data, it falls back to the plain text view instead.
+- Parquet files show a summary card with an "Open in viewer" link instead of raw content — see
+  [Viewing Datasets](dataset-viewer.md).
 - Checkpoint files (safetensors, `.bin`, `.pt`, `.pth`, `.ckpt`) open the model inspector —
   see [Inspecting Models](model-checkpoints.md).
 - Anything else falls back to a download link; a preview larger than 512 KB is truncated with
@@ -118,6 +122,17 @@ away or close the tab.
 If someone else committed to the same file while you were editing, saving fails with a
 conflict message rather than overwriting their change; your edit stays in the box so you can
 reload and reapply it.
+
+## Rename or move a file
+
+A file's page also shows a **Rename** button next to Edit and Delete, under the same
+conditions (write access, on a branch). Unlike Edit, it's offered for every file — including
+LFS-tracked ones — since a rename moves a tree entry by content hash without reading or
+re-uploading the bytes, so an LFS pointer travels as a pointer.
+
+Rename and move are the same control: the field is pre-filled with the file's whole path from
+the repository root, so changing the last segment renames it and changing the directory part
+moves it to a different location. Confirming commits the change as a single commit.
 
 ## Add files from the file tree
 
@@ -145,8 +160,13 @@ commit of its own — the file remains in every commit that came before, so noth
 from the history.
 
 Unlike editing, this works for LFS-tracked files as well: deleting one removes the pointer
-from the tree, while the stored object stays in the bucket until nothing references it any
-more and garbage collection reclaims it.
+from the tree, but not the stored object or your namespace's storage usage — the commit that
+added the file is still in the repository's history, so the object has to stay retrievable at
+that revision for as long as the repository exists. Only an LFS upload that never made it into
+a commit at all is ever reclaimed by garbage collection. See
+[Uploading Files](uploading.md#delete-a-file-in-the-browser) and the
+`TF_DEFAULT_STORAGE_QUOTA_BYTES` row in [Configuration](../self-hosting/configuration.md) for
+what actually frees the space.
 
 ## Manage branches and tags
 
@@ -172,6 +192,18 @@ back to the unrestricted history.
 
 ![Commit history for a repository, one commit per row with author, time, and SHA](../images/commit-history.png)
 
+## Commit diff
+
+Both the commit message and the short SHA in a commit row link to that commit's diff page
+(`/commit/{sha}`). It lists every file the commit touched with an added/modified/deleted
+badge, followed by a unified diff per file with the added/removed line counts. A file's diff
+can be collapsed without losing the rest of the page.
+
+Not every file gets a patch: a binary file, an LFS pointer change, a diff too large to render,
+a change with no text difference (a mode change, for instance), an unsupported case, or the
+page simply running out of its per-request diff budget all show the file in the list with a
+badge but no patch, and say which of those reasons applies instead.
+
 ## The namespace page
 
 `/{namespace}` (for example `/admin` or `/acme`) consolidates everything a user or
@@ -180,6 +212,19 @@ alongside a Members tab for organizations. The models and datasets tabs are the 
 listing, search, and filter UI as the global `/models` and `/datasets` pages, scoped to that
 namespace. A namespace with nothing under a given tab yet shows an empty state, with a
 "Create the first repository" shortcut if you have permission to publish there.
+
+## The organizations directory
+
+`/orgs` lists every organization on the instance — name, description, and member/repository
+counts — with the same search box and pagination pattern as `/models` and `/datasets`, and a
+"Create organization" shortcut when you have permission to create one. See
+[Organizations](organizations.md) for what an organization page itself offers.
+
+## Light / dark theme
+
+A theme toggle in the header cycles Auto → Light → Dark → Auto. Auto follows the browser's
+`prefers-color-scheme`; Light and Dark override it. The choice is remembered per browser (not
+tied to your account), so it does not follow you to a different device.
 
 ## Your profile
 

@@ -65,7 +65,9 @@ make clean              # docker compose down -v -- also removes the named volum
     自分だけが到達できるラップトップ上であれば問題ありません。それ以外の誰かが到達できるネットワーク
     にこのインスタンスを置く前に、`.env` で `TF_ADMIN_PASSWORD` と `TF_SESSION_SECRET` を設定して
     ください — どちらも [設定](configuration.md) を参照してください。`TF_PUBLIC_URL` が
-    `https://` の URL になっている場合、サーバーはこれらのデフォルト値のままでは一切起動を拒否します。
+    `localhost`/`127.0.0.1`（および `.localhost` 名）以外になっている場合、サーバーはこれらの
+    デフォルト値のままでは一切起動を拒否します。社内ホスト名や IP に対する平文の `http://` インスタンス
+    も対象で、`https://` の場合に限りません。
 
 ## データベースバックエンドを選ぶ { #choosing-a-database-backend }
 
@@ -172,9 +174,27 @@ terraform apply -var="project_id=my-gcp-project"
 
 Terraform はインフラをプロビジョニングしますが、その後のコンテナイメージフィールドのドリフトは
 意図的に無視するため、新しいイメージを push して Cloud Run サービスとジョブにそれを指すよう
-設定するのは別の手順です（`gcloud run deploy` / `gcloud run jobs update`）。Terraform の状態に
-実際のバックエンドを配線する方法を含む、apply からデプロイまでの完全な手順については、
-リポジトリ内の `infra/README.md` を参照してください。
+設定するのは別の手順です（`gcloud run deploy` / `gcloud run jobs update`）。この最初の `apply`
+だけでは動く状態には**なりません** — さらに2点、対応が必要です。どちらも `infra/README.md` の
+「After `apply`」の手順に詳しく書かれています。
+
+- **api の公開 URL は、自分で設定するまでプレースホルダー
+  （`https://api.{environment}.example.com`）のままです。** LFS の href 生成、HF 互換の resolve
+  リダイレクトは、デフォルトのままでは壊れます。`api` をデプロイし、`terraform output -raw
+  api_url` で実際の URL を確認する（またはカスタムドメインをそこに向ける）、その値を
+  `-var="api_public_url=..."` として渡し、再度 apply してください。CORS の許可リスト
+  （`TF_ALLOWED_ORIGINS`）は別の変数（`web_public_url` から導出されます — 詳細は
+  `infra/README.md` を参照）で、`web` サービスが存在すればその `*.run.app` URL にデフォルトで
+  設定されるため、この手順をしなくても最初から機能します。`web_public_url` を明示的に設定するのは、
+  `web` の前にカスタムドメインを置く場合だけで構いません。
+- **web フロントエンドのイメージは、api の URL が分かった後にビルドする必要があります。**
+  他の設定とは異なり、`NEXT_PUBLIC_API_URL` はコンテナ起動時に環境変数として読まれるのではなく、
+  `docker build` 時に Next.js のブラウザバンドルに組み込まれるためです。`web` をデプロイする前に
+  `docker build --build-arg NEXT_PUBLIC_API_URL=$(terraform output -raw api_url) ...` でビルド
+  してください。それより前に（あるいは build arg なしで）ビルドすると
+  `frontend/lib/api.ts` のフォールバック `http://localhost:8080` が焼き込まれ、API と通信する
+  クライアント側の機能（トークン、アカウント／プロフィール／SSH 鍵設定、Webhook、リポジトリ
+  作成、Parquet ビューアなど）が全訪問者に対して動かなくなります。
 
 この Terraform ではプロビジョニングされないもの: カスタムドメインや TLS のフロントエンドです。
 Cloud Run 自体が TLS を終端し、各サービスをそれぞれの `*.run.app` の URL で提供するため、
@@ -207,6 +227,19 @@ Terraform の `database_backend` 変数（デフォルトは `postgres`、また
   緩和するには `--no-traffic` でデプロイして手動でトラフィックを切り替えるか、デプロイ頻度が
   低いのであればこの小さな窓を許容してください。厳密な一貫性が必要な場合は、代わりに Cloud SQL
   構成を使ってください。
+
+  **このモードではガベージコレクションが一切行われません。** `thinkingface gc` は不要になった
+  `lfs/`/`blobs/` オブジェクト（削除されたリポジトリ、置き換えられたファイルなど）をデータベースの
+  参照カウントを読んで回収しますが、これにはサービング中のプロセスと同じ「生きた」データを
+  見る必要があります。`sqlite` モードではそれができません — `gc` が見るのは Litestream で復元
+  された**スナップショット**でしかなく、そのスナップショット取得後にアップロードされた、まだ
+  参照されている生きたオブジェクトを削除してしまう恐れがあります。`backend/entrypoint.sh` は
+  このモードで `gc` の実行自体を拒否します（そのリスクを取らず即座に終了する）し、Terraform の
+  `sqlite` 構成ではそもそもスケジュールされた `gc` Cloud Run Job 自体が作られません。実際には、
+  `sqlite` デプロイの稼働期間中、バケット内の `lfs/`・`blobs/`・`tmp/uploads/` は増え続ける
+  一方になります — ストレージコストの見積もりにこれを織り込んでください。削除・置き換え済みの
+  コンテンツからストレージを回収できることが重要であれば、代わりに `postgres` 構成を選んで
+  ください。
 
 ### Continuity / WAL 移行 { #the-continuity-wal-migration }
 

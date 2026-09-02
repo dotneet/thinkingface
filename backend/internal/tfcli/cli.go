@@ -197,6 +197,31 @@ func resolveCreds(c *commonFlags, stderr io.Writer) (config.Resolved, error) {
 	return resolved, nil
 }
 
+// resolveEndpoint resolves the endpoint alone, with the precedence
+// resolveCreds uses (--endpoint > TF_ENDPOINT > THINKINGFACE_ENDPOINT >
+// HF_ENDPOINT > the config file's default endpoint), and prints its
+// provenance when verbose is set. The result is already normalised.
+//
+// `tf login` and `tf logout` need this rather than resolveCreds because
+// --token means something different to them -- login saves the token it is
+// handed or mints a new one, logout revokes the one already saved for the
+// endpoint -- but the endpoint half of the contract in docs/dev/tf-cli.md
+// ("Credential resolution order") holds for every command, environment
+// variables included. flagEndpoint is the value of --endpoint or of the
+// command's positional ENDPOINT argument, whichever the caller took.
+// config.ErrNoEndpoint comes back when nothing names a server, which login
+// answers by prompting and logout by giving up.
+func resolveEndpoint(flagEndpoint string, file *config.File, verbose bool, stderr io.Writer) (string, error) {
+	resolved, err := config.Resolve(flagEndpoint, "", os.Getenv, file)
+	if err != nil {
+		return "", err
+	}
+	if verbose {
+		fmt.Fprintf(stderr, "tf: endpoint %s (from %s)\n", resolved.Endpoint, resolved.EndpointSource)
+	}
+	return resolved.Endpoint, nil
+}
+
 // userAgent is the User-Agent every hub.Client this CLI builds sends.
 func userAgent() string {
 	return "thinkingface-tf/" + Version

@@ -21,7 +21,18 @@ function resolveScope(pathname: string): { scope: Scope; target: string } {
   return { scope: "datasets", target: "/datasets" };
 }
 
-export function SearchBox() {
+export function SearchBox({
+  onNavigate,
+}: {
+  /**
+   * Called once the box has navigated. The mobile menu uses it to close
+   * itself: every `<Link>` in that panel closes on click, but a search only
+   * changes the URL, so the panel used to stay open on top of the results the
+   * reader had just asked for. Optional — the header instance has no panel to
+   * close.
+   */
+  onNavigate?: () => void;
+} = {}) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -60,9 +71,11 @@ export function SearchBox() {
       params.delete("offset");
       const qs = params.toString();
       router.push(qs ? `${target}?${qs}` : target);
+      onNavigate?.();
       return;
     }
     router.push(q ? `${target}?search=${encodeURIComponent(q)}` : target);
+    onNavigate?.();
   }
 
   return <SearchInput activeValue={paramSearch} onSearch={go} placeholder={placeholder} />;

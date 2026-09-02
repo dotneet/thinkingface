@@ -20,6 +20,16 @@ FROM oven/bun:1@sha256:5ff609364c049b54eb0ff560ec96319729a972078ef2c755d758f0c6e
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+# NEXT_PUBLIC_API_URL is read by frontend/lib/api.ts via process.env, which
+# Next.js inlines into the client bundle at build time -- setting it as a
+# *runtime* container env var (as docker-compose.yml and infra/main.tf both
+# do for the server-only API_URL) has no effect on browser code. It must be
+# supplied as a build arg here so it ends up baked into the bundle. When
+# unset, the build falls back to lib/api.ts's own default
+# (http://localhost:8080), which happens to match docker-compose's default
+# setup but is wrong for any other deployment -- see infra/README.md.
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
 # The backend is not reachable during the image build; every route is
 # force-dynamic and no page fetches data at build time, so this never
 # depends on API connectivity.

@@ -17,8 +17,12 @@ Webhook は、このインスタンス上で何かが起きたことを、あな
 
 **Webhook は管理者専用です。** Organization では `write` ではなく `admin` ロールが必要です — webhook
 はネームスペースのシークレットを外部 URL へ持ち出すものなので、コンテンツの変更ではなく管理操作として
-扱われます。`write` メンバーは API から 403 を受け取り、ネームスペースの選択肢にも現れません。自分の
-ネームスペースでは自分自身が管理者なので、何も変わりません。
+扱われます。`write` メンバーにはネームスペースの選択肢が表示されず、そのネームスペースの webhook を
+一覧・作成しようとすると（`GET`/`POST /api/v1/namespaces/{ns}/webhooks`）API から 403 を受け取ります。一方
+`/api/v1/webhooks/{id}` 配下のルート(get、update、delete、deliveries、redeliver)は、管理権限のない
+webhook に対して、存在しない場合とまったく同じ 404 を返します — ここで 403 を返すと、連番の小さい id
+を総当たりするだけで、どの webhook を誰が所有しているかを読み取れてしまうためです。自分のネームスペース
+では自分自身が管理者なので、何も変わりません。
 
 各 webhook には**スコープ**があります。空のままにすればそのネームスペースの全リポジトリで発火し、
 リポジトリを 1 つ選べばそのリポジトリだけで発火します。作成時（またはあとから）に無効化しておくことも
@@ -26,7 +30,7 @@ Webhook は、このインスタンス上で何かが起きたことを、あな
 
 ## イベント { #events }
 
-イベントは 9 種類あります。9 種すべてが UI に表示され、API でも受け付けられます。それ以外の値は、黙って
+イベントは 10 種類あります。10 種すべてが UI に表示され、API でも受け付けられます。それ以外の値は、黙って
 保存されるのではなく「不明なイベント」として拒否されます。
 
 | イベント | 発火するタイミング |
@@ -38,6 +42,7 @@ Webhook は、このインスタンス上で何かが起きたことを、あな
 | `repo.transfer_requested` | 転送が移動先の承認待ちになったとき。**移動先**のネームスペースに配信されます |
 | `repo.archived` | リポジトリが読み取り専用に凍結されたとき |
 | `repo.unarchived` | アーカイブされたリポジトリが解除されたとき |
+| `repo.ref_deleted` | ブランチまたはタグが削除されたとき。ブランチは `git push --delete` と API のどちらでも発火しますが、**タグ**は API 経由(`DELETE .../tag/{tag}`)でのみ発火します — タグの作成が push からは見えないのと同じ理由で、タグに対する `git push --delete` はサーバーから見えず、いかなる webhook も発火しません |
 | `run.finished` | 実験の run が `finished` に遷移したとき |
 | `run.failed` | 実験の run が `failed` に遷移したとき |
 
@@ -101,6 +106,23 @@ X-Thinkingface-Signature: sha256=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822
   "full_name": "acme/sentiment-base", "archived": true
 }
 ```
+
+`repo.ref_deleted`:
+
+```json
+{
+  "namespace": "acme",
+  "repo": "sentiment-base",
+  "full_name": "acme/sentiment-base",
+  "kind": "model",
+  "ref": "old-experiment",
+  "ref_type": "branch",
+  "old_sha": "0a1b2c3…",
+  "new_sha": ""
+}
+```
+
+`ref_type` は `"branch"` か `"tag"` です。短い ref 名だけではどちらか区別できないためです。`new_sha` は常に空文字列です — ref が消えた時点で新しい値というもの自体が存在しません。
 
 `repo.moved`:
 

@@ -37,31 +37,84 @@ func (f File) Open() (io.ReadCloser, error) {
 	return os.Open(f.AbsPath)
 }
 
+// Skip reasons reported by Scan. They double as the human wording of the
+// warning `tf up` prints, so they read as a sentence fragment after the path.
+const (
+	// ReasonSymlinkDir: a symlink inside the tree pointing at a directory.
+	// It is not followed (that is how a link back up the tree would turn
+	// into an unbounded, looping walk), so nothing below it is uploaded.
+	ReasonSymlinkDir = "symlink to a directory"
+	// ReasonBrokenSymlink: a symlink whose target does not resolve.
+	ReasonBrokenSymlink = "broken symlink"
+	// ReasonIrregular: a socket, fifo, device node -- something with no
+	// byte content to commit.
+	ReasonIrregular = "not a regular file"
+	// ReasonIgnoredDir: ".git" / "__pycache__", skipped by design and
+	// documented, so not worth telling the user about.
+	ReasonIgnoredDir = "ignored directory"
+)
+
+// Skipped is one path Scan deliberately left out of files. Dir means the
+// whole subtree beneath RepoPath went unread, so the walk cannot say what (if
+// anything) lives down there -- which is precisely why `tf up --delete` must
+// keep its hands off those remote paths.
+type Skipped struct {
+	RepoPath string // forward-slash path relative to the root
+	Dir      bool   // the subtree below RepoPath was never enumerated
+	Reason   string // one of the Reason* constants above
+}
+
+// Notable reports whether the skip is worth showing the user. The routine,
+// documented exclusions (.git, __pycache__) are not; anything that drops
+// content the user plausibly meant to upload is.
+func (s Skipped) Notable() bool { return s.Reason != ReasonIgnoredDir }
+
+// SkippedDirs returns the repo-relative directories in skipped whose contents
+// were never enumerated. Callers hand these to hub.Plan.LocalUnknownDirs so a
+// delete pass treats "we did not look" differently from "it is gone".
+func SkippedDirs(skipped []Skipped) []string {
+	var dirs []string
+	for _, s := range skipped {
+		if s.Dir {
+			dirs = append(dirs, s.RepoPath)
+		}
+	}
+	return dirs
+}
+
 // Scan walks root. When root is a directory every regular file below it is
 // returned with RepoPath relative to root; when root is a single file, one
 // entry with RepoPath = its base name. If root itself is a symlink to a
 // directory, it is followed and its contents are scanned as normal. Always
 // skipped: ".git" directories, ".DS_Store", "Thumbs.db", "__pycache__"
-// directories, and symlinks *inside* the tree that point at directories (to
-// avoid loops; symlinked files are followed). Results are sorted by
-// RepoPath. A root that does not exist is an error.
+// directories, symlinks *inside* the tree that point at directories (to
+// avoid loops; symlinked files are followed), broken symlinks and
+// non-regular files. Results are sorted by RepoPath. A root that does not
+// exist is an error.
 //
-// allPaths reports every RepoPath the walk visited (subject only to the
-// always-skipped names above, never to Include/Exclude): callers that need to
-// know what actually exists on disk -- as opposed to what --include/--exclude
-// selected for upload -- use this instead of re-scanning. `tf up --delete`
-// is the motivating case: a file excluded from the upload but still on disk
-// must not be treated as "gone locally" and deleted from the remote. A single
-// walk produces both slices so scanning a large tree twice is never needed.
-func Scan(root string, opts Options) (files []File, allPaths []string, err error) {
+// allPaths reports every path the walk found on disk -- including the ones
+// left out of files, whether by the always-skipped names above or by
+// Include/Exclude. Callers that need to know what actually exists on disk, as
+// opposed to what this run uploads, use it instead of re-scanning. `tf up
+// --delete` is the motivating case: a file the walk skipped is still a file
+// that exists, and must never be mistaken for "gone locally" and deleted from
+// the remote.
+//
+// skipped names what did not make it into files and why. Its Dir entries are
+// the walk's blind spots -- directories whose contents allPaths therefore
+// cannot list -- and its Notable entries are the ones a caller should show
+// the user, since a silently unread symlinked directory otherwise looks like
+// an upload that simply had nothing to do. A single walk produces all three
+// results so scanning a large tree twice is never needed.
+func Scan(root string, opts Options) (files []File, allPaths []string, skipped []Skipped, err error) {
 	info, err := os.Stat(root)
 	if err != nil {
-		return nil, nil, fmt.Errorf("local: scan %s: %w", root, err)
+		return nil, nil, nil, fmt.Errorf("local: scan %s: %w", root, err)
 	}
 
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
-		return nil, nil, fmt.Errorf("local: scan %s: %w", root, err)
+		return nil, nil, nil, fmt.Errorf("local: scan %s: %w", root, err)
 	}
 
 	if !info.IsDir() {
@@ -74,7 +127,7 @@ func Scan(root string, opts Options) (files []File, allPaths []string, err error
 		if matchFilters(f.RepoPath, opts) {
 			files = append(files, f)
 		}
-		return files, allPaths, nil
+		return files, allPaths, nil, nil
 	}
 
 	// root itself may be a symlink to a directory (or sit behind one via an
@@ -104,36 +157,48 @@ func Scan(root string, opts Options) (files []File, allPaths []string, err error
 			return nil
 		}
 		name := d.Name()
+		rel, relErr := filepath.Rel(rootAbs, p)
+		if relErr != nil {
+			return relErr
+		}
+		repoPath := filepath.ToSlash(rel)
 
 		if d.IsDir() {
 			if name == ".git" || name == "__pycache__" {
+				skipped = append(skipped, Skipped{RepoPath: repoPath, Dir: true, Reason: ReasonIgnoredDir})
 				return filepath.SkipDir
 			}
 			return nil
+		}
+
+		// Everything below is a path that exists on disk, so it joins
+		// allPaths whether or not it is uploaded: a skipped file is still
+		// a file that is *there*, and treating it as absent is how
+		// --delete would remove a remote copy of it.
+		allPaths = append(allPaths, repoPath)
+		keep := func(size int64) {
+			if matchFilters(repoPath, opts) {
+				files = append(files, File{RepoPath: repoPath, AbsPath: p, Size: size})
+			}
 		}
 
 		if d.Type()&os.ModeSymlink != 0 {
 			target, statErr := os.Stat(p)
 			if statErr != nil {
 				// Broken symlink: nothing to upload.
+				skipped = append(skipped, Skipped{RepoPath: repoPath, Reason: ReasonBrokenSymlink})
 				return nil
 			}
 			if target.IsDir() {
 				// Do not follow symlinked directories (avoids cycles).
+				// Nothing beneath it was read, so it is a blind spot.
+				skipped = append(skipped, Skipped{RepoPath: repoPath, Dir: true, Reason: ReasonSymlinkDir})
 				return nil
 			}
 			if name == ".DS_Store" || name == "Thumbs.db" {
 				return nil
 			}
-			rel, relErr := filepath.Rel(rootAbs, p)
-			if relErr != nil {
-				return relErr
-			}
-			f := File{RepoPath: filepath.ToSlash(rel), AbsPath: p, Size: target.Size()}
-			allPaths = append(allPaths, f.RepoPath)
-			if matchFilters(f.RepoPath, opts) {
-				files = append(files, f)
-			}
+			keep(target.Size())
 			return nil
 		}
 
@@ -141,6 +206,7 @@ func Scan(root string, opts Options) (files []File, allPaths []string, err error
 			return nil
 		}
 		if !d.Type().IsRegular() {
+			skipped = append(skipped, Skipped{RepoPath: repoPath, Reason: ReasonIrregular})
 			return nil
 		}
 
@@ -148,24 +214,17 @@ func Scan(root string, opts Options) (files []File, allPaths []string, err error
 		if infoErr != nil {
 			return infoErr
 		}
-		rel, relErr := filepath.Rel(rootAbs, p)
-		if relErr != nil {
-			return relErr
-		}
-		f := File{RepoPath: filepath.ToSlash(rel), AbsPath: p, Size: entryInfo.Size()}
-		allPaths = append(allPaths, f.RepoPath)
-		if matchFilters(f.RepoPath, opts) {
-			files = append(files, f)
-		}
+		keep(entryInfo.Size())
 		return nil
 	})
 	if walkErr != nil {
-		return nil, nil, walkErr
+		return nil, nil, nil, walkErr
 	}
 
 	sort.Slice(files, func(i, j int) bool { return files[i].RepoPath < files[j].RepoPath })
 	sort.Strings(allPaths)
-	return files, allPaths, nil
+	sort.Slice(skipped, func(i, j int) bool { return skipped[i].RepoPath < skipped[j].RepoPath })
+	return files, allPaths, skipped, nil
 }
 
 func matchFilters(repoPath string, opts Options) bool {

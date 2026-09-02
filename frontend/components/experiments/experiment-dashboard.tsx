@@ -29,6 +29,7 @@ import { useRunFilters } from "@/hooks/use-run-filters";
 import { useRunSelection } from "@/hooks/use-run-selection";
 import { ApiResultError, queryErrorMessage } from "@/lib/api-error-message";
 import { deleteRun, getMetrics, listRuns, updateRunAnnotations } from "@/lib/experiments";
+import { metricsQueryKey } from "@/lib/experiments-query-keys";
 import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
 import type { RunModels } from "@/lib/lineage";
@@ -170,7 +171,10 @@ export function ExperimentDashboard({
   });
 
   const { data, isFetching, isPending, isError, error } = useQuery({
-    queryKey: ["exp-metrics", ns, repo, project, selectedNames.join(","), chartOptions.xMode],
+    // Keyed through the shared helper, which serializes the run list as JSON:
+    // a run literally named `lr=0.1,bs=32` would otherwise collide with the
+    // pair `lr=0.1` + `bs=32` under a comma-join.
+    queryKey: metricsQueryKey(ns, repo, project, selectedNames, chartOptions.xMode),
     queryFn: async () => {
       const result = await getMetrics(ns, repo, project, {
         runs: selectedNames,

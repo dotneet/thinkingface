@@ -43,7 +43,7 @@ func (b *stalledBody) Read(p []byte) (int, error) {
 // the pipe cannot unblock a read of the body), so the copy has to be detached
 // from Wait instead.
 func TestServeDoesNotWaitForAStalledRequestBody(t *testing.T) {
-	h, storagePath := newAdvertiseFixture(t)
+	h, storagePath, _ := newAdvertiseFixture(t)
 
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
@@ -176,7 +176,7 @@ func gzipZeros(t *testing.T, n int) []byte {
 // into a 500 on its second request. Only the E2E suite noticed; this is the
 // unit-level statement of the same thing.
 func TestServeLeavesTheConnectionReusable(t *testing.T) {
-	h, storagePath := newAdvertiseFixture(t)
+	h, storagePath, _ := newAdvertiseFixture(t)
 
 	var mu sync.Mutex
 	conns := map[net.Conn]bool{}

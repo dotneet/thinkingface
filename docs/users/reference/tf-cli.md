@@ -86,7 +86,7 @@ tf login [ENDPOINT] [--token TOKEN | --token -]
 
 | Flag | Meaning |
 |---|---|
-| `ENDPOINT` | The server URL. Defaults to the config file's default endpoint; if there is none and stdin is a terminal, `tf` prompts for it |
+| `ENDPOINT` | The server URL. If omitted, follows the same [credential resolution order](#credential-resolution-order) as every other command (`TF_ENDPOINT` / `THINKINGFACE_ENDPOINT` / `HF_ENDPOINT`, then the config file's default endpoint) — `login`/`logout` are not a special case here; if none of those resolve anything and stdin is a terminal, `tf login` prompts for it instead of erroring |
 | `--token TOKEN` | Verifies the given token with `whoami` and saves it as-is. `--token -` reads the token from stdin (one line) instead |
 | `--username USER` | Username for password-based login (used when `--token` is not given) |
 | `--password-stdin` | Reads the password from stdin (one line) instead of prompting with echo disabled |
@@ -145,15 +145,15 @@ tf up PATH [--to NS/NAME|NAME] [--kind dataset|model] [--rev BRANCH]
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--to NS/NAME` or `NAME` | your namespace + PATH's directory name | Destination repository. A `datasets/` or `models/` prefix on `NS/NAME` also pins the kind |
+| `--to NS/NAME` or `NAME` | your namespace + a name derived from PATH | Destination repository. A `datasets/` or `models/` prefix on `NS/NAME` also pins the kind. The derived name is PATH's directory name when PATH is a directory, or its file name **with the extension stripped** when PATH is a single file (`tf up ./model.safetensors` targets a repository named `model`, not `model.safetensors`) |
 | `--kind dataset\|model` | inferred from contents | Pins the repository kind explicitly, overriding `--to`'s prefix |
 | `--rev` | `main` | Branch to push to |
-| `-m`, `--message` | `Upload N files with tf` | Commit summary |
+| `-m`, `--message` | `Upload N files with tf` (`Upload 1 file with tf` for exactly one; `Delete N files with tf` when the run only deletes, nothing is uploaded) | Commit summary |
 | `--license` | (unset) | The repository card's `license` |
 | `--tag` | (unset) | The repository card's `tags`. Repeatable; a single occurrence may also carry comma-separated values (`--tag a,b --tag c` → `a`, `b`, `c`) |
 | `--desc` | (unset) | The repository card's `description`, also used as the opening paragraph of a generated README |
-| `--include` | include everything | Only include files matching this shell glob (repeatable) |
-| `--exclude` | (none) | Exclude files matching this shell glob (repeatable) |
+| `--include` | include everything | Only include files matching this glob (repeatable). Not a shell glob run through the shell — `tf` matches it itself, with `**` matching any number of path segments (`data/**`, `**/*.parquet`) and, for a pattern with no `/` at all, also tried against just the file's base name (`*.parquet` matches `data/train.parquet` too) |
+| `--exclude` | (none) | Exclude files matching this glob (repeatable). Same matching rules as `--include` |
 | `--delete` | off | Delete remote files that are not present anywhere on disk under PATH, regardless of `--include`/`--exclude` — a file those flags kept out of this run's upload but that still exists on disk is never deleted |
 | `--dry-run` | off | Show what would happen without changing anything |
 | `--workers` | `4` | Number of parallel LFS transfers |
@@ -180,11 +180,38 @@ dataset, but a model repository of the same name already exists — that one is 
     not against the upload set: as long as it exists somewhere under PATH, it survives
     `--delete`. Only files genuinely absent from PATH are removed.
 
-**README handling**: if any of `--license`, `--tag`, or `--desc` is given and there's no
-local `README.md`, one is generated with a repository card and included in the upload. If a
-local `README.md` exists, only the given values are merged into its existing frontmatter (the
-body and key order are preserved). If none of the card flags are given, the README is left
-untouched entirely.
+!!! note "`--delete` and symlinked directories: blind spots are left alone"
+    The local scan does not follow a symlink that points at a directory (following it could
+    loop), a broken symlink, or a non-regular file (a socket, a fifo, ...) — `.git` and
+    `__pycache__` directories are skipped the same way, silently. `tf up` prints a warning to
+    stderr for every skip that isn't `.git`/`__pycache__` (up to 10, then a count of the
+    rest), and **this warning is not suppressed by `--quiet`** — `--quiet` only suppresses
+    progress output, and silently leaving content out of an upload isn't progress.
+
+    A symlinked directory in particular is a blind spot for `--delete`: since the scan never
+    read what's inside it, `tf` cannot tell whether a remote path under that directory still
+    exists locally or not, so it leaves everything under it alone rather than guess. A remote
+    file whose local counterpart is now behind a directory symlink is therefore never deleted,
+    even with `--delete`, until the symlink is resolved into a real directory (or removed) on
+    a later run.
+
+**README handling**: `tf up` never leaves a local `README.md` out of the upload on its own — a
+local `README.md` is a normal file like any other, uploaded (and so overwriting whatever is on
+the remote) whenever it's part of the run. What's described below is only about whether its
+*content* gets touched before that upload, and it works off the filtered file set (after
+`--include`/`--exclude`), not off what's physically on disk:
+
+- If none of `--license`, `--tag`, `--desc` is given, no README content is generated or
+  merged — a local `README.md` uploads exactly as it is on disk (if it's in the filtered set).
+- If any of those flags is given **and** `README.md` is in the filtered file set, only the
+  given values are merged into its existing frontmatter (the body and key order are
+  preserved).
+- If any of those flags is given and `README.md` is **not** in the filtered file set — either
+  because there truly is no local `README.md`, or because `--include`/`--exclude` excluded it
+  — a brand new `README.md` is generated from the card flags and included in the upload,
+  silently replacing whatever `README.md` exists on the remote. A local `README.md` that
+  `--include`/`--exclude` filtered out of this run does not protect the remote file the way it
+  would if the flags were simply left off.
 
 The shape of `tf up --json`'s output:
 

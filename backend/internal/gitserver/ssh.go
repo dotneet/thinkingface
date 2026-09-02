@@ -13,8 +13,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-
-	"github.com/dotneet/thinkingface/backend/internal/gitexec"
 )
 
 // Streams are the three standard streams of an SSH session, wired to the git
@@ -95,24 +93,20 @@ func (h *Handler) ServeSSH(ctx context.Context, storagePath string, service Serv
 	return nil
 }
 
-// sshEnv is the shared git environment (internal/gitexec) with GIT_PROTOCOL
-// decided by the client rather than hard-coded. Over HTTP the version travels
-// in a header the transport always sends; over SSH it is an optional
-// environment request, and inventing one breaks clients that did not ask for
-// it.
+// sshEnv is gitEnv with the protocol value named the way SSH delivers it: an
+// optional environment request from the client, where HTTP uses the
+// Git-Protocol header. Both are the client's own choice and neither is
+// invented for it -- see gitEnv.
 func sshEnv(gitProtocol string) []string {
-	env := gitexec.Env()
-	if v := sanitizeGitProtocol(gitProtocol); v != "" {
-		env = append(env, "GIT_PROTOCOL="+v)
-	}
-	return env
+	return gitEnv(gitProtocol)
 }
 
 // sanitizeGitProtocol accepts only the shape git actually sends. The value
-// arrives from the client, and it is the one piece of client input that
-// reaches the service process's environment, so it is allow-listed rather
-// than filtered: `version=<digits>` optionally followed by colon-separated
-// bare words (the extension syntax of protocol v2).
+// arrives from the client -- an SSH environment request, or the Git-Protocol
+// header over HTTP -- and it is the one piece of client input that reaches the
+// service process's environment, so it is allow-listed rather than filtered:
+// `version=<digits>` optionally followed by colon-separated bare words (the
+// extension syntax of protocol v2).
 func sanitizeGitProtocol(raw string) string {
 	if raw == "" || len(raw) > 64 {
 		return ""

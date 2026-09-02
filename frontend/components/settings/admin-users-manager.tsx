@@ -66,6 +66,11 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
   const [search, setSearch] = useState("");
 
   const [actionError, setActionError] = useState<string | null>(null);
+  // A failure from a confirmation dialog is shown *in* that dialog rather than
+  // in the page-level Alert below the table: the dialog is where the user is
+  // looking, and it stays open until the request it fired has finished (see
+  // `handleConfirm`).
+  const [dialogError, setDialogError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -110,57 +115,85 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
    * listing is always re-read rather than patched in place — the row's state
    * afterwards belongs to the server, not to the copy this page took before
    * somebody else touched the account.
+   *
+   * `firedFrom` says who is waiting for it. A write started from a
+   * confirmation dialog keeps that dialog open across the request — its
+   * confirm button reads "Working…" — and a failure lands in it, where the
+   * administrator is already looking; the dialog closes only once the write
+   * has actually succeeded. A write started straight from a row (Approve asks
+   * nothing) has only the row's spinner and the page-level Alert.
    */
   async function run(
     username: string,
     write: () => Promise<ApiResult<unknown>>,
     successKey: MessageKey,
+    firedFrom: "row" | "dialog" = "row",
   ) {
     setBusy(username);
     setActionError(null);
+    setDialogError(null);
     setNotice(null);
     const result = await write();
     setBusy(null);
     if (!result.ok) {
-      setActionError(describe(result));
+      (firedFrom === "dialog" ? setDialogError : setActionError)(describe(result));
       return;
     }
+    if (firedFrom === "dialog") setConfirmTarget(null);
     setNotice(t(successKey, { username }));
     await refresh();
   }
 
-  function handleConfirm(target: AdminUserConfirmTarget) {
+  /** The write behind each confirmed operation, and how to announce it. */
+  function confirmedWrite(target: AdminUserConfirmTarget): {
+    write: () => Promise<ApiResult<unknown>>;
+    successKey: MessageKey;
+  } {
     const { kind, user } = target;
-    setConfirmTarget(null);
     switch (kind) {
       case "admin":
-        return void run(
-          user.username,
-          () => updateAdminUser(user.username, { is_admin: !user.is_admin }),
-          "settings.adminUsers.adminChanged",
-        );
+        return {
+          write: () => updateAdminUser(user.username, { is_admin: !user.is_admin }),
+          successKey: "settings.adminUsers.adminChanged",
+        };
       case "disable":
-        return void run(
-          user.username,
-          () => setAdminUserDisabled(user.username, !user.disabled),
-          user.disabled ? "settings.adminUsers.restoreDone" : "settings.adminUsers.suspendDone",
-        );
+        return {
+          write: () => setAdminUserDisabled(user.username, !user.disabled),
+          successKey: user.disabled
+            ? "settings.adminUsers.restoreDone"
+            : "settings.adminUsers.suspendDone",
+        };
       case "hold":
-        return void run(
-          user.username,
-          () => setAdminUserApproval(user.username, UserApprovalPending),
-          "settings.adminUsers.holdDone",
-        );
+        return {
+          write: () => setAdminUserApproval(user.username, UserApprovalPending),
+          successKey: "settings.adminUsers.holdDone",
+        };
       case "revoke":
         // The listing does not change — nothing on the wire type counts tokens
         // or keys — but `run` reloads anyway so the row cannot be acted on
         // again from a copy taken before somebody else touched the account.
-        return void run(
-          user.username,
-          () => revokeAdminUserCredentials(user.username),
-          "settings.adminUsers.revokeDone",
-        );
+        return {
+          write: () => revokeAdminUserCredentials(user.username),
+          successKey: "settings.adminUsers.revokeDone",
+        };
     }
+  }
+
+  // Confirming does not close the dialog: `run` holds it open across the write
+  // and closes it on success. Clearing the target here closed it the instant
+  // the request left, which also made `confirming` permanently false —
+  // revoking somebody's credentials looked like nothing had happened at all,
+  // and on a slow link the natural response is to do it again.
+  function handleConfirm(target: AdminUserConfirmTarget) {
+    const { write, successKey } = confirmedWrite(target);
+    void run(target.user.username, write, successKey, "dialog");
+  }
+
+  // One dialog serves all four operations, so a failure left over from the
+  // last one would otherwise greet the next account it opens for.
+  function openConfirm(target: AdminUserConfirmTarget) {
+    setDialogError(null);
+    setConfirmTarget(target);
   }
 
   const actions: AdminUserActions = {
@@ -171,10 +204,10 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
         () => setAdminUserApproval(user.username, UserApprovalApproved),
         "settings.adminUsers.approveDone",
       ),
-    hold: (user) => setConfirmTarget({ kind: "hold", user }),
-    toggleDisabled: (user) => setConfirmTarget({ kind: "disable", user }),
-    revokeCredentials: (user) => setConfirmTarget({ kind: "revoke", user }),
-    toggleAdmin: (user) => setConfirmTarget({ kind: "admin", user }),
+    hold: (user) => openConfirm({ kind: "hold", user }),
+    toggleDisabled: (user) => openConfirm({ kind: "disable", user }),
+    revokeCredentials: (user) => openConfirm({ kind: "revoke", user }),
+    toggleAdmin: (user) => openConfirm({ kind: "admin", user }),
   };
 
   // A failed read leaves `users` null, and the banner below is simply not
@@ -205,27 +238,6 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
           {t("settings.adminUsers.addUser")}
         </Button>
       </div>
-
-      {actionError && <Alert tone="negative">{actionError}</Alert>}
-      {notice && <Alert tone="positive">{notice}</Alert>}
-
-      {/* A pending account authenticates on nothing at all, so somebody is
-          sitting locked out until an administrator acts. The listing already
-          sorts them to the top; this is what makes the reason visible without
-          reading the badges. Only ever rendered from a successful read, and it
-          counts what is on this page rather than the instance — the endpoint
-          reports no instance-wide pending total, and inventing one from a page
-          would state something the screen does not know (DESIGN.md §9). */}
-      {pendingHere > 0 && (
-        <Alert tone="warning">
-          {t(
-            pendingHere === 1
-              ? "settings.adminUsers.pendingNoticeOne"
-              : "settings.adminUsers.pendingNoticeOther",
-            { count: formatNumber(pendingHere) },
-          )}
-        </Alert>
-      )}
 
       {users === null && !loadError ? (
         <SkeletonLines lines={5} />
@@ -270,6 +282,34 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
 
       <PaginationControls pager={pager} />
 
+      {/* Every banner on this screen lives *below* the table, and none of them
+          sits between the toolbar and the rows. Approving an account inserts a
+          success Alert and — once the last pending account is gone — removes
+          the waiting-room banner; from above the table each of those moved
+          every row by its own height, so the second click of a run of
+          approvals landed on a different account's Suspend or Revoke
+          credentials (DESIGN.md §8.1). */}
+      {actionError && <Alert tone="negative">{actionError}</Alert>}
+      {notice && <Alert tone="positive">{notice}</Alert>}
+
+      {/* A pending account authenticates on nothing at all, so somebody is
+          sitting locked out until an administrator acts. The listing already
+          sorts them to the top; this is what makes the reason visible without
+          reading the badges. Only ever rendered from a successful read, and it
+          counts what is on this page rather than the instance — the endpoint
+          reports no instance-wide pending total, and inventing one from a page
+          would state something the screen does not know (DESIGN.md §9). */}
+      {pendingHere > 0 && (
+        <Alert tone="warning">
+          {t(
+            pendingHere === 1
+              ? "settings.adminUsers.pendingNoticeOne"
+              : "settings.adminUsers.pendingNoticeOther",
+            { count: formatNumber(pendingHere) },
+          )}
+        </Alert>
+      )}
+
       <AdminUserCreateDialog
         open={addOpen}
         onClose={() => setAddOpen(false)}
@@ -296,8 +336,13 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
 
       <AdminUserConfirms
         target={confirmTarget}
-        onClose={() => setConfirmTarget(null)}
+        onClose={() => {
+          setConfirmTarget(null);
+          setDialogError(null);
+        }}
         onConfirm={handleConfirm}
+        confirming={busy !== null && confirmTarget !== null}
+        error={dialogError}
       />
     </div>
   );

@@ -326,3 +326,30 @@ func (s *Store) PendingSyncCount(ctx context.Context, repoID int64) (int, error)
 		repoID).Scan(&n)
 	return n, err
 }
+
+// HasUnsettledSyncJobs reports whether the repository has any sync job other
+// than exceptID that has not reached 'done' -- pending, running, or parked as
+// 'failed'.
+//
+// It gates PruneRepoLFSLinks. That prune releases links no commit has been
+// seen to name, and the sync pipeline is what does the seeing: LinkLFSObjects
+// stamps a revision's objects as committed when the job for that ref runs. A
+// ref whose job is still queued, or one parked after five failures, has
+// pointers nothing has vouched for yet. Their links would look like abandoned
+// uploads, get pruned once they aged past the grace window, and `thinkingface
+// gc` would then delete bytes a perfectly live pointer names -- discovered
+// only when the operator finally retried that job.
+//
+// So the reconciliation waits until the queue is quiet for this repository.
+// The cost is that a repository with a permanently parked job never has its
+// abandoned uploads collected, which over-counts its usage; that is the
+// direction to err in, and the parked job is already an operator-visible fault
+// (ListFailedSyncJobs).
+func (s *Store) HasUnsettledSyncJobs(ctx context.Context, repoID, exceptID int64) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM sync_jobs
+		               WHERE repo_id = $1 AND id <> $2 AND status <> 'done')`,
+		repoID, exceptID).Scan(&exists)
+	return exists, err
+}

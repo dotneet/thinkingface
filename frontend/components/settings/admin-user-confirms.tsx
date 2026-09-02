@@ -34,10 +34,16 @@ export function AdminUserConfirms({
   target,
   onClose,
   onConfirm,
+  confirming = false,
+  error,
 }: {
   target: AdminUserConfirmTarget | null;
   onClose: () => void;
   onConfirm: (target: AdminUserConfirmTarget) => void;
+  /** The confirmed write is in flight: the confirm button says so and blocks. */
+  confirming?: boolean;
+  /** Why the write failed, reported here rather than behind the dialog. */
+  error?: string | null;
 }) {
   const t = useT();
   const user = target?.user;
@@ -48,12 +54,11 @@ export function AdminUserConfirms({
   // keeps its own mount (and, for `revoke`, its typed confirmation) instead of
   // one component swapping copy underneath the user mid-animation.
   //
-  // None of them takes `confirming`: confirming closes the dialog and *then*
-  // starts the write, so by the time anything is in flight `target` is already
-  // null and no dialog is open to show a "Working…" button. The prop used to
-  // be passed and was dead by construction. Showing progress here would mean
-  // holding the dialog open across the write instead, which is a different
-  // design, not a missing prop.
+  // `confirming` and `error` are the caller's, because the write is the
+  // caller's: the dialog is held open across it rather than closed the instant
+  // the request leaves, so the confirm button can say "Working…" and a failure
+  // can land where the administrator is already looking. Only the open dialog
+  // can show either, so both are handed to all four.
   const isOpen = (k: AdminUserConfirmKind) => kind === k;
   const fire = () => {
     if (target) onConfirm(target);
@@ -65,6 +70,9 @@ export function AdminUserConfirms({
         open={isOpen("admin")}
         onClose={onClose}
         onConfirm={fire}
+        confirming={confirming}
+        confirmingLabel={t("settings.adminUsers.working")}
+        error={error}
         tone={user?.is_admin ? "danger" : "primary"}
         title={t(
           user?.is_admin ? "settings.adminUsers.demoteTitle" : "settings.adminUsers.promoteTitle",
@@ -92,6 +100,9 @@ export function AdminUserConfirms({
         open={isOpen("disable")}
         onClose={onClose}
         onConfirm={fire}
+        confirming={confirming}
+        confirmingLabel={t("settings.adminUsers.working")}
+        error={error}
         tone={user?.disabled ? "primary" : "danger"}
         title={t(
           user?.disabled ? "settings.adminUsers.restoreTitle" : "settings.adminUsers.suspendTitle",
@@ -120,6 +131,9 @@ export function AdminUserConfirms({
         open={isOpen("hold")}
         onClose={onClose}
         onConfirm={fire}
+        confirming={confirming}
+        confirmingLabel={t("settings.adminUsers.working")}
+        error={error}
         tone="danger"
         title={t("settings.adminUsers.holdTitle", { username })}
         description={
@@ -136,6 +150,9 @@ export function AdminUserConfirms({
         open={isOpen("revoke")}
         onClose={onClose}
         onConfirm={fire}
+        confirming={confirming}
+        confirmingLabel={t("settings.adminUsers.working")}
+        error={error}
         requireText={isOpen("revoke") ? username : undefined}
         title={t("settings.adminUsers.revokeTitle", { username })}
         description={

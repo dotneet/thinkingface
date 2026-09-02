@@ -17,8 +17,15 @@ import (
 
 // Entry is one item in a tree listing.
 type Entry struct {
-	Path  string
-	Name  string
+	Path string
+	Name string
+	// IsDir marks an entry that has no blob behind it: a subtree, or a
+	// gitlink — the commit a submodule is pinned at (mode 160000). The two
+	// share this flag because every caller of a tree listing already tests it
+	// to mean "there is nothing here to read, index or publish", and that is
+	// exactly as true of a gitlink: its hash names a commit in the
+	// *submodule's* repository, which this object database has never seen.
+	// IsSubmodule tells the two apart for callers that care.
 	IsDir bool
 	Mode  filemode.FileMode
 	Hash  plumbing.Hash
@@ -27,6 +34,11 @@ type Entry struct {
 	// LFS is set when the blob's content parses as a Git LFS pointer.
 	LFS *LFSPointer
 }
+
+// IsSubmodule reports whether the entry is a gitlink rather than a subtree.
+// Both come back with IsDir set; only this one has a hash that cannot be
+// resolved locally.
+func (e Entry) IsSubmodule() bool { return e.Mode == filemode.Submodule }
 
 // TargetSize is the size a client sees: the real object for LFS files.
 func (e Entry) TargetSize() int64 {
@@ -82,9 +94,17 @@ func (r *Repo) listTree(t *object.Tree, prefix string, recursive bool) ([]Entry,
 		if prefix != "" {
 			p = prefix + "/" + te.Name
 		}
-		if te.Mode == filemode.Dir {
+		// A gitlink joins subtrees on this side of the branch rather than
+		// falling through to blobEntry. Its hash belongs to the submodule's
+		// object database, so asking this one for it fails — and used to fail
+		// the whole listing, not just the entry, which took out the tree API,
+		// the file browser and the post-push index job the moment anyone
+		// pushed a single submodule.
+		if te.Mode == filemode.Dir || te.Mode == filemode.Submodule {
 			out = append(out, Entry{Path: p, Name: te.Name, IsDir: true, Mode: te.Mode, Hash: te.Hash})
-			if recursive {
+			// Only a real subtree has children here; a gitlink's are in
+			// another repository entirely.
+			if recursive && te.Mode == filemode.Dir {
 				sub, err := object.GetTree(r.storer(), te.Hash)
 				if err != nil {
 					return nil, fmt.Errorf("load subtree %s: %w", p, err)
@@ -145,7 +165,7 @@ func (r *Repo) Stat(rev, p string) (Entry, plumbing.Hash, error) {
 	if err != nil {
 		return Entry{}, commit, ErrPathNotFound
 	}
-	if te.Mode == filemode.Dir {
+	if te.Mode == filemode.Dir || te.Mode == filemode.Submodule {
 		return Entry{Path: p, Name: path.Base(p), IsDir: true, Mode: te.Mode, Hash: te.Hash}, commit, nil
 	}
 	e, err := r.blobEntry(*te, p)
@@ -184,7 +204,7 @@ func (r *Repo) StatMany(rev string, paths []string) (map[string]Entry, plumbing.
 		if err != nil {
 			continue
 		}
-		if te.Mode == filemode.Dir {
+		if te.Mode == filemode.Dir || te.Mode == filemode.Submodule {
 			out[p] = Entry{Path: clean, Name: path.Base(clean), IsDir: true, Mode: te.Mode, Hash: te.Hash}
 			continue
 		}

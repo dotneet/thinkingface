@@ -7,7 +7,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -63,27 +62,17 @@ func safeContentType(contentType string) string {
 // `attachment` is what stops a top-level navigation to a pushed .html or .svg
 // from rendering in the API origin: the browser saves it instead. It does not
 // affect subresource loads, so <img src=".../resolve/main/plot.png"> in a
-// rendered README keeps working. The LFS signed-URL path already asks GCS for
-// the same header (storage/gcs.go), so this brings the git-blob path in line
-// with it rather than inventing a new policy.
+// rendered README keeps working.
 //
-// Both the quoted ASCII form and RFC 5987's filename* are emitted: the first
-// is what every client understands, the second is what carries a non-ASCII
-// name intact.
+// The header itself is built by storage.ContentDisposition, the same call the
+// LFS signed-URL path hands to GCS, so the two paths cannot drift. They did:
+// this function used to build filename* with url.PathEscape, which is not RFC
+// 5987's attr-char set -- it leaves `=`, `:`, `@`, `'`, `(` and `)` alone --
+// so "epoch=12-step=500.ckpt", the name PyTorch Lightning gives every
+// checkpoint by default, produced a header that mime.ParseMediaType (and any
+// other RFC 2231 parser) rejects outright.
 func attachmentDisposition(name string) string {
-	ascii := make([]rune, 0, len(name))
-	for _, r := range name {
-		if r < 0x20 || r > 0x7e || r == '"' || r == '\\' {
-			ascii = append(ascii, '_')
-			continue
-		}
-		ascii = append(ascii, r)
-	}
-	fallback := string(ascii)
-	if fallback == "" {
-		fallback = "download"
-	}
-	return "attachment; filename=\"" + fallback + "\"; filename*=UTF-8''" + url.PathEscape(name)
+	return storage.ContentDisposition(name)
 }
 
 // resolveCacheControl picks the caching policy for one resolve response.
@@ -309,11 +298,16 @@ func serveGitBlob(w http.ResponseWriter, r *http.Request, gitRepo *gitrepo.Repo,
 	}
 	defer rc.Close()
 
-	// Honour a single Range, the same way serveLFSFile does. An unparseable or
-	// unsatisfiable one falls back to the whole body with a 200 rather than a
-	// 416, again matching that path.
+	// Honour a single Range, the same way serveLFSFile does: a range this
+	// server cannot make sense of falls back to the whole body with a 200,
+	// while one that starts past the end is a 416 (see parseRange).
 	body := io.Reader(rc)
-	if offset, length, partial := parseRange(r.Header.Get("Range"), entry.Size); partial {
+	offset, length, verdict := parseRange(r.Header.Get("Range"), entry.Size)
+	if verdict == rangeUnsatisfiable {
+		writeRangeNotSatisfiable(w, entry.Size)
+		return
+	}
+	if verdict == rangePartial {
 		// go-git blob readers are sequential, so the prefix has to be read
 		// past rather than seeked over -- and these blobs run to gigabytes, so
 		// it is discarded as it streams instead of being buffered.
@@ -484,7 +478,11 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 	// GetRange fails below and a JSON error body (a different length) is
 	// written instead, corrupting the response the same way a redirect body
 	// would be corrupted by it.
-	offset, length, partial := parseRange(r.Header.Get("Range"), entry.LFS.Size)
+	offset, length, verdict := parseRange(r.Header.Get("Range"), entry.LFS.Size)
+	if verdict == rangeUnsatisfiable {
+		writeRangeNotSatisfiable(w, entry.LFS.Size)
+		return
+	}
 	rc, err := s.storage.GetRange(r.Context(), key, offset, length)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -496,7 +494,7 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 	}
 	defer rc.Close()
 
-	if partial {
+	if verdict == rangePartial {
 		writePartialContent(w, offset, length, entry.LFS.Size)
 	} else {
 		w.Header().Set("Content-Length", strconv.FormatInt(entry.LFS.Size, 10))
@@ -504,19 +502,51 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 	_, _ = io.Copy(w, rc)
 }
 
+// rangeVerdict is what parseRange concluded about a Range header, which is
+// three answers rather than two.
+type rangeVerdict int
+
+const (
+	// rangeNone: no Range, or one this server does not understand (a unit
+	// other than bytes, several ranges, a malformed spec). The whole body is
+	// served with a 200, which RFC 9110 §14.2 explicitly allows -- a recipient
+	// may ignore a Range header it cannot make sense of.
+	rangeNone rangeVerdict = iota
+	// rangePartial: a satisfiable range. 206 with Content-Range.
+	rangePartial
+	// rangeUnsatisfiable: a well-formed byte range whose first position is at
+	// or past the end of the file. 416.
+	rangeUnsatisfiable
+)
+
 // parseRange understands the single-range forms clients actually send. It
 // returns length -1 for "to the end".
-func parseRange(header string, size int64) (offset, length int64, ok bool) {
+//
+// The one case that must not fall back to a 200 is a first position at or past
+// the end of the file, and the reason is huggingface_hub's resumed download.
+// http_get resumes by sending `Range: bytes=N-` and appending whatever comes
+// back to the partial file it already holds -- without ever checking that the
+// status was 206. So when the ".incomplete" file is already the whole object
+// (the previous attempt finished the transfer and died before the rename), a
+// 200 hands it the entire file again and it is appended to a copy of itself.
+// The result is a file of twice the size that fails its hash check, and every
+// retry doubles it again. A 416 stops that dead: the client raises instead of
+// writing. This is the only status this server can use to say "there is
+// nothing after byte N", so it is worth the strictness (RFC 9110 §15.5.17).
+func parseRange(header string, size int64) (offset, length int64, verdict rangeVerdict) {
 	spec, found := strings.CutPrefix(header, "bytes=")
 	if !found || strings.Contains(spec, ",") {
-		return 0, -1, false
+		return 0, -1, rangeNone
 	}
 	startStr, endStr, _ := strings.Cut(spec, "-")
 	if startStr == "" {
-		// Suffix range: the last N bytes.
+		// Suffix range: the last N bytes. A suffix is never unsatisfiable in
+		// the sense above -- it is clamped to the file, and "the last N bytes
+		// of nothing" is the empty file rather than a request for bytes that
+		// are missing.
 		n, err := strconv.ParseInt(endStr, 10, 64)
 		if err != nil || n <= 0 {
-			return 0, -1, false
+			return 0, -1, rangeNone
 		}
 		if n > size {
 			n = size
@@ -524,25 +554,42 @@ func parseRange(header string, size int64) (offset, length int64, ok bool) {
 		if n == 0 {
 			// An empty file: there is no last byte to hand back, and a
 			// "bytes 0--1/0" would be nonsense.
-			return 0, -1, false
+			return 0, -1, rangeNone
 		}
-		return size - n, n, true
+		return size - n, n, rangePartial
 	}
 	start, err := strconv.ParseInt(startStr, 10, 64)
-	if err != nil || start < 0 || start >= size {
-		return 0, -1, false
+	if err != nil || start < 0 {
+		return 0, -1, rangeNone
+	}
+	if start >= size {
+		return 0, -1, rangeUnsatisfiable
 	}
 	if endStr == "" {
-		return start, -1, true
+		return start, -1, rangePartial
 	}
 	end, err := strconv.ParseInt(endStr, 10, 64)
 	if err != nil || end < start {
-		return 0, -1, false
+		return 0, -1, rangeNone
 	}
 	if end >= size {
 		end = size - 1
 	}
-	return start, end - start + 1, true
+	return start, end - start + 1, rangePartial
+}
+
+// writeRangeNotSatisfiable answers a range that starts at or past the end of
+// the file. Content-Range carries the file's real length, which is what lets a
+// client that was resuming discover it already holds everything (RFC 9110
+// §14.4). Every identity header the 200 would have carried is already set by
+// the caller, so a conditional retry still works.
+func writeRangeNotSatisfiable(w http.ResponseWriter, size int64) {
+	w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(size, 10))
+	// The body is this API's error shape, not a range response, so the
+	// Content-Type set for the file must not stand.
+	w.Header().Del("Content-Disposition")
+	writeError(w, http.StatusRequestedRangeNotSatisfiable, "range_not_satisfiable",
+		"the requested range starts at or past the end of this "+strconv.FormatInt(size, 10)+"-byte file")
 }
 
 // handleRaw returns a bounded preview for the UI, base64-encoding anything that

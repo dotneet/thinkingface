@@ -75,13 +75,21 @@ var ErrResponseStarted = errors.New("response already started")
 // (a pkt-line per ref), and holding it back until the command has exited is
 // what lets a failure surface as a 500 instead of an empty 200 that a git
 // client reads as "this repository has no refs".
-func (h *Handler) AdvertiseRefs(ctx context.Context, w http.ResponseWriter, storagePath string, service Service) error {
+//
+// gitProtocol is optional and holds the client's Git-Protocol request header
+// ("version=2" for a modern client). HTTP callers must pass
+// r.Header.Get("Git-Protocol") -- it is what decides which protocol version
+// the advertisement is framed in, and it has to be the client's choice: see
+// gitEnv. Omitting it advertises in v0, which every client understands but
+// none of them prefer, so it is a fallback rather than a default worth
+// keeping.
+func (h *Handler) AdvertiseRefs(ctx context.Context, w http.ResponseWriter, storagePath string, service Service, gitProtocol string) error {
 	dir := h.git.Dir(storagePath)
 
 	// CommandContext, like Serve: a client that hangs up mid-negotiation must
 	// not leave upload-pack walking the object database on its behalf.
 	cmd := exec.CommandContext(ctx, "git", string(service)[len("git-"):], "--stateless-rpc", "--advertise-refs", dir)
-	cmd.Env = gitEnv()
+	cmd.Env = gitEnv(gitProtocol)
 	// And WaitDelay for the same reason Serve sets it: Stdout and Stderr are
 	// buffers rather than pipes, so os/exec makes its own pipes and copies on
 	// goroutines that Wait then waits for -- and a grandchild holding one of
@@ -174,7 +182,11 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, storagePath stri
 		return err
 	}
 
-	args, env := h.serviceArgs(service, storagePath, gitEnv())
+	// The client repeats its Git-Protocol header on the RPC itself, and it has
+	// to be honoured here too: the version framing the request body is the one
+	// the advertisement established, so answering it in another version makes
+	// the response unparseable.
+	args, env := h.serviceArgs(service, storagePath, gitEnv(r.Header.Get("Git-Protocol")))
 	args = append(args, "--stateless-rpc", dir)
 	// CommandContext, like AdvertiseRefs: a client that hangs up mid-transfer
 	// must not leave the service running on its behalf.
@@ -387,8 +399,10 @@ func (l *ratioLimitedReader) Read(p []byte) (int, error) {
 
 // serviceArgs builds the `git` arguments up to and including the service name
 // ("upload-pack" / "receive-pack"), and the environment to run it with, for
-// both transports. baseEnv is the transport's own environment: gitEnv() over
-// HTTP, sshEnv(gitProtocol) over SSH. The caller appends what is left --
+// both transports. baseEnv is the transport's own environment: over both it is
+// gitEnv with the protocol version the client asked for -- taken from the
+// Git-Protocol header over HTTP, from the GIT_PROTOCOL environment variable
+// the SSH client sends over SSH (sshEnv). The caller appends what is left --
 // `--stateless-rpc` and the directory for HTTP, the directory alone for SSH,
 // where the service owns the connection for its whole lifetime.
 //
@@ -412,12 +426,28 @@ func (h *Handler) serviceArgs(service Service, storagePath string, baseEnv []str
 	return append(args, string(service)[len("git-"):]), env
 }
 
-// gitEnv is the shared git environment (internal/gitexec) plus the protocol
-// version this transport speaks. Over HTTP the version is fixed: every request
-// is a fresh stateless RPC and this handler always frames it as v2. The SSH
-// transport passes the client's own value through instead -- see sshEnv.
-func gitEnv() []string {
-	return append(gitexec.Env(), "GIT_PROTOCOL=version=2")
+// gitEnv is the shared git environment (internal/gitexec) with GIT_PROTOCOL
+// set to what the client asked for, and to nothing when it asked for nothing.
+// Both transports go through here because the rule is the same on both: the
+// protocol version is the client's to pick, and framing an exchange in a
+// version the other side never offered leaves it unable to read the answer.
+//
+// This used to force "version=2" on the HTTP side, on the theory that a
+// stateless RPC may as well always be v2. It cannot: a client pinned to v0 or
+// v1 (protocol.version in a corporate config, an older git, libgit2, dulwich,
+// go-git) then received a v2 capability list where it expected a ref
+// advertisement, read no refs out of it, and reported success on an empty
+// clone -- a silent wrong answer rather than an error. git's own http-backend
+// passes the Git-Protocol header through instead, which is what this does.
+//
+// The value reaches a process environment and comes from the client, so it is
+// allow-listed by sanitizeGitProtocol rather than trusted.
+func gitEnv(gitProtocol string) []string {
+	env := gitexec.Env()
+	if v := sanitizeGitProtocol(gitProtocol); v != "" {
+		env = append(env, "GIT_PROTOCOL="+v)
+	}
+	return env
 }
 
 // pktLine encodes one git protocol packet.

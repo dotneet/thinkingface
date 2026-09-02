@@ -140,6 +140,12 @@ comes first, and always on process exit. **A network failure never raises into y
 loop** — it is reported as a warning and the points are kept for the next attempt. The one
 exception is `resume="must"` (below), which cannot be honoured without reaching the server.
 
+The server-side ingest API this shim talks to has its own limits, which matter mostly if you
+are logging unusually large or unusually varied batches: a single ingest request may carry at
+most 10,000 points, and a run may carry at most 1,000 distinct metric names over its lifetime
+(every metric name a run has ever logged is kept, so this is a lifetime count, not a per-batch
+one). Neither is something the normal `log()` usage above comes close to.
+
 If your script already imports `trackio`, switching to the real-time path is one line:
 
 ```python
@@ -188,6 +194,11 @@ trackio.init(project="sentiment-finetune", name=f"lr-{lr}", group="lr-sweep",
 Runs sharing a group collapse into one foldable row in the run table and can be compared
 axis-by-axis in the parallel-coordinates view. A run without a group is listed flat.
 
+`trackio.init()` also accepts and ignores any other keyword argument, so a call site written
+against wandb or upstream trackio (`tags=`, for instance) doesn't raise just because this shim
+doesn't support that option — but each ignored argument gets its own warning naming it, so an
+option you expected to take effect doesn't silently do nothing.
+
 ### Attach artifacts to a run
 
 `trackio.log_artifact(path, name=None)` attaches a file — or a whole directory — to the current
@@ -209,6 +220,18 @@ Nothing is uploaded while the run is going: everything is committed together whe
 so a run that saves twenty plots makes one commit rather than twenty. A path that does not exist,
 a name containing `..`, or the reserved name `metrics.parquet` produces a warning, never an
 exception.
+
+A directory attached this way has limits, and blowing past one of them means **none** of that
+call's files upload, not a truncated subset:
+
+- **500 files per `log_artifact()` call.** Past that, the call warns and stages nothing at all —
+  it's an all-or-nothing refusal, not a truncation. Log the files you need individually, or push
+  a model repository instead of attaching a large checkpoint directory this way.
+- **A symlink to a file is followed and uploaded like any other file.** A symlink to a directory
+  is not descended into, and a dangling symlink resolves to neither — both are skipped, with a
+  warning naming them.
+- **An empty directory is a warning, not an empty no-op upload** — there is nothing to stage, so
+  the call fails the same way a directory over the 500-file limit does.
 
 ### Link the model a run produced
 
@@ -236,7 +259,7 @@ the same as anything else in `config`:
 - `_meta.cmdline` — `sys.argv`, with values of secret-looking flags (`--token`, `--password`,
   `--api-key`, `--secret`, `--auth`, `--credential` and variants) replaced with `***`
 - `_meta.python` / `_meta.platform` / `_meta.hostname`
-- `_meta.gpu.name` / `.count` / `_meta.cuda` — read via `torch` if installed, else `nvidia-smi`
+- `_meta.gpu.name` / `.count` / `.cuda` — read via `torch` if installed, else `nvidia-smi`
 - `_meta.requirements_sha256` — a hash of the sorted installed package name/version pairs, so two
   runs can be compared for "same environment or not" without storing the full list
 
@@ -250,10 +273,22 @@ Every active run also samples GPU, CPU and memory usage roughly every 10 seconds
 `system/`-prefixed keys (`system/gpu.0.util`, `system/cpu.percent`, and so on). These get their own
 **System metrics** tab in the chart area, so they never crowd out the metrics your script logs.
 
-Telemetry is best-effort: a machine with no GPU and no `psutil` simply logs nothing. It also never
-counts toward the run's point count, last step or start time, so "how many points did this run
-log" does not depend on how long the machine happened to be up. Set
+Telemetry is best-effort: a machine with no GPU and no `psutil` simply logs nothing. Set
 `THINKINGFACE_SYSTEM_METRICS=off` to disable it.
+
+Whether it counts toward the run's point count and last step depends on which route logged it
+(see [Two ways to get runs in](#two-ways-to-get-runs-in) above):
+
+- **Route A** (trackio writing its own Parquet, indexed by the server) keeps system telemetry
+  entirely out of `num_points`, `last_step` and the run's start time — it's sampled on a
+  wall-clock timer of its own, so counting it would make "how many points did this run log" and
+  "what step is it on" depend on how long the machine happened to be up.
+- **Route B** (the `thinkingface.trackio` shim) does not make that distinction: a system-metric
+  sample goes through the same buffer and the same ingest request as any other logged point, so
+  it counts toward `num_points` exactly like a metric you logged yourself (it's logged at the
+  *current* step without advancing it, so it rarely moves `last_step` on its own). Each
+  `system/`-prefixed key also counts toward the 1,000-distinct-metric-names ceiling mentioned
+  above, though that set is small and fixed, so it never gets close to it by itself.
 
 ### Framework integrations
 
@@ -304,7 +339,10 @@ The run table shows each run's name, status, tags, last step, its summary metric
 it started, and any checkpoints it produced. Columns sort, groups fold into a single row, and a
 metric filter narrows the list to runs matching a threshold (for example `eval/accuracy > 0.9`).
 The first five runs are selected when the page opens; the checkboxes control what the views below
-plot.
+plot. An **Export table CSV** button downloads the table as-is — a folded group still exports
+every member, not just its header row, so the file always matches what the current filters
+selected rather than what happens to be visible. The Metrics view (below) has its own
+**Export metrics CSV** button, on both the project dashboard and a single run's page.
 
 ![Metric charts overlaying several runs, with step and time axes and a smoothing control](../images/experiment-charts.png)
 
@@ -374,6 +412,23 @@ Two points are also worth knowing about how charts read that file:
   matter when you look.
 - Two genuinely different values logged at the same step — from a resume, or from logging a step
   twice — are both kept in the Parquet. The chart draws whichever was logged later.
+
+A flush rebuilds the target `metrics.parquet` in memory (there's no way to append a row group to
+an existing file today), so there's a ceiling on how large that file can grow and still be
+flushed: 1,000,000 existing rows. This is a project-wide ceiling shared by every run writing to
+that project's `metrics.parquet`, not a per-run one, and no realistic single training run
+reaches it on its own — it matters mainly for a project accumulating a very long history of
+runs.
+
+Past that ceiling, **no data is lost.** The project's still-unflushed points stay buffered in
+the database (the live chart keeps reading them from there, so nothing disappears from the UI
+either) and a flush is retried automatically about once an hour, rather than writing a
+truncated file or discarding the points that couldn't be written. The retry keeps failing until
+the underlying condition changes — the file shrinking back under the ceiling, most likely by
+deleting some of the runs that contributed to it — so this is something an operator needs to
+notice and act on, not something that resolves itself. Today that means watching the server
+logs for the error `experiment project cannot be flushed; its buffered points are being kept`,
+which names the project; there is no dedicated CLI or UI surface for it yet.
 
 ## Related pages
 

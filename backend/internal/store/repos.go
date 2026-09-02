@@ -419,11 +419,11 @@ func buildRepoWhere(d dialect, f RepoFilter, scope repoFilterScope) (string, []a
 		where = append(where, d.jsonArrayContainsAll("r.card", "tags", bind, f.Tags))
 	}
 	if scope.license && f.License != "" {
-		where = append(where, `r.card->>'license' = `+bind(f.License))
+		where = append(where, `(`+d.jsonScalarText("r.card", "license")+`) = `+bind(f.License))
 	}
 	if scope.task && f.Task != "" {
 		task := bind(f.Task)
-		where = append(where, `(r.card->>'pipeline_tag' = `+task+` OR `+d.jsonArrayHas("r.card", "task_categories", task)+`)`)
+		where = append(where, `((`+d.jsonScalarText("r.card", "pipeline_tag")+`) = `+task+` OR `+d.jsonArrayHas("r.card", "task_categories", task)+`)`)
 	}
 	// Relation is a facet dimension and drops out of its own facet; BaseModel
 	// is not and stays, so the relation facet still answers "of this base
@@ -627,8 +627,11 @@ func (s *Store) tagFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem, er
 
 func (s *Store) licenseFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem, error) {
 	clause, args := buildRepoWhere(s.d, f, repoFilterScope{tags: true, task: true})
-	licenseClause := andClause(clause, `r.card->>'license' IS NOT NULL AND r.card->>'license' <> ''`)
-	query := `SELECT r.card->>'license' AS value, count(*) FROM repositories r
+	// The same expression the license filter uses, so a value the facet
+	// offers is a value clicking it actually finds (see jsonScalarText).
+	license := `(` + s.d.jsonScalarText("r.card", "license") + `)`
+	licenseClause := andClause(clause, license+` IS NOT NULL AND `+license+` <> ''`)
+	query := `SELECT ` + license + ` AS value, count(*) FROM repositories r
 		JOIN namespaces n ON n.id = r.namespace_id` + licenseClause + `
 		GROUP BY value ORDER BY count(*) DESC, value ASC LIMIT ` + strconv.Itoa(facetLimit)
 	return s.queryFacet(ctx, query, args)
@@ -647,10 +650,11 @@ func (s *Store) licenseFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem
 // "repositories with this task" rather than "mentions of this task".
 func (s *Store) taskFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem, error) {
 	clause, args := buildRepoWhere(s.d, f, repoFilterScope{tags: true, license: true})
-	pipelineClause := andClause(clause, `r.card->>'pipeline_tag' IS NOT NULL AND r.card->>'pipeline_tag' <> ''`)
+	pipeline := `(` + s.d.jsonScalarText("r.card", "pipeline_tag") + `)`
+	pipelineClause := andClause(clause, pipeline+` IS NOT NULL AND `+pipeline+` <> ''`)
 	from, elem := s.d.jsonArrayElements("r.card", "task_categories")
 	query := `SELECT value, count(DISTINCT repo_id) AS repos FROM (
-			SELECT r.id AS repo_id, r.card->>'pipeline_tag' AS value FROM repositories r
+			SELECT r.id AS repo_id, ` + pipeline + ` AS value FROM repositories r
 			JOIN namespaces n ON n.id = r.namespace_id` + pipelineClause + `
 			UNION ALL
 			SELECT r.id AS repo_id, ` + elem + ` AS value FROM repositories r
@@ -727,7 +731,13 @@ func (s *Store) queryFacet(ctx context.Context, query string, args []any) ([]Rep
 // the repeated $5 as one named parameter sharing an index, so the six
 // arguments still line up (see TestUpdateRepoIndexKeepsManualDescription).
 func (s *Store) UpdateRepoIndex(ctx context.Context, repoID int64, headSHA string, totalSize int64, card map[string]any, description string, isExperiment bool) error {
-	cardRaw, err := json.Marshal(card)
+	// A card is whatever the README's YAML front matter decoded to, and a
+	// README is an arbitrary byte string. PostgreSQL rejects a NUL inside a
+	// JSONB string (SQLSTATE 22P05) and any non-UTF-8 byte in either the card
+	// or the description (22021), which fails the sync job rather than the
+	// value -- see text.go. SQLite accepts both, so normalising here is also
+	// what keeps the two engines storing the same thing.
+	cardRaw, err := json.Marshal(sanitizeJSONMap(card))
 	if err != nil {
 		return fmt.Errorf("marshal card: %w", err)
 	}
@@ -737,7 +747,25 @@ func (s *Store) UpdateRepoIndex(ctx context.Context, repoID int64, headSHA strin
 		     description = CASE WHEN $5 = '' THEN description ELSE $5 END,
 		     is_experiment = $6, updated_at = now()
 		 WHERE id = $1`,
-		repoID, headSHA, totalSize, cardRaw, description, isExperiment)
+		repoID, headSHA, totalSize, cardRaw, sanitizeText(description), isExperiment)
+	return err
+}
+
+// UpdateRepoIndexKeepingCard records the same push as UpdateRepoIndex but
+// leaves everything derived from the README alone: the card, the description
+// and the experiment flag stay exactly as the previous push left them.
+//
+// It is for the sync worker's "the README could not be read" path. Reading it
+// can fail for reasons that say nothing about the repository's metadata -- a
+// model card whose benchmark tables push it past the indexer's read limit is
+// the ordinary one -- and the alternative, calling UpdateRepoIndex with the
+// empty card that failure produced, silently erased the license, the tags,
+// the pipeline tag and every lineage edge. Advancing head_sha and total_size
+// is still right: those come from the tree, which was read fine.
+func (s *Store) UpdateRepoIndexKeepingCard(ctx context.Context, repoID int64, headSHA string, totalSize int64) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE repositories SET head_sha = $2, total_size = $3, updated_at = now() WHERE id = $1`,
+		repoID, headSHA, totalSize)
 	return err
 }
 
@@ -749,9 +777,11 @@ func (s *Store) UpdateRepoIndex(ctx context.Context, repoID int64, headSHA strin
 // updated_at is bumped for the same reason SetRepoDefaultBranch bumps it --
 // this changes what a plain visit to the repository shows.
 func (s *Store) SetRepoDescription(ctx context.Context, repoID int64, description string) (*Repo, error) {
+	// Sanitised for the same reason UpdateRepoIndex's is: a JSON request body
+	// can carry \u0000, which PostgreSQL's TEXT refuses (see text.go).
 	if _, err := s.db.Exec(ctx,
 		`UPDATE repositories SET description = $2, updated_at = now() WHERE id = $1`,
-		repoID, description); err != nil {
+		repoID, sanitizeText(description)); err != nil {
 		return nil, err
 	}
 	return s.GetRepoByID(ctx, repoID)

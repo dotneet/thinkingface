@@ -31,6 +31,7 @@ import { useChartOptions } from "@/hooks/use-chart-options";
 import { ApiResultError, queryErrorMessage } from "@/lib/api-error-message";
 import { runColorIndex } from "@/lib/chart-utils";
 import { deleteRun, getMetrics, listRuns, updateRunAnnotations } from "@/lib/experiments";
+import { metricsQueryKey } from "@/lib/experiments-query-keys";
 import { useT } from "@/lib/i18n/client";
 import { splitRunConfig } from "@/lib/run-config";
 import type { ExpRun, ExpRunAnnotationRequest } from "@/types/api";
@@ -131,7 +132,9 @@ export function RunDetail({
   });
 
   const metrics = useQuery({
-    queryKey: ["exp-metrics", ns, repo, project, runName, options.xMode],
+    // Same helper as the dashboard, so a single-run selection there and this
+    // page share one cache entry instead of drifting apart.
+    queryKey: metricsQueryKey(ns, repo, project, [runName], options.xMode),
     queryFn: async () => {
       const result = await getMetrics(ns, repo, project, {
         runs: [runName],

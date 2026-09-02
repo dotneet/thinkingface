@@ -95,7 +95,24 @@ describe("imageSourceFor", () => {
       src: "https://example.com/a.png",
       path: "https://example.com/a.png",
       bytes: null,
+      external: true,
     });
+  });
+
+  // The flag is what makes the renderer send `referrerPolicy="no-referrer"`,
+  // so a URL the dataset chose cannot collect the viewer's IP together with
+  // the full URL of the page (repository, revision and file) being read.
+  it("marks every http(s) source as external and every inlined one as not", () => {
+    expect(imageSourceFor({ bytes: null, path: "http://example.com/a.png" })?.external).toBe(true);
+    expect(imageSourceFor("https://example.com/a.png")?.external).toBe(true);
+    expect(imageSourceFor({ bytes: "https://example.com/a.png", path: "a.png" })?.external).toBe(
+      true,
+    );
+    expect(imageSourceFor(b64(PNG))?.external).toBe(false);
+    expect(imageSourceFor("data:image/gif;base64,R0lGODlh")?.external).toBe(false);
+    expect(imageSourceFor({ bytes: null, path: "data:image/gif;base64,R0lGODlh" })?.external).toBe(
+      false,
+    );
   });
 
   it("passes a data: URL through untouched", () => {

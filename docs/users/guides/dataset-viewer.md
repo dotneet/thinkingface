@@ -7,12 +7,20 @@ code against it.
 
 ## What makes a file viewable
 
-Any file whose path ends in `.parquet` on a repository's default branch is indexed
-automatically the next time it's pushed, in both model and dataset repositories. No manual
-step or configuration is needed — push a `.parquet` file and it becomes viewable. Other
-tabular formats (CSV, JSON Lines, Arrow) are not indexed and don't get a viewer; they fall
-back to the plain file preview described in
-[Browsing the Web UI](web-ui.md#view-a-file).
+Any file whose path ends in `.parquet` is indexed automatically the next time it's pushed, in
+both model and dataset repositories. No manual step or configuration is needed — push a
+`.parquet` file and it becomes viewable. Indexing isn't limited to the default branch: it runs
+for whichever *branch* was just pushed, so the Viewer tab and viewer links work on any branch
+that has an indexed Parquet file, not only the default one. Tags are the exception: pushing or
+creating a tag schedules no indexing job (the server never sees a `git push --delete` on a tag
+either), so a `.parquet` file that only exists on a tag is not viewable — see
+[Webhooks](webhooks.md#events) for the same gap on the webhook side.
+
+Arrow files are not indexed and get the plain file preview described in
+[Browsing the Web UI](web-ui.md#view-a-file). CSV, TSV and JSON Lines files are not indexed
+into the Parquet-style viewer either, but under 10 MiB they still get a real, sortable table
+in the file preview itself (rather than falling all the way back to plain text) — see
+[Browsing the Web UI](web-ui.md#view-a-file) for what that looks like.
 
 A repository that was just pushed to may briefly show an "indexing" banner while the server
 finishes scanning it — the Viewer tab and the file tree's viewer links can lag a push by a

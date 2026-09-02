@@ -25,16 +25,31 @@ function isNonRelative(url: string): boolean {
 /**
  * Apply `.` / `..` / empty segments of `path` to `base`, returning decoded
  * segments. `..` at the root is dropped rather than escaping the repository.
+ *
+ * Decoding happens **before** the `.` / `..` test, not after. Testing the raw
+ * segment first let `%2e%2e` through as an ordinary directory name, so
+ * `%2e%2e/%2e%2e/secret.png` produced `…/blob/main/docs/../../secret.png` —
+ * a link the app believed pointed inside the repository and the browser
+ * normalized straight back out of it (`[go](%2e%2e/%2e%2e/%2e%2e/settings/tokens)`
+ * in a README lands on the settings page, and the `![img]` spelling fires the
+ * same-origin GET without a click).
+ *
+ * A decoded segment can itself contain a separator (`%2f` → `/`), and
+ * `repoBlobHref` re-splits on those downstream, so the decoded value is fed
+ * back through the same split instead of being pushed whole — otherwise
+ * `%2f..%2f` would smuggle a `..` past this loop.
  */
 function normalizeSegments(base: string[], path: string): string[] {
   const out = path.startsWith("/") ? [] : [...base];
   for (const raw of path.split("/")) {
-    if (raw === "" || raw === ".") continue;
-    if (raw === "..") {
-      out.pop();
-      continue;
+    for (const segment of decodeSegment(raw).split("/")) {
+      if (segment === "" || segment === ".") continue;
+      if (segment === "..") {
+        out.pop();
+        continue;
+      }
+      out.push(segment);
     }
-    out.push(decodeSegment(raw));
   }
   return out;
 }

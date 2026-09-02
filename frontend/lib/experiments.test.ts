@@ -1,7 +1,21 @@
-import { describe, expect, it } from "vitest";
-import { expArtifactHref, expRunHref, expRunModelHref, formatMetricValue } from "@/lib/experiments";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  expArtifactHref,
+  expRunHref,
+  expRunModelHref,
+  formatMetricValue,
+  getMetrics,
+} from "@/lib/experiments";
 import { decodeRouteParams } from "@/lib/paths";
 import type { ExpArtifact, ExpRunModelRef, PreviewKind } from "@/types/api";
+
+// The network call itself belongs to lib/api.ts, so apiFetch is a spy here and
+// the assertions are about the request this module builds (same split as
+// lib/parquet.test.ts).
+const { apiFetch } = vi.hoisted(() => ({
+  apiFetch: vi.fn(async () => ({ ok: true as const, data: {} })),
+}));
+vi.mock("@/lib/api", () => ({ apiFetch }));
 
 function artifact(path: string, preview: PreviewKind): ExpArtifact {
   return { name: path.split("/").pop() ?? path, path, size: 1, lfs: false, preview };
@@ -98,5 +112,42 @@ describe("formatMetricValue", () => {
   it("passes non-finite values through unchanged", () => {
     expect(formatMetricValue(Number.NaN)).toBe("NaN");
     expect(formatMetricValue(Number.POSITIVE_INFINITY)).toBe("Infinity");
+  });
+});
+
+describe("getMetrics", () => {
+  type Call = [string, { query?: Record<string, unknown> }];
+  const lastCall = () => apiFetch.mock.calls.at(-1) as unknown as Call;
+
+  beforeEach(() => {
+    apiFetch.mockClear();
+  });
+
+  it("sends runs and keys as repeated parameters, never comma-joined", async () => {
+    await getMetrics("alice", "exp", "proj", { runs: ["a", "b"], keys: ["loss"], x: "step" });
+    const [path, opts] = lastCall();
+    expect(path).toBe("/api/v1/experiments/alice/exp/proj/metrics");
+    expect(opts.query?.run).toEqual(["a", "b"]);
+    expect(opts.query?.key).toEqual(["loss"]);
+    expect(opts.query?.runs).toBeUndefined();
+    expect(opts.query?.keys).toBeUndefined();
+  });
+
+  // A comma-joined list split `lr=0.1,bs=32` into two names: at best the run
+  // matched nothing, at worst a fragment matched a different run and plotted
+  // a series nobody selected.
+  it("keeps a run name or metric key containing a comma intact", async () => {
+    await getMetrics("alice", "exp", "proj", {
+      runs: ["lr=0.1,bs=32", " spaced "],
+      keys: ["eval/f1,macro"],
+    });
+    expect(lastCall()[1].query?.run).toEqual(["lr=0.1,bs=32", " spaced "]);
+    expect(lastCall()[1].query?.key).toEqual(["eval/f1,macro"]);
+  });
+
+  it("omits both parameters when the lists are empty", async () => {
+    await getMetrics("alice", "exp", "proj", { runs: [], keys: [] });
+    expect(lastCall()[1].query?.run).toBeUndefined();
+    expect(lastCall()[1].query?.key).toBeUndefined();
   });
 });

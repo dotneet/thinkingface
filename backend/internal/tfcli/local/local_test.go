@@ -41,7 +41,7 @@ func TestScanDirectory(t *testing.T) {
 		}
 	}
 
-	files, _, err := Scan(root, Options{})
+	files, _, _, err := Scan(root, Options{})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestScanRootIsSymlinkToDirectory(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	files, allPaths, err := Scan(root, Options{})
+	files, allPaths, _, err := Scan(root, Options{})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestScanSingleFile(t *testing.T) {
 	p := filepath.Join(root, "model.safetensors")
 	writeFile(t, p, "weights")
 
-	files, _, err := Scan(p, Options{})
+	files, _, _, err := Scan(p, Options{})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestScanSingleFile(t *testing.T) {
 }
 
 func TestScanMissingRoot(t *testing.T) {
-	if _, _, err := Scan(filepath.Join(t.TempDir(), "nope"), Options{}); err == nil {
+	if _, _, _, err := Scan(filepath.Join(t.TempDir(), "nope"), Options{}); err == nil {
 		t.Fatal("Scan() on missing root: want error, got nil")
 	}
 }
@@ -142,7 +142,7 @@ func TestScanIncludeExclude(t *testing.T) {
 	writeFile(t, filepath.Join(root, "data", "test.parquet"), "x")
 	writeFile(t, filepath.Join(root, "notes.txt"), "x")
 
-	files, _, err := Scan(root, Options{
+	files, _, _, err := Scan(root, Options{
 		Include: []string{"**/*.parquet"},
 		Exclude: []string{"**/test.parquet"},
 	})
@@ -316,5 +316,120 @@ func TestParseTarget(t *testing.T) {
 				t.Errorf("ParseTarget(%q) = (%q,%q,%q), want (%q,%q,%q)", tt.in, kind, ns, name, tt.kind, tt.ns, tt.name)
 			}
 		})
+	}
+}
+
+// TestScanReportsSkippedPathsAndBlindSpots pins the contract `tf up --delete`
+// depends on: a path Scan leaves out of files is still reported as present on
+// disk, and a directory Scan never looked inside is reported as a blind spot
+// rather than as an empty one. Getting this wrong deletes remote files that
+// are sitting right there locally.
+func TestScanReportsSkippedPathsAndBlindSpots(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require elevated privileges on windows")
+	}
+
+	realData := t.TempDir()
+	writeFile(t, filepath.Join(realData, "train.parquet"), "parquet-bytes")
+	writeFile(t, filepath.Join(realData, "nested", "b.csv"), "a,b\n")
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "README.md"), "hello")
+	writeFile(t, filepath.Join(root, ".DS_Store"), "junk")
+	writeFile(t, filepath.Join(root, "__pycache__", "mod.pyc"), "junk")
+	if err := os.Symlink(realData, filepath.Join(root, "data")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "gone.txt"), filepath.Join(root, "dangling.txt")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	files, allPaths, skipped, err := Scan(root, Options{})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	var got []string
+	for _, f := range files {
+		got = append(got, f.RepoPath)
+	}
+	if !reflect.DeepEqual(got, []string{"README.md"}) {
+		t.Fatalf("Scan files = %v, want just README.md", got)
+	}
+
+	// Everything the walk found on disk is reported, uploaded or not.
+	wantAll := []string{".DS_Store", "README.md", "dangling.txt", "data"}
+	if !reflect.DeepEqual(allPaths, wantAll) {
+		t.Fatalf("Scan allPaths = %v, want %v", allPaths, wantAll)
+	}
+
+	byPath := map[string]Skipped{}
+	for _, s := range skipped {
+		byPath[s.RepoPath] = s
+	}
+	dataSkip, ok := byPath["data"]
+	if !ok {
+		t.Fatalf("skipped = %+v, want an entry for the symlinked directory", skipped)
+	}
+	if !dataSkip.Dir || dataSkip.Reason != ReasonSymlinkDir || !dataSkip.Notable() {
+		t.Errorf("skipped data = %+v, want a notable directory skip with reason %q", dataSkip, ReasonSymlinkDir)
+	}
+	if s, ok := byPath["dangling.txt"]; !ok || s.Dir || s.Reason != ReasonBrokenSymlink {
+		t.Errorf("skipped dangling.txt = %+v (present=%v), want a non-directory broken-symlink skip", s, ok)
+	}
+	pycache, ok := byPath["__pycache__"]
+	if !ok || !pycache.Dir {
+		t.Fatalf("skipped = %+v, want __pycache__ recorded as an unread directory", skipped)
+	}
+	if pycache.Notable() {
+		t.Error("__pycache__ is a documented, routine exclusion and must not be warned about")
+	}
+	// .DS_Store is in allPaths (it exists), so it needs no blind-spot entry.
+	if _, ok := byPath[".DS_Store"]; ok {
+		t.Error(".DS_Store is reported in allPaths and must not also be a skip entry")
+	}
+
+	dirs := SkippedDirs(skipped)
+	sort.Strings(dirs)
+	if !reflect.DeepEqual(dirs, []string{"__pycache__", "data"}) {
+		t.Fatalf("SkippedDirs = %v, want [__pycache__ data]", dirs)
+	}
+}
+
+// TestScanRecordsIgnoredGitDirectory keeps ".git" out of the user-facing
+// warnings while still recording it as unread.
+func TestScanRecordsIgnoredGitDirectory(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "README.md"), "hello")
+	writeFile(t, filepath.Join(root, ".git", "HEAD"), "ref: refs/heads/main")
+
+	_, allPaths, skipped, err := Scan(root, Options{})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if !reflect.DeepEqual(allPaths, []string{"README.md"}) {
+		t.Fatalf("Scan allPaths = %v, want just README.md", allPaths)
+	}
+	if len(skipped) != 1 || skipped[0].RepoPath != ".git" || !skipped[0].Dir || skipped[0].Notable() {
+		t.Fatalf("skipped = %+v, want one quiet, unread .git directory", skipped)
+	}
+}
+
+// TestScanExcludedFileStaysOnDisk is the older half of the same rule: a file
+// --exclude kept out of the upload is still on disk.
+func TestScanExcludedFileStaysOnDisk(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "keep.txt"), "x")
+	writeFile(t, filepath.Join(root, "skip.txt"), "x")
+
+	files, allPaths, _, err := Scan(root, Options{Exclude: []string{"skip.txt"}})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(files) != 1 || files[0].RepoPath != "keep.txt" {
+		t.Fatalf("Scan files = %+v, want just keep.txt", files)
+	}
+	if !reflect.DeepEqual(allPaths, []string{"keep.txt", "skip.txt"}) {
+		t.Fatalf("Scan allPaths = %v, want both files", allPaths)
 	}
 }

@@ -52,6 +52,10 @@ output "api_service_name" {
   value = google_cloud_run_v2_service.api.name
 }
 
+output "web_service_name" {
+  value = google_cloud_run_v2_service.web.name
+}
+
 output "api_url" {
   description = "Public *.run.app URL of the Cloud Run api service (point TF_PUBLIC_URL / DNS at this, or at a custom domain mapping)."
   value       = google_cloud_run_v2_service.api.uri

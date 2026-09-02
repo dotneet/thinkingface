@@ -68,14 +68,26 @@ export const markdownSanitizeSchema: SanitizeSchema = {
     // `user-content-` namespace `mdast-util-to-hast` gives them.
     li: [...(defaultSchema.attributes?.li ?? []), ["id", /^user-content-fn-/]],
     a: [...(defaultSchema.attributes?.a ?? []), ["id", /^user-content-fnref-/]],
-    h2: [["id", "footnote-label"]],
+    // Spread the default first: `h2` already carries `["className", "sr-only"]`
+    // there, and replacing the list outright made GFM's visually hidden
+    // "Footnotes" heading render as an ordinary <h2> in every card that has a
+    // footnote.
+    h2: [...(defaultSchema.attributes?.h2 ?? []), ["id", "footnote-label"]],
     // `remark-math` marks inline math as `<code class="language-math
     // math-inline">`; the default schema only allows `language-*` on `code`.
     code: [["className", /^language-./, "math-inline", "math-display"]],
     div: [...(defaultSchema.attributes?.div ?? []), ["className", "math-inline", "math-display"]],
     span: [["className", "math-inline", "math-display"]],
     img: [...(defaultSchema.attributes?.img ?? []), "src", "loading", "decoding"],
-    source: ["media", "sizes", "src", "srcSet", "type"],
+    // No `srcSet`: react-markdown's `urlTransform` only rewrites the
+    // attributes in `html-url-attributes` (src / href / poster / …), and the
+    // protocol allowlist below is a per-attribute check on one URL, which a
+    // comma-separated candidate list is not. So a `srcset` would be the one
+    // URL-bearing attribute that reaches the DOM neither resolved against the
+    // repository nor protocol-checked — a relative candidate would 404 and an
+    // arbitrary scheme would go unexamined. Dropping it makes `<picture>` fall
+    // back to its nested `<img>`, which does get both.
+    source: ["media", "sizes", "src", "type"],
     video: ["autoPlay", "controls", "loop", "muted", "playsInline", "poster", "preload", "src"],
   },
   protocols: {

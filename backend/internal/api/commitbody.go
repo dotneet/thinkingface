@@ -107,6 +107,9 @@ func (s *Server) parseCommitBody(w http.ResponseWriter, r *http.Request, repo *s
 				badRequest(w, "invalid file entry")
 				return nil, false
 			}
+			if !checkOpPath(w, "file", v.Path) {
+				return nil, false
+			}
 			data := []byte(v.Content)
 			if v.Encoding == "base64" || v.Encoding == "" {
 				decoded, err := base64.StdEncoding.DecodeString(v.Content)
@@ -130,6 +133,9 @@ func (s *Server) parseCommitBody(w http.ResponseWriter, r *http.Request, repo *s
 			}
 			if err := json.Unmarshal(line.Value, &v); err != nil {
 				badRequest(w, "invalid lfsFile entry")
+				return nil, false
+			}
+			if !checkOpPath(w, "lfsFile", v.Path) {
 				return nil, false
 			}
 			size, ok := s.verifyCommitLFSFile(w, r, repo, v.Path, v.OID, v.Size)
@@ -157,6 +163,9 @@ func (s *Server) parseCommitBody(w http.ResponseWriter, r *http.Request, repo *s
 				badRequest(w, "deletedFile entry must be an object with a non-empty path")
 				return nil, false
 			}
+			if !checkOpPath(w, "deletedFile", v.Path) {
+				return nil, false
+			}
 			plan.ops = append(plan.ops, gitrepo.Op{Kind: gitrepo.OpDelete, Path: v.Path})
 
 		case "deletedFolder":
@@ -167,7 +176,11 @@ func (s *Server) parseCommitBody(w http.ResponseWriter, r *http.Request, repo *s
 				badRequest(w, "deletedFolder entry must be an object with a non-empty path")
 				return nil, false
 			}
-			plan.ops = append(plan.ops, gitrepo.Op{Kind: gitrepo.OpDeleteDir, Path: strings.TrimSuffix(v.Path, "/")})
+			folder := strings.TrimSuffix(v.Path, "/")
+			if !checkOpPath(w, "deletedFolder", folder) {
+				return nil, false
+			}
+			plan.ops = append(plan.ops, gitrepo.Op{Kind: gitrepo.OpDeleteDir, Path: folder})
 
 		case "copyFile":
 			// huggingface_hub's CommitOperationCopy. srcRevision arrives as
@@ -184,6 +197,13 @@ func (s *Server) parseCommitBody(w http.ResponseWriter, r *http.Request, repo *s
 			}
 			if v.Path == "" || v.SrcPath == "" {
 				badRequest(w, "copyFile: path and srcPath are both required")
+				return nil, false
+			}
+			// Both ends, and the source for the same reason as the
+			// destination: resolveCopies would otherwise answer a traversal
+			// attempt with 404 EntryNotFound, which reads as "that file is
+			// missing" rather than "that is not a path".
+			if !checkOpPath(w, "copyFile", v.Path) || !checkOpPath(w, "copyFile srcPath", v.SrcPath) {
 				return nil, false
 			}
 			// The source is resolved after the whole body has been read, so

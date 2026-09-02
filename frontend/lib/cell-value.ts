@@ -118,6 +118,16 @@ export type ImageSource = {
   path: string | null;
   /** Approximate decoded size in bytes, or null when `src` is a remote URL. */
   bytes: number | null;
+  /**
+   * `src` is an http(s) URL the *dataset* chose, so loading it makes the
+   * reader's browser talk to a third-party server the repository owner
+   * nominated. Nothing executes (it is an `<img>`), but without a referrer
+   * policy that server would also be told the exact page being viewed —
+   * private repository path, revision, file and all. Renderers must pass
+   * `referrerPolicy="no-referrer"` for these; an inlined `data:` URL makes no
+   * request at all and needs nothing.
+   */
+  external: boolean;
 };
 
 // Enough bytes for every signature below: WebP needs 12, the ISO-BMFF brands
@@ -233,8 +243,8 @@ function mimeFromPath(path: string | null): string | null {
 function imageFromParts(raw: string | null, path: string | null): ImageSource | null {
   if (raw !== null && raw !== "") {
     // Already a URL the browser can load: hand it through untouched.
-    if (raw.startsWith("data:")) return { src: raw, path, bytes: null };
-    if (isHttpUrl(raw)) return { src: raw, path: path ?? raw, bytes: null };
+    if (raw.startsWith("data:")) return { src: raw, path, bytes: null, external: false };
+    if (isHttpUrl(raw)) return { src: raw, path: path ?? raw, bytes: null, external: true };
     const base64 = normalizeBase64(raw);
     if (!looksBase64(base64)) return null;
     const sniffed = decodePrefix(base64, SNIFF_BYTES);
@@ -242,10 +252,15 @@ function imageFromParts(raw: string | null, path: string | null): ImageSource | 
     // dropped — browsers sniff too, and <img onError> covers the rest.
     const mime =
       (sniffed && sniffImageMime(sniffed)) ?? mimeFromPath(path) ?? "application/octet-stream";
-    return { src: `data:${mime};base64,${base64}`, path, bytes: base64ByteLength(base64) };
+    return {
+      src: `data:${mime};base64,${base64}`,
+      path,
+      bytes: base64ByteLength(base64),
+      external: false,
+    };
   }
   if (path !== null && (isHttpUrl(path) || path.startsWith("data:"))) {
-    return { src: path, path, bytes: null };
+    return { src: path, path, bytes: null, external: isHttpUrl(path) };
   }
   return null;
 }

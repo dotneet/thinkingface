@@ -176,13 +176,19 @@ existence is public information.
 | **Profile** | Display name, description, website and avatar URL (a link to an image hosted elsewhere; there are no uploads). The namespace name is fixed. |
 | **Policy** | `members_visibility`, described above. |
 | **Members** | Add, promote, demote and remove, as described above. |
-| **Webhooks** | HTTP endpoints notified about events in the organization's repositories — pushes, repository lifecycle, transfers and experiment run status. All nine events, the payloads, signature verification and the retry policy are in [Webhooks](webhooks.md). |
+| **Webhooks** | HTTP endpoints notified about events in the organization's repositories — pushes, repository lifecycle, transfers and experiment run status. All ten events, the payloads, signature verification and the retry policy are in [Webhooks](webhooks.md). |
 | **Storage** | The LFS bytes the organization's repositories hold in object storage, broken down by repository. |
 | **Audit log** | Administrative changes and repository lifecycle events, newest first. |
 | **Delete organization** | The danger zone, described below. |
 
 Members without the admin role can still see the organization's storage usage: their own
-**Storage usage** page (`/settings/storage`) lists every namespace they belong to.
+**Storage usage** page (`/settings/storage`) lists every namespace they belong to. Usage does
+**not** go back down when a file is merely deleted or replaced — once a commit has named an
+LFS object, thinkingface keeps it retrievable at any historical revision for as long as the
+repository exists, so only an object no commit ever named (an interrupted upload) is ever
+reclaimed. See `TF_DEFAULT_STORAGE_QUOTA_BYTES` in
+[Configuration](../self-hosting/configuration.md) for the mechanics, and how to actually free
+the bytes.
 
 ### The audit log
 
@@ -210,7 +216,15 @@ still belongs to the organization. Delete or transfer them first.
 
 Repositories move between namespaces — from your personal namespace into an organization, between
 two organizations, or back out. Open the repository's **Settings** tab and use **Transfer
-ownership**. You can also rename within the same namespace from the same form.
+ownership**.
+
+Renaming a repository within the same namespace has its own **Rename** section above Transfer
+ownership on the same Settings page, with no typed confirmation required. The Transfer ownership
+form also still has an optional "new name" field, which renames the repository as part of the
+transfer — useful when the destination namespace already has something with the same name. Use
+the dedicated Rename section for a same-namespace rename such as fixing a typo, since it skips
+the typed confirmation a transfer requires. Either way, a rename leaves a redirect behind, exactly
+like a transfer, so old URLs, clone remotes and model-card references keep resolving.
 
 Git history, LFS objects and download counts carry over unchanged, and no bytes move in object
 storage — object keys are derived from content, not from the repository name.

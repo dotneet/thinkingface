@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/dotneet/thinkingface/backend/internal/storage"
 )
@@ -60,7 +61,13 @@ func (s *Store) ReplaceRepoFiles(ctx context.Context, repoID int64, ref string, 
 	if len(files) > 0 {
 		rows := make([][]any, 0, len(files))
 		for _, f := range files {
-			rows = append(rows, []any{repoID, ref, f.Path, f.Size, f.BlobSHA, f.LFSOID})
+			// A git path is any byte string without NUL or '/', so it can be
+			// Latin-1, Shift_JIS or anything else an old workstation wrote.
+			// PostgreSQL's COPY refuses those bytes outright (SQLSTATE
+			// 22021) and the refusal parks the sync job, freezing the whole
+			// repository's index -- see text.go. Blob shas and LFS oids are
+			// hex by construction and need nothing.
+			rows = append(rows, []any{repoID, ref, sanitizeText(f.Path), f.Size, f.BlobSHA, f.LFSOID})
 		}
 		if err := tx.BulkInsert(ctx, "repo_files",
 			[]string{"repo_id", "ref", "path", "size", "blob_sha", "lfs_oid"}, rows); err != nil {
@@ -210,7 +217,8 @@ func (s *Store) RecordLFSObject(ctx context.Context, repoID int64, oid string, s
 	}
 
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO repo_lfs_objects (repo_id, oid) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+		`INSERT INTO repo_lfs_objects (repo_id, oid, created_at) VALUES ($1, $2, now())
+		 ON CONFLICT DO NOTHING`,
 		repoID, oid); err != nil {
 		return fmt.Errorf("link lfs object: %w", err)
 	}
@@ -239,12 +247,14 @@ func (s *Store) RecordLFSObject(ctx context.Context, repoID int64, oid string, s
 // bytes in the bucket, and the row lock below is what keeps a concurrent
 // collector from taking them away.
 //
-// Nothing removes a link again. A later commit that drops the last pointer to
-// an object leaves the row, so the object stays out of gc's reach until the
-// repository itself is deleted -- the same property links made by
-// RecordLFSObject have always had, over a wider set now that a whole revision
-// is linked rather than only what this repository uploaded. It errs towards
-// keeping bytes somebody may still be able to name.
+// **A link this method makes is permanent**, and that is the whole of how
+// history stays readable: it stamps committed_at, and PruneRepoLFSLinks only
+// ever releases links that carry no such stamp (an upload whose commit never
+// arrived). A file deleted from the tip therefore keeps its entitlement, so
+// `git checkout` of the commit that added it still resolves. This method only
+// ever adds or promotes, which is also what lets it run before
+// ReplaceRepoFiles without a window in which an object is named by a file but
+// linked by nothing.
 func (s *Store) LinkLFSObjects(ctx context.Context, repoID int64, objects []LFSObjectRef) error {
 	// Keyed by the whole (oid, size) pair, not by oid. One revision can name
 	// the same object from two paths, and if one of those pointers is wrong
@@ -322,6 +332,74 @@ func (s *Store) LinkLFSObjects(ctx context.Context, repoID int64, objects []LFSO
 	return tx.Commit(ctx)
 }
 
+// PruneRepoLFSLinks removes this repository's links to objects no commit of it
+// has ever named, and returns how many it removed. In practice that is one
+// thing: an LFS transfer that completed and whose commit never arrived -- a
+// `tf up` or a huggingface_hub upload interrupted between the upload and the
+// commit, which used to leave tens of gigabytes charged to a repository
+// holding no files at all.
+//
+// **What it deliberately does not touch is history.** repo_lfs_objects is not
+// a cache: store.RepoHasLFSObject reads it as the entitlement that authorises
+// the LFS batch's download branch (lfs.Batch) and `resolve` at any revision
+// (api.lfsObjectOwned). An object whose link is gone is a 404 even while its
+// bytes sit untouched in the bucket, and `thinkingface gc` will then delete
+// those bytes for real. So an object any commit named keeps its link for as
+// long as the repository exists, and `git checkout <old sha>`, `git lfs fetch
+// --all` and resolve at a historical revision keep working. That is what git
+// means and what the HuggingFace Hub does.
+//
+// committed_at is the marker, and LinkLFSObjects is what sets it -- the
+// HF-compatible commit handler calls it for one commit's pointers, the
+// syncer's post-push pipeline for the whole indexed revision. RecordLFSObject,
+// the upload path, leaves it NULL: an upload is not yet a commit.
+//
+// **The consequence, stated plainly: deleting a file does not reduce the
+// namespace's usage.** UsageByRepo sums these rows, NamespaceQuotaForRepo
+// divides by that sum, and lfs.withinQuota refuses uploads against it -- and
+// none of those numbers move when a 10 GiB checkpoint is deleted from the tip,
+// because the commit that added it is still in the repository's history and
+// cloning that revision still has to work. This is not the leak an earlier
+// revision of this method tried to fix; it is the correct accounting for a
+// versioned store, the same one `git clone` costs you. Deleting the repository
+// (or rewriting its history so those commits are gone, and running
+// `thinkingface gc`) is what actually frees the bytes -- and that is what the
+// quota-refusal message and the user-facing storage docs have to say, because
+// "delete the file" is advice that does nothing.
+//
+// notBefore is the age floor on top of that, and it is still load bearing. An
+// object is uploaded and linked long before the commit naming it exists -- for
+// a large dataset, hours before -- so an uncommitted link is as likely to be an
+// upload in flight as an abandoned one. Only links settled before notBefore are
+// considered, which also covers a second ref of the same repository being
+// indexed concurrently (ref locks are per ref, so its LinkLFSObjects may have
+// run while its ReplaceRepoFiles has not).
+//
+// The repo_files clause is redundant belt-and-braces: a link the syncer just
+// earned is stamped committed by LinkLFSObjects before ReplaceRepoFiles writes
+// the row. It stays because the cost of the two disagreeing is content that
+// 404s, and the cost of the extra predicate is nothing.
+//
+// A NULL created_at -- possible only on a SQLite database migrated by
+// sqlite/0028, whose ADD COLUMN could carry no default -- is kept rather than
+// collected. The migration stamps every existing row, so this is the safe
+// reading of a state that should not occur.
+func (s *Store) PruneRepoLFSLinks(ctx context.Context, repoID int64, notBefore time.Time) (int64, error) {
+	// No lockRepoRow: this deletes child rows of a single repository and
+	// takes no lock the index rebuilders want, so a concurrent DeleteRepo
+	// simply cascades over whatever is left.
+	return s.db.Exec(ctx,
+		`DELETE FROM repo_lfs_objects
+		 WHERE repo_id = $1
+		   AND committed_at IS NULL
+		   AND created_at IS NOT NULL
+		   AND created_at < $2
+		   AND NOT EXISTS (
+		       SELECT 1 FROM repo_files f
+		       WHERE f.repo_id = $1 AND f.lfs_oid = repo_lfs_objects.oid)`,
+		repoID, notBefore)
+}
+
 // ------------------------------------------------------------------ parquet
 
 type ParquetFile struct {
@@ -337,6 +415,15 @@ func (s *Store) UpsertParquetFile(ctx context.Context, repoID int64, ref, path s
 	if len(schema) == 0 {
 		schema = json.RawMessage("[]")
 	}
+	// The same sanitising ReplaceRepoFiles applies, and for the same two
+	// reasons (see text.go). A git path is any byte string without NUL or
+	// '/', so a .parquet committed from an old workstation can be Shift_JIS:
+	// PostgreSQL refuses those bytes outright (SQLSTATE 22021) and the refusal
+	// parks the sync job, freezing the repository's whole index. And on
+	// SQLite, where the insert succeeds, ListParquetFiles joins parquet_files
+	// to repo_files on `f.path = p.path` -- with only one side folded the join
+	// misses and the viewer reports a zero-byte file.
+	path = sanitizeText(path)
 	// Same parent-row-first ordering as ReplaceRepoFiles (see lockRepoRow):
 	// the ON CONFLICT update would otherwise lock the parquet_files row
 	// before the foreign-key check reaches repositories. ErrNotFound when the

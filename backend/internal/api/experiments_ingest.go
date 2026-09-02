@@ -46,7 +46,10 @@ const (
 	// behind them are unconstrained TEXT, so the ceiling lives here.
 	maxIngestNameBytes = 256
 	// maxIngestKeys bounds how many distinct metric names one run may carry,
-	// since every key is kept in the run's metric_keys array forever.
+	// since every key is kept in the run's metric_keys array forever. It is a
+	// lifetime cap on the run, not a per-request one: the check merges the
+	// batch's names with the ones already stored (mergeRunState), so the limit
+	// cannot be walked past a batch at a time.
 	maxIngestKeys = 1000
 )
 
@@ -237,15 +240,41 @@ func buildRunPoints(w http.ResponseWriter, raw []ingestPoint) (runBatch, bool) {
 		}
 		batch.points = append(batch.points, store.MetricPoint{Step: p.Step, TS: ts, Metrics: p.Metrics})
 	}
-	if len(batch.keys) > maxIngestKeys {
-		badRequest(w, fmt.Sprintf("a run may carry at most %d distinct metrics", maxIngestKeys))
-		return runBatch{}, false
-	}
+	// The metric-name cap is deliberately not checked here: it is a ceiling on
+	// the run rather than on the request, so it needs the names already stored
+	// as well as these. mergeRunState applies it.
 	return batch, true
 }
 
-// mergeRunState folds a batch onto whatever the run already holds, and reports
-// the status it had beforehand.
+// runState is what the store already holds for a run: the zero value when the
+// project, or the run inside it, has never been written.
+type runState struct {
+	keys    []string
+	summary map[string]any
+	status  string
+}
+
+// loadRunState reads a run's stored state, creating nothing on the way: the
+// project is looked up rather than upserted.
+//
+// That is what lets mergeRunState refuse a batch below without leaving an
+// empty project row behind, exactly like a batch refused for a bad name or an
+// unknown status.
+func (s *Server) loadRunState(ctx context.Context, repoID int64, project, run string) runState {
+	proj, err := s.store.GetExpProject(ctx, repoID, project)
+	if err != nil {
+		return runState{}
+	}
+	existing, err := s.store.GetExpRun(ctx, proj.ID, run)
+	if err != nil {
+		return runState{}
+	}
+	return runState{keys: existing.MetricKeys, summary: existing.Summary, status: existing.Status}
+}
+
+// mergeRunState folds a batch onto whatever the run already holds, and applies
+// the one limit that can only be checked once the two are together. It answers
+// the request itself and reports ok=false when the batch is refused.
 //
 // Existing metric keys *and* summary values must survive: this batch may not
 // carry every metric the run logs. A batch of only "loss" must not drop the
@@ -257,32 +286,47 @@ func buildRunPoints(w http.ResponseWriter, raw []ingestPoint) (runBatch, bool) {
 // against a run this read could not see keeps whatever is stored instead of
 // writing an empty object over it.
 //
-// prevStatus is captured here so a webhook fires only on the transition into
-// finished/failed, not on every batch a long-running run logs at that status.
-// A run this read cannot find has prevStatus "", which is not a valid status,
-// so the first write is always a transition.
-func (s *Server) mergeRunState(ctx context.Context, projectID int64, run string, batch runBatch) (keys []string, summary map[string]any, prevStatus string) {
+// maxIngestKeys is a ceiling on the run, not on the request: every key a batch
+// introduces is written into metric_keys and stays there for the life of the
+// run, so ten batches of 500 new names have to be refused exactly like one
+// batch of 5000. Checking the batch alone let a client walk straight past the
+// limit one batch at a time, growing the array without bound. What is measured
+// is therefore the merged set -- the number of distinct names the run would
+// carry once this batch is stored -- and what is refused is *growth* past the
+// ceiling rather than every write to a run that is already past it. A run that
+// grew beyond the cap while the check was still per-batch would otherwise
+// become unwritable on upgrade, including the status ping that marks it
+// finished, which carries no metric names at all and cannot make anything
+// worse.
+func mergeRunState(w http.ResponseWriter, run string, stored runState, batch runBatch) (keys []string, summary map[string]any, ok bool) {
 	keySet := batch.keys
-	merged := map[string]any{}
-	if existing, err := s.store.GetExpRun(ctx, projectID, run); err == nil {
-		prevStatus = existing.Status
-		for _, k := range existing.MetricKeys {
-			keySet[k] = true
-		}
-		for k, v := range existing.Summary {
-			merged[k] = v
-		}
+	for _, k := range stored.keys {
+		keySet[k] = true
 	}
-	for k, v := range batch.summary {
-		merged[k] = v
+	// Names already on the run are not "new", so report the two halves
+	// separately: a client that sees only the total cannot tell whether it
+	// sent too much or the run was already full.
+	added := len(keySet) - len(stored.keys)
+	if added > 0 && len(keySet) > maxIngestKeys {
+		badRequest(w, fmt.Sprintf(
+			"a run may carry at most %d distinct metrics; run %q already has %d and this batch adds %d more (%d in total)",
+			maxIngestKeys, run, len(stored.keys), added, len(keySet)))
+		return nil, nil, false
 	}
 	for k := range keySet {
 		keys = append(keys, k)
 	}
-	if len(merged) == 0 {
-		return keys, nil, prevStatus
+	merged := map[string]any{}
+	for k, v := range stored.summary {
+		merged[k] = v
 	}
-	return keys, merged, prevStatus
+	for k, v := range batch.summary {
+		merged[k] = v
+	}
+	if len(merged) == 0 {
+		return keys, nil, true
+	}
+	return keys, merged, true
 }
 
 func (s *Server) handleExperimentLog(w http.ResponseWriter, r *http.Request) {
@@ -318,15 +362,29 @@ func (s *Server) handleExperimentLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Nothing is written until every name and status has been checked, so a
-	// rejected batch never leaves an empty project row behind.
 	ctx := r.Context()
+	// The run is read before the project is upserted, and deliberately: the
+	// merged key set is what maxIngestKeys is checked against, and a batch
+	// refused there must leave no empty project row behind. The status it had
+	// beforehand comes from the same read, so a webhook fires only on the
+	// transition into finished/failed rather than on every batch a
+	// long-running run logs at that terminal status. A run this read cannot
+	// find has prevStatus "", which is not a valid status, so the first write
+	// is always a transition.
+	stored := s.loadRunState(ctx, repo.ID, id.project, id.run)
+	prevStatus := stored.status
+	keys, summary, ok := mergeRunState(w, id.run, stored, batch)
+	if !ok {
+		return
+	}
+
+	// Nothing is written until every name, status and limit has been checked,
+	// so a rejected batch never leaves an empty project row behind.
 	projectID, err := s.store.UpsertExpProject(ctx, repo.ID, id.project)
 	if err != nil {
 		internalError(w, "upsert experiment project", err)
 		return
 	}
-	keys, summary, prevStatus := s.mergeRunState(ctx, projectID, id.run, batch)
 
 	now := time.Now()
 	runID, err := s.store.UpsertExpRunWith(ctx, projectID, store.ExpRunUpsert{
