@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -188,6 +189,21 @@ type Config struct {
 	// SSHIdleTimeout closes an SSH connection that goes quiet. Clones stream
 	// continuously, so this only reaps abandoned connections. Zero disables.
 	SSHIdleTimeout time.Duration
+	// SSHMaxUnauthConns and SSHMaxUnauthConnsPerAddr bound how many SSH
+	// connections may sit in the pre-authentication phase, process-wide and
+	// per source address. Zero on either means "whatever internal/sshserver
+	// defaults to" -- the numbers live there, next to the gate that enforces
+	// them, rather than being restated here where they would drift.
+	//
+	// The per-address one is the limit that protects the fleet; the global one
+	// is a backstop. They are configurable because their right values depend
+	// on the deployment: an instance behind a NAT or a bastion sees many real
+	// clients as one address and needs the per-address cap raised, while
+	// SSHIdleTimeout -- which is what eventually reclaims a slot from a peer
+	// that connects and says nothing -- is itself tunable, and a long one
+	// makes both caps bite sooner.
+	SSHMaxUnauthConns        int
+	SSHMaxUnauthConnsPerAddr int
 
 	WebhookWorkers int
 	// AllowPrivateWebhookTargets opts out of the webhook SSRF guard so a
@@ -228,11 +244,13 @@ func Load() (*Config, error) {
 		SignupRequireApproval:    e.bool("TF_SIGNUP_REQUIRE_APPROVAL", false),
 		ExpFlushInterval:         e.duration("TF_EXP_FLUSH_INTERVAL", time.Minute),
 
-		SSHEnabled:     e.bool("TF_SSH_ENABLED", false),
-		SSHAddr:        env("TF_SSH_ADDR", ":2222"),
-		SSHPublicPort:  env("TF_SSH_PUBLIC_PORT", ""),
-		SSHHostKeyPath: env("TF_SSH_HOST_KEY_PATH", "/data/ssh/host_ed25519"),
-		SSHIdleTimeout: e.duration("TF_SSH_IDLE_TIMEOUT", 10*time.Minute),
+		SSHEnabled:               e.bool("TF_SSH_ENABLED", false),
+		SSHAddr:                  env("TF_SSH_ADDR", ":2222"),
+		SSHPublicPort:            env("TF_SSH_PUBLIC_PORT", ""),
+		SSHHostKeyPath:           env("TF_SSH_HOST_KEY_PATH", "/data/ssh/host_ed25519"),
+		SSHIdleTimeout:           e.duration("TF_SSH_IDLE_TIMEOUT", 10*time.Minute),
+		SSHMaxUnauthConns:        e.int("TF_SSH_MAX_UNAUTH_CONNS", 0),
+		SSHMaxUnauthConnsPerAddr: e.int("TF_SSH_MAX_UNAUTH_CONNS_PER_ADDR", 0),
 
 		WebhookWorkers:             e.int("TF_WEBHOOK_WORKERS", 1),
 		AllowPrivateWebhookTargets: e.bool("TF_WEBHOOKS_ALLOW_PRIVATE_TARGETS", false),
@@ -282,11 +300,18 @@ func Load() (*Config, error) {
 	default:
 		return nil, fmt.Errorf("TF_ORG_CREATION must be anyone or admin, got %q", c.OrgCreation)
 	}
-	if c.WALMode != "off" && c.GitHooksPath == "" {
-		// Without the hook, pushes over git smart HTTP would bypass the WAL
-		// entirely — silently in shadow mode, catastrophically once
-		// authoritative. Refuse to start rather than run half-wired.
-		return nil, fmt.Errorf("TF_GIT_HOOKS_PATH is required when TF_WAL_MODE=%s", c.WALMode)
+	if c.WALMode != "off" {
+		if c.GitHooksPath == "" {
+			// Without the hook, pushes over git smart HTTP would bypass the
+			// WAL entirely — silently in shadow mode, catastrophically once
+			// authoritative. Refuse to start rather than run half-wired.
+			return nil, fmt.Errorf("TF_GIT_HOOKS_PATH is required when TF_WAL_MODE=%s", c.WALMode)
+		}
+		// The *filesystem* half of this check is deliberately not here; see
+		// CheckPreReceiveHook. Load runs for every subcommand, including the
+		// break-glass `admin` path, and a shadowed hooks directory is
+		// precisely the incident in which an operator needs to reset a
+		// password.
 	}
 	// The development defaults are public knowledge -- the seeded admin
 	// password is in .env.example, and the default session secret lets anyone
@@ -380,8 +405,67 @@ func Load() (*Config, error) {
 		if c.SSHHostKeyPath == "" {
 			return nil, fmt.Errorf("TF_SSH_HOST_KEY_PATH is required when TF_SSH_ENABLED=true")
 		}
+		// Negative is not "unlimited" -- it is a typo. Unlimited is what the
+		// unbounded accept loop these caps replaced already did, and it is
+		// not on offer; 0 means "the default".
+		if c.SSHMaxUnauthConns < 0 {
+			return nil, fmt.Errorf("TF_SSH_MAX_UNAUTH_CONNS must not be negative, got %d", c.SSHMaxUnauthConns)
+		}
+		if c.SSHMaxUnauthConnsPerAddr < 0 {
+			return nil, fmt.Errorf("TF_SSH_MAX_UNAUTH_CONNS_PER_ADDR must not be negative, got %d", c.SSHMaxUnauthConnsPerAddr)
+		}
 	}
 	return c, nil
+}
+
+// PreReceiveHookName is the file git looks for inside core.hooksPath when a
+// push arrives. Named because both the check below and the deployment that
+// bakes it into the image have to agree on it
+// (docs/dev/continuity-design.md §6.2).
+const PreReceiveHookName = "pre-receive"
+
+// CheckPreReceiveHook is the fail-closed half of the TF_GIT_HOOKS_PATH
+// requirement, and it belongs to whoever is about to serve pushes rather than
+// to Load.
+//
+// A non-empty path only proves an operator typed something. git treats a hook
+// that is missing, is a directory, or is not executable as *no hook at all*:
+// it runs no hook, reports nothing, and lets the push proceed. So an image
+// that lost hooks/pre-receive, a path with a typo in it, or a bind mount that
+// shadowed the directory produces a server that applies every push over HTTP
+// and SSH to disk and acks it to the client with no WAL entry and no CAS —
+// invariant 4 of §5 broken silently. Nothing surfaces until the next
+// Materialize, where writeRefs projects the index over the copy and deletes
+// the refs those pushes created.
+//
+// Server startup is the only honest place to catch that: by the time a push
+// arrives the damage is already acknowledged. But it must be *server* startup
+// (runServe), not Load. Load runs for every subcommand this binary has,
+// including `admin` — documented as the path that still works when the
+// instance cannot reach its bucket, and the one an operator reaches for during
+// exactly the kind of incident (a bind mount over the hooks directory) that
+// makes this check fail. Gating a password reset on a hook it will never run
+// refuses to start for a reason unrelated to what was asked.
+func CheckPreReceiveHook(hooksPath string) error {
+	hook := filepath.Join(hooksPath, PreReceiveHookName)
+	info, err := os.Stat(hook)
+	if err != nil {
+		return fmt.Errorf("the pre-receive hook %s is unreadable (%w): "+
+			"without it every git push is applied and acknowledged without a WAL entry", hook, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("the pre-receive hook %s is a directory, not an executable", hook)
+	}
+	// Any of the three execute bits: the server may run as owner, as a member
+	// of the file's group, or as neither, and which one applies is a property
+	// of the deployment rather than of the image. Requiring all three would
+	// reject a correctly locked-down 0700 hook owned by the server's user.
+	if info.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("the pre-receive hook %s is not executable (mode %s): "+
+			"git silently skips a non-executable hook, so every git push would be "+
+			"applied and acknowledged without a WAL entry", hook, info.Mode().Perm())
+	}
+	return nil
 }
 
 func env(key, def string) string {

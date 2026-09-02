@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
@@ -227,9 +228,14 @@ func TestBuildRepoWhereBaseOnly(t *testing.T) {
 
 // The relation facet drops the relation filter but keeps the base model one,
 // so it can answer "of this base model, how many are quantisations?".
-func TestBuildRepoWhereRelationScopeExcludesOnlyRelation(t *testing.T) {
+//
+// Every scope here is the variable the corresponding facet query passes, not
+// a hand-built copy of it: the earlier version of this test asserted its own
+// literal and so kept passing while tagFacet/licenseFacet/taskFacet were
+// dropping Relation from the counts they showed beside the listing.
+func TestBuildRepoWhereFacetScopesExcludeOnlyTheirOwnDimension(t *testing.T) {
 	f := RepoFilter{BaseModel: "alice/bert-base", Relation: "quantized", Dataset: "bob/imdb"}
-	clause, args := buildRepoWhere(pgDialect{}, f, repoFilterScope{tags: true, license: true, task: true})
+	clause, args := buildRepoWhere(pgDialect{}, f, relationFacetScope)
 	if strings.Contains(clause, "l.relation") {
 		t.Errorf("relation facet scope should drop the relation filter, got %q", clause)
 	}
@@ -239,11 +245,19 @@ func TestBuildRepoWhereRelationScopeExcludesOnlyRelation(t *testing.T) {
 	if !reflect.DeepEqual(args, []any{"alice", "bert-base", "bob", "imdb"}) {
 		t.Errorf("args = %#v", args)
 	}
-	// The other facets keep it, the same way they keep every dimension but
-	// their own.
-	tagFacetClause, _ := buildRepoWhere(pgDialect{}, f, repoFilterScope{license: true, task: true, relation: true})
-	if !strings.Contains(tagFacetClause, "l.relation") {
-		t.Errorf("tag facet scope should keep the relation filter, got %q", tagFacetClause)
+	// The card facets keep it, the same way they keep every dimension but
+	// their own. A facet that counted over the unfiltered relation set
+	// offered a tag whose count came from a repository the listing beside it
+	// does not contain, so clicking the tag returned nothing.
+	for name, scope := range map[string]repoFilterScope{
+		"tag":     tagFacetScope,
+		"license": licenseFacetScope,
+		"task":    taskFacetScope,
+	} {
+		got, _ := buildRepoWhere(pgDialect{}, f, scope)
+		if !strings.Contains(got, "l.relation") {
+			t.Errorf("%s facet scope should keep the relation filter, got %q", name, got)
+		}
 	}
 }
 
@@ -379,6 +393,207 @@ func TestIntegrationRepoDescriptionSurvivesACardlessPush(t *testing.T) {
 		}
 		if updated.Description != "" {
 			t.Fatalf("description = %q, want it cleared", updated.Description)
+		}
+	})
+}
+
+// ------------------------------------------------- search index maintenance
+
+// clearSearchIndex blanks a repository's full-text index entry behind the
+// trigger's back, so a later search tells us whether anything rebuilt it.
+// Neither statement touches a column the search triggers watch, so neither
+// re-fills what it just emptied.
+func clearSearchIndex(t *testing.T, s *Store, repoID int64) {
+	t.Helper()
+	var q string
+	switch s.d.name() {
+	case "postgres":
+		q = `UPDATE repositories SET search_vector = ''::tsvector WHERE id = $1`
+	default:
+		q = `DELETE FROM repositories_fts WHERE rowid = $1`
+	}
+	if _, err := s.db.Exec(context.Background(), q, repoID); err != nil {
+		t.Fatalf("clear search index: %v", err)
+	}
+}
+
+// searchFinds reports whether the free-text listing filter matches repoID.
+func searchFinds(t *testing.T, s *Store, term string, repoID int64) bool {
+	t.Helper()
+	repos, _, _, err := s.ListRepos(context.Background(), RepoFilter{Search: term})
+	if err != nil {
+		t.Fatalf("ListRepos(search %q): %v", term, err)
+	}
+	for _, r := range repos {
+		if r.ID == repoID {
+			return true
+		}
+	}
+	return false
+}
+
+// The search index is maintained by a database trigger, and 0001_init.sql
+// attached it to every UPDATE of the repositories row. The row's hottest
+// write by far is IncrementDownloads -- one `SET downloads = downloads + 1`
+// per resolved file, from a detached goroutine -- which cannot change the
+// index by construction: on Postgres it re-ran nine to_tsvector() calls over
+// the card to store the tsvector already there, and on SQLite it ran a
+// DELETE + INSERT into FTS5 on the single writer connection every other write
+// in the process queues behind.
+//
+// 0004 narrowed both triggers to name/description/card. This test pins both
+// halves of that: the download must leave the index alone, and every write
+// that does feed it must still rebuild it. The index is deliberately emptied
+// first, because "unchanged" is only observable against a value that would be
+// wrong if anything had run.
+func TestIntegrationSearchIndexOnlyFollowsTheColumnsItReads(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+
+		r := f.repo(t, "alice", "bert", "model", map[string]any{"tags": []any{"alphatoken"}})
+		if !searchFinds(t, s, "alphatoken", r.ID) {
+			t.Fatalf("the card's tag is not searchable to begin with")
+		}
+
+		clearSearchIndex(t, s, r.ID)
+		if searchFinds(t, s, "alphatoken", r.ID) {
+			t.Fatalf("clearing the index did not make the repository unsearchable")
+		}
+
+		// The download-only write must not rebuild it.
+		s.IncrementDownloads(ctx, r.ID)
+		got, err := s.GetRepoByID(ctx, r.ID)
+		if err != nil {
+			t.Fatalf("reload: %v", err)
+		}
+		if got.Downloads != 1 {
+			t.Fatalf("downloads = %d, want 1 -- the counter itself must still move", got.Downloads)
+		}
+		if searchFinds(t, s, "alphatoken", r.ID) {
+			t.Errorf("a download rebuilt the search index")
+		}
+
+		// ... and neither must the other writes that leave the indexed
+		// columns alone: a push whose README could not be read, and the
+		// archive flag.
+		if err := s.UpdateRepoIndexKeepingCard(ctx, r.ID, "deadbeef", 99); err != nil {
+			t.Fatalf("UpdateRepoIndexKeepingCard: %v", err)
+		}
+		if searchFinds(t, s, "alphatoken", r.ID) {
+			t.Errorf("a head_sha/total_size update rebuilt the search index")
+		}
+
+		// A card change does rebuild it.
+		if err := s.UpdateRepoIndex(ctx, r.ID, "abc", 10,
+			map[string]any{"tags": []any{"betatoken"}, "license": "gammatoken"}, "", false); err != nil {
+			t.Fatalf("UpdateRepoIndex: %v", err)
+		}
+		if !searchFinds(t, s, "betatoken", r.ID) {
+			t.Errorf("a card update did not rebuild the search index (tags)")
+		}
+		if !searchFinds(t, s, "gammatoken", r.ID) {
+			t.Errorf("a card update did not rebuild the search index (license)")
+		}
+
+		// So does a description change...
+		clearSearchIndex(t, s, r.ID)
+		if _, err := s.SetRepoDescription(ctx, r.ID, "deltatoken"); err != nil {
+			t.Fatalf("SetRepoDescription: %v", err)
+		}
+		if !searchFinds(t, s, "deltatoken", r.ID) {
+			t.Errorf("a description update did not rebuild the search index")
+		}
+
+		// ... and a rename. The statement is the one transferMove issues;
+		// calling it directly keeps this test on the trigger rather than on
+		// the transfer workflow around it.
+		clearSearchIndex(t, s, r.ID)
+		if _, err := s.db.Exec(ctx,
+			`UPDATE repositories SET name = $2 WHERE id = $1`, r.ID, "epsilontoken"); err != nil {
+			t.Fatalf("rename: %v", err)
+		}
+		if !searchFinds(t, s, "epsilontoken", r.ID) {
+			t.Errorf("a rename did not rebuild the search index")
+		}
+	})
+}
+
+// ------------------------------------------------------------- card facets
+
+// A facet's count and the listing behind it have to describe the same set.
+// The three card facets dropped Relation from their WHERE -- not just from
+// their own dimension, the way the design intends, but entirely -- so with
+// ?base_model=...&relation=... selected the sidebar counted over every
+// relation and offered tags, licenses and tasks that only exist on
+// repositories the listing does not contain. Clicking one returned nothing.
+func TestIntegrationCardFacetsRespectTheRelationFilter(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newLineageFixture(t, s)
+		ctx := f.ctx
+
+		// Two children of the same base model, with disjoint card metadata,
+		// distinguished only by their relation to it.
+		if err := s.UpdateRepoIndex(ctx, f.ft.ID, "abc", 10, map[string]any{
+			"tags": []any{"ft-only"}, "license": "ft-license", "pipeline_tag": "ft-task",
+		}, "", false); err != nil {
+			t.Fatalf("UpdateRepoIndex(ft): %v", err)
+		}
+		if err := s.UpdateRepoIndex(ctx, f.gguf.ID, "abc", 10, map[string]any{
+			"tags": []any{"gguf-only"}, "license": "gguf-license", "pipeline_tag": "gguf-task",
+		}, "", false); err != nil {
+			t.Fatalf("UpdateRepoIndex(gguf): %v", err)
+		}
+
+		base := RepoFilter{BaseModel: "alice/base-model", Relation: "quantized"}
+		withFacets := base
+		withFacets.WithFacets = true
+		_, _, facets, err := s.ListRepos(ctx, withFacets)
+		if err != nil {
+			t.Fatalf("ListRepos: %v", err)
+		}
+
+		// Each facet offers exactly what the quantisation carries, and
+		// nothing the fine-tune does.
+		for _, c := range []struct {
+			name    string
+			items   []RepoFacetItem
+			want    string
+			refuted string
+			apply   func(*RepoFilter, string)
+		}{
+			{"tag", facets.Tags, "gguf-only", "ft-only",
+				func(f *RepoFilter, v string) { f.Tags = []string{v} }},
+			{"license", facets.Licenses, "gguf-license", "ft-license",
+				func(f *RepoFilter, v string) { f.License = v }},
+			{"task", facets.Tasks, "gguf-task", "ft-task",
+				func(f *RepoFilter, v string) { f.Task = v }},
+		} {
+			got := map[string]int64{}
+			for _, it := range c.items {
+				got[it.Value] = it.Count
+			}
+			if got[c.want] != 1 {
+				t.Errorf("%s facet[%q] = %d, want 1 (got %v)", c.name, c.want, got[c.want], got)
+			}
+			if _, ok := got[c.refuted]; ok {
+				t.Errorf("%s facet offers %q, which only exists on a repository the listing excludes (got %v)",
+					c.name, c.refuted, got)
+			}
+			// Whatever it offers, the number must be the number clicking it
+			// returns.
+			for _, it := range c.items {
+				sub := base
+				c.apply(&sub, it.Value)
+				_, total, _, err := s.ListRepos(ctx, sub)
+				if err != nil {
+					t.Fatalf("ListRepos(%s %q): %v", c.name, it.Value, err)
+				}
+				if total != it.Count {
+					t.Errorf("%s facet says %s (%d) but the filter returns %d",
+						c.name, it.Value, it.Count, total)
+				}
+			}
 		}
 	})
 }

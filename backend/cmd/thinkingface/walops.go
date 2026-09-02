@@ -113,26 +113,30 @@ func runCompact(ctx context.Context, db *store.Store, obj storage.Storage, cfg *
 	workRoot := filepath.Join(cfg.ViewerCacheDir, "compact-work")
 
 	return forEachRepo(ctx, db, func(ref store.RepoRef) error {
-		ix, _, err := wal.ReadIndex(ctx, obj, ref.StoragePath)
-		if err != nil {
-			return fmt.Errorf("read index %s: %w", refName(ref), err)
+		work := filepath.Join(workRoot, filepath.FromSlash(ref.StoragePath)+".git")
+		res, err := wal.CompactAndSweep(ctx, obj, work, ref.StoragePath, *threshold, gcOrphanAge)
+		switch {
+		case errors.Is(err, wal.ErrIndexMissing):
+			// Loud, and not fatal to the rest of the run: this repository's
+			// packs are the only way its index comes back
+			// (docs/dev/wal-index-recovery.md), so its sweep stops here — but
+			// the other repositories still deserve their maintenance.
+			slog.Error("compact: index missing, orphan sweep skipped to preserve the recovery material",
+				"repo", refName(ref), "recovery", "docs/dev/wal-index-recovery.md", "error", err)
+			return nil
+		case err != nil:
+			return fmt.Errorf("compact %s: %w", refName(ref), err)
 		}
-		if wal.NeedsCompaction(ix, *threshold) {
-			work := filepath.Join(workRoot, filepath.FromSlash(ref.StoragePath)+".git")
-			err := wal.Compact(ctx, obj, work, ref.StoragePath)
-			switch {
-			case errors.Is(err, wal.ErrCompactionRaced):
-				slog.Info("compact: lost to a concurrent push, will retry next run", "repo", refName(ref))
-			case err != nil:
-				return fmt.Errorf("compact %s: %w", refName(ref), err)
-			}
+		if res.Raced {
+			slog.Info("compact: lost to a concurrent push, will retry next run", "repo", refName(ref))
 		}
-		deleted, err := wal.GCOrphans(ctx, obj, ref.StoragePath, gcOrphanAge)
-		if err != nil {
-			return fmt.Errorf("gc orphans %s: %w", refName(ref), err)
-		}
-		if len(deleted) > 0 {
-			slog.Info("compact: collected orphaned packs", "repo", refName(ref), "count", len(deleted))
+		if len(res.Deleted) > 0 {
+			// "protected" is the count the pre-run index shielded — the packs
+			// this run superseded, plus whatever else it still named. They go
+			// on the next run; see wal.CompactAndSweep for why that one run of
+			// grace is what invariant 3 of §5 needs.
+			slog.Info("compact: collected orphaned packs", "repo", refName(ref),
+				"count", len(res.Deleted), "protected", res.Protected)
 		}
 		return nil
 	})

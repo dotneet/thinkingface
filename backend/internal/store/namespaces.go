@@ -216,6 +216,21 @@ func (s *Store) NamespacesForUser(ctx context.Context, userID int64) ([]Namespac
 // CanWriteNamespace, its by-name twin, was the second one and had no caller
 // outside its own test; two spellings of an authorization rule is one more
 // than an authorization rule may have.
+//
+// A site administrator is deliberately *not* an arm of this predicate, even
+// though the API layer's roleIn answers RoleAdmin for one in every namespace.
+// The two are asked different questions and are allowed to differ: roleIn
+// authorises an actor against a namespace it was handed ("may this actor do
+// this?"), while this one drives a listing ("what is waiting for me?"). An
+// is_admin arm here answered the second question with the first one's answer,
+// and every consequence of that was wrong -- ListRepoTransfersForUser applies
+// this to the source and the destination of the same rows, so an
+// administrator got every pending transfer on the instance, listed twice, and
+// the header badge (which counts the incoming side on every page render)
+// became a permanent unread marker for requests between two strangers that
+// nobody had asked them to decide. A site administrator may still accept,
+// reject or cancel any of those by id (docs/dev/repo-transfer-design.md §5);
+// what they no longer get is somebody else's inbox.
 func namespaceWritable(idExpr string) string {
 	return `EXISTS (
 		SELECT 1 FROM namespaces n

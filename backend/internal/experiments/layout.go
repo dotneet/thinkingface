@@ -4,7 +4,11 @@
 package experiments
 
 import (
+	"fmt"
 	"path"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -21,9 +25,22 @@ const SystemMetricPrefix = "system/"
 type Layout struct {
 	Project string
 	// MetricsPath is the file every reader requires; a project without one is
-	// not a project (see the filter at the end of DetectLayouts).
+	// not a project (see the filter at the end of DetectLayouts). It is the
+	// oldest surviving member of the chain described below: the base parquet
+	// normally, and the lowest-numbered continuation file when the base has
+	// been deleted.
 	MetricsPath string
-	ConfigsPath string
+	// MetricsShards are the rest of the continuation files a flush created
+	// when appending to the file before them would have produced a file too
+	// large to read back (flush.go's maxExistingFlushRows), in part-number
+	// order. They have exactly the shape of MetricsPath -- one row per point,
+	// the same structural columns -- so every reader that scans MetricsPath
+	// must scan these straight after it, in this order, or a long project's
+	// chart simply stops at the rotation point.
+	//
+	// Nil for the overwhelmingly common project that never crossed the bound.
+	MetricsShards []string
+	ConfigsPath   string
 	// SystemMetricsPath is trackio's {project}_system.parquet, holding the
 	// machine telemetry it samples in the background. It is optional, and its
 	// columns are read under SystemMetricPrefix.
@@ -40,6 +57,115 @@ var auxSuffixes = []string{
 	"_artifact_aliases", "_run_artifact_links",
 }
 
+// metricsShardPattern matches the stem of a continuation file this package
+// writes: "metrics.part0001" -> stem "metrics", part 1. Four digits is a
+// minimum, not a maximum, so the numbering never has to stop.
+//
+// The marker is deliberately specific. A shard has to be recognised from its
+// name alone (nothing else in the repository says which file continues which),
+// and the generic `{project}.parquet` case at the bottom of DetectLayouts
+// would otherwise turn "myproj.part0001.parquet" into a project of its own
+// called "myproj.part0001" -- a second, half-empty entry in the project list
+// for every rotated project.
+var metricsShardPattern = regexp.MustCompile(`^(.+)\.part(\d{4,})$`)
+
+// MetricsShardPath is the name of the n-th continuation file of a metrics
+// parquet: "demo/metrics.parquet" with n=1 becomes
+// "demo/metrics.part0001.parquet". The extension is taken from base so an
+// uppercase ".PARQUET" keeps its casing; only the stem is extended.
+func MetricsShardPath(base string, n int) string {
+	ext := path.Ext(base)
+	return fmt.Sprintf("%s.part%04d%s", strings.TrimSuffix(base, ext), n, ext)
+}
+
+// MetricsChainFile is the inverse of MetricsShardPath: it splits a member of a
+// metrics chain into the base file the numbering is derived from and its part
+// number, which is 0 for the base itself.
+//
+// The name is the only place the chain is recorded -- nothing inside the
+// parquet says which file continues which -- so this is what lets the writer
+// keep numbering from the right stem after the base file has been deleted out
+// from under it (flush.go's resolveMetricsTarget). Passing a path that is not
+// a continuation file returns it unchanged with part 0.
+func MetricsChainFile(p string) (base string, part int) {
+	ext := path.Ext(p)
+	if stem, n, ok := parseMetricsShard(strings.TrimSuffix(p, ext)); ok {
+		return stem + ext, n
+	}
+	return p, 0
+}
+
+// parseMetricsShard splits a file stem (the name with its extension already
+// removed) into the stem of the file it continues and its part number.
+func parseMetricsShard(stem string) (base string, n int, ok bool) {
+	m := metricsShardPattern.FindStringSubmatch(stem)
+	if m == nil {
+		return "", 0, false
+	}
+	// A number too large for an int is not a shard this package wrote; the
+	// generic project case can have it.
+	n, err := strconv.Atoi(m[2])
+	if err != nil || n <= 0 {
+		return "", 0, false
+	}
+	return m[1], n, true
+}
+
+// shardProject resolves which project a continuation file belongs to, by
+// applying to its base stem exactly the rules DetectLayouts applies to the
+// base file itself. Anything those rules would not have accepted as a metrics
+// file (an aux table, a configs export, a nested non-"metrics" name) is not a
+// shard of anything and is reported as such.
+func shardProject(stem, dir, repoName string) (string, bool) {
+	switch {
+	case strings.EqualFold(stem, "metrics"):
+		if dir != "" {
+			return dir, true
+		}
+		return repoName, true
+
+	// The root-level arm adopts by name alone, and it is worth being explicit
+	// that this was chosen rather than overlooked. A dataset repository holding
+	// train.parquet and train.part0001.parquet side by side used to yield two
+	// unrelated "projects" and now yields one, whose chart scans the second
+	// file as metric rows.
+	//
+	// It is still the right trade:
+	//
+	//   - The root arm below in DetectLayouts already treats *any* root-level
+	//     .parquet that is not an aux table as a project's metrics file, so
+	//     train.parquet was being read as metric rows before shards existed.
+	//     This merges two heuristic guesses into one; it does not newly adopt a
+	//     third-party file into a domain it was outside of.
+	//   - Refusing it would cost real data. This package writes root-level
+	//     shards: a trackio local export names its metrics {project}.parquet,
+	//     that is the base resolveMetricsTarget picks, and rotation continues it
+	//     as {project}.part0001.parquet. A reader that would not follow those is
+	//     the exact silent black hole the base-file invariant below exists to
+	//     prevent, in the writer's own supported layout.
+	//   - The marker is distinctive enough to make a collision unlikely: a dot,
+	//     no dash, at least four digits. Spark writes part-00000, HF datasets
+	//     write train-00000-of-00001; neither matches.
+	//   - And the damage if one did collide is bounded: an adopted file's rows
+	//     are read like any other metrics rows, and scanMetricRows drops every
+	//     row of a file with no run column, so a table that is not metrics
+	//     contributes nothing to the chart.
+	//
+	// The name is all there is to go on -- nothing in the repository records
+	// which file continues which -- so a stricter rule would have to be a marker
+	// inside the parquet, which is a format change, not a tweak here.
+	case dir == "" && !hasAuxSuffix(strings.ToLower(stem)):
+		return stem, true
+	}
+	return "", false
+}
+
+// metricsShard is one continuation file waiting to be attached to its project.
+type metricsShard struct {
+	path string
+	n    int
+}
+
 // DetectLayouts maps repository file paths onto projects. It understands the
 // two shapes trackio produces:
 //
@@ -51,6 +177,7 @@ var auxSuffixes = []string{
 // carries no name of its own.
 func DetectLayouts(paths []string, repoName string) []Layout {
 	byProject := map[string]*Layout{}
+	shards := map[string][]metricsShard{}
 	get := func(project string) *Layout {
 		if l, ok := byProject[project]; ok {
 			return l
@@ -79,6 +206,18 @@ func DetectLayouts(paths []string, repoName string) []Layout {
 		// case, but project names keep the casing the author chose.
 		lowerFile := strings.ToLower(file)
 		lowerBase := strings.ToLower(base)
+
+		// Continuation files are resolved before anything else, because every
+		// case below would misread one: at the root the generic project case
+		// would invent "{project}.part0001", and in a subdirectory the file
+		// would match nothing at all and its rows would silently vanish from
+		// the chart.
+		if stem, n, ok := parseMetricsShard(base); ok {
+			if project, ok := shardProject(stem, dir, repoName); ok {
+				shards[project] = append(shards[project], metricsShard{path: p, n: n})
+				continue
+			}
+		}
 
 		switch {
 		case lowerFile == "metrics.parquet":
@@ -110,15 +249,66 @@ func DetectLayouts(paths []string, repoName string) []Layout {
 		}
 	}
 
+	// Continuation files whose project has no other file of its own still make
+	// a project: the base file can be deleted out from under them (the Web UI,
+	// HF's delete_file, `tf up --delete`, a history rewrite) and the rows in
+	// them are no less real for it. Dropping them here is what used to make
+	// that deletion a silent black hole -- see the anchoring comment below.
+	for project := range shards {
+		get(project)
+	}
+
 	out := make([]Layout, 0, len(byProject))
 	for _, l := range byProject {
-		// A project without metrics is not a project; a stray configs file on
-		// its own tells us nothing to chart.
-		if l.MetricsPath != "" {
-			out = append(out, *l)
+		// Part-number order is the reading order, and the reading order is
+		// chronological, because the writer only ever appends to the
+		// highest-numbered file of the chain or starts a higher-numbered one
+		// (flush.go's resolveMetricsTarget). Series() resolves two values at
+		// one step by taking the later one in scan order and indexProject
+		// overwrites a run's summary as it goes, so getting this backwards
+		// would chart -- and summarise -- a resumed run's *older* value.
+		found := shards[l.Project]
+		sort.Slice(found, func(i, j int) bool { return found[i].n < found[j].n })
+
+		// The chain is anchored on its oldest surviving member rather than on
+		// the base file, so a deleted base costs its own rows and nothing
+		// else. This is the reader's half of the invariant above: the writer
+		// never re-anchors onto a file it has already written past, precisely
+		// so that "later in this list" can keep meaning "logged later".
+		// Change one end and you must change the other.
+		if l.MetricsPath == "" {
+			if len(found) == 0 {
+				// A project without metrics is not a project; a stray configs
+				// file on its own tells us nothing to chart.
+				continue
+			}
+			l.MetricsPath = found[0].path
+			found = found[1:]
 		}
+		if len(found) > 0 {
+			l.MetricsShards = make([]string, 0, len(found))
+			for _, s := range found {
+				l.MetricsShards = append(l.MetricsShards, s.path)
+			}
+		}
+		out = append(out, *l)
 	}
 	return out
+}
+
+// MetricsFiles is every file holding this project's metric rows, in reading
+// order: the oldest surviving member of the chain followed by the rest, by
+// part number. That order is chronological (see DetectLayouts), so the last
+// file is the one the newest points are in. Readers that scan the whole
+// project use this rather than MetricsPath, so adding a shard never means
+// remembering to update a second loop.
+func (l Layout) MetricsFiles() []string {
+	if l.MetricsPath == "" {
+		return nil
+	}
+	out := make([]string, 0, 1+len(l.MetricsShards))
+	out = append(out, l.MetricsPath)
+	return append(out, l.MetricsShards...)
 }
 
 func hasAuxSuffix(base string) bool {

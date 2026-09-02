@@ -966,3 +966,40 @@ func TestSameOrigin(t *testing.T) {
 		}
 	}
 }
+
+// TestCommitRejectsAnswerWithoutACommit: a 2xx whose body carries no commit
+// is a failure. It used to be returned as a success with OID "", which `tf
+// up` then printed as a green tick with an empty short oid, wrote as
+// "commit": "" in --json, and exited 0.
+func TestCommitRejectsAnswerWithoutACommit(t *testing.T) {
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{"success false", map[string]any{"success": false, "commitOid": "c0ffee"}},
+		{"empty oid", map[string]any{"success": true, "commitOid": "", "commitUrl": "http://x/commit/"}},
+		{"neither field", map[string]any{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /api/datasets/alice/corpus/commit/main", func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				writeTestJSON(t, w, tc.body)
+			})
+			c, _ := newTestClient(t, mux)
+
+			res, err := c.Commit(context.Background(), testRef(), "main", "s", "", []CommitOp{{Kind: OpDeleteFile, Path: "x"}})
+			if err == nil {
+				t.Fatalf("Commit = %+v, want an error", res)
+			}
+			if res != nil {
+				t.Errorf("result = %+v, want nil alongside the error", res)
+			}
+			// The message has to say what the server actually returned.
+			if !strings.Contains(err.Error(), "success=") || !strings.Contains(err.Error(), "commitOid=") {
+				t.Errorf("err = %q, want it to report the fields the server sent", err)
+			}
+		})
+	}
+}

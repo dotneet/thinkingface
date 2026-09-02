@@ -62,21 +62,13 @@ export function WebhookDeliveriesPanel({ webhookId }: { webhookId: number }) {
     pager,
   } = usePagedList({
     pageSize: PAGE_SIZE,
+    // Expanding a different webhook's row starts back on its first page rather
+    // than wherever this one happened to be paged to: `usePagedList` rewinds
+    // the offset whenever `deps` change.
     deps: [webhookId],
     fetchPage: ({ limit, offset }) => listWebhookDeliveries(webhookId, { limit, offset }),
     describe,
   });
-
-  // A different webhook starts back on its first page rather than wherever
-  // this one happened to be paged to. Adjusted during render rather than in an
-  // effect: an effect would run after this render's fetch had already been
-  // scheduled for the old offset, so switching webhooks from page 2 would fire
-  // a request for page 2 of the new one and immediately abandon it.
-  const [shownWebhookId, setShownWebhookId] = useState(webhookId);
-  if (webhookId !== shownWebhookId) {
-    setShownWebhookId(webhookId);
-    setOffset(0);
-  }
 
   async function handleRedeliver(deliveryId: number) {
     if (redeliveringId !== null) return;
@@ -100,7 +92,6 @@ export function WebhookDeliveriesPanel({ webhookId }: { webhookId: number }) {
 
   return (
     <div className="flex flex-col gap-3">
-      {actionError && <Alert tone="negative">{actionError}</Alert>}
       {deliveries === null && !loadError ? (
         <SkeletonLines lines={3} />
       ) : deliveries === null ? (
@@ -189,6 +180,13 @@ export function WebhookDeliveriesPanel({ webhookId }: { webhookId: number }) {
         </div>
       )}
       <PaginationControls pager={pager} />
+
+      {/* Below the table, not above it: a failed redelivery reported here used
+          to insert an Alert as the panel's first child, pushing every delivery
+          row — including the Redeliver button next to the one just pressed —
+          down by its height (DESIGN.md §8.1). Every comparable manager on
+          these screens already places it here. */}
+      {actionError && <Alert tone="negative">{actionError}</Alert>}
 
       <Dialog
         open={detail !== null}

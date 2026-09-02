@@ -1,6 +1,6 @@
 "use client";
 
-import { Webhook as WebhookIcon } from "lucide-react";
+import { Webhook as WebhookIcon, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { LoginRequiredState } from "@/components/settings/login-required-state";
 import { WEBHOOK_EVENT_OPTIONS } from "@/components/settings/webhook-events";
@@ -99,6 +99,10 @@ export function WebhooksManager({
     setWebhooks(null);
     setRepos(null);
     setReposError(false);
+    // The signing secret belongs to the namespace it was minted in. Left
+    // behind, it kept sitting above another namespace's list — and stayed in
+    // the DOM long after the person who created it had walked away.
+    setJustCreated(undefined);
     refreshWebhooks(namespace, () => cancelled);
     listRepos({ author: namespace, limit: 100 }).then((result) => {
       if (cancelled) return;
@@ -137,6 +141,10 @@ export function WebhooksManager({
     }
     setCreating(true);
     setCreateError(null);
+    // Drop the previous secret before asking for a new one: a failed create
+    // would otherwise leave the old banner standing where it reads as the
+    // result of the attempt that just failed.
+    setJustCreated(undefined);
     const result = await createWebhook(namespace, {
       repo: repoScope || undefined,
       url: url.trim(),
@@ -264,7 +272,20 @@ export function WebhooksManager({
           </p>
           <div className="mt-1.5 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-raised p-2.5">
             <code className="scroll-x whitespace-pre font-mono text-xs">{justCreated.secret}</code>
-            <CopyButton value={justCreated.secret} />
+            <div className="flex shrink-0 items-center gap-1">
+              <CopyButton value={justCreated.secret} />
+              {/* A one-time secret needs a way off the screen that is not
+                  "reload the page and hope": once it has been copied, leaving
+                  it rendered is the only remaining exposure. */}
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label={t("settings.webhooks.dismissSecret")}
+                onClick={() => setJustCreated(undefined)}
+              >
+                <X size={14} />
+              </Button>
+            </div>
           </div>
         </Alert>
       )}

@@ -84,9 +84,18 @@ export function runTableCsv(
  * `xIsTime` names the x column after what the chart is actually plotting, so
  * a file exported from the time axis cannot be mistaken for one exported from
  * the step axis.
+ *
+ * The time axis is **epoch seconds** (the backend divides UnixMilli by 1000 in
+ * experiments/series.go because uPlot's default `ms: 1e-3` wants seconds), so
+ * the column is named `timestamp_s`. Renamed rather than multiplied back up to
+ * milliseconds: the values are what the chart plots and what the API returned,
+ * and scaling them here would add a rounding step whose only purpose is to
+ * match a column name we are free to choose. `timestamp_s` is also the spelling
+ * that makes the pandas idiom obvious — `pd.to_datetime(df.timestamp_s,
+ * unit="s")`, where the old `timestamp_ms` header sent every point to 1970.
  */
 export function metricSeriesCsv(series: readonly ExpMetricSeries[], xIsTime: boolean): string {
-  const xColumn = xIsTime ? "timestamp_ms" : "step";
+  const xColumn = xIsTime ? "timestamp_s" : "step";
   const columns = ["run", "metric", xColumn, "value"];
   const rows: Record<string, unknown>[] = [];
   for (const trace of series) {

@@ -144,7 +144,9 @@ repository. As in Python, `--repo-type dataset` is required for datasets.
 `tf` is thinkingface's own client: a single static binary that turns "register this
 directory" into one command. It creates the repository if it does not exist, infers whether
 the contents are a dataset or a model, names the repository after the directory, and pushes
-everything as a single commit.
+the directory as a single commit. Hidden files and directories — anything whose name starts
+with a dot, such as `.env` — are skipped by default so credentials are not published by
+accident; `tf up` names what it skipped, and `--hidden` uploads them.
 
 ```bash
 tf login http://localhost:8080

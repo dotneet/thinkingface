@@ -636,3 +636,38 @@ func TestIntegrationOffsetWalkSkipsARowAfterARemoval(t *testing.T) {
 		}
 	})
 }
+
+// repo_redirects.from_namespace is a plain string -- it has to be, since it
+// names a place that no longer holds the repository -- so nothing in the
+// schema removes an organisation's redirects when the organisation goes.
+// Left behind, they are inherited by whoever registers that name next:
+// acme/x would 308 into the namespace the *previous* acme handed it to, a
+// decision the new owner of the name never made.
+func TestIntegrationDeleteOrgClearsItsRedirects(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+
+		org := mustOrg(t, s, "acme", f.alice, OrgUpdate{})
+		r := f.repo(t, "acme", "x", "model", nil)
+
+		// acme hands its only repository to bob, which leaves the redirect,
+		// and can then delete itself: it holds no repositories any more.
+		if _, err := s.TransferRepo(ctx, TransferSpec{
+			RepoID: r.ID, ToNamespaceID: f.ns(t, "bob").ID, ActorID: f.alice.ID,
+		}); err != nil {
+			t.Fatalf("TransferRepo: %v", err)
+		}
+		if _, err := s.ResolveRepoRedirect(ctx, "model", "acme", "x"); err != nil {
+			t.Fatalf("the redirect should exist while acme does: %v", err)
+		}
+		if err := s.DeleteOrg(ctx, org.ID); err != nil {
+			t.Fatalf("DeleteOrg: %v", err)
+		}
+
+		if _, err := s.ResolveRepoRedirect(ctx, "model", "acme", "x"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("acme/x still redirects after acme was deleted (err = %v); "+
+				"the next namespace to claim the name would inherit it", err)
+		}
+	})
+}

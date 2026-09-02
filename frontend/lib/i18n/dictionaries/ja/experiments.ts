@@ -23,8 +23,8 @@ export const experiments = {
   repo: {
     breadcrumbRoot: "実験",
     noProjects: "プロジェクトはまだありません",
-    runsOne: "{count} run",
-    runsOther: "{count} run",
+    runsOne: "run {count} 件",
+    runsOther: "run {count} 件",
   },
   project: {
     errorHint:

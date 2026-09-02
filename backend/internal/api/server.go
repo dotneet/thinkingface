@@ -576,7 +576,8 @@ func (s *Server) cors(next http.Handler) http.Handler {
 	})
 }
 
-// requireSameOrigin is the CSRF backstop for cookie sessions.
+// requireSameOrigin is the CSRF backstop for the credentials a browser
+// attaches by itself.
 //
 // The cookie is SameSite=Lax, which already keeps it off most cross-site
 // requests -- but that is one attribute away from being the only defence, and
@@ -584,6 +585,14 @@ func (s *Server) cors(next http.Handler) http.Handler {
 // grace window). So: a state-changing request that authenticated with the
 // cookie must carry an Origin (or, failing that, a Referer) this server
 // accepts.
+//
+// HTTP Basic is covered for the same reason, and used not to be. unauthorized()
+// answers `WWW-Authenticate: Basic realm="thinkingface"`, so anyone who has
+// ever filled in that dialog has credentials the browser re-attaches to this
+// origin on its own -- including on a cross-site top-level form POST, which is
+// exactly the shape the cookie clause exists to stop. A Bearer token is not
+// ambient in that sense (a page has to go and put it in a header, which a form
+// cannot do and a preflight would catch), so it is deliberately not gated here.
 //
 // A request with neither header passes. That is not a hole: every current
 // browser attaches Origin to a cross-site POST, form submissions included, so
@@ -593,7 +602,7 @@ func (s *Server) cors(next http.Handler) http.Handler {
 // the only thing this check exists to stop.
 func (s *Server) requireSameOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if safeMethod(r.Method) || !cookieAuthenticated(r.Context()) {
+		if safeMethod(r.Method) || !ambientBrowserCredential(r.Context()) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -603,6 +612,26 @@ func (s *Server) requireSameOrigin(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// ambientBrowserCredential reports whether this request authenticated with
+// something a browser sends on its own initiative: the session cookie, or a
+// Basic password cached from the WWW-Authenticate dialog. Those are the two
+// credentials a hostile page can borrow without being able to read anything,
+// which is precisely the CSRF condition.
+//
+// The auth method is read off the record requestLogger installs and identify
+// fills in (authRecord below). That is the only place it survives past the
+// identify middleware -- the alternative would be a second context key saying
+// almost the same thing as ctxKeyCookieAuth. A nil record means no middleware
+// stack ran, which is a handler under direct test; those are anonymous or
+// token-authenticated and answer false, exactly as they did before.
+func ambientBrowserCredential(ctx context.Context) bool {
+	if cookieAuthenticated(ctx) {
+		return true
+	}
+	rec := authRecordFrom(ctx)
+	return rec != nil && rec.method == authPassword
 }
 
 func safeMethod(method string) bool {

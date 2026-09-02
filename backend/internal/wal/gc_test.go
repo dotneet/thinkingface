@@ -2,6 +2,7 @@ package wal
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -136,18 +137,47 @@ func TestGCOrphans_CollectsWhatCompactionSuperseded(t *testing.T) {
 	assertHealthy(t, rebuilt)
 }
 
-func TestGCOrphans_WithoutAnIndexStillCollectsOldPacks(t *testing.T) {
-	f := newFakeStore()
-	key := storage.WALKey(storagePath, EntryName(1, "0123456789ABCDEFGHJKMNPQRS"))
-	if err := f.Put(context.Background(), key, stringReader("PACK"), packContentType); err != nil {
-		t.Fatalf("put: %v", err)
-	}
-	f.age(t, key, 48*time.Hour)
+// A missing index used to read as "nothing is referenced", which turned the
+// scheduled compaction job into the thing that finished off a lost index: it
+// would sweep away every pack, and those packs are exactly what
+// docs/dev/wal-index-recovery.md restores the index *from*.
+func TestGCOrphans_WithoutAnIndexRefusesToSweep(t *testing.T) {
+	fx := newPushFixture(t)
+	head := commitTo(t, fx.dir, "main", "one")
+	fx.mustShadow(t, RefUpdate{Ref: "refs/heads/main", Old: "", New: head})
 
-	// No index means nothing is referenced: a pack whose CAS never landed and
-	// whose repository never got one is the purest orphan there is.
-	if deleted := gcOrFail(t, f, DefaultGCGracePeriod); len(deleted) != 1 {
-		t.Fatalf("deleted = %v, want the one orphan", deleted)
+	ix, _ := readIndexOrFail(t, fx.store)
+	live := storage.WALKey(storagePath, ix.Entries[0])
+	fx.store.age(t, live, 48*time.Hour)
+
+	// The §13 failure: the index is gone, the packs that reconstruct it are not.
+	if err := fx.store.Delete(context.Background(), storage.WALIndexKey(storagePath)); err != nil {
+		t.Fatalf("delete index: %v", err)
+	}
+
+	deleted, err := GCOrphans(context.Background(), fx.store, storagePath, DefaultGCGracePeriod)
+	if !errors.Is(err, ErrIndexMissing) {
+		t.Fatalf("GCOrphans err = %v, want ErrIndexMissing", err)
+	}
+	if len(deleted) != 0 {
+		t.Errorf("deleted = %v, want nothing swept", deleted)
+	}
+	if !fx.store.has(live) {
+		t.Error("the recovery material was deleted: the index can no longer be rebuilt")
+	}
+}
+
+// The distinction the error draws: no packs at all is a repository that never
+// wrote a WAL, not a lost index, and it must stay a silent no-op so the job
+// does not alarm on every freshly created repository.
+func TestGCOrphans_WithoutAnIndexAndWithoutPacksIsASilentNoop(t *testing.T) {
+	f := newFakeStore()
+	deleted, err := GCOrphans(context.Background(), f, storagePath, DefaultGCGracePeriod)
+	if err != nil {
+		t.Fatalf("GCOrphans: %v", err)
+	}
+	if len(deleted) != 0 {
+		t.Errorf("deleted = %v, want nothing", deleted)
 	}
 }
 

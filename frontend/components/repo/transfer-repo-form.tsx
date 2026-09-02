@@ -33,6 +33,11 @@ export function TransferRepoForm({ kind, ns, name }: { kind: RepoKind; ns: strin
   const t = useT();
   const router = useRouter();
   const confirmFormId = useId();
+  // The destination heading is a plain <span> (the two controls below it are
+  // alternatives chosen by the SegmentedControl, so neither owns a <label>).
+  // Naming both from it stops a screen reader announcing the transfer
+  // destination as an unlabelled combo box / text field.
+  const destinationLabelId = useId();
 
   const [namespaces, setNamespaces] = useState<string[] | null>(null); // null = loading
   const [needsLogin, setNeedsLogin] = useState(false);
@@ -213,7 +218,7 @@ export function TransferRepoForm({ kind, ns, name }: { kind: RepoKind; ns: strin
     <>
       <form onSubmit={handleSubmit} className="flex max-w-lg flex-col gap-4">
         <div className="flex flex-col gap-2">
-          <span className="text-sm font-medium text-fg-muted">
+          <span id={destinationLabelId} className="text-sm font-medium text-fg-muted">
             {t("repo.settings.transfer.destinationLabel")}
           </span>
           <SegmentedControl<DestMode>
@@ -232,6 +237,7 @@ export function TransferRepoForm({ kind, ns, name }: { kind: RepoKind; ns: strin
           {mode === "mine" ? (
             namespaces.length > 0 ? (
               <Select
+                aria-labelledby={destinationLabelId}
                 value={selectedNamespace}
                 onChange={(e) => setSelectedNamespace(e.target.value)}
               >
@@ -248,6 +254,7 @@ export function TransferRepoForm({ kind, ns, name }: { kind: RepoKind; ns: strin
             )
           ) : (
             <Input
+              aria-labelledby={destinationLabelId}
               value={otherNamespace}
               onChange={(e) => setOtherNamespace(e.target.value)}
               placeholder={t("repo.settings.transfer.otherNamespacePlaceholder")}

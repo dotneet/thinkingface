@@ -468,3 +468,63 @@ func TestUpdateRepo_AppliesEveryFieldInOneRequest(t *testing.T) {
 		t.Fatalf("repo = %+v, want bar / release / everything at once", body.Repo.RepoSummary)
 	}
 }
+
+// PATCH /api/v1/repos/{kind}/{ns}/{name} applies its three fields as three
+// separate writes. A rename to a name the namespace already holds used to be
+// caught only inside resolveTransferTarget -- after the description had
+// already been committed -- so the caller got a 409 *and* a change they had
+// asked for as part of a request that failed.
+func TestUpdateRepo_RefusedRenameLeavesTheOtherFieldsAlone(t *testing.T) {
+	f := newTransferFixture(t)
+	r := f.repo("alice", "foo", "model")
+	f.repo("alice", "taken", "model")
+	tok := f.token(f.alice, "write")
+
+	resp := f.do("PATCH", "/api/v1/repos/model/alice/foo", tok, map[string]any{
+		"description": "a description nobody asked to keep",
+		"name":        "taken",
+	})
+	if resp.status() != 409 {
+		t.Fatalf("status = %d, body = %s, want 409", resp.status(), resp.rec.Body.String())
+	}
+
+	stored, err := f.st.GetRepoByID(context.Background(), r.ID)
+	if err != nil {
+		t.Fatalf("reload repo: %v", err)
+	}
+	if stored.Description != "desc" {
+		t.Errorf("description = %q, want the original %q: a refused request committed it anyway",
+			stored.Description, "desc")
+	}
+	if stored.Name != "foo" {
+		t.Errorf("name = %q, want foo", stored.Name)
+	}
+}
+
+// The other half of the same guarantee: when nothing is in the way, both
+// fields still land and the rename still leaves a redirect behind.
+func TestUpdateRepo_RenameAndDescribeTogether(t *testing.T) {
+	f := newTransferFixture(t)
+	r := f.repo("alice", "foo", "model")
+	tok := f.token(f.alice, "write")
+
+	resp := f.do("PATCH", "/api/v1/repos/model/alice/foo", tok, map[string]any{
+		"description": "now with a description",
+		"name":        "bar",
+	})
+	if resp.status() != 200 {
+		t.Fatalf("status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+
+	stored, err := f.st.GetRepoByID(context.Background(), r.ID)
+	if err != nil {
+		t.Fatalf("reload repo: %v", err)
+	}
+	if stored.Name != "bar" || stored.Description != "now with a description" {
+		t.Fatalf("repo = %s/%s %q, want alice/bar with the new description",
+			stored.Namespace, stored.Name, stored.Description)
+	}
+	if _, err := f.st.ResolveRepoRedirect(context.Background(), "model", "alice", "foo"); err != nil {
+		t.Errorf("the old name should still redirect after a rename: %v", err)
+	}
+}

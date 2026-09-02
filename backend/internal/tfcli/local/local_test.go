@@ -433,3 +433,140 @@ func TestScanExcludedFileStaysOnDisk(t *testing.T) {
 		t.Fatalf("Scan allPaths = %v, want both files", allPaths)
 	}
 }
+
+// TestScanSkipsHiddenPathsByDefault covers the credential-leak rule: a
+// project directory routinely holds ".env" / ".envrc" / ".aws/credentials"
+// next to the data, and repositories here are world-readable.
+func TestScanSkipsHiddenPathsByDefault(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "README.md"), "hello")
+	writeFile(t, filepath.Join(root, ".env"), "TOKEN=secret")
+	writeFile(t, filepath.Join(root, ".envrc"), "export TOKEN=secret")
+	writeFile(t, filepath.Join(root, "conf", ".secret.json"), "{}")
+	writeFile(t, filepath.Join(root, ".aws", "credentials"), "[default]")
+	// Repository content rather than machine state: these keep travelling.
+	writeFile(t, filepath.Join(root, ".gitattributes"), "*.parquet filter=lfs")
+	writeFile(t, filepath.Join(root, ".gitignore"), "*.pyc")
+
+	files, allPaths, skipped, err := Scan(root, Options{})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	var got []string
+	for _, f := range files {
+		got = append(got, f.RepoPath)
+	}
+	want := []string{".gitattributes", ".gitignore", "README.md"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Scan files = %v, want %v", got, want)
+	}
+
+	// The skipped dot-files are still on disk, which is what keeps
+	// `tf up --delete` from reading their absence as "deleted locally".
+	// The hidden *directory* is not listed (allPaths only ever holds files);
+	// SkippedDirs below is what keeps --delete off everything under it.
+	wantAll := []string{".env", ".envrc", ".gitattributes", ".gitignore", "README.md", "conf/.secret.json"}
+	if !reflect.DeepEqual(allPaths, wantAll) {
+		t.Fatalf("Scan allPaths = %v, want %v", allPaths, wantAll)
+	}
+
+	byPath := map[string]Skipped{}
+	for _, s := range skipped {
+		byPath[s.RepoPath] = s
+	}
+	for _, p := range []string{".env", ".envrc", "conf/.secret.json"} {
+		s, ok := byPath[p]
+		if !ok {
+			t.Fatalf("skipped = %+v, want an entry for %s", skipped, p)
+		}
+		if s.Dir || s.Reason != ReasonHidden || !s.Notable() {
+			t.Errorf("skipped %s = %+v, want a notable non-directory %q skip", p, s, ReasonHidden)
+		}
+	}
+	aws, ok := byPath[".aws"]
+	if !ok || !aws.Dir || aws.Reason != ReasonHidden || !aws.Notable() {
+		t.Fatalf("skipped .aws = %+v (present=%v), want a notable unread hidden directory", aws, ok)
+	}
+	if !reflect.DeepEqual(SkippedDirs(skipped), []string{".aws"}) {
+		t.Fatalf("SkippedDirs = %v, want [.aws]", SkippedDirs(skipped))
+	}
+}
+
+// TestScanHiddenOptionUploadsThem is the opt-back-in half of the rule.
+func TestScanHiddenOptionUploadsThem(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "README.md"), "hello")
+	writeFile(t, filepath.Join(root, ".env"), "TOKEN=secret")
+	writeFile(t, filepath.Join(root, ".aws", "credentials"), "[default]")
+
+	files, _, skipped, err := Scan(root, Options{Hidden: true})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	var got []string
+	for _, f := range files {
+		got = append(got, f.RepoPath)
+	}
+	want := []string{".aws/credentials", ".env", "README.md"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Scan files = %v, want %v", got, want)
+	}
+	for _, s := range skipped {
+		if s.Reason == ReasonHidden {
+			t.Errorf("--hidden must produce no hidden skips, got %+v", s)
+		}
+	}
+}
+
+// TestScanHiddenRootIsStillScanned: the rule is about what the walk finds
+// *inside* the tree. A path the user typed is a path the user chose.
+func TestScanHiddenRootIsStillScanned(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, ".hidden-project")
+	writeFile(t, filepath.Join(root, "train.parquet"), "x")
+
+	files, _, _, err := Scan(root, Options{})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(files) != 1 || files[0].RepoPath != "train.parquet" {
+		t.Fatalf("Scan files = %+v, want just train.parquet", files)
+	}
+
+	// Same for a single hidden file named directly.
+	single := filepath.Join(parent, ".env")
+	writeFile(t, single, "TOKEN=secret")
+	files, _, _, err = Scan(single, Options{})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(files) != 1 || files[0].RepoPath != ".env" {
+		t.Fatalf("Scan files = %+v, want the file the user named", files)
+	}
+}
+
+// TestScanHiddenSymlinkedDirectoryStaysABlindSpot: a dot-named symlink to a
+// directory must still be reported as an unread directory, or --delete would
+// treat everything the remote holds under it as gone locally.
+func TestScanHiddenSymlinkedDirectoryStaysABlindSpot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require elevated privileges on windows")
+	}
+	realData := t.TempDir()
+	writeFile(t, filepath.Join(realData, "train.parquet"), "x")
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "README.md"), "hello")
+	if err := os.Symlink(realData, filepath.Join(root, ".cache")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, _, skipped, err := Scan(root, Options{})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if !reflect.DeepEqual(SkippedDirs(skipped), []string{".cache"}) {
+		t.Fatalf("SkippedDirs = %v, want [.cache]", SkippedDirs(skipped))
+	}
+}

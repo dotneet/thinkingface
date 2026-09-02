@@ -131,3 +131,177 @@ func TestDetectLayouts_CaseInsensitiveExtension(t *testing.T) {
 		t.Errorf("DetectLayouts with uppercase extension = %+v, want a single reponame layout", got)
 	}
 }
+
+// ------------------------------------------------------ continuation files
+
+// TestDetectLayouts_ContinuationFilesAttachToTheirProject covers the files a
+// flush rotates into once appending to the base parquet would produce one it
+// could not read back (flush.go's maxExistingFlushRows).
+//
+// Both halves of this matter. A shard that is not attached is a shard nobody
+// reads, so the chart and the run index simply stop at the rotation point; and
+// a shard mistaken for a project of its own puts a second, half-empty
+// "demo.part0001" in the project list.
+func TestDetectLayouts_ContinuationFilesAttachToTheirProject(t *testing.T) {
+	// Deliberately out of order: reading order is the part number, not the
+	// order the repository listed the files in.
+	paths := []string{
+		"demo/metrics.part0002.parquet",
+		"demo/metrics.parquet",
+		"demo/metrics.part0001.parquet",
+	}
+	got := DetectLayouts(paths, "repo-name-unused")
+	want := []Layout{{
+		Project:     "demo",
+		MetricsPath: "demo/metrics.parquet",
+		MetricsShards: []string{
+			"demo/metrics.part0001.parquet",
+			"demo/metrics.part0002.parquet",
+		},
+	}}
+	if !reflect.DeepEqual(sortedLayouts(got), want) {
+		t.Errorf("DetectLayouts(sharded project) = %+v, want %+v", got, want)
+	}
+}
+
+func TestDetectLayouts_ContinuationFilesOfALocalExport(t *testing.T) {
+	paths := []string{"myproj.parquet", "myproj.part0001.parquet", "myproj_configs.parquet"}
+	got := DetectLayouts(paths, "repo-name-unused")
+	want := []Layout{{
+		Project:       "myproj",
+		MetricsPath:   "myproj.parquet",
+		MetricsShards: []string{"myproj.part0001.parquet"},
+		ConfigsPath:   "myproj_configs.parquet",
+	}}
+	if !reflect.DeepEqual(sortedLayouts(got), want) {
+		t.Errorf("DetectLayouts(sharded local export) = %+v, want %+v", got, want)
+	}
+}
+
+// TestDetectLayouts_RootMetricsShardsUseTheRepoName mirrors the base file's
+// rule: a root-level metrics.parquet is named after the repository, so its
+// continuation files must be too rather than inventing a project called
+// "metrics.part0001".
+func TestDetectLayouts_RootMetricsShardsUseTheRepoName(t *testing.T) {
+	got := DetectLayouts([]string{"metrics.parquet", "metrics.part0001.parquet"}, "my-repo")
+	want := []Layout{{
+		Project:       "my-repo",
+		MetricsPath:   "metrics.parquet",
+		MetricsShards: []string{"metrics.part0001.parquet"},
+	}}
+	if !reflect.DeepEqual(sortedLayouts(got), want) {
+		t.Errorf("DetectLayouts(root shard) = %+v, want %+v", got, want)
+	}
+}
+
+// TestDetectLayouts_ChainIsAnchoredOnItsOldestSurvivingFile covers the base
+// file being deleted out from under a rotated project, which is something any
+// user can do (the Web UI, huggingface_hub.delete_file, `tf up --delete`, a
+// history rewrite).
+//
+// Dropping the project used to be the answer, and it cost the surviving
+// shards' rows for no reason: the chain's order comes from the part numbers in
+// the names, not from the base being present. What must not happen is the
+// other repair -- letting the writer re-anchor onto the base -- because that
+// puts the newest points in the file every reader scans first
+// (TestFlush_ChainStaysInOrderWhenTheBaseFileIsDeleted).
+func TestDetectLayouts_ChainIsAnchoredOnItsOldestSurvivingFile(t *testing.T) {
+	got := DetectLayouts([]string{
+		"demo/metrics.part0002.parquet",
+		"demo/metrics.part0001.parquet",
+	}, "repo")
+	want := []Layout{{
+		Project:       "demo",
+		MetricsPath:   "demo/metrics.part0001.parquet",
+		MetricsShards: []string{"demo/metrics.part0002.parquet"},
+	}}
+	if !reflect.DeepEqual(sortedLayouts(got), want) {
+		t.Errorf("DetectLayouts(chain with no base) = %+v, want %+v", got, want)
+	}
+
+	// The same for a local export's root-level chain, and with the lowest
+	// surviving part deleted too: whichever files are left keep their order.
+	got = DetectLayouts([]string{"myproj.part0003.parquet"}, "repo")
+	want = []Layout{{Project: "myproj", MetricsPath: "myproj.part0003.parquet"}}
+	if !reflect.DeepEqual(sortedLayouts(got), want) {
+		t.Errorf("DetectLayouts(orphan root shard) = %+v, want %+v", got, want)
+	}
+
+	// A stray configs file is still not a project: this loosens the rule for
+	// files that hold metric rows, not for everything.
+	if got := DetectLayouts([]string{"myproj_configs.parquet"}, "repo"); len(got) != 0 {
+		t.Errorf("DetectLayouts(configs only) = %+v, want none", got)
+	}
+}
+
+// TestMetricsChainFile pins the inverse of MetricsShardPath, which is how the
+// writer keeps numbering from the right stem once the base file is gone.
+func TestMetricsChainFile(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		base string
+		part int
+	}{
+		{"demo/metrics.parquet", "demo/metrics.parquet", 0},
+		{"demo/metrics.part0001.parquet", "demo/metrics.parquet", 1},
+		{"myproj.part0042.PARQUET", "myproj.PARQUET", 42},
+		// Not a continuation file: fewer than four digits (see
+		// metricsShardPattern), so it is somebody's own filename.
+		{"demo.part1.parquet", "demo.part1.parquet", 0},
+	} {
+		base, part := MetricsChainFile(tc.path)
+		if base != tc.base || part != tc.part {
+			t.Errorf("MetricsChainFile(%q) = %q, %d, want %q, %d", tc.path, base, part, tc.base, tc.part)
+		}
+	}
+}
+
+// TestDetectLayouts_NearMissesAreOrdinaryFiles pins how narrow the marker is.
+// "part" followed by fewer than four digits, or by none, is somebody's own
+// filename and keeps behaving exactly as it did before shards existed.
+func TestDetectLayouts_NearMissesAreOrdinaryFiles(t *testing.T) {
+	got := DetectLayouts([]string{"demo.parquet", "demo.part1.parquet", "demo.partial.parquet"}, "repo")
+	byProject := map[string]Layout{}
+	for _, l := range got {
+		byProject[l.Project] = l
+	}
+	for _, name := range []string{"demo", "demo.part1", "demo.partial"} {
+		if _, ok := byProject[name]; !ok {
+			t.Errorf("project %q missing from %+v; a near miss must stay an ordinary project file", name, got)
+		}
+	}
+	if shards := byProject["demo"].MetricsShards; len(shards) != 0 {
+		t.Errorf("demo picked up %v as continuation files", shards)
+	}
+}
+
+func TestMetricsShardPath(t *testing.T) {
+	for _, tc := range []struct{ base, want string }{
+		{"demo/metrics.parquet", "demo/metrics.part0001.parquet"},
+		{"myproj.parquet", "myproj.part0001.parquet"},
+		{"demo/metrics.part0001.parquet", "demo/metrics.part0001.part0001.parquet"},
+	} {
+		if got := MetricsShardPath(tc.base, 1); got != tc.want {
+			t.Errorf("MetricsShardPath(%q, 1) = %q, want %q", tc.base, got, tc.want)
+		}
+	}
+	// Five digits once four are not enough: the numbering never has to stop,
+	// and parseMetricsShard accepts four *or more*.
+	if got := MetricsShardPath("m.parquet", 12345); got != "m.part12345.parquet" {
+		t.Errorf("MetricsShardPath(_, 12345) = %q", got)
+	}
+	if _, n, ok := parseMetricsShard("m.part12345"); !ok || n != 12345 {
+		t.Errorf("parseMetricsShard(five digits) = %d, %v", n, ok)
+	}
+}
+
+func TestLayout_MetricsFilesIsBaseThenShards(t *testing.T) {
+	l := Layout{MetricsPath: "a.parquet", MetricsShards: []string{"a.part0001.parquet"}}
+	want := []string{"a.parquet", "a.part0001.parquet"}
+	if got := l.MetricsFiles(); !reflect.DeepEqual(got, want) {
+		t.Errorf("MetricsFiles() = %v, want %v", got, want)
+	}
+	if got := (Layout{}).MetricsFiles(); got != nil {
+		t.Errorf("MetricsFiles() of a project with no metrics = %v, want nil", got)
+	}
+}

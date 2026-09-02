@@ -24,6 +24,8 @@ const ERROR_TYPE_KEYS: Record<string, MessageKey> = {
   not_found: "errors.notFound",
   conflict: "errors.conflict",
   payload_too_large: "errors.payloadTooLarge",
+  unsupported_media_type: "errors.unsupportedMediaType",
+  insufficient_storage: "errors.insufficientStorage",
   internal_error: "errors.internalError",
   repository_archived: "errors.repositoryArchived",
   repo_moved: "errors.repoMoved",
@@ -93,6 +95,12 @@ const DETAIL_KEYS: Record<string, MessageKey> = {
   bad_request: "errors.badRequest",
   forbidden: "errors.forbiddenDetail",
   conflict: "errors.conflictDetail",
+  // `insufficient_storage` is assembled by lfs.quotaMessage, whose whole job
+  // is to tell the person pushing which namespace ran out, what the limit is
+  // and by how much they went over. Dropping that for a flat "out of space"
+  // would leave them with nothing to act on, and the text is built from the
+  // namespace name and three byte counts — nothing server-side leaks through.
+  insufficient_storage: "errors.insufficientStorageDetail",
 };
 
 /**

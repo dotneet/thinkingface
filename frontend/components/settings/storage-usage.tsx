@@ -21,11 +21,19 @@ import type { UsageResponse } from "@/types/api";
  * Keeps only the rows belonging to `namespace`. `/api/v1/usage` answers with
  * every namespace the viewer can see, so an organisation's own storage screen
  * narrows it here rather than asking the API for a slice it does not offer.
+ *
+ * The comparison is case-insensitive, like every other namespace lookup in
+ * this system (`canCreateInNamespace` in lib/namespace.ts, the backend's
+ * `LOWER(name)` matching, and the `/[ns]` route's redirect to the canonical
+ * spelling). An exact match sent /orgs/ACME/settings/storage — a URL that
+ * renders perfectly well — through the filter with nothing left, and the
+ * screen then claimed the organisation had stored nothing (DESIGN.md §9).
  */
 function narrowToNamespace(usage: UsageResponse, namespace: string): UsageResponse {
+  const target = namespace.toLowerCase();
   return {
-    namespaces: usage.namespaces.filter((ns) => ns.namespace === namespace),
-    repos: usage.repos.filter((repo) => repo.namespace === namespace),
+    namespaces: usage.namespaces.filter((ns) => ns.namespace.toLowerCase() === target),
+    repos: usage.repos.filter((repo) => repo.namespace.toLowerCase() === target),
   };
 }
 

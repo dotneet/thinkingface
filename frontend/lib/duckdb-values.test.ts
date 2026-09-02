@@ -4,6 +4,7 @@ import {
   fromJsonish,
   isTemporalHint,
   MAX_INLINE_BYTES,
+  temporalKind,
   toPlainValue,
   toTemporalValue,
 } from "@/lib/duckdb-values";
@@ -101,9 +102,29 @@ describe("isTemporalHint", () => {
     expect(isTemporalHint("Date32<DAY>")).toBe(true);
   });
 
+  it("matches the time-of-day, duration and interval types too", () => {
+    expect(isTemporalHint("Time64<MICROSECOND>")).toBe(true);
+    expect(isTemporalHint("Duration<MICROSECOND>")).toBe(true);
+    expect(isTemporalHint("Interval<DAY_TIME>")).toBe(true);
+  });
+
   it("rejects everything else", () => {
     expect(isTemporalHint("Int64")).toBe(false);
     expect(isTemporalHint(undefined)).toBe(false);
+  });
+});
+
+describe("temporalKind", () => {
+  it("does not read Timestamp as a TIME, though it starts with one", () => {
+    expect(temporalKind("Timestamp<MICROSECOND>")).toBe("datetime");
+    expect(temporalKind("Time64<MICROSECOND>")).toBe("time");
+    expect(temporalKind("Time32<SECOND>")).toBe("time");
+  });
+
+  it("names the duration and interval kinds", () => {
+    expect(temporalKind("Duration<MICROSECOND>")).toBe("duration");
+    expect(temporalKind("Interval<YEAR_MONTH>")).toBe("interval");
+    expect(temporalKind("Utf8")).toBeUndefined();
   });
 });
 
@@ -119,5 +140,32 @@ describe("toTemporalValue", () => {
 
   it("falls back to toPlainValue for values that are not a valid epoch", () => {
     expect(toTemporalValue("not a date")).toBe("not a date");
+  });
+
+  it("reads a TIME as a clock reading rather than a tick count", () => {
+    // CAST('12:34:56' AS TIME) -> 45296000000 microseconds since midnight.
+    expect(toTemporalValue(45296000000, "Time64<MICROSECOND>")).toBe("12:34:56");
+    expect(toTemporalValue(45296n, "Time32<SECOND>")).toBe("12:34:56");
+  });
+
+  it("keeps sub-second precision but trims the trailing zeros", () => {
+    expect(toTemporalValue(500000, "Time64<MICROSECOND>")).toBe("00:00:00.5");
+  });
+
+  it("lets a DURATION run past 24 hours, and signs a negative one", () => {
+    expect(toTemporalValue(93600000000, "Duration<MICROSECOND>")).toBe("26:00:00");
+    expect(toTemporalValue(-3600000000, "Duration<MICROSECOND>")).toBe("-01:00:00");
+  });
+
+  it("reads an INTERVAL from its pair of int32s", () => {
+    // Arrow hands DAY_TIME back as [days, milliseconds].
+    expect(toTemporalValue(new Int32Array([1, 7200000]), "Interval<DAY_TIME>")).toBe("26:00:00");
+    // …and YEAR_MONTH as [years, months], which has no fixed length in seconds.
+    expect(toTemporalValue(new Int32Array([1, 2]), "Interval<YEAR_MONTH>")).toBe("P1Y2M");
+    expect(toTemporalValue(new Int32Array([0, 0]), "Interval<YEAR_MONTH>")).toBe("P0M");
+  });
+
+  it("still reads a hintless value as epoch milliseconds", () => {
+    expect(toTemporalValue(0, "Timestamp<MILLISECOND>")).toBe("1970-01-01T00:00:00.000Z");
   });
 });

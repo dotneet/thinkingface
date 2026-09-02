@@ -221,7 +221,12 @@ function toPlainRow(row: unknown, columns: DataTableColumn[]): DataTableRow {
   const out: DataTableRow = {};
   for (const col of columns) {
     const value = source?.[col.key];
-    out[col.key] = isTemporalHint(col.hint) ? toTemporalValue(value) : toPlainValue(value);
+    // The hint goes in as well as gating the call: TIME, DURATION and INTERVAL
+    // are temporal too, and each is read differently from a TIMESTAMP's epoch
+    // milliseconds (see temporalKind in lib/duckdb-values.ts).
+    out[col.key] = isTemporalHint(col.hint)
+      ? toTemporalValue(value, col.hint)
+      : toPlainValue(value);
   }
   return out;
 }

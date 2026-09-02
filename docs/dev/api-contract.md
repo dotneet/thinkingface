@@ -42,6 +42,19 @@ The confirmed specification between the backend (Go) and frontend (Next.js), and
     `tree/{rev}/{path}` for a path that isn't there). `HfFileSystem.glob` — and so
     `datasets.push_to_hub`, which globs before uploading — depends on this one specifically.
   A 200 never carries either header.
+- **A JSON request body must be typed as JSON, or not typed at all.** Every endpoint that reads
+  its body through `decodeJSON` (`internal/api/errors.go`) — all the Web UI's JSON endpoints, plus
+  the HF-compatible `preupload/{rev}` and `/api/validate-yaml` — answers **415
+  `unsupported_media_type`** (`request body must be JSON; send Content-Type: application/json`) to
+  any `Content-Type` other than `application/json`, a `…+json` subtype, or none at all. **An
+  absent `Content-Type` passes deliberately**: `git`, `curl`, the E2E suite and this repository's
+  own Go tests all send bodies without one, while a browser always sets it — so
+  "no `Content-Type`" identifies a caller no page can steer. What the check refuses is
+  `text/plain` and the two form encodings: a cross-site `<form enctype="text/plain">` is a simple
+  request, fires with no CORS preflight carrying whatever ambient credential the browser holds for
+  this origin, and its body can be shaped to parse as JSON. The routes that decode their bodies by
+  hand check no media type and are unaffected — `paths-info`, the NDJSON `commit/{rev}` and the
+  LFS batch / verify routes.
 - **Security headers attached to every response** (`internal/api.securityHeaders`):
   `X-Content-Type-Options: nosniff` / `X-Frame-Options: DENY` /
   `Referrer-Policy: strict-origin-when-cross-origin`
@@ -384,9 +397,16 @@ type NamespaceProfile = {
   num_members: number             // Organizations only. 0 for a user namespace
   members_visibility: MembersVisibility | ""   // Organizations only. "" for a user namespace
   viewer_role: OrgRole            // "admin" for a site admin and for one's own namespace, "" when not logged in
-  can_edit: boolean               // viewer_role === "admin"
+  can_edit: boolean               // Whether an editor is actually reachable (see below)
 }
 ```
+
+`can_edit` is **not** simply `viewer_role === "admin"`. For `kind: "org"` it is, but for
+`kind: "user"` it is true only for the namespace's own owner: the sole editor of a user profile
+is `PATCH /api/v1/me/profile`, which edits the caller's own namespace and has no
+edit-somebody-else path (`namespace-design.md` §10). So a site admin looking at another user's
+namespace gets `viewer_role: "admin"` with `can_edit: false`, and the UI is right to hide the
+edit affordance there — there is nothing behind it.
 
 | Endpoint | Permission | req | res |
 |---|---|---|---|
@@ -813,15 +833,38 @@ instance that never configures quotas refuses nothing. `effective_quota_bytes` i
 of the two — the override when there is one, otherwise the default, `null` for unlimited — so no
 client has to re-implement that fallback and get the "0 is not an absence" half wrong.
 
-**Enforcement** is in the LFS batch API, the one place that authorises a write into the bucket.
-An `operation: "upload"` batch whose objects total more than what is left refuses **the whole
-batch**, before any transfer URL is minted, with a per-object error carrying code **507**
-(Insufficient Storage) and a message naming the namespace, both sides of the ratio and the
-shortfall. Checking one object at a time would let a hundred-file push land a hundred times the
-remaining allowance; refusing only the objects that do not fit would leave the push half
-transferred and the commit impossible. Objects the bucket already holds are **not** counted — a
-deduplicated hit transfers nothing — and downloads are never gated. Lowering a quota below what
-a namespace already stores deletes nothing; it refuses the next upload.
+**Enforcement is wherever a link is about to be written**, since a namespace is charged for its
+rows in `repo_lfs_objects` — the links `GET /api/v1/usage` sums — and not for the transfer that
+produced them. That is two checks:
+
+- **The LFS batch API**, which decides a whole push before it mints a single transfer URL. An
+  `operation: "upload"` batch whose objects total more than what is left refuses **the whole
+  batch** with a per-object error carrying code **507** (Insufficient Storage) and a message
+  naming the namespace, both sides of the ratio and the shortfall. Checking one object at a time
+  would let a hundred-file push land a hundred times the remaining allowance; refusing only the
+  objects that do not fit would leave the push half transferred and the commit impossible. This
+  is the only check that can answer before a byte moves, which is why it exists.
+- **Publication**, which every upload path runs to link an object: the signed-URL `verify`, the
+  emulator's transfer proxy (`PUT /api/v1/lfs/{repo_id}/{oid}`) and the browser's
+  `POST /api/v1/upload/...`. The last two never pass through the batch API at all, so while the
+  batch check stood alone a namespace pinned at its quota took a 507 on `git push` and then
+  uploaded the same weights through the Web UI's dialog. A refusal here is 507 as well.
+
+**A deduplicated hit is counted**, whenever it is about to earn this repository a link it does not
+already have: it moves no bytes, but usage is the sum over `repo_lfs_objects`, and an oid is
+public — every LFS pointer in every readable repository is one — so exempting dedup exempted not
+"content the namespace already pays for" but "content anybody on the instance ever uploaded". What
+is genuinely free is an object this repository is **already** linked to. Downloads are never
+gated. Lowering a quota below what a namespace already stores deletes nothing; it refuses the next
+upload.
+
+Two known gaps, both deliberate and both documented in `backend/internal/lfs/quota.go`: the check
+reads usage and compares without reserving, so concurrent transfers can overshoot by whatever is
+in flight at once; and `store.LinkLFSObjects` — the syncer's post-push pipeline, which links the
+oids of pointer files pushed as ordinary blobs by a client that never spoke the LFS protocol — is
+a third link writer with no check in front of it, so a namespace at its quota can still inflate
+its accounted usage (no new bytes enter the bucket) by committing a pointer copied out of any
+repository it can read.
 
 Both endpoints are **site administrators only**, for the reason the feature exists: an
 organisation admin able to raise their own ceiling would not be under one. There is deliberately
@@ -1252,9 +1295,13 @@ PATCH /api/v1/repos/{kind}/{ns}/{name}   req RepoUpdateRequest {name?: string, d
 
 Present fields are applied in the order `default_branch`, `description`, `name`, and the response
 describes the repository as it stands afterwards. They are separate writes with no transaction
-spanning them: a request carrying several fields can therefore leave the earlier ones applied if a
-later one fails. Both names are validated before anything is written, so the common case of a bad
-name is refused before the other fields land.
+spanning them — one of them repoints git's `HEAD`, which no database transaction could roll back
+— so every reason the request has to fail is checked up front instead: the new name's syntax, the
+description's length, and whether `{ns}/{new name}` is already taken (409 `conflict`). A request
+that is going to be refused is therefore refused before any of the three writes lands. The
+remaining window is a genuine race — a repository created at the new name after the check and
+before the rename still answers 409 with the earlier fields applied, caught by the store's unique
+constraint.
 
 - **`name`** renames the repository inside the namespace it already lives in. It goes through
   exactly the same path a transfer does (`startTransfer` → `store.TransferRepo`), so everything a
@@ -1311,7 +1358,28 @@ POST   /api/v1/transfers/{id}/accept               → 200 RepoTransferResponse 
 POST   /api/v1/transfers/{id}/reject               → 200 RepoTransferResponse
 ```
 Accept/reject require write permission on the destination namespace; cancel requires write
-permission on the source. A pending transfer expires after 7 days.
+permission on the source. A site admin has write permission everywhere and may therefore decide
+**any** transfer by ID — that is what unsticks a request whose destination has gone unresponsive.
+
+`GET /api/v1/me/transfers` deliberately does **not** follow that rule. It is an inbox, not a list
+of everything the caller is permitted to do: it returns only the pending transfers aimed at
+(`incoming`) or leaving (`outgoing`) a namespace the caller *personally* owns or holds an org
+`admin`/`write` role in. A site admin is therefore shown their own transfers and nothing else,
+and the header's count badge — which counts `incoming` on every page render — means "waiting for
+you" rather than "exists on this server". Answering it with the by-ID permission listed every
+pending transfer on the instance at every admin, each row appearing in `incoming` *and*
+`outgoing` (the same account matches both ends), and left a permanent badge for requests between
+two strangers.
+
+Each side is capped at **200 entries, newest (`created_at`) first**. Nobody controls how many
+requests are aimed at their namespace — any account may file one at any destination — so the
+listing the header runs on every page view is bounded. The cap sits far above any queue a person
+would work through, so the badge is the true count in practice; past it, the 200 newest are
+listed and the badge reads 200. The remainder become visible as those are decided, and expire on
+their own.
+
+A pending transfer expires after 7 days; once it has, it is listed by neither side and the next
+transfer request for that repository takes its place (it does not collide with it).
 If a user without permission calls accept / reject, the response is **404 `not_found`
 (`transfer not found`)**. Returning 403 with the destination namespace name would let someone
 brute-force numeric IDs to enumerate pending destinations, so the response is unified to be
@@ -1846,6 +1914,26 @@ file of exactly 10MiB is `lfs`). Every write path decides this with the same
 `LFSRules.ShouldUseLFS` call — preupload, the Web UI upload endpoint, and the fallback used when a
 repository's own `.gitattributes` cannot be read.
 
+**Request bounds.** All three are checked before the repository's tree is read, and all three are
+**400 `bad_request`**:
+
+- `files` may carry **at most 1000 entries** (`maxPathsInfoPaths`, shared with `paths-info`: the
+  two endpoints are the same shape — one small record and one tree lookup per entry — and the
+  8MiB body limit is no bound on that work, since 8MiB of minimal records is roughly 380k of
+  them).
+- each `path` must be at most **4096 bytes** (`maxPathBytes`, likewise shared).
+- each `path` must pass `gitrepo.ValidatePath` — the same check the commit endpoint runs on every
+  op in its body, so no empty path segment, no `.` or `..` segment, no `.git` component at any
+  depth (matched case-insensitively) and no NUL byte. preupload is the step immediately before the
+  commit, so a path answered happily here and refused there would cost a round trip — and, for an
+  LFS-routed path, a whole transfer — to learn something this could have said first.
+  **This is stricter than `paths-info`**, which takes a trailing slash as a way of naming a
+  directory: `"data/"`, `""` and `"/"` are 400s here, each for having an empty segment. A
+  directory is named without the slash (`"data"`), which is accepted and answered `oid: null`.
+
+The body is read through `decodeJSON`, so the preamble's 415 and the 8MiB `maxBatchBody` 413
+apply as they do to every other JSON endpoint.
+
 `oid` reports the hash of the file *currently* at that path in the repository at `rev`, in
 whichever form matches `uploadMode`, so `huggingface_hub` can tell an unchanged file from a new
 one without transferring it:
@@ -1854,7 +1942,8 @@ one without transferring it:
 - `uploadMode: "lfs"` → the sha256 of the existing file's content (the same value that becomes its
   LFS pointer's `oid`).
 - `null` — the safe default — whenever there is nothing meaningful to compare against: the path
-  does not exist at `rev`, the path is a directory rather than a file, the entry is a symlink
+  does not exist at `rev`, the path names a directory rather than a file (`"data"`; `"data/"` is
+  refused by the path validation above rather than answered), the entry is a symlink
   (whose blob holds the target path, not the bytes the client hashes), or the existing entry's
   storage form doesn't match the freshly computed `uploadMode` (e.g. a path that used to be a
   regular file but would now be routed through LFS, or vice versa).
@@ -2147,6 +2236,11 @@ Limits (constants in `internal/api/upload.go`):
 | `maxUploadInlineTotalBytes` | 128MiB of non-LFS files per request | The per-file limit alone would still allow 64 x 32MiB resident at once. This is the number that actually bounds the handler's memory; LFS parts never contribute to it |
 | `maxUploadFieldBytes` | 8KiB per text field | `message` / `description` / `path` are prose, not payload |
 
+These constants are not the only ceiling. A part routed to LFS is published through
+`lfs.PromoteStagedFrom`, which charges the namespace's storage quota exactly as the LFS batch API
+does ("Namespace storage quotas" above), so a browser upload into a full namespace is refused with
+**507** even when every limit in the table is satisfied. See the table below.
+
 Constraints and status codes:
 
 | Condition | Behavior |
@@ -2156,6 +2250,7 @@ Constraints and status codes:
 | Path validation | Every path goes through `gitrepo.ValidatePath` **before any bytes are stored**: a `..` segment, a `.git` component (case-insensitively, at any depth) or a NUL byte is 400 |
 | Missing directories | Created by the commit itself, here and on `PUT /api/v1/edit/...` alike — a path may name directories that do not exist yet |
 | Over a size limit | **413 `payload_too_large`**, naming the file |
+| Namespace over quota | **507 `insufficient_storage`**, carrying the same sentence the LFS batch API's per-object 507 does: the namespace, both sides of the ratio and the shortfall. 507 rather than 413 because the request is not too large in itself — the account is full — and it is the status a `git push` already gets, so both ways into a repository refuse an over-quota upload identically. Only LFS-routed parts are charged, and the check runs per part at promotion: a refusal on the fourth part aborts the whole request before the commit, so nothing reaches git, and the objects the first three published stay linked but uncommitted until `PruneRepoLFSLinks` releases them |
 | Too many files | 400, naming the limit |
 | `rev` | Branch name only. Passing a commit SHA returns 400; a `rev` that resolves to something other than a branch (a tag, an abbreviated SHA, `HEAD`) returns **409 `conflict`**, as on the commit API and for the same reason — reads resolve a tag before a branch of the same name, so the write would land on a branch nobody reads. A `rev` that resolves to nothing still creates the branch. Defaults to the repository's default branch when omitted |
 | Concurrent push | The commit is rebuilt on the moved head (`retryOnStale`), as for the HF commit API; only exhausted retries surface as 409 `conflict` |
@@ -2696,6 +2791,19 @@ different name already exists) and deletes it from `exp_points`. See `docs/dev/t
   going through `loadRepoForRead`, so it is where that check has to be added the day visibility
   exists. The response carries `X-Content-Type-Options: nosniff` and
   `Content-Disposition: attachment`.
+- **Both of those two exist only for the emulator, and both answer 404 when the storage driver can
+  sign URLs.** `uploadAction` / `downloadAction` mint a proxy href only when it cannot, so on a
+  real GCS deployment no client is ever handed either URL and every legitimate transfer goes
+  straight to the bucket (and `resolve` redirects there rather than here). Left answering anyway,
+  the `PUT` was a write into the bucket that any holder of a write-scoped token could make without
+  ever holding a batch response, and the `GET` was worse: its fallback authorisation asks only
+  that the repository link the oid, and a repository id and an oid are both public, so an
+  anonymous caller could stream whole objects through the API process and turn the signed-URL
+  offload the deployment exists for back into egress and CPU there. The refusal is a 404 like
+  every other refusal on these routes, and the route table does
+  not change shape with the storage driver. `POST .../verify` is deliberately **not** gated: it
+  runs in both modes, because a directly-signed upload still has to be recorded against the
+  repository.
 - `POST /api/v1/lfs/{repo_id}/verify`
 - `POST /{...}.git/info/lfs/objects/verify`
 

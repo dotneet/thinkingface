@@ -318,7 +318,18 @@ func (s *Server) handleCancelTransfer(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleMyTransfers answers GET /api/v1/me/transfers.
+// handleMyTransfers answers GET /api/v1/me/transfers: the pending transfers
+// that are the caller's own to act on -- ones aimed at, or leaving, a
+// namespace they personally own or hold org admin/write in.
+//
+// That is narrower than what handleDecideTransfer below authorises, on
+// purpose. A site admin is RoleAdmin in every namespace (roleIn) and may
+// therefore decide any transfer by id, but this endpoint is an inbox, not a
+// capability list: listing them the whole instance meant every pending
+// transfer appeared here twice (the same account matches both the source and
+// the destination side) and left a permanent count in the header badge for
+// requests between two strangers. store.ListRepoTransfersForUser holds the
+// rule and the reasoning.
 func (s *Server) handleMyTransfers(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.requireUser(w, r)
 	if !ok {
@@ -338,7 +349,12 @@ func (s *Server) handleMyTransfers(w http.ResponseWriter, r *http.Request) {
 // handleAcceptTransfer and handleRejectTransfer answer
 // POST /api/v1/transfers/{id}/accept and .../reject. Both require write
 // access to the destination namespace: its owner, or an org admin/write
-// member (docs/dev/repo-transfer-design.md §5 "accept / reject").
+// member (docs/dev/repo-transfer-design.md §5 "accept / reject") -- and a site
+// admin, whom roleIn answers RoleAdmin for everywhere, which is what lets one
+// unstick a request whose destination has gone unresponsive. They reach such a
+// transfer by its id, from the repository's settings page or an operator's
+// notes; handleMyTransfers deliberately does not list other people's requests
+// at them.
 func (s *Server) handleAcceptTransfer(w http.ResponseWriter, r *http.Request) {
 	s.handleDecideTransfer(w, r, true)
 }

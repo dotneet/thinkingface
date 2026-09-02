@@ -133,6 +133,15 @@ export const org = {
       confirmRemoveTitle: "Remove {username}?",
       confirmRemove:
         "Remove {username} from {org}? They lose membership and the ability to push to its repositories.",
+      changingRole: "Changing…",
+      // A privilege change is confirmed the way the admin screens confirm one:
+      // the trigger here is a <select>, where a stray scroll or a mis-release
+      // would otherwise write a new role with no prompt.
+      confirmRoleTitle: "Change {username}'s role?",
+      confirmRole: "Change {username}'s role in {org} from {from} to {to}.",
+      confirmRoleAdmin:
+        "Admins can add and remove members, change everyone's role, and manage the organization's settings and webhooks.",
+      confirmRoleConfirm: "Change role",
       emptyTitle: "No members",
       emptyDescription: "Add someone by username to give them access.",
       loadFailed: "Failed to load members",

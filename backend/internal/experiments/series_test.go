@@ -79,3 +79,173 @@ func TestDownsample_EmptyInput(t *testing.T) {
 		t.Errorf("downsample(nil) = %v, want empty", got)
 	}
 }
+
+// ------------------------------------------------- the read path's memory bound
+
+// TestSeriesCollector_ThinsRatherThanGrowingWithoutBound is the read half of
+// the bound the write path has always had.
+//
+// Series() used to accumulate every numeric cell of the parquet into
+// collected[run][key] and only then apply max_points, so `GET
+// .../{project}/metrics` -- which needs no authentication -- allocated one
+// [2]float64 per cell of the whole file before it looked at the caller's
+// limit. The fix is not to stop scanning (a chart that stops halfway shows a
+// run that stopped halfway, which is wrong rather than coarse) but to give up
+// resolution as the budget fills.
+func TestSeriesCollector_ThinsRatherThanGrowingWithoutBound(t *testing.T) {
+	restore := maxSeriesScanPoints
+	maxSeriesScanPoints = 64
+	t.Cleanup(func() { maxSeriesScanPoints = restore })
+
+	c := newSeriesCollector(nil, nil)
+	const logged = 5000
+	for i := range logged {
+		c.add("run-1", "loss", float64(i), float64(i)*2)
+	}
+	if c.held > maxSeriesScanPoints {
+		t.Fatalf("held %d pairs, want at most the budget %d", c.held, maxSeriesScanPoints)
+	}
+
+	points := c.series["run-1"]["loss"].finish()
+	// finish() may restore one point past the budget: the true final one.
+	if len(points) > maxSeriesScanPoints+1 {
+		t.Fatalf("kept %d points, want at most %d", len(points), maxSeriesScanPoints+1)
+	}
+	if len(points) < 2 {
+		t.Fatalf("kept %d points, want a usable trace", len(points))
+	}
+	// The endpoints are what downsample() promises the chart, so the thinning
+	// underneath it must not move them.
+	if points[0] != [2]float64{0, 0} {
+		t.Errorf("first point = %v, want the first point logged", points[0])
+	}
+	if want := ([2]float64{logged - 1, (logged - 1) * 2}); points[len(points)-1] != want {
+		t.Errorf("last point = %v, want the last point logged %v", points[len(points)-1], want)
+	}
+	// Order is preserved, because it is what dedupeLastWins resolves ties with.
+	for i := 1; i < len(points); i++ {
+		if points[i][0] <= points[i-1][0] {
+			t.Fatalf("thinning disturbed the collection order at %d: %v then %v", i, points[i-1], points[i])
+		}
+	}
+}
+
+// TestSeriesCollector_ThinsEveryTraceTogether checks that the budget is global
+// rather than per trace: a project with many traces must not multiply the
+// bound by the number of them, and no trace may be starved by the others.
+func TestSeriesCollector_ThinsEveryTraceTogether(t *testing.T) {
+	restore := maxSeriesScanPoints
+	maxSeriesScanPoints = 100
+	t.Cleanup(func() { maxSeriesScanPoints = restore })
+
+	c := newSeriesCollector(nil, nil)
+	for i := range 2000 {
+		c.add("run-1", "loss", float64(i), float64(i))
+		c.add("run-2", "loss", float64(i), float64(i))
+	}
+	if c.held > maxSeriesScanPoints {
+		t.Fatalf("held %d pairs across both traces, want at most %d", c.held, maxSeriesScanPoints)
+	}
+	for _, run := range []string{"run-1", "run-2"} {
+		points := c.series[run]["loss"].finish()
+		if len(points) < 2 {
+			t.Errorf("%s kept %d points; the budget must be shared, not handed to whichever trace got there first", run, len(points))
+		}
+		if points[len(points)-1][0] != 1999 {
+			t.Errorf("%s last point = %v, want the last one logged", run, points[len(points)-1])
+		}
+	}
+}
+
+// TestSeriesCollector_BoundsTheNumberOfTraces covers the other dimension:
+// thinning the points of a million one-point traces would still leave a
+// million map entries.
+func TestSeriesCollector_BoundsTheNumberOfTraces(t *testing.T) {
+	restore := maxSeriesCount
+	maxSeriesCount = 3
+	t.Cleanup(func() { maxSeriesCount = restore })
+
+	c := newSeriesCollector(nil, nil)
+	for i := range 10 {
+		c.add("run-1", string(rune('a'+i)), float64(i), 1)
+	}
+	if c.numSeries != 3 {
+		t.Errorf("traces = %d, want the ceiling %d", c.numSeries, maxSeriesCount)
+	}
+	if c.droppedSeries != 7 {
+		t.Errorf("droppedSeries = %d, want 7 -- a truncated answer has to be visible somewhere", c.droppedSeries)
+	}
+}
+
+// TestSeriesCollector_FiltersBeforeAllocating pins that the run and key
+// filters are applied on the way in. Charting one key of one run must not pay
+// for -- or be thinned by -- every other trace in the file.
+func TestSeriesCollector_FiltersBeforeAllocating(t *testing.T) {
+	c := newSeriesCollector(map[string]bool{"run-1": true}, map[string]bool{"loss": true})
+	c.add("run-1", "loss", 1, 1)
+	c.add("run-1", "accuracy", 1, 1)
+	c.add("run-2", "loss", 1, 1)
+	if c.numSeries != 1 || c.held != 1 {
+		t.Fatalf("traces = %d, held = %d, want 1 and 1", c.numSeries, c.held)
+	}
+	if c.droppedSeries != 0 {
+		t.Errorf("droppedSeries = %d, want 0: a filtered trace was not asked for, so it is not truncation", c.droppedSeries)
+	}
+}
+
+// TestSeries_ThinsRatherThanHoldingEveryRowOfTheFile pins the bound where it
+// is actually reachable: at Series(), over a real parquet, rather than at the
+// collector a test constructed itself.
+//
+// The tests above all drive seriesCollector directly, so every one of them
+// would still pass if Series() went back to accumulating into a plain
+// map[run]map[key][][2]float64 and left the collector unused -- and the older
+// Series() tests, which use a handful of points, would pass too. The bound
+// would be gone with nothing red. This test is the end of the wire: it feeds
+// Series() more rows than the budget and asks whether the answer is thinned.
+func TestSeries_ThinsRatherThanHoldingEveryRowOfTheFile(t *testing.T) {
+	// Below the 1000 points Series() downsamples to by default, so what is
+	// measured here is the scan-time budget and not downsample().
+	restore := maxSeriesScanPoints
+	maxSeriesScanPoints = 8
+	t.Cleanup(func() { maxSeriesScanPoints = restore })
+
+	h := newExpHarness(t)
+	const logged = 200
+	steps := make([]int64, 0, logged)
+	for i := range logged {
+		steps = append(steps, int64(i+1))
+	}
+	projectID := h.ingest("demo", "run-1", "running", steps, "loss")
+
+	// Move them into the parquet and drop the buffer, so the rows come back
+	// through scanParquetSeries -- the half an unauthenticated
+	// `GET .../{project}/metrics` reaches.
+	result := h.flush(projectID, "demo")
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, result.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	got := h.series("demo")
+	if len(got) != 1 {
+		t.Fatalf("series = %#v, want one trace", got)
+	}
+	points := got[0].Points
+	// finish() restores one point past the budget: the true final one.
+	if len(points) > maxSeriesScanPoints+1 {
+		t.Fatalf("Series() returned %d of %d logged points with a budget of %d: the collector's bound "+
+			"is not on the path Series() actually takes", len(points), logged, maxSeriesScanPoints)
+	}
+	if len(points) < 2 {
+		t.Fatalf("Series() returned %d points, want a usable trace", len(points))
+	}
+	// Thinning may not move the endpoints: a chart that stops short shows a
+	// run that stopped short, which is wrong rather than coarse.
+	if want := ([2]float64{1, 0.1}); points[0] != want {
+		t.Errorf("first point = %v, want the first step logged %v", points[0], want)
+	}
+	if points[len(points)-1][0] != float64(logged) {
+		t.Errorf("last point = %v, want step %d, the last one logged", points[len(points)-1], logged)
+	}
+}

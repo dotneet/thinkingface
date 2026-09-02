@@ -68,7 +68,7 @@ export function WebhookRow({
     setEditing((v) => !v);
   }
 
-  async function handleSave(rotateSecret: boolean) {
+  async function handleSave() {
     if (events.size === 0) {
       setError(t("settings.webhooks.selectAtLeastOneEvent"));
       return;
@@ -79,8 +79,28 @@ export function WebhookRow({
       url,
       events: Array.from(events),
       active,
-      rotate_secret: rotateSecret,
     });
+    setSaving(false);
+    if (!result.ok) {
+      setError(errorMessage(t, result));
+      return;
+    }
+    setEditing(false);
+    onChanged();
+  }
+
+  // Rotating replaces the signing secret and nothing else. The request
+  // deliberately carries *only* `rotate_secret`: it used to send the live edit
+  // buffers too, so opening Edit to check the endpoint, starting to retype the
+  // URL, changing your mind and pressing Rotate secret committed the
+  // half-typed URL and sent every later delivery somewhere nobody chose.
+  // Omitted fields are left unchanged by the API (UpdateWebhookRequest), so the
+  // stored URL / events / active state survive untouched and unsaved edits stay
+  // unsaved — which is what the confirmation now says out loud.
+  async function handleRotate() {
+    setSaving(true);
+    setError(null);
+    const result = await updateWebhook(webhook.id, { rotate_secret: true });
     setSaving(false);
     if (!result.ok) {
       setError(errorMessage(t, result));
@@ -88,7 +108,7 @@ export function WebhookRow({
     }
     if (result.data.secret) setRotatedSecret(result.data.secret);
     setConfirmRotateOpen(false);
-    setEditing(rotateSecret); // stay open to show the rotated secret
+    // The panel stays open so the new secret can be copied.
     onChanged();
   }
 
@@ -103,6 +123,15 @@ export function WebhookRow({
     }
     onChanged();
   }
+
+  // Whether the panel's buffers have drifted from what the server holds. Only
+  // used to warn before rotating — the save itself always sends the buffers.
+  const savedEvents = new Set<WebhookEvent>(webhook.events);
+  const hasUnsavedEdits =
+    url !== webhook.url ||
+    active !== webhook.active ||
+    events.size !== savedEvents.size ||
+    Array.from(events).some((e) => !savedEvents.has(e));
 
   async function handleDelete() {
     setDeleting(true);
@@ -223,7 +252,7 @@ export function WebhookRow({
             {t("settings.webhooks.active")}
           </label>
           <div className="flex flex-wrap gap-2">
-            <Button variant="primary" size="sm" disabled={saving} onClick={() => handleSave(false)}>
+            <Button variant="primary" size="sm" disabled={saving} onClick={() => handleSave()}>
               {saving ? t("settings.webhooks.saving") : t("settings.webhooks.save")}
             </Button>
             <Button
@@ -267,10 +296,20 @@ export function WebhookRow({
       <ConfirmDialog
         open={confirmRotateOpen}
         onClose={() => setConfirmRotateOpen(false)}
-        onConfirm={() => handleSave(true)}
+        onConfirm={handleRotate}
         title={t("settings.webhooks.confirmRotateTitle")}
         description={
-          <p className="text-sm text-fg-muted">{t("settings.webhooks.confirmRotate")}</p>
+          <>
+            <p className="text-sm text-fg-muted">{t("settings.webhooks.confirmRotate")}</p>
+            {/* Says out loud what rotating does *not* do, so the edits still
+                sitting in the panel behind this dialog can't be mistaken for
+                part of the action being confirmed. */}
+            {hasUnsavedEdits && (
+              <p className="mt-2 text-sm text-fg-muted">
+                {t("settings.webhooks.confirmRotateUnsaved")}
+              </p>
+            )}
+          </>
         }
         confirmLabel={t("settings.webhooks.rotateSecret")}
         confirmingLabel={t("settings.webhooks.saving")}

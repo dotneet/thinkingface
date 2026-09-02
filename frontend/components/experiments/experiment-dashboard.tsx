@@ -170,6 +170,45 @@ export function ExperimentDashboard({
     },
   });
 
+  // Memoised because RunTable memoises its row context on this object, and a
+  // fresh literal every render made all of it useless: the run list re-reads
+  // itself every 15 seconds while anything is training, so every poll
+  // re-rendered every row.
+  const { mutate: annotateMutate, reset: annotateReset } = annotate;
+  const { reset: removeReset } = remove;
+  const runActions = useMemo(
+    () => ({
+      onEditTags: (run: ExpRun) => {
+        // Drop a failure left over from an archive/baseline click, so the
+        // dialog does not open already showing someone else's error.
+        annotateReset();
+        setTagsFor(run.name);
+      },
+      onToggleArchived: (run: ExpRun) =>
+        annotateMutate({ run: run.name, body: { archived: !run.archived } }),
+      onToggleBaseline: (run: ExpRun) =>
+        annotateMutate({ run: run.name, body: { is_baseline: !run.is_baseline } }),
+      onDelete: (run: ExpRun) => {
+        removeReset();
+        setDeleteFor(run.name);
+      },
+      pendingRun: annotate.isPending
+        ? annotate.variables?.run
+        : remove.isPending
+          ? remove.variables
+          : undefined,
+    }),
+    [
+      annotateMutate,
+      annotateReset,
+      removeReset,
+      annotate.isPending,
+      annotate.variables?.run,
+      remove.isPending,
+      remove.variables,
+    ],
+  );
+
   const { data, isFetching, isPending, isError, error } = useQuery({
     // Keyed through the shared helper, which serializes the run list as JSON:
     // a run literally named `lr=0.1,bs=32` would otherwise collide with the
@@ -202,21 +241,12 @@ export function ExperimentDashboard({
   }
 
   const archivedCount = runs.filter((r) => r.archived).length;
+  const annotateError = annotate.isError
+    ? queryErrorMessage(t, annotate.error, t("experiments.dashboard.updateFailed"))
+    : undefined;
 
   return (
     <div className="flex flex-col gap-6">
-      {annotate.isError && (
-        <Alert tone="negative" title={t("experiments.dashboard.annotateErrorTitle")}>
-          {queryErrorMessage(t, annotate.error, t("experiments.dashboard.updateFailed"))}{" "}
-          {t("experiments.dashboard.writeAccessRequired", { repo: `${ns}/${repo}` })}
-        </Alert>
-      )}
-      {runsFailed && (
-        <Alert tone="warning" title={t("experiments.dashboard.staleTitle")}>
-          {t("experiments.dashboard.staleBody")}
-        </Alert>
-      )}
-
       <RunFilterBar
         filters={filters}
         onChange={setFilters}
@@ -313,31 +343,42 @@ export function ExperimentDashboard({
             runModels={runModels}
             sort={sort}
             onSort={(column: RunSortColumn) => setSort((current) => toggleSort(current, column))}
-            actions={{
-              onEditTags: (run) => setTagsFor(run.name),
-              onToggleArchived: (run) =>
-                annotate.mutate({ run: run.name, body: { archived: !run.archived } }),
-              onToggleBaseline: (run) =>
-                annotate.mutate({ run: run.name, body: { is_baseline: !run.is_baseline } }),
-              onDelete: (run) => {
-                remove.reset();
-                setDeleteFor(run.name);
-              },
-              pendingRun: annotate.isPending
-                ? annotate.variables?.run
-                : remove.isPending
-                  ? remove.variables
-                  : undefined,
-            }}
+            actions={runActions}
           />
         )}
       </div>
+
+      {/* Below the table, never above it (DESIGN.md §8.1). The run row's action
+          cluster is [baseline][tags][archive][delete], so a banner inserted
+          above the rows shifts every one of them down by its own height — and
+          the click right after a failed archive lands on delete. The stale
+          banner follows the same rule: it appears and disappears on its own,
+          on a 15-second poll, under whatever the reader is aiming at. */}
+      {annotateError && !tagsFor && (
+        <Alert tone="negative" title={t("experiments.dashboard.annotateErrorTitle")}>
+          {annotateError}{" "}
+          {t("experiments.dashboard.writeAccessRequired", { repo: `${ns}/${repo}` })}
+        </Alert>
+      )}
+      {runsFailed && (
+        <Alert tone="warning" title={t("experiments.dashboard.staleTitle")}>
+          {t("experiments.dashboard.staleBody")}
+        </Alert>
+      )}
 
       <RunTagsDialog
         run={runs.find((r) => r.name === tagsFor) ?? null}
         open={tagsFor !== null}
         saving={annotate.isPending}
-        onClose={() => setTagsFor(null)}
+        // The dialog reports the failure itself, and the banner above is
+        // suppressed while it is open: two copies read as two failures.
+        error={annotateError}
+        // Ignored while the PATCH is in flight, the same way delete-file-button
+        // guards its dialog: Escape or a backdrop click would otherwise read as
+        // a cancel for a write that is still on its way to the server.
+        onClose={() => {
+          if (!annotate.isPending) setTagsFor(null);
+        }}
         onSave={(run, tags) => annotate.mutate({ run, body: { tags } })}
       />
 
@@ -350,7 +391,11 @@ export function ExperimentDashboard({
             ? queryErrorMessage(t, remove.error, t("experiments.deleteRun.failed"))
             : undefined
         }
-        onClose={() => setDeleteFor(null)}
+        // Dismissing mid-DELETE reads as a cancel while the request keeps
+        // running and still drops the run from the selection on success.
+        onClose={() => {
+          if (!remove.isPending) setDeleteFor(null);
+        }}
         onConfirm={(run) => remove.mutate(run)}
       />
     </div>

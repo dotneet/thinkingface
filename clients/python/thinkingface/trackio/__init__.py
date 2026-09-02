@@ -83,6 +83,8 @@ from __future__ import annotations
 
 import atexit
 import copy
+import math
+import numbers
 import os
 import threading
 import time
@@ -120,12 +122,55 @@ _MAX_METRIC_KEYS = 1000
 # Ceiling on `group=` / `job_type=`, matching the server's own limit on the
 # free-text ingest names (maxIngestNameBytes in internal/api/experiments.go).
 _MAX_GROUPING_BYTES = 256
+# Failures that mean the request body could never be built, as opposed to a
+# request that was built and did not arrive. `requests` serialises `json=` with
+# `allow_nan=False` and turns the resulting ValueError into an InvalidJSONError,
+# and it lets a TypeError from a value json cannot encode at all through
+# untouched -- both happen *before* the socket is touched, so retrying re-raises
+# the identical exception forever. A malformed URL (MissingSchema / InvalidURL,
+# both ValueError subclasses) is in the same category.
+_ENCODE_ERRORS = (requests.exceptions.InvalidJSONError, TypeError, ValueError)
 
 __all__ = ["init", "log", "log_artifact", "log_model", "finish"]
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _is_nonfinite(value: Any) -> bool:
+    """True for a NaN or an infinite metric value.
+
+    Anything that is not a real number (a string, None, a tensor that was
+    never reduced to a scalar) is *not* reported here: those are the server's
+    business, and `integrations._numeric_only` already filters them out on the
+    autolog paths.
+    """
+    if not isinstance(value, numbers.Real):
+        return False
+    try:
+        return not math.isfinite(value)
+    except (TypeError, ValueError, OverflowError):  # an exotic Real
+        return False
+
+
+def _finite_metrics(metrics: Any) -> tuple[dict[str, Any], list[str]]:
+    """Split a metrics mapping into what can be sent and what cannot.
+
+    JSON has no way to spell NaN or +/-inf, and this client sends strict JSON
+    (`json.dumps(..., allow_nan=False)` is what `requests` does), so a single
+    such value makes the whole batch unserialisable. Dropping the value is the
+    only outcome that keeps the rest of the run's metrics flowing, and it
+    matches what `integrations._numeric_only` already does with values the
+    server cannot store.
+
+    Returns the sendable metrics and the names that were dropped.
+    """
+    converted = dict(metrics)
+    dropped = [name for name, value in converted.items() if _is_nonfinite(value)]
+    if not dropped:
+        return converted, []
+    return {name: value for name, value in converted.items() if name not in dropped}, dropped
 
 
 def _check_path_segment(label: str, value: str) -> None:
@@ -213,6 +258,9 @@ class _Run:
         # that pushed it over is still the one in the caller's hand.
         self._metric_keys: set[str] = set()
         self._key_limit_warned = False
+        # Warn once per run about NaN/inf metric values, not once per log()
+        # call: a diverged loss produces one on every single step.
+        self._nonfinite_warned = False
         # Whether the config has ever been sent, and (once it has) a snapshot
         # of exactly what was last sent -- so a later change to `self.config`
         # (e.g. `run.config.update(...)` from ThinkingFaceLightningLogger) is
@@ -318,6 +366,9 @@ class _Run:
         """Append a system-telemetry point at the *current* step, without
         advancing it -- unlike log(), so background sampling never shifts
         the step numbering of the run's own metrics."""
+        sendable, _ = _finite_metrics(metrics)
+        if not sendable:
+            return
         with self._lock:
             if self._finished:
                 return
@@ -325,13 +376,13 @@ class _Run:
                 {
                     "step": self.step,
                     "timestamp": _utc_now_iso(),
-                    "metrics": metrics,
+                    "metrics": sendable,
                 }
             )
             # Counted towards the server's per-run key ceiling like any other
             # name, but never warned about: this set is fixed and small, and
             # the caller did not choose it.
-            self._metric_keys.update(metrics)
+            self._metric_keys.update(sendable)
 
     # -- public API ---------------------------------------------------------
 
@@ -339,19 +390,35 @@ class _Run:
         if self._finished:
             warnings.warn("thinkingface.trackio: log() called after finish(); ignoring.")
             return
+        sendable, nonfinite = _finite_metrics(metrics)
         with self._lock:
             if step is None:
                 step = self.step
             self.step = max(self.step, step) + 1
-            self._buffer.append(
-                {
-                    "step": step,
-                    "timestamp": _utc_now_iso(),
-                    "metrics": dict(metrics),
-                }
-            )
+            # A point whose every value was non-finite carries nothing; the
+            # step still advances, so the next log() lands where it would have.
+            if sendable or not nonfinite:
+                self._buffer.append(
+                    {
+                        "step": step,
+                        "timestamp": _utc_now_iso(),
+                        "metrics": sendable,
+                    }
+                )
             should_flush = len(self._buffer) >= _FLUSH_MAX_POINTS
-            over_key_limit = self._note_metric_keys(metrics)
+            over_key_limit = self._note_metric_keys(sendable)
+            warn_nonfinite = bool(nonfinite) and not self._nonfinite_warned
+            if warn_nonfinite:
+                self._nonfinite_warned = True
+        if warn_nonfinite:
+            warnings.warn(
+                f"thinkingface.trackio: dropping non-finite value(s) for "
+                f"{', '.join(repr(name) for name in nonfinite)} in run {self.name!r}: "
+                "NaN and infinity cannot be represented in JSON, so a point carrying "
+                "one can never be sent. Whatever else the point held was logged as "
+                "usual, and further occurrences in this run are dropped without "
+                "another warning."
+            )
         if over_key_limit:
             warnings.warn(
                 f"thinkingface.trackio: run {self.name!r} has logged more than "
@@ -442,6 +509,42 @@ class _Run:
                 headers=self._headers(),
                 timeout=_REQUEST_TIMEOUT_SECONDS,
             )
+        except _ENCODE_ERRORS as exc:
+            # Nothing was sent and nothing ever will be: this batch is not a
+            # network fault and must never be requeued, or every flush from
+            # here on re-raises it and the run stops delivering metrics.
+            if config is not None:
+                # Either half of the body could be the unencodable one: the
+                # config is the likelier culprit (log() strips NaN/inf from
+                # metrics), but not the only one -- a numpy scalar is finite,
+                # so _finite_metrics passes it through and json chokes on the
+                # points instead. Retry with the points alone and let *that*
+                # call decide which half was at fault; the points are the part
+                # that cannot be reconstructed, so they go first either way.
+                outcome = self._post_points(points, None)
+                if outcome != "sent":
+                    # The points were the bad half (or the send failed for an
+                    # unrelated reason). The config was never transmitted, so
+                    # it stays pending and goes out with the next batch --
+                    # marking it delivered here would silence it forever.
+                    return outcome
+                warnings.warn(
+                    f"thinkingface.trackio: the config for run {self.name!r} cannot be "
+                    f"encoded as JSON ({exc!r}); the points were sent without it."
+                )
+                with self._lock:
+                    # Only now, on a call that really did reach the server:
+                    # treated as delivered so it is not re-encoded on every
+                    # flush; a config that is later changed compares unequal
+                    # again and is retried then.
+                    self._config_sent = True
+                    self._last_sent_config = config
+                return outcome
+            warnings.warn(
+                f"thinkingface.trackio: dropping {len(points)} point(s) for run "
+                f"{self.name!r}: the batch cannot be encoded as JSON ({exc!r})."
+            )
+            return "drop"
         except Exception as exc:  # network failures must never raise
             warnings.warn(
                 f"thinkingface.trackio: failed to send {len(points)} point(s) "

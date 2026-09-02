@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash"
 	"io"
 	"log/slog"
@@ -194,7 +195,7 @@ func (s *Server) handleLFSVerify(w http.ResponseWriter, r *http.Request, kind st
 		return
 	}
 	if err := s.lfs.Verify(r.Context(), repo.ID, req.OID, req.Size); err != nil {
-		writeLFSError(w, http.StatusNotFound, err.Error())
+		writeLFSVerifyError(w, err)
 		return
 	}
 	// writeRawJSON, not writeJSON: the latter sets application/json itself and
@@ -208,12 +209,53 @@ func (s *Server) handleLFSVerify(w http.ResponseWriter, r *http.Request, kind st
 	writeRawJSON(w, http.StatusOK, map[string]any{"oid": req.OID, "size": req.Size})
 }
 
+// maxLFSProxyObjectBytes bounds one object arriving over the transfer proxy.
+//
+// Nothing here can consult a declared length: the LFS transfer protocol PUTs
+// the raw object with no size the server has already agreed to, so the only
+// ceiling available is an explicit one. Without it the handler streamed an
+// unbounded body straight into the bucket -- no MaxBytesReader, no
+// server-wide body cap, and streamingRoute exempts this path from
+// handlerTimeout as well, so a single request could write for as long as it
+// liked.
+//
+// It is the browser upload endpoint's per-file ceiling (maxUploadFileBytes),
+// for the same reason that one was chosen: 10 GiB is past any weights file
+// that travels as one non-resumable HTTP request, and the two write paths
+// having different ideas of "too large" would be a difference nothing could
+// justify to whoever hit it.
+//
+// A var rather than a const only so a test can lower it -- streaming 10 GiB to
+// prove the ceiling exists would cost more than the ceiling is worth. Nothing
+// in the server assigns to it.
+var maxLFSProxyObjectBytes int64 = maxUploadFileBytes
+
 // handleLFSProxyUpload receives object bytes when the storage driver cannot
 // issue signed URLs (the local emulator). It verifies the digest before
 // accepting, so a corrupted transfer never becomes a valid-looking object.
 func (s *Server) handleLFSProxyUpload(w http.ResponseWriter, r *http.Request) {
 	repoID, oid, ok := s.lfsProxyTarget(w, r)
 	if !ok {
+		return
+	}
+	// In signed-URL mode nothing ever hands a client this href: uploadAction
+	// mints a proxy URL only when the driver cannot sign one, so in a real GCS
+	// deployment every legitimate transfer goes straight to the bucket and this
+	// route is reachable but unused. Leaving it answering there anyway meant
+	// any holder of a write-scoped token for any repository could stream
+	// volume into the bucket through an emulator affordance -- and, because the
+	// signature check falls back to s.canWrite, without even holding a batch
+	// response. It is refused rather than left unregistered so the route table
+	// does not change shape with the storage driver, and it is a 404 because
+	// that is what every other refusal on this route answers.
+	//
+	// handleLFSProxyDownload is gated identically, for the same reason in the
+	// other direction. Verify (POST /api/v1/lfs/{repoID}/verify) is
+	// deliberately not gated: it runs in both modes, since a directly-signed
+	// upload still has to be recorded against the repository.
+	if s.storage.SupportsSignedURL() {
+		writeLFSError(w, http.StatusNotFound,
+			"this instance transfers LFS objects directly to object storage; use the upload href from the batch response")
 		return
 	}
 	// A missing repository and an unauthorised one answer identically, so
@@ -254,12 +296,21 @@ func (s *Server) handleLFSProxyUpload(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "buffer upload", err)
 		return
 	}
-	hashReader := newHashingReader(r.Body)
+	// limitedReader rather than http.MaxBytesReader: the cap has to travel back
+	// out through storage.Put as an error this handler can recognise, so an
+	// oversized object is a 413 naming the ceiling rather than a blind 500.
+	hashReader := newHashingReader(&limitedReader{r: r.Body, left: maxLFSProxyObjectBytes})
 	if err := s.storage.Put(r.Context(), stagingKey, hashReader, "application/octet-stream"); err != nil {
 		// Nothing else will ever name this key, so a partial write here is
 		// garbage the moment this request ends. Best effort: `thinkingface gc`
 		// sweeps the staging prefix by age if the delete does not land.
 		_ = s.storage.Delete(r.Context(), stagingKey)
+		if errors.Is(err, errUploadTooLarge) {
+			writeLFSError(w, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("object %s is too large; a single object may be at most %d bytes over this endpoint",
+					oid, maxLFSProxyObjectBytes))
+			return
+		}
 		internalError(w, "buffer upload", err)
 		return
 	}
@@ -273,6 +324,16 @@ func (s *Server) handleLFSProxyUpload(w http.ResponseWriter, r *http.Request) {
 	// Promotion (copy to lfs/{oid}, link, drop the staged object) is shared
 	// with Verify so both upload paths publish objects the same way.
 	if err := s.lfs.PromoteStagedFrom(r.Context(), repoID, oid, size, stagingKey); err != nil {
+		// The staged bytes are this request's alone (the key is random), so a
+		// promotion that did not happen leaves nothing anyone will ever name.
+		// Dropping them now keeps a refusal -- the quota one especially -- from
+		// occupying the bucket until gc's grace period is up.
+		_ = s.storage.Delete(r.Context(), stagingKey)
+		var overQuota *lfs.QuotaExceededError
+		if errors.As(err, &overQuota) {
+			writeLFSError(w, http.StatusInsufficientStorage, overQuota.Error())
+			return
+		}
 		if errors.Is(err, store.ErrLFSObjectGone) || errors.Is(err, lfs.ErrNotStaged) {
 			writeLFSError(w, http.StatusConflict, "object was removed; retry the upload")
 			return
@@ -286,6 +347,25 @@ func (s *Server) handleLFSProxyUpload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLFSProxyDownload(w http.ResponseWriter, r *http.Request) {
 	repoID, oid, ok := s.lfsProxyTarget(w, r)
 	if !ok {
+		return
+	}
+	// Gated exactly as handleLFSProxyUpload is, and for the same reason:
+	// downloadAction mints a proxy href only when the driver cannot sign one,
+	// so in a real GCS deployment no client is ever given this URL -- the
+	// batch response names the bucket, and resolve redirects to it rather than
+	// here. Left answering anyway, it was a worse affordance than the
+	// upload half -- it takes no token at all, since the fallback below asks
+	// only that the repository link the oid, and both repoID and oid are
+	// public -- so an anonymous caller could stream whole objects through this
+	// process, repeatedly and concurrently, converting the signed-URL offload
+	// the deployment exists for back into API egress and CPU.
+	//
+	// The emulator (SupportsSignedURL() == false) is untouched: it is the only
+	// mode in which this href is minted, and the only mode `make up` and the
+	// E2E suite run in.
+	if s.storage.SupportsSignedURL() {
+		writeLFSError(w, http.StatusNotFound,
+			"this instance transfers LFS objects directly from object storage; use the download href from the batch response")
 		return
 	}
 	// The signed href is only ever handed out for an object the batch
@@ -373,11 +453,25 @@ func (s *Server) handleLFSVerifyByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.lfs.Verify(r.Context(), repoID, req.OID, req.Size); err != nil {
-		writeLFSError(w, http.StatusNotFound, err.Error())
+		writeLFSVerifyError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", lfs.ContentType)
 	writeRawJSON(w, http.StatusOK, map[string]any{"oid": req.OID, "size": req.Size})
+}
+
+// writeLFSVerifyError answers a failed verify. Everything lfs.Verify reports is
+// "this object is not there as you described it", which is the 404 git-lfs
+// expects -- except a namespace that has run out of room, which is a 507 and a
+// sentence the operator can act on. Answering that as a 404 would tell the
+// pusher its own upload had vanished.
+func writeLFSVerifyError(w http.ResponseWriter, err error) {
+	var overQuota *lfs.QuotaExceededError
+	if errors.As(err, &overQuota) {
+		writeLFSError(w, http.StatusInsufficientStorage, err.Error())
+		return
+	}
+	writeLFSError(w, http.StatusNotFound, err.Error())
 }
 
 // lfsProxyAuthorized accepts the signature embedded in the href we handed the

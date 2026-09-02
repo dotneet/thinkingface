@@ -24,7 +24,17 @@ export function ValueCell({ value, feature }: { value: unknown; feature?: CellFe
   // previous image's failure.
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
 
-  if (value === null || value === undefined) {
+  // `null` and "this row has no such key" are two different claims, and
+  // collapsing them (both are falsy, both used to print the literal "null")
+  // is exactly DESIGN.md §9. A row that simply does not carry the column —
+  // a jsonl object missing a key, or a page fetched before the column set
+  // caught up — gets the em dash this app uses everywhere for "absent",
+  // while a genuine null still says so. The dash is punctuation, not copy,
+  // so it needs no dictionary entry.
+  if (value === undefined) {
+    return <span className="text-fg-subtle">—</span>;
+  }
+  if (value === null) {
     return <span className="text-fg-subtle">null</span>;
   }
 

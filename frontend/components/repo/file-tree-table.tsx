@@ -107,15 +107,24 @@ export async function FileTreeTable({
                     className="flex items-center gap-2 text-fg after:absolute after:inset-0 after:content-['']"
                   >
                     <EntryIcon entry={entry} />
-                    <span className="truncate">{entry.name}</span>
+                    {/* A long file name is clipped by `truncate` with nothing
+                        to reveal it — the row links to the file, not to its
+                        name — so the full text lives in the tooltip. */}
+                    <span className="truncate" title={entry.name}>
+                      {entry.name}
+                    </span>
                     {entry.lfs && <Badge tone="accent">LFS</Badge>}
                   </Link>
                 </td>
+                {/* `max-w-0` lets this column give its width to the others,
+                    which means the commit message is clipped at almost any
+                    viewport width; the tooltip is the only way to read it. */}
                 <td className="max-w-0 truncate px-3 py-2 text-fg-subtle">
                   {entry.last_commit ? (
                     <Link
                       href={repoCommitsHref(kind, ns, name, rev, entry.path)}
                       className="relative z-10 hover:underline"
+                      title={entry.last_commit.message}
                     >
                       {entry.last_commit.message}
                     </Link>

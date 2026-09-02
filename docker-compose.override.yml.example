@@ -25,7 +25,14 @@ services:
       - ./backend:/src
       - git-data:/data
     environment:
-      CGO_ENABLED: "1"
+      # Matches the image build (backend/Dockerfile builds with
+      # CGO_ENABLED=0) and CLAUDE.md invariant 4: this backend is pure Go --
+      # parquet-go for Parquet, modernc.org/sqlite for SQLite -- and the
+      # builder stage installs no C toolchain. `CGO_ENABLED: "1"` here was a
+      # hard failure rather than a slower build: Go only falls back to
+      # disabling cgo when the variable is *unset*, so an explicit "1" with
+      # no gcc in the image makes `go run` fail outright.
+      CGO_ENABLED: "0"
 
   web:
     build:

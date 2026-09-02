@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/parquet-go/parquet-go"
 	"github.com/parquet-go/parquet-go/encoding/thrift"
 	"github.com/parquet-go/parquet-go/format"
 
@@ -829,4 +830,434 @@ func assertFlushBlocked(t *testing.T, h *expHarness, projectID int64, wantReason
 		return
 	}
 	t.Fatalf("project %d is not listed as blocked (%+v)", projectID, blocked)
+}
+
+// ------------------------------------------------- rotation and column types
+
+// TestFlush_RotatesRatherThanWritingAFileItCannotReadBack is the fix for a
+// wedge this package inflicted on itself.
+//
+// maxExistingFlushRows bounded what a flush would *read* and nothing bounded
+// what it *wrote*, so a flush would cheerfully append its 50,000 points to a
+// file already holding a million. The commit succeeded; every flush after it
+// read the footer, found more rows than it would accept, and blocked the
+// project -- for ever, because nothing shrinks a committed file. The buffered
+// points were kept (blockFlush's deliberate trade), so exp_points for that
+// project then grew with no ceiling and no eviction. A long enough training
+// run wedged its own project simply by continuing to log.
+//
+// Rotation keeps the two halves in step: the flush starts a continuation file
+// and carries on, and every reader follows it (layout.MetricsFiles).
+func TestFlush_RotatesRatherThanWritingAFileItCannotReadBack(t *testing.T) {
+	h := newExpHarness(t)
+
+	// Rather than build a million-row fixture, shrink the bound. Four rows is
+	// above the first batch and below the first batch plus the second, so the
+	// boundary is crossed by an ordinary append.
+	restore := maxExistingFlushRows
+	maxExistingFlushRows = 4
+	t.Cleanup(func() { maxExistingFlushRows = restore })
+
+	projectID := h.ingest("demo", "run-1", "running", []int64{1, 2, 3}, "loss")
+	first := h.flush(projectID, "demo")
+	if first.Path != "demo/metrics.parquet" {
+		t.Fatalf("first flush wrote %q, want the base file", first.Path)
+	}
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, first.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	// 3 rows + 3 points is over the bound, so this one rotates.
+	h.ingest("demo", "run-1", "running", []int64{4, 5, 6}, "loss")
+	second := h.flush(projectID, "demo")
+	if second.Path != "demo/metrics.part0001.parquet" {
+		t.Fatalf("second flush wrote %q, want a continuation file", second.Path)
+	}
+	if second.NumAppended != 3 {
+		t.Errorf("appended = %d, want all 3 points in the new file", second.NumAppended)
+	}
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, second.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	// Nothing was blocked, and nothing was lost: the chart still spans both
+	// files, which is the only reason rotating beats refusing.
+	blocked, err := h.st.ListBlockedFlushProjects(h.ctx)
+	if err != nil {
+		t.Fatalf("list blocked: %v", err)
+	}
+	if len(blocked) != 0 {
+		t.Fatalf("blocked projects after a rotation = %+v, want none", blocked)
+	}
+	got := h.series("demo")
+	if len(got) != 1 || len(got[0].Points) != 6 {
+		t.Fatalf("series after rotation = %#v, want one trace of 6 points", got)
+	}
+	for i, p := range got[0].Points {
+		if want := float64(i+1) / 10; p[1] != want {
+			t.Errorf("point %d = %v, want y=%v", i, p, want)
+		}
+	}
+	// The run index reads the same files, so its counters must agree.
+	if run := h.run("demo", "run-1"); run.NumPoints != 6 || run.LastStep != 6 {
+		t.Errorf("indexed run = num_points %d last_step %d, want 6 and 6", run.NumPoints, run.LastStep)
+	}
+
+	// The continuation file is now the active one: it fills before another is
+	// started, so a rotation costs one extra file and not one per flush.
+	h.ingest("demo", "run-1", "running", []int64{7}, "loss")
+	third := h.flush(projectID, "demo")
+	if third.Path != "demo/metrics.part0001.parquet" {
+		t.Fatalf("third flush wrote %q, want the same continuation file", third.Path)
+	}
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, third.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	// And it rotates again on the same rule.
+	h.ingest("demo", "run-1", "running", []int64{8, 9}, "loss")
+	fourth := h.flush(projectID, "demo")
+	if fourth.Path != "demo/metrics.part0002.parquet" {
+		t.Fatalf("fourth flush wrote %q, want a second continuation file", fourth.Path)
+	}
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, fourth.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+	if got := h.series("demo"); len(got) != 1 || len(got[0].Points) != 9 {
+		t.Fatalf("series across three files = %#v, want one trace of 9 points", got)
+	}
+}
+
+// TestFlush_RotationDoesNotDuplicateAlreadyWrittenPoints covers the crash
+// window across a rotation: the commit lands and the process dies before the
+// exp_points rows are deleted, so the same points are offered again.
+//
+// The rotation carries the ingest ids of the file it read forward for exactly
+// this reason. Without them the retry would count those points as new, rotate
+// again, and write every one of them a second time -- doubling the chart with
+// no way back, since both copies are then committed history.
+func TestFlush_RotationDoesNotDuplicateAlreadyWrittenPoints(t *testing.T) {
+	h := newExpHarness(t)
+	restore := maxExistingFlushRows
+	maxExistingFlushRows = 4
+	t.Cleanup(func() { maxExistingFlushRows = restore })
+
+	projectID := h.ingest("demo", "run-1", "running", []int64{1, 2, 3}, "loss")
+	first := h.flush(projectID, "demo")
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, first.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	h.ingest("demo", "run-1", "running", []int64{4, 5, 6}, "loss")
+	second := h.flush(projectID, "demo")
+	if second.Path != "demo/metrics.part0001.parquet" {
+		t.Fatalf("second flush wrote %q, want a continuation file", second.Path)
+	}
+	// The crash: reindex, but never delete the rows.
+	h.reindex()
+
+	retry := h.flush(projectID, "demo")
+	if retry.NumAppended != 0 {
+		t.Errorf("retry appended %d points, want 0 (they are already in the file)", retry.NumAppended)
+	}
+	if retry.Path != "demo/metrics.part0001.parquet" {
+		t.Errorf("retry wrote %q, want the continuation file it already wrote", retry.Path)
+	}
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, retry.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+	if got := h.series("demo"); len(got) != 1 || len(got[0].Points) != 6 {
+		t.Fatalf("series after the retry = %#v, want one trace of 6 points, not 9", got)
+	}
+}
+
+// deleteFile removes a path from the default branch the way a user can: the
+// Web UI's delete button, huggingface_hub.delete_file, `tf up --delete`.
+func (h *expHarness) deleteFile(path string) {
+	h.t.Helper()
+	gitRepo, err := h.git.Open(h.repo.StoragePath)
+	if err != nil {
+		h.t.Fatalf("open git repo: %v", err)
+	}
+	if _, _, err := gitRepo.Commit(gitrepo.CommitRequest{
+		Branch: h.repo.DefaultBranch, Message: "delete " + path,
+		Author: gitrepo.Signature{Name: "alice", Email: "alice@example.com"},
+		Ops:    []gitrepo.Op{{Kind: gitrepo.OpDelete, Path: path}},
+	}); err != nil {
+		h.t.Fatalf("delete %s: %v", path, err)
+	}
+	h.reindex()
+}
+
+// fileExists reports whether the default branch still carries a path.
+func (h *expHarness) fileExists(path string) bool {
+	h.t.Helper()
+	gitRepo, err := h.git.Open(h.repo.StoragePath)
+	if err != nil {
+		h.t.Fatalf("open git repo: %v", err)
+	}
+	_, _, err = gitRepo.Stat(h.repo.DefaultBranch, path)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, gitrepo.ErrPathNotFound):
+		return false
+	default:
+		h.t.Fatalf("stat %s: %v", path, err)
+		return false
+	}
+}
+
+// TestFlush_ChainStaysInOrderWhenTheBaseFileIsDeleted covers the two ways
+// rotation can turn into silent data loss, which are two halves of one
+// invariant: **part-number order is chronological order.**
+//
+// The files are not this package's to keep -- a user can delete any of them
+// from the Web UI, with huggingface_hub.delete_file, with `tf up --delete`, or
+// by rewriting history -- and the base file is the one whose loss used to
+// break both halves at once:
+//
+//   - Readers dropped a project whose shards had no base, so deleting it hid
+//     rows that were still there (and, if the writer had gone on appending to
+//     the highest shard, would have gone on hiding every point flushed after
+//     it: a black hole with no way to heal).
+//   - Answering that by re-anchoring the writer onto the base put the *newest*
+//     points in the file both readers scan *first*. Series() breaks a tie at
+//     one step by taking the later value in scan order and indexProject
+//     overwrites a run's summary as it goes, so a rotated project whose base
+//     had been deleted reported the chart point and the summary from before
+//     the rotation -- silently, and for good.
+//
+// So the chain is append-only at the writing end and anchored on its oldest
+// *surviving* member at the reading end, and the deleted anchor comes back
+// empty for the sake of the name alone (syncer.looksLikeExperiment).
+func TestFlush_ChainStaysInOrderWhenTheBaseFileIsDeleted(t *testing.T) {
+	h := newExpHarness(t)
+	restore := maxExistingFlushRows
+	maxExistingFlushRows = 4
+	t.Cleanup(func() { maxExistingFlushRows = restore })
+
+	projectID := h.ingest("demo", "run-1", "running", []int64{1, 2, 3}, "loss")
+	first := h.flush(projectID, "demo")
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, first.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	h.ingest("demo", "run-1", "running", []int64{4, 5, 6}, "loss")
+	second := h.flush(projectID, "demo")
+	if second.Path != "demo/metrics.part0001.parquet" {
+		t.Fatalf("second flush wrote %q, want a continuation file", second.Path)
+	}
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, second.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	// The user deletes the base file. Steps 1-3 went with it -- that was their
+	// choice -- but steps 4-6 are in the shard and stay readable: an orphaned
+	// chain is anchored on its lowest surviving part.
+	h.deleteFile("demo/metrics.parquet")
+	if got := h.series("demo"); len(got) != 1 || len(got[0].Points) != 3 {
+		t.Fatalf("series with the base deleted = %#v, want the shard's 3 points", got)
+	}
+
+	// The run resumes and re-logs step 6 with a different value, then goes on
+	// to step 7. Two measurements at one step, both real, and the chart must
+	// show the one logged later (docs/dev/thinkingface-design.md §8).
+	h.ingestPoints("demo", "run-1", []metricPoint{
+		{step: 6, values: map[string]float64{"loss": 9.9}},
+		{step: 7, values: map[string]float64{"loss": 0.7}},
+	})
+	third := h.flush(projectID, "demo")
+	if third.Path == "demo/metrics.parquet" {
+		t.Fatalf("flush after the base was deleted wrote %q: re-anchoring onto the base puts the "+
+			"newest points in the file every reader scans first", third.Path)
+	}
+	if third.Path != "demo/metrics.part0002.parquet" {
+		t.Fatalf("third flush wrote %q, want the next continuation file "+
+			"(part0001 holds 3 of the 4 rows a file may have here)", third.Path)
+	}
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, third.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	// Nothing is stranded: the surviving shard's points and the new ones are
+	// all charted...
+	got := h.series("demo")
+	if len(got) != 1 {
+		t.Fatalf("series after the deletion = %#v, want one trace", got)
+	}
+	var steps []float64
+	for _, p := range got[0].Points {
+		steps = append(steps, p[0])
+	}
+	if want := []float64{4, 5, 6, 7}; !reflect.DeepEqual(steps, want) {
+		t.Fatalf("charted steps = %v, want %v (the shard's points plus the new ones)", steps, want)
+	}
+	// ... and the contested step reads the value logged after the rotation,
+	// not the one from before it.
+	if got[0].Points[2][1] != 9.9 {
+		t.Errorf("charted value at step 6 = %v, want 9.9 (logged after the rotation, not 0.6 from before it)",
+			got[0].Points[2][1])
+	}
+	// The run summary is the same question asked of the indexer: it keeps the
+	// last value it sees, file by file, in the same order.
+	summary, ok := toFloat(h.run("demo", "run-1").Summary["loss"])
+	if !ok || summary != 0.7 {
+		t.Errorf("run summary loss = %v, want 0.7 (the newest file's last row)", h.run("demo", "run-1").Summary["loss"])
+	}
+	// (num_points is not asserted: it only ever grows -- store.UpsertExpRunWith
+	// takes the MAX -- so it still reports the points that existed before the
+	// user deleted three of them, which is a separate question from this one.)
+
+	// The anchor is back, and empty: it exists for syncer.looksLikeExperiment,
+	// which reads "metrics.parquet is in the tree" as "this dataset is an
+	// experiment" and decides whether the project is indexed at all. Holding
+	// rows there instead is what the ordering assertions above forbid.
+	if !h.fileExists("demo/metrics.parquet") {
+		t.Errorf("the chain's anchor was not restored; repo.is_experiment goes false on the next push")
+	}
+
+	// And the chain still only grows: the next rotation must not overwrite a
+	// part that is holding data.
+	h.ingest("demo", "run-1", "running", []int64{8, 9, 10}, "loss")
+	fourth := h.flush(projectID, "demo")
+	if fourth.Path != "demo/metrics.part0003.parquet" {
+		t.Fatalf("fourth flush wrote %q, want a fresh continuation file "+
+			"(part0001 and part0002 still hold data)", fourth.Path)
+	}
+}
+
+// TestFlush_BlocksAFileWithAColumnItCannotRewrite covers the third condition
+// routed to blockFlush, and the reason it had to be.
+//
+// A pushed metrics.parquet holding a repeated column, a nested group, an
+// unannotated BYTE_ARRAY or an unknown logical type makes columnFromSchema
+// refuse the file. That error used to fall through to the plain error return,
+// which leaves the project unmarked -- so the poller picked it up again ten
+// seconds later, for ever, *and* it held a permanent slot at the front of
+// ListPendingFlushProjects' oldest-unflushed-point ordering, starving the
+// other ninety-nine projects in the window. That starvation is the exact thing
+// blockFlush exists to stop.
+//
+// It is not rotated past, unlike the row bound: the file may hold ingest ids
+// that could not be read, so writing its points into a sibling could double
+// them, and an operator pushed this file by hand and should be told.
+func TestFlush_BlocksAFileWithAColumnItCannotRewrite(t *testing.T) {
+	h := newExpHarness(t)
+	// A BYTE_ARRAY with no STRING annotation: the viewer hands those back
+	// base64-encoded, so rewriting one would change its bytes.
+	h.commitParquet("demo.parquet",
+		[]flushColumn{
+			stringColumn("run_name", false),
+			int64Column("step"),
+			{name: "blob", kind: colString, node: parquet.Leaf(parquet.ByteArrayType), optional: true},
+		},
+		[]map[string]any{{"run_name": "run-1", "step": int64(1), "blob": "x"}})
+
+	projectID := h.ingest("demo", "run-1", "running", []int64{2, 3}, "loss")
+	result, err := h.flusher.Flush(h.ctx, h.repo, projectID, "demo")
+	if !errors.Is(err, ErrFlushBlocked) {
+		t.Fatalf("flush error = %v, want ErrFlushBlocked", err)
+	}
+	if result != nil {
+		t.Fatalf("flush committed %+v, want nothing", result)
+	}
+	if n := h.pointCount(projectID); n != 2 {
+		t.Errorf("buffered points after a blocked flush = %d, want both kept", n)
+	}
+	assertFlushBlocked(t, h, projectID, "unannotated BYTE_ARRAY is not supported")
+}
+
+// TestMergePoints_WidensAnIntegerColumnForAFractionalValue pins the type
+// promotion. The existing file decides a column's type, which is right until
+// the values change shape: a trackio export that wrote `epoch` as an integer
+// typed the column INT64, and a later trackio.log({"epoch": 3.5}) went through
+// toInt and was stored as 3 -- charted as 3, summarised as 3, with nothing
+// anywhere recording that a value had been altered.
+func TestMergePoints_WidensAnIntegerColumnForAFractionalValue(t *testing.T) {
+	existing := &existingTable{
+		columns: []flushColumn{
+			stringColumn("run_name", false),
+			int64Column("step"),
+			int64Column("epoch"),
+			int64Column("tokens"),
+		},
+		rows:      []map[string]any{{"run_name": "run-1", "step": int64(1), "epoch": int64(1), "tokens": int64(10)}},
+		ingestIDs: map[int64]bool{},
+	}
+	points := []store.PendingPoint{{
+		ID: 7, RunName: "run-1", Step: 2, TS: time.Now(),
+		Metrics: map[string]float64{"epoch": 3.5, "tokens": 20},
+	}}
+
+	columns, rows, appended := mergePoints(existing, points)
+	if appended != 1 || len(rows) != 2 {
+		t.Fatalf("appended = %d, rows = %d, want 1 and 2", appended, len(rows))
+	}
+	byName := map[string]flushColumn{}
+	for _, c := range columns {
+		byName[c.name] = c
+	}
+	if got := byName["epoch"].kind; got != colDouble {
+		t.Errorf("epoch column kind = %v, want colDouble: 3.5 does not fit an integer column", got)
+	}
+	// A metric whose values still fit keeps the type the file gave it.
+	if got := byName["tokens"].kind; got != colInt64 {
+		t.Errorf("tokens column kind = %v, want colInt64: 20 loses nothing as an integer", got)
+	}
+	// Structural columns are not metrics and are never widened; readers use
+	// step as an int64.
+	if got := byName["step"].kind; got != colInt64 {
+		t.Errorf("step column kind = %v, want colInt64", got)
+	}
+}
+
+// TestFlush_FractionalValueSurvivesAnIntegerTypedColumn is the same promotion
+// end to end: a route-A export types the column, route B logs a fraction into
+// it, and the value that comes back out of the parquet is the one that was
+// logged.
+func TestFlush_FractionalValueSurvivesAnIntegerTypedColumn(t *testing.T) {
+	h := newExpHarness(t)
+	h.commitParquet("demo.parquet",
+		[]flushColumn{
+			stringColumn("run_name", false),
+			int64Column("step"),
+			stringColumn("timestamp", true),
+			int64Column("epoch"),
+		},
+		[]map[string]any{
+			{"run_name": "run-1", "step": int64(1), "timestamp": "2026-08-22T00:00:00Z", "epoch": int64(1)},
+		})
+
+	// The harness logs {key: step/10}, so step 3 is an epoch of 0.3.
+	projectID := h.ingest("demo", "run-1", "running", []int64{3}, "epoch")
+	result := h.flush(projectID, "demo")
+	if result.Path != "demo.parquet" {
+		t.Fatalf("flush wrote %q, want the file route A created", result.Path)
+	}
+	h.reindex()
+	// Deleted, so what the chart shows can only have come out of the parquet.
+	if err := h.st.DeletePoints(h.ctx, result.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	got := h.series("demo")
+	if len(got) != 1 || len(got[0].Points) != 2 {
+		t.Fatalf("series = %#v, want one trace of 2 points", got)
+	}
+	if got[0].Points[1][1] != 0.3 {
+		t.Errorf("epoch at step 3 = %v, want 0.3 (an integer column truncated it to 0)", got[0].Points[1][1])
+	}
+	if run := h.run("demo", "run-1"); run.Summary["epoch"] != 0.3 {
+		t.Errorf("summary epoch = %v, want 0.3", run.Summary["epoch"])
+	}
 }

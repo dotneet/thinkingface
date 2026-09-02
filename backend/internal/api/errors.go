@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net/http"
+	"strings"
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
@@ -35,11 +37,46 @@ const (
 	maxIngestBody = 32 << 20
 )
 
+// jsonContentType reports whether a body may be read as JSON.
+//
+// An absent Content-Type passes, and has to: `git`, `curl`, the e2e suite and
+// this repository's own Go tests all send bodies without one, and a browser
+// never does -- every form submission and every fetch with a body sets the
+// header, so "no Content-Type at all" identifies a caller no page can steer.
+//
+// What must not pass is text/plain (and the other two form encodings). A
+// cross-site `<form enctype="text/plain">` is a "simple request": it fires
+// with no CORS preflight, carrying whatever ambient credential the browser
+// holds for this origin, and its body can be shaped to parse as JSON. Reading
+// any Content-Type therefore made every decodeJSON endpoint -- POST
+// /api/v1/repos and POST /api/v1/tokens among them -- reachable from a
+// hostile page. Insisting on a type no form can produce closes that without
+// asking anything of a real client, since every one of them already sends
+// application/json.
+func jsonContentType(r *http.Request) bool {
+	raw := r.Header.Get("Content-Type")
+	if raw == "" {
+		return true
+	}
+	base, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return false
+	}
+	base = strings.ToLower(base)
+	return base == "application/json" || strings.HasSuffix(base, "+json")
+}
+
 // decodeJSON reads a bounded JSON body into v, writing the error response
-// itself when the body is oversized or malformed. badMsg is the message shown
-// for a body that will not parse; the decoder's own text is never echoed, so a
-// malformed request cannot reflect server-side detail back to the caller.
+// itself when the body is oversized, wrongly typed or malformed. badMsg is the
+// message shown for a body that will not parse; the decoder's own text is
+// never echoed, so a malformed request cannot reflect server-side detail back
+// to the caller.
 func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, v any, badMsg string) bool {
+	if !jsonContentType(r) {
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type",
+			"request body must be JSON; send Content-Type: application/json")
+		return false
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
 		var tooLarge *http.MaxBytesError

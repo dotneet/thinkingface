@@ -141,7 +141,9 @@ describe("metricSeriesCsv", () => {
   });
 
   it("names the x column after the axis the chart was plotting", () => {
-    expect(rows(metricSeriesCsv(series, true))[0]?.[2]).toBe("timestamp_ms");
+    // Epoch *seconds*, not milliseconds: the API divides UnixMilli by 1000 for
+    // uPlot, and the header has to say so or `unit="ms"` lands in 1970.
+    expect(rows(metricSeriesCsv(series, true))[0]?.[2]).toBe("timestamp_s");
   });
 
   it("keeps runs with different axis lengths side by side without inventing points", () => {

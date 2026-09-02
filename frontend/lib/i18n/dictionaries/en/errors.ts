@@ -33,6 +33,9 @@ export const errors = {
   // DETAIL_KEYS in lib/api-error-message.ts.
   conflictDetail: "Conflict: {detail}",
   payloadTooLarge: "The request is too large.",
+  unsupportedMediaType: "The server could not read the format this request was sent in.",
+  insufficientStorage: "This namespace has no room left for this upload.",
+  insufficientStorageDetail: "Not enough storage: {detail}",
   internalError: "Something went wrong on the server. Try again in a moment.",
   repositoryArchived:
     "This repository is archived and read-only. Unarchive it in the repository settings to make changes.",

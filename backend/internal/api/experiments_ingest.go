@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -32,9 +33,19 @@ import (
 )
 
 type ingestPoint struct {
-	Step      int64              `json:"step"`
-	Timestamp string             `json:"timestamp"`
-	Metrics   map[string]float64 `json:"metrics"`
+	Step      int64  `json:"step"`
+	Timestamp string `json:"timestamp"`
+	// Metrics values are pointers so that a JSON null arrives as one.
+	//
+	// As map[string]float64 the decoder left the zero value in place, so
+	// `{"metrics": {"loss": null}}` recorded a real measurement of 0.0 -- a
+	// number nobody logged, indistinguishable in the chart, in the summary and
+	// in the parquet from a loss that genuinely reached zero. The Python shim
+	// filters non-numeric values before it posts, so the wire shape this
+	// restores is the one clients already send; what changes is what a
+	// hand-rolled poster (or a client serialising a NaN as null, which is what
+	// the JSON encoders that do not refuse it produce) is able to store.
+	Metrics map[string]*float64 `json:"metrics"`
 }
 
 const (
@@ -96,7 +107,7 @@ func validateIngestMetricName(name string) error {
 
 // validateIngestProject is validateIngestName plus the check that the project
 // can actually become a directory in the repository. The flush writes
-// "{project}/metrics.parquet" (experiments.Flusher.metricsPath), and Commit
+// "{project}/metrics.parquet" (experiments.Flusher.resolveMetricsTarget), and Commit
 // refuses a ".", ".." or ".git" segment -- so a project named ".git" would be
 // accepted here, buffered in exp_points, and then fail every flush forever.
 // This is the same guard safeRunArtifactDir applies to an artifact path, moved
@@ -230,15 +241,38 @@ func buildRunPoints(w http.ResponseWriter, raw []ingestPoint) (runBatch, bool) {
 		if p.Step > batch.lastStep {
 			batch.lastStep = p.Step
 		}
+		metrics := make(map[string]float64, len(p.Metrics))
 		for k, v := range p.Metrics {
 			if err := validateIngestMetricName(k); err != nil {
 				badRequest(w, "metric name "+strconv.Quote(k)+" "+err.Error())
 				return runBatch{}, false
 			}
+			// A null is "this step logged nothing for this metric", which is
+			// what the Python client means when it drops a non-numeric value.
+			// Skipping it is the only answer that does not invent data: the
+			// alternative the pointer replaced recorded 0.0, and refusing the
+			// whole batch would lose the metrics that *were* logged alongside
+			// it.
+			if v == nil {
+				continue
+			}
+			// NaN and +-Inf cannot be encoded as JSON, so a value that reached
+			// the store would come back out of every read path as an
+			// encoding/json error -- the run list, the summary, the metrics
+			// endpoint -- turning one bad point into a 500 for the whole
+			// project. encoding/json will not decode the bare `NaN` literal
+			// either, so this is unreachable through an ordinary request body;
+			// it is here because the cost of being wrong about that is a
+			// permanently unreadable project, and the check is one comparison.
+			if math.IsNaN(*v) || math.IsInf(*v, 0) {
+				badRequest(w, "metric "+strconv.Quote(k)+" must be a finite number")
+				return runBatch{}, false
+			}
 			batch.keys[k] = true
-			batch.summary[k] = v
+			batch.summary[k] = *v
+			metrics[k] = *v
 		}
-		batch.points = append(batch.points, store.MetricPoint{Step: p.Step, TS: ts, Metrics: p.Metrics})
+		batch.points = append(batch.points, store.MetricPoint{Step: p.Step, TS: ts, Metrics: metrics})
 	}
 	// The metric-name cap is deliberately not checked here: it is a ceiling on
 	// the run rather than on the request, so it needs the names already stored
@@ -260,16 +294,40 @@ type runState struct {
 // That is what lets mergeRunState refuse a batch below without leaving an
 // empty project row behind, exactly like a batch refused for a bad name or an
 // unknown status.
-func (s *Server) loadRunState(ctx context.Context, repoID int64, project, run string) runState {
+//
+// It reports "there is no such project/run" as a zero runState and *anything
+// else* as an error, and the distinction is the same one indexedRunStatus
+// draws on the indexer path -- for the same reason, because the same class of
+// failure is destructive here. Both reads used to collapse every error into
+// the zero value, and the zero value is not a neutral answer: mergeRunState
+// merges the batch onto it, and the upsert then replaces metric_keys and
+// summary wholesale. One statement timeout while a run logged {"loss": ...}
+// truncated metric_keys to ["loss"] and emptied the summary of every other
+// metric the run had ever recorded -- permanently, unless a later batch
+// happened to mention them again. The status went with it, so a run already
+// finished looked new and fired run.finished a second time.
+//
+// Failing the request instead is the conservative answer: the client retries
+// (the shim buffers and re-posts), and nothing is overwritten from a read that
+// did not happen.
+func (s *Server) loadRunState(ctx context.Context, repoID int64, project, run string) (runState, error) {
 	proj, err := s.store.GetExpProject(ctx, repoID, project)
-	if err != nil {
-		return runState{}
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		// Nothing has ever been ingested into this project: there is no state
+		// to preserve, and the upsert below will create it.
+		return runState{}, nil
+	case err != nil:
+		return runState{}, fmt.Errorf("read experiment project %q: %w", project, err)
 	}
 	existing, err := s.store.GetExpRun(ctx, proj.ID, run)
-	if err != nil {
-		return runState{}
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return runState{}, nil
+	case err != nil:
+		return runState{}, fmt.Errorf("read experiment run %q: %w", run, err)
 	}
-	return runState{keys: existing.MetricKeys, summary: existing.Summary, status: existing.Status}
+	return runState{keys: existing.MetricKeys, summary: existing.Summary, status: existing.Status}, nil
 }
 
 // mergeRunState folds a batch onto whatever the run already holds, and applies
@@ -371,7 +429,11 @@ func (s *Server) handleExperimentLog(w http.ResponseWriter, r *http.Request) {
 	// long-running run logs at that terminal status. A run this read cannot
 	// find has prevStatus "", which is not a valid status, so the first write
 	// is always a transition.
-	stored := s.loadRunState(ctx, repo.ID, id.project, id.run)
+	stored, err := s.loadRunState(ctx, repo.ID, id.project, id.run)
+	if err != nil {
+		internalError(w, "read experiment run state", err)
+		return
+	}
 	prevStatus := stored.status
 	keys, summary, ok := mergeRunState(w, id.run, stored, batch)
 	if !ok {
@@ -473,9 +535,18 @@ func (s *Server) handleExperimentFinish(w http.ResponseWriter, r *http.Request) 
 		internalError(w, "upsert experiment project", err)
 		return
 	}
+	// The same distinction loadRunState draws, for the same reason: a failed
+	// read must not be reported as "this run is new". It would re-fire
+	// run.finished for a run that was already finished, which is a duplicate
+	// delivery to every subscriber -- and a retried finish call is exactly
+	// when this read is most likely to be under load.
 	prevStatus := ""
-	if existing, err := s.store.GetExpRun(ctx, projectID, id.run); err == nil {
+	switch existing, err := s.store.GetExpRun(ctx, projectID, id.run); {
+	case err == nil:
 		prevStatus = existing.Status
+	case !errors.Is(err, store.ErrNotFound):
+		internalError(w, "read experiment run", err)
+		return
 	}
 	if _, err := s.store.UpsertExpRunWith(ctx, projectID, store.ExpRunUpsert{
 		Name: id.run, Status: id.status, Group: id.group, JobType: id.jobType,

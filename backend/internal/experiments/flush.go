@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/go-git/go-git/v5/plumbing"
@@ -42,18 +43,40 @@ const MaxFlushPoints = 50000
 // several-hundred-megabyte flush: high enough that no realistic training run
 // reaches it, low enough to survive.
 //
+// **The bound applies to what a flush writes as well as to what it reads.**
+// It did not, once, and the two halves disagreeing was worse than either
+// limit: a flush would happily append 50,000 rows to a file already holding a
+// million, the commit would succeed, and every flush after that read the
+// footer, found more rows than it would accept, and blocked the project --
+// permanently, since nothing shrinks a committed file. A long run crossing the
+// line wedged its own project forever. maybeRotate is what keeps the two in
+// step: rather than write a file it will refuse to read, a flush starts a
+// continuation file (layout.MetricsShards) and carries on.
+//
 // It is a var only so the tests can lower it; nothing changes it at runtime.
 //
 // TODO: the permanent fix is to append a row group to the existing file
-// instead of rebuilding it, which would need neither cap. That is a rewrite of
-// the writer (parquetwrite.go) and of the LFS blob handling around it, so it
-// is deliberately not attempted here.
+// instead of rebuilding it, which would need neither cap nor rotation. That is
+// a rewrite of the writer (parquetwrite.go) and of the LFS blob handling
+// around it, so it is deliberately not attempted here.
 var maxExistingFlushRows int64 = 1_000_000
+
+// maxMetricsShards bounds how far this package will look for -- or create --
+// continuation files. Each one holds up to maxExistingFlushRows rows, so the
+// ceiling is a project of ten billion points; what it really guards is the
+// probe loop in resolveMetricsTarget, which walks the numbers in order and
+// must terminate even if the tree is somehow full of them.
+const maxMetricsShards = 10_000
 
 // tooManyExistingRowsError reports a metrics parquet this package cannot
 // rebuild within its memory budget. Like unsupportedColumnError it describes a
-// file, not a transient failure -- see abandonPoints for what happens to the
+// file, not a transient failure -- see blockFlush for what happens to the
 // buffered points.
+//
+// It is only ever raised for a file this package did not write: rotation keeps
+// its own output under the bound, so reaching this means an oversized parquet
+// was pushed into the repository by hand (or that maxExistingFlushRows was
+// lowered under a file that already existed).
 type tooManyExistingRowsError struct {
 	Path string
 	// NumRows is what the file's footer declared, or -1 when the count came
@@ -143,7 +166,7 @@ func (f *Flusher) Flush(ctx context.Context, repo *store.Repo, projectID int64, 
 
 	// Authoritative mode serves reads from the WAL, so the local copy has to
 	// be current before its tree is read or extended.
-	if err := f.git.EnsureLocal(ctx, repo.StoragePath); err != nil {
+	if err := f.git.EnsureLocalWithDefaultBranch(ctx, repo.StoragePath, repo.DefaultBranch); err != nil {
 		return nil, err
 	}
 	gitRepo, err := f.git.Open(repo.StoragePath)
@@ -152,7 +175,7 @@ func (f *Flusher) Flush(ctx context.Context, repo *store.Repo, projectID int64, 
 	}
 
 	ref := FlushRef(repo)
-	path, err := f.metricsPath(ctx, repo, project)
+	target, err := f.resolveMetricsTarget(ctx, repo, gitRepo, ref, project)
 	if err != nil {
 		return nil, err
 	}
@@ -161,17 +184,47 @@ func (f *Flusher) Flush(ctx context.Context, repo *store.Repo, projectID int64, 
 	// than failing at the end of every tick from now on. Ingest rejects such a
 	// name today (api.validateIngestProject); this is for the rows an older
 	// build already accepted.
-	if perr := gitrepo.ValidatePath(path); perr != nil {
+	if perr := gitrepo.ValidatePath(target.active); perr != nil {
 		return nil, f.blockFlush(ctx, projectID, project, points, perr)
 	}
 
+	path := target.active
 	existing, baseOID, err := f.readExisting(ctx, repo, gitRepo, ref, path)
 	if err != nil {
+		// Two shapes of file this package cannot rebuild, and neither gets
+		// better by being retried: one holds more rows than a rebuild can
+		// hold, the other a column the writer cannot reproduce (a list, a
+		// nested group, an unannotated BYTE_ARRAY). Both were pushed by hand
+		// -- rotation keeps this package's own output clear of the first, and
+		// it never writes the second -- so the answer is to mark the project
+		// and tell the operator, not to append somewhere else: the file may
+		// well hold ingest ids we could not read, and writing its points again
+		// into a sibling would double them on the chart.
 		var tooMany *tooManyExistingRowsError
-		if errors.As(err, &tooMany) {
+		var unsupported *unsupportedColumnError
+		if errors.As(err, &tooMany) || errors.As(err, &unsupported) {
 			return nil, f.blockFlush(ctx, projectID, project, points, err)
 		}
 		return nil, err
+	}
+
+	// Rotating *before* the merge is the whole point: the file this flush is
+	// about to write has to be one the next flush can read back.
+	if rotated, ok := maybeRotate(existing, points, target); ok {
+		slog.Info("rotating an experiment project's metrics parquet: appending would exceed the rebuild bound",
+			"project", project, "project_id", projectID, "from", path, "to", rotated,
+			"existing_rows", len(existing.rows), "max_rows", maxExistingFlushRows)
+		path = rotated
+		// The ingest ids survive the rotation and the rows do not. Keeping the
+		// ids is what stops a flush that committed and then died from writing
+		// its points a second time into the new file; dropping the rows (and
+		// with them the old file's column descriptions) is what makes the new
+		// file small, which is the reason to rotate at all.
+		existing = &existingTable{ingestIDs: existing.ingestIDs}
+		// A file that does not exist yet: the commit's precondition becomes
+		// "absent", so a concurrent flush that got there first loses the race
+		// instead of overwriting it.
+		baseOID = ""
 	}
 
 	columns, rows, appended := mergePoints(existing, points)
@@ -185,15 +238,37 @@ func (f *Flusher) Flush(ctx context.Context, repo *store.Repo, projectID int64, 
 		return nil, err
 	}
 
+	ops := []gitrepo.Op{{Kind: gitrepo.OpAdd, Path: path, Data: blob}}
+	// The optimistic lock is evaluated against the parent commit under the
+	// mutex that picks it, so a push landing between readExisting and here
+	// loses the race instead of being silently overwritten.
+	preconditions := []gitrepo.PathPrecondition{{Path: path, OID: baseOID}}
+	if !target.baseExists && path != target.base {
+		// The points went into a continuation file, and the base file the
+		// chain is named after is gone -- deleted by whoever owns the
+		// repository. The rows do not need it back (DetectLayouts anchors on
+		// the oldest surviving file), but two name-based signals do:
+		// syncer.looksLikeExperiment reads "metrics.parquet is in the tree" as
+		// "this dataset is an experiment", and repo.is_experiment is
+		// recomputed from it on every push -- so without the file a project
+		// whose card carries no trackio tag stops being indexed at all, while
+		// its flushes go on succeeding. Restoring it *empty* is what keeps the
+		// chain append-only: putting the points here instead would make the
+		// file both readers scan first the one holding the newest rows.
+		anchor, err := f.emptyMetricsBlob(ctx, gitRepo, repo, ref, target.base)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, gitrepo.Op{Kind: gitrepo.OpAdd, Path: target.base, Data: anchor})
+		preconditions = append(preconditions, gitrepo.PathPrecondition{Path: target.base, OID: ""})
+	}
+
 	newHash, oldHash, err := f.commit(ctx, repo, gitrepo.CommitRequest{
-		Branch:  ref,
-		Message: fmt.Sprintf("chore(trackio): flush %s metrics", project),
-		Author:  gitrepo.Signature{Name: flushAuthor.Name, Email: flushAuthor.Email, When: time.Now()},
-		Ops:     []gitrepo.Op{{Kind: gitrepo.OpAdd, Path: path, Data: blob}},
-		// The optimistic lock is evaluated against the parent commit under the
-		// mutex that picks it, so a push landing between readExisting and here
-		// loses the race instead of being silently overwritten.
-		Preconditions: []gitrepo.PathPrecondition{{Path: path, OID: baseOID}},
+		Branch:        ref,
+		Message:       fmt.Sprintf("chore(trackio): flush %s metrics", project),
+		Author:        gitrepo.Signature{Name: flushAuthor.Name, Email: flushAuthor.Email, When: time.Now()},
+		Ops:           ops,
+		Preconditions: preconditions,
 	})
 	if err != nil {
 		return nil, err
@@ -229,9 +304,19 @@ var ErrFlushBlocked = errors.New("experiments: this project's metrics cannot be 
 // blockFlush marks the project as unflushable and returns why, wrapped in
 // ErrFlushBlocked.
 //
-// The two conditions routed here -- a project name no path can hold, and a
-// metrics file too large to rebuild in memory -- are properties of the
-// repository, not of this attempt: nothing about the next tick is different.
+// The three conditions routed here -- a project name no path can hold, a
+// metrics file too large to rebuild in memory, and one holding a column this
+// package's writer cannot reproduce (unsupportedColumnError: a repeated
+// column, a nested group, an unannotated BYTE_ARRAY, an unsupported logical
+// type) -- are properties of the repository, not of this attempt: nothing
+// about the next tick is different.
+//
+// The third of those used to fall through to the plain error return, and the
+// difference mattered: an unmarked project is picked up again on the next
+// tick, so a single pushed metrics.parquet with a list column made one project
+// fail every ten seconds for ever *and* hold a permanent slot at the front of
+// ListPendingFlushProjects' oldest-first window -- starving the other
+// ninety-nine, which is precisely what this function exists to prevent.
 // What made retrying forever intolerable was that the damage did not stay
 // inside the one project: the poller takes its candidates from
 // ListPendingFlushProjects, which takes the hundred projects whose oldest
@@ -274,25 +359,162 @@ func (f *Flusher) blockFlush(ctx context.Context, projectID int64, project strin
 	return fmt.Errorf("%w: %w", ErrFlushBlocked, reason)
 }
 
-// metricsPath picks the file this project's points belong in: the metrics
-// parquet the repository already carries for it (so route A and route B share
-// one file, which is the whole point of §8), or `{project}/metrics.parquet`
-// for a project that has never been exported.
-func (f *Flusher) metricsPath(ctx context.Context, repo *store.Repo, project string) (string, error) {
+// metricsTarget is where a flush may write: the file it appends to, and the
+// name it would rotate into if appending would make that file unreadable.
+type metricsTarget struct {
+	// base is the chain's anchor -- the file its continuations are numbered
+	// from ("{project}/metrics.parquet" and "{project}/metrics.partNNNN.parquet").
+	// It is a name, not necessarily a file: baseExists says whether the ref
+	// still carries it.
+	base       string
+	baseExists bool
+	// active is the newest of the project's metrics files -- the base parquet
+	// when nothing has rotated yet, otherwise its highest-numbered
+	// continuation file.
+	active string
+	// next is the name the rotation would claim. It is guaranteed not to exist
+	// in the ref this was resolved against.
+	next string
+}
+
+// resolveMetricsTarget picks the file this project's points belong in: the
+// metrics parquet the repository already carries for it (so route A and route
+// B share one file, which is the whole point of §8), or
+// `{project}/metrics.parquet` for a project that has never been exported --
+// then walks forward over the continuation files a previous rotation created.
+//
+// The walk goes to the git tree rather than stopping at what DetectLayouts
+// found, and that is not belt and braces. The file index it reads is refreshed
+// by the sync worker *after* the commit lands, so a crash in between leaves a
+// continuation file that is in the tree and not in the index. Appending to the
+// base file in that window would write points the new shard already holds --
+// with ingest ids this flush never saw, so nothing would deduplicate them --
+// and the chart would show every one of them twice, forever.
+//
+// **The chain is append-only: a flush writes its highest-numbered surviving
+// file, or a higher-numbered one, and never anything below that.** That is
+// what makes part-number order chronological, which is the property both
+// readers rely on -- Series() resolves two values at one step by taking the
+// later one in scan order, and indexProject overwrites a run's summary as it
+// goes, so a file written out of order reports measurements from before the
+// rotation and does it silently and permanently.
+//
+// The rule has to hold even though the files are not this package's to keep:
+// the Web UI's delete button, huggingface_hub's delete_file, `tf up --delete`
+// and a history rewrite can remove any of them, the base file included. So the
+// walk starts at the highest number the chain still has rather than at the
+// base, and a deleted base is simply a chain that starts later -- DetectLayouts
+// anchors on the oldest *surviving* member for exactly this reason, which is
+// the reader's half of the same invariant. Re-anchoring onto the base instead
+// would put the newest points in the file both readers scan first.
+//
+// The one thing the base file's absence does cost is the name: syncer's
+// looksLikeExperiment recognises a trackio dataset by "metrics.parquet" being
+// in the tree, and repo.is_experiment -- which decides whether the project is
+// indexed at all -- is recomputed from it on every push. So Flush restores the
+// anchor as an empty table alongside the points it writes. Empty is what keeps
+// it honest: a file with no rows cannot be read out of order.
+func (f *Flusher) resolveMetricsTarget(ctx context.Context, repo *store.Repo, gitRepo *gitrepo.Repo,
+	ref, project string) (metricsTarget, error) {
+
 	files, err := f.store.ListRepoFiles(ctx, repo.ID, repo.DefaultBranch)
 	if err != nil {
-		return "", fmt.Errorf("list repo files: %w", err)
+		return metricsTarget{}, fmt.Errorf("list repo files: %w", err)
 	}
 	paths := make([]string, 0, len(files))
 	for _, file := range files {
 		paths = append(paths, file.Path)
 	}
+
+	// The index gives the chain's shape in one query: its anchor name (which
+	// outlives the base file, since the shards are named after it) and the
+	// highest part it has reached. The walk below starts from there instead of
+	// from zero, so a project that rotated a hundred times does not cost a
+	// hundred stats per flush.
+	base := project + "/metrics.parquet"
+	highest := 0
 	for _, layout := range DetectLayouts(paths, repo.Name) {
-		if layout.Project == project && layout.MetricsPath != "" {
-			return layout.MetricsPath, nil
+		if layout.Project != project {
+			continue
+		}
+		chain := layout.MetricsFiles()
+		if len(chain) == 0 {
+			continue
+		}
+		base, _ = MetricsChainFile(chain[0])
+		_, highest = MetricsChainFile(chain[len(chain)-1])
+		break
+	}
+
+	baseExists, err := f.pathExists(gitRepo, ref, base)
+	if err != nil {
+		return metricsTarget{}, err
+	}
+
+	active := base
+	if highest > 0 {
+		active = MetricsShardPath(base, highest)
+	}
+	// The walk goes past what the index knows because the index is refreshed
+	// after the commit lands: a crash in between leaves a continuation file
+	// that is in the tree and not in the index. It normally probes once and
+	// stops.
+	for n := highest; n < maxMetricsShards; n++ {
+		candidate := MetricsShardPath(base, n+1)
+		exists, err := f.pathExists(gitRepo, ref, candidate)
+		if err != nil {
+			return metricsTarget{}, err
+		}
+		if !exists {
+			return metricsTarget{base: base, baseExists: baseExists, active: active, next: candidate}, nil
+		}
+		active = candidate
+	}
+	return metricsTarget{}, fmt.Errorf("metrics parquet %s already has %d continuation files", base, maxMetricsShards)
+}
+
+func (f *Flusher) pathExists(gitRepo *gitrepo.Repo, ref, path string) (bool, error) {
+	_, _, err := gitRepo.Stat(ref, path)
+	switch {
+	case errors.Is(err, gitrepo.ErrPathNotFound), errors.Is(err, gitrepo.ErrEmptyRepo):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("stat %s: %w", path, err)
+	}
+	return true, nil
+}
+
+// maybeRotate reports the file this flush should write instead of the one it
+// read, when appending to that one would push it past maxExistingFlushRows.
+//
+// The count that matters is of the points that will actually be added: a retry
+// after a crash re-offers points the file already holds, and those cost no
+// rows (mergePoints skips them by ingest id). Counting them would rotate a
+// project that was merely being retried.
+//
+// It declines to rotate when the batch alone would not fit either, because
+// then the new file would be born over the bound and the next flush would
+// block on it -- exactly the state rotation exists to avoid. That cannot
+// happen in production, where MaxFlushPoints (50,000) is a twentieth of the
+// bound; it is reachable only with the bound lowered, which is a thing tests
+// do.
+func maybeRotate(existing *existingTable, points []store.PendingPoint, target metricsTarget) (string, bool) {
+	newRows := 0
+	for _, p := range points {
+		if !existing.ingestIDs[p.ID] {
+			newRows++
 		}
 	}
-	return project + "/metrics.parquet", nil
+	if newRows == 0 {
+		return "", false
+	}
+	if int64(len(existing.rows)+newRows) <= maxExistingFlushRows {
+		return "", false
+	}
+	if int64(newRows) > maxExistingFlushRows {
+		return "", false
+	}
+	return target.next, true
 }
 
 // existingTable is what a flush read out of the current metrics parquet.
@@ -388,6 +610,59 @@ func mergePoints(existing *existingTable, points []store.PendingPoint) ([]flushC
 		byName[c.name] = c
 		order = append(order, c.name)
 	}
+	// widenFor promotes a metric column to DOUBLE when the value about to be
+	// written could not survive the column's current type.
+	//
+	// The existing file decides a column's type, which is right for a metric
+	// whose values keep the shape the file already gives them -- and silently
+	// wrong for one whose shape changes. A trackio export that wrote `epoch`
+	// as an integer types the column INT64, and a later
+	// `trackio.log({"epoch": 3.5})` went through toInt: stored as 3, charted
+	// as 3, with nothing anywhere saying a value had been altered. A boolean
+	// column does the same with `!= 0`, turning 0.5 into 1.
+	//
+	// Widening rather than dropping the value, because the alternatives are
+	// both worse: keeping the truncated number is a fabricated measurement,
+	// and writing a null loses a point the ingest API accepted with a 200.
+	// A DOUBLE holds every value the narrower column could -- an int32 or an
+	// int64 up to 2^53 exactly, a bool as 0/1 -- so the rows already in the
+	// file re-encode without loss, and every reader here coerces through
+	// toFloat and cannot tell the difference. Widening is one-way: the column
+	// stays DOUBLE afterwards, which is the correct record of "this metric is
+	// not an integer".
+	//
+	// Structural columns are deliberately exempt. `step` is an int64 by this
+	// package's own construction and readers use it as one; a metric may not
+	// be named after one anyway (IsStructuralColumn, checked by the caller
+	// below).
+	widenFor := func(name string, value float64) {
+		c, ok := byName[name]
+		if !ok || IsStructuralColumn(name) {
+			return
+		}
+		switch c.kind {
+		case colInt32, colInt64:
+			// NaN and +-Inf are left alone: encode() cannot represent them in
+			// an integer column *or* a double one and writes a null either
+			// way, and converting one to an int64 to compare is undefined in
+			// Go rather than merely lossy.
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				return
+			}
+			// Outside the int64 range the round-trip below is undefined too,
+			// and the value certainly does not fit: widen.
+			if value >= math.MinInt64 && value <= math.MaxInt64 && float64(int64(value)) == value {
+				return
+			}
+		case colBool:
+			if value == 0 || value == 1 {
+				return
+			}
+		default:
+			return
+		}
+		byName[name] = doubleColumn(name)
+	}
 	for _, c := range existing.columns {
 		add(c)
 	}
@@ -424,6 +699,7 @@ func mergePoints(existing *existingTable, points []store.PendingPoint) ([]flushC
 				continue
 			}
 			add(doubleColumn(key))
+			widenFor(key, value)
 			row[key] = value
 		}
 		rows = append(rows, row)
@@ -435,6 +711,23 @@ func mergePoints(existing *existingTable, points []store.PendingPoint) ([]flushC
 		columns = append(columns, byName[name])
 	}
 	return columns, rows, appended
+}
+
+// emptyMetricsBlob renders a metrics parquet with this package's structural
+// columns and no rows, ready to be committed at path. It is only ever used to
+// put a deleted chain anchor back (see Flush): every reader opens it like any
+// other metrics file and gets nothing out of it, which is the point -- a file
+// with no rows carries no measurement whose position in the chain could
+// contradict when it was logged.
+func (f *Flusher) emptyMetricsBlob(ctx context.Context, gitRepo *gitrepo.Repo, repo *store.Repo,
+	ref, path string) ([]byte, error) {
+
+	columns, rows, _ := mergePoints(&existingTable{ingestIDs: map[int64]bool{}}, nil)
+	data, err := writeMetricsParquet(columns, rows)
+	if err != nil {
+		return nil, fmt.Errorf("render empty metrics parquet: %w", err)
+	}
+	return f.blobFor(ctx, gitRepo, repo, ref, path, data)
 }
 
 // blobFor turns the rendered parquet into the bytes the commit carries: an LFS

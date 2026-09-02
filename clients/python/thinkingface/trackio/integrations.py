@@ -146,11 +146,20 @@ class ThinkingFaceCallback(_TrainerCallback):
         self.config = dict(config or {})
         self._init_kwargs = init_kwargs
         self._started = False
+        # The run this callback owns. Everything below logs through this
+        # handle rather than the module-level trackio.log()/finish(), which
+        # act on whatever run was started last: a script with two callbacks,
+        # or one that calls trackio.init() for a side experiment mid-training,
+        # would otherwise send this Trainer's metrics to someone else's run
+        # and finish the wrong one.
+        self._run: Any = None
 
     def on_train_begin(self, args, state, control, **kwargs: Any) -> None:
         config = dict(self.config)
         config["_args"] = _to_plain_dict(args)
-        trackio.init(project=self.project, name=self.name, config=config, **self._init_kwargs)
+        self._run = trackio.init(
+            project=self.project, name=self.name, config=config, **self._init_kwargs
+        )
         self._started = True
 
     def on_log(
@@ -166,12 +175,14 @@ class ThinkingFaceCallback(_TrainerCallback):
             )
             return
         metrics = _numeric_only(logs)
-        if metrics:
-            trackio.log(metrics, step=state.global_step)
+        if metrics and self._run is not None:
+            self._run.log(metrics, step=state.global_step)
 
     def on_train_end(self, args, state, control, **kwargs: Any) -> None:
         if self._started:
-            trackio.finish()
+            if self._run is not None:
+                self._run.finish()
+            self._run = None
             self._started = False
 
 
@@ -286,13 +297,17 @@ class ThinkingFaceLightningLogger(_LightningLogger):
 
     @rank_zero_only
     def log_metrics(self, metrics: dict[str, Any], step: int | None = None) -> None:
-        self._ensure_run()
+        run = self._ensure_run()
         numeric = _numeric_only(metrics)
-        if numeric:
-            trackio.log(numeric, step=step)
+        if numeric and run is not None:
+            # Through the handle, not trackio.log(): the module-level helpers
+            # act on the most recently started run, so a second logger -- or a
+            # trackio.init() for a side experiment between two log_metrics
+            # calls -- would silently redirect this logger's metrics.
+            run.log(numeric, step=step)
 
     @rank_zero_only
     def finalize(self, status: str) -> None:
         if self._run is not None:
-            trackio.finish(status="finished" if status == "success" else "failed")
+            self._run.finish(status="finished" if status == "success" else "failed")
             self._run = None

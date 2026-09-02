@@ -334,6 +334,11 @@ export const repo = {
     fetchFailedBody:
       "ファイル全体をダウンロードできなかったため（{error}）、最初の 512KB のみを解析しています。",
     networkError: "ネットワークエラー",
+    fetchReasonUnauthorized: "未ログイン",
+    fetchReasonForbidden: "権限がありません",
+    fetchReasonNotFound: "ファイルが見つかりません",
+    fetchReasonServer: "サーバーエラー",
+    fetchReasonStatus: "HTTP {status}",
     // {link} is replaced with a "download the full file" link.
     rowLimit: "最初の {rows} 行で打ち切りました。残りを見るには{link}してください。",
     rowLimitLink: "ファイル全体をダウンロード",

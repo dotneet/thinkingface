@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/dotneet/thinkingface/backend/internal/storage"
 )
@@ -15,9 +16,16 @@ import (
 // starts paying for the WAL's length (§10).
 const DefaultCompactionThreshold = 50
 
-// ErrCompactionRaced means a push landed while the snapshot was being built, so
-// the CAS was declined. §10 says not to retry: compaction has no deadline and
-// pushes must not queue behind it. The next run picks the repository up again.
+// ErrCompactionRaced means the index moved while the snapshot was being built,
+// so the CAS was declined. §10 says not to retry: compaction has no deadline
+// and pushes must not queue behind it. The next run picks the repository up
+// again.
+//
+// "Concurrent write", not "concurrent push": this is returned for any failed
+// precondition, and the other writer may equally well be a second compactor —
+// one that has already superseded packs. Callers that go on to delete
+// anything must therefore not read a race as "nothing became unreferenced";
+// CompactAndSweep says how it handles that.
 var ErrCompactionRaced = errors.New("wal: compaction lost the CAS to a concurrent write")
 
 // NeedsCompaction is the selection rule of §10, kept next to the implementation
@@ -27,6 +35,89 @@ func NeedsCompaction(ix *Index, maxEntries int) bool {
 		maxEntries = DefaultCompactionThreshold
 	}
 	return len(ix.Entries) > maxEntries
+}
+
+// MaintenanceResult reports what one CompactAndSweep call did, so the
+// scheduling job can log it without re-deriving anything.
+type MaintenanceResult struct {
+	// Compacted is true when a snapshot was published and the CAS won.
+	Compacted bool
+	// Raced is true when compaction was attempted and lost the CAS. Not an
+	// error to the caller: §10 says to defer to the next run.
+	Raced bool
+	// Deleted are the pack keys the sweep collected.
+	Deleted []string
+	// Protected is how many packs the pre-run index shielded from this run's
+	// sweep. Non-zero on essentially every run — it is the normal state, not
+	// a warning — and worth logging only as the counterpart to Deleted.
+	Protected int
+}
+
+// CompactAndSweep is one repository's turn in the scheduled maintenance job
+// (§10): fold a long WAL into a base snapshot, and collect packs no index
+// needs any more.
+//
+// It does both, every run, and the safety comes from *what* the sweep is
+// allowed to delete rather than from skipping it.
+//
+// The problem it is solving. GCOrphans measures a pack's age from its upload
+// time, which for a compaction's leftovers says nothing about when they
+// stopped being referenced: a WAL only reaches the compaction threshold over
+// time, so the packs a compaction folds away are already past any sane grace
+// period the instant the CAS drops them. Sweeping them on age alone would
+// delete them seconds after that CAS, out from under any instance that read
+// the pre-compaction index and is still applying them — a 500 on a clone that
+// was going fine, and exactly what invariant 3 of §5 exists to prevent.
+//
+// The mechanism. This call already reads the index before it compacts. That
+// pre-run index is passed to the sweep as *additional* protection, so a pack
+// is deleted only when it is unreferenced by both the index as this run found
+// it and the index as the sweep finds it. That is real "unreferenced for at
+// least one full run" semantics, with nothing persisted and nothing for two
+// compactors to race on — which is why it is preferred over recording an
+// "unreferenced since" timestamp in the bucket, on the one object whose loss
+// is already the §13 single point of failure. It gives, in order:
+//
+//   - packs this run superseded are named by the pre-run index, so they
+//     survive exactly one run and go on the next;
+//   - packs a *previous* run left behind are unreferenced in both, so they are
+//     collected — which the previous "defer the sweep whenever we compacted"
+//     rule could not do at all. A repository that crosses the threshold on
+//     every run (the experiments flusher commits per tick, so a busy one
+//     routinely does) was never swept under that rule, and leaked a base plus
+//     up to a threshold's worth of entry packs into the bucket permanently;
+//   - a lost CAS is safe whichever party won. ErrCompactionRaced is returned
+//     for any failed precondition, not only for a race against a push, so the
+//     loser may well have lost to another compactor that *did* supersede
+//     packs — the pre-run index names exactly those, and protects them;
+//   - a repository that never compacts sweeps exactly as it did before.
+func CompactAndSweep(ctx context.Context, st storage.Storage, workDir, storagePath string,
+	threshold int, minAge time.Duration,
+) (MaintenanceResult, error) {
+	var res MaintenanceResult
+
+	ix, _, err := ReadIndex(ctx, st, storagePath)
+	if err != nil {
+		return res, err
+	}
+	// Captured before anything below can change it. Everything this revision
+	// names survives this run, whatever the compaction does or fails to do.
+	protected := referencedKeys(storagePath, ix)
+	res.Protected = len(protected)
+
+	if NeedsCompaction(ix, threshold) {
+		switch err := Compact(ctx, st, workDir, storagePath); {
+		case errors.Is(err, ErrCompactionRaced):
+			res.Raced = true
+		case err != nil:
+			return res, err
+		default:
+			res.Compacted = true
+		}
+	}
+
+	res.Deleted, err = gcOrphans(ctx, st, storagePath, minAge, protected)
+	return res, err
 }
 
 // Compact folds base+entries into a single snapshot pack (§10):
@@ -49,7 +140,8 @@ func NeedsCompaction(ix *Index, maxEntries int) bool {
 //
 // Superseded packs are never deleted here (invariant 3 of §5): an instance may
 // still be materialising from the index this call replaced. They are logged and
-// left for age-based GC.
+// left to the sweep, which protects them for one full maintenance run (see
+// CompactAndSweep) before age alone decides.
 func Compact(ctx context.Context, st storage.Storage, workDir, storagePath string) error {
 	if err := Materialize(ctx, st, workDir, storagePath); err != nil {
 		return fmt.Errorf("compact %s: materialize: %w", storagePath, err)

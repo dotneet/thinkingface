@@ -155,7 +155,8 @@ single commit, creating the repository first if it doesn't exist.
 ```
 tf up PATH [--to NS/NAME|NAME] [--kind dataset|model] [--rev BRANCH]
            [-m/--message MSG] [--license L] [--tag T ...] [--desc TEXT]
-           [--include GLOB ...] [--exclude GLOB ...] [--delete] [--dry-run]
+           [--include GLOB ...] [--exclude GLOB ...] [--hidden]
+           [--delete] [--dry-run]
            [--workers N] [--quiet] [--json]
 ```
 
@@ -169,6 +170,7 @@ tf up PATH [--to NS/NAME|NAME] [--kind dataset|model] [--rev BRANCH]
 | `--tag` | (unset) | The repository card's `tags` (repeatable; comma-separated values can also be given together: `--tag a,b --tag c`) |
 | `--desc` | (unset) | The repository card's `description` (also becomes the opening paragraph of the body in a generated README) |
 | `--include` / `--exclude` | include everything | Narrows the file set (repeatable). These are **not** shell globs expanded by the shell — `tf` matches each pattern itself (`Match` in `backend/internal/tfcli/local/local.go`), with `**` matching any number of path segments (`data/**`, `**/*.parquet`) and a pattern with no `/` also tried against just the file's base name |
+| `--hidden` | off | Also uploads dot-files and dot-directories found *inside* PATH. Without it they are skipped (see "Hidden paths" below), except the names in `alwaysKeptDotfiles` (`.gitattributes`, `.gitignore`) |
 | `--delete` | off | Deletes remote files that don't exist anywhere on disk under PATH (excludes `.gitattributes` and `README.md` at the repository root — the former is server-generated LFS rules, and the latter may be a card generated from `--license` etc., so neither is removed just because it's absent locally). Independent of `--include`/`--exclude`: a file those flags kept out of this run's upload but that is still on disk is never deleted |
 | `--dry-run` | off | Only shows what would happen; changes nothing |
 | `--workers` | 4 | Number of parallel LFS transfers |
@@ -197,10 +199,32 @@ no local `README.md`, or `--include`/`--exclude` excluded it — a brand-new `RE
 generated from the card flags and included in the upload, silently replacing whatever
 `README.md` exists on the remote.
 
+**Hidden paths**: repositories on this server are world-readable, and a project directory
+routinely holds `.env`, `.envrc`, `.aws/credentials` or an editor's `.idea/` right next to
+the data. So the scan leaves every dot-file and dot-directory it finds *inside* the tree out
+of the upload (`isHidden` / `hiddenSkip` in `backend/internal/tfcli/local/local.go`), and
+`tf up` prints one grouped line on stderr naming what was skipped and the `--hidden` flag
+that includes them (`warnHidden` in `backend/internal/tfcli/up.go`; like every other skip
+warning it survives `--quiet`). Two exceptions, in `alwaysKeptDotfiles`: `.gitattributes`
+(the LFS routing rules — also in `protectedPaths`, so `--delete` never removes it either)
+and `.gitignore`. The rule is about what the *walk* finds, not about the path the user
+typed: `tf up ./.config` and `tf up ./.env` are explicit choices and still upload. Note
+that `--include` does not override it -- the hidden check runs before the include/exclude
+filters, so `--include .env` still needs `--hidden`.
+
+The `--delete` side of this is the part to be careful about. A skipped dot-*file* is still
+listed in `Scan`'s `allPaths`, so it reaches `hub.Plan.LocalPaths` and a remote copy of it
+counts as "present on disk", not "gone locally" — a repository uploaded before this rule
+existed keeps its `.env` on the remote rather than having it silently deleted by the next
+`tf up --delete`. A skipped dot-*directory* is recorded as a `Skipped{Dir: true}` entry, so
+it lands in `LocalUnknownDirs` and everything the remote holds beneath it is left alone for
+the same reason a symlinked directory is (next paragraph).
+
 **`--delete` and symlinked directories**: the local scan does not follow a symlink that
 points at a directory (to avoid loops), a broken symlink, or a non-regular file (a socket, a
 fifo, ...) — `.git` and `__pycache__` directories are skipped the same way, silently. `tf up`
-prints a warning to stderr for every skip that isn't `.git`/`__pycache__`, up to
+prints a warning to stderr for every skip that isn't `.git`/`__pycache__` (dot-paths
+excepted — those are grouped onto the single line described above), up to
 `maxSkipWarnings = 10` (then a count of the rest) — see `warnSkipped` in
 `backend/internal/tfcli/up.go`. **This warning is not suppressed by `--quiet`**: `--quiet`
 only suppresses progress output, and silently leaving content out of an upload is not

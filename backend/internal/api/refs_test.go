@@ -622,6 +622,61 @@ func TestHFCommits_PagesWithALinkHeader(t *testing.T) {
 	}
 }
 
+// The walk has to start at the commit the revision resolved to, not at the
+// revision's name. handleHFCommits resolves rev up front so an unknown one is
+// a 404 rather than an empty list, and then used to hand ListCommits the name
+// again -- which re-resolves it, so the answer described whatever the ref
+// pointed at by then. A branch deleted in between sends ListCommits down its
+// ErrEmptyRepo branch and list_repo_commits answers 200 [], which is exactly
+// the "unknown revision looks like an empty repository" failure the resolve
+// was there to prevent.
+//
+// The race itself is not reproducible over HTTP, so what is pinned here is the
+// property it violates: a rev that resolves to an older commit lists that
+// commit's history and not the branch's, whether it is spelled as a tag or as
+// the hash itself.
+func TestHFCommits_WalksFromTheResolvedCommit(t *testing.T) {
+	f := newRefsFixture(t)
+	repo := f.repo("alice", "foo", "model")
+	tok := f.token(f.alice, "write")
+
+	// The repository fixture already carries one commit; add a second, tag it,
+	// then move main past it.
+	second := f.commit(repo, "main", "second")
+	if got := f.do("POST", "/api/models/alice/foo/tag/main", tok, map[string]any{"tag": "v1.0"}).status(); got != 201 {
+		t.Fatalf("create tag: status = %d", got)
+	}
+	f.commit(repo, "main", "third")
+
+	ids := func(rev string) []string {
+		t.Helper()
+		resp := f.do("GET", "/api/models/alice/foo/commits/"+rev, "", nil)
+		if resp.status() != 200 {
+			t.Fatalf("commits/%s: status = %d, body = %s", rev, resp.status(), resp.rec.Body.String())
+		}
+		var page []struct {
+			ID string `json:"id"`
+		}
+		resp.json(t, &page)
+		out := make([]string, 0, len(page))
+		for _, c := range page {
+			out = append(out, c.ID)
+		}
+		return out
+	}
+
+	viaTag, viaHash := ids("v1.0"), ids(second.String())
+	if len(viaTag) != 2 || viaTag[0] != second.String() {
+		t.Fatalf("commits at the tag = %v, want a two-commit history headed by %s", viaTag, second)
+	}
+	if strings.Join(viaTag, ",") != strings.Join(viaHash, ",") {
+		t.Fatalf("tag and hash disagree: %v vs %v", viaTag, viaHash)
+	}
+	if main := ids("main"); len(main) != 3 {
+		t.Fatalf("commits on main = %v, want all three", main)
+	}
+}
+
 func TestHFCommits_UnknownRevisionIs404(t *testing.T) {
 	f := newRefsFixture(t)
 	f.repo("alice", "foo", "model")

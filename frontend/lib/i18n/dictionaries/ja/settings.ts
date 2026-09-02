@@ -49,6 +49,7 @@ export const settings = {
     creating: "作成中…",
     createdTitle: "トークン「{name}」を作成しました",
     copyNow: "今すぐコピーしてください — 二度と表示されません。",
+    dismissToken: "このトークンを非表示にする",
     sessionExpiredCreate:
       "セッションの有効期限が切れました。トークンを作成するには再度ログインしてください。",
     sessionExpiredDelete:
@@ -104,6 +105,10 @@ export const settings = {
       "セッションの有効期限が切れました。このキーを削除するには再度ログインしてください。",
     confirmDeleteTitle: "SSH キーを削除しますか？",
     confirmDelete: "この SSH キーを削除しますか？ このキーを使用しているものは動作しなくなります。",
+    // 複数のキーがあると「この SSH キー」ではどれか分からないため、対象名を
+    // 明示する。タイトル未設定のキーではフィンガープリントが入る。
+    confirmDeleteNamed:
+      "SSH キー「{title}」を削除しますか？ このキーを使用しているものは動作しなくなります。",
     loadFailed: "SSH キーの読み込みに失敗しました",
     loadFailedHint:
       "バックエンド API に接続できない可能性があります。ページを再読み込みしてください。",
@@ -164,6 +169,7 @@ export const settings = {
     createdTitle: "Webhook を作成しました",
     secretCopyPrefix: "シークレットを今すぐコピーしてください — 二度と表示されません。各配信の",
     secretCopySuffix: "ヘッダの検証に使用します。",
+    dismissSecret: "このシークレットを非表示にする",
     emptyTitle: "Webhook はまだありません",
     emptyDescription:
       "上のフォームから作成すると、push・リポジトリの変更・run の状態が通知されます。",
@@ -188,8 +194,12 @@ export const settings = {
     saving: "保存中…",
     rotateSecret: "シークレットを更新",
     confirmRotateTitle: "シークレットを再発行しますか？",
+    // 「シークレット以外は変わらない」ことまで明示する。この操作は編集パネル
+    // 内の「変更を保存」の隣にあり、以前は編集中の内容も一緒に送信していた。
     confirmRotate:
-      "現在のシークレットは直ちに無効になります。このダイアログを閉じる前に、送信先のエンドポイントを新しいシークレットで更新してください。",
+      "この Webhook の署名シークレットを新しいものに置き換えます。現在のシークレットは直ちに無効になり、それ以外の設定は変更されません。このダイアログを閉じる前に、送信先のエンドポイントを新しいシークレットで更新してください。",
+    confirmRotateUnsaved:
+      "未保存の URL とイベントの変更は反映されません。反映するにはダイアログを閉じて「変更を保存」を実行してください。",
   },
   webhookEvents: {
     repoPush: { label: "リポジトリへの push", hint: "いずれかの ref にコミットが到達した" },

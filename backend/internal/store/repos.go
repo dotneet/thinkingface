@@ -324,6 +324,20 @@ type repoFilterScope struct {
 
 var repoFilterScopeAll = repoFilterScope{tags: true, license: true, task: true, relation: true}
 
+// Each facet's own scope: every dimension applied except the one the facet
+// counts. They are named rather than written inline at the four call sites so
+// that a test asserting the rule reads the same value the query does -- a
+// test that rebuilds the scope by hand asserts its own copy and passes
+// happily while the query drops a filter (which is how the three card facets
+// came to silently drop Relation, counting over a wider set than the listing
+// they sit beside).
+var (
+	tagFacetScope      = repoFilterScope{license: true, task: true, relation: true}
+	licenseFacetScope  = repoFilterScope{tags: true, task: true, relation: true}
+	taskFacetScope     = repoFilterScope{tags: true, license: true, relation: true}
+	relationFacetScope = repoFilterScope{tags: true, license: true, task: true}
+)
+
 // lineageRelationDefault is what an empty relation on a base_model edge means:
 // a fine-tune. It is the Hub's own default (repocard.RelationFinetune) and the
 // only thing a row indexed before the relation column existed can be read as,
@@ -616,7 +630,7 @@ func (s *Store) repoFacets(ctx context.Context, f RepoFilter) (RepoFacets, error
 // `tags` array fans one repository out into one row per element, so a card
 // that repeats a tag would otherwise be counted twice for it.
 func (s *Store) tagFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem, error) {
-	clause, args := buildRepoWhere(s.d, f, repoFilterScope{license: true, task: true})
+	clause, args := buildRepoWhere(s.d, f, tagFacetScope)
 	from, elem := s.d.jsonArrayElements("r.card", "tags")
 	query := `SELECT ` + elem + ` AS value, count(DISTINCT r.id) AS repos FROM repositories r
 		JOIN namespaces n ON n.id = r.namespace_id
@@ -626,7 +640,7 @@ func (s *Store) tagFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem, er
 }
 
 func (s *Store) licenseFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem, error) {
-	clause, args := buildRepoWhere(s.d, f, repoFilterScope{tags: true, task: true})
+	clause, args := buildRepoWhere(s.d, f, licenseFacetScope)
 	// The same expression the license filter uses, so a value the facet
 	// offers is a value clicking it actually finds (see jsonScalarText).
 	license := `(` + s.d.jsonScalarText("r.card", "license") + `)`
@@ -649,7 +663,7 @@ func (s *Store) licenseFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem
 // deduplicating whole rows; it is count(DISTINCT id) that makes the number
 // "repositories with this task" rather than "mentions of this task".
 func (s *Store) taskFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem, error) {
-	clause, args := buildRepoWhere(s.d, f, repoFilterScope{tags: true, license: true})
+	clause, args := buildRepoWhere(s.d, f, taskFacetScope)
 	pipeline := `(` + s.d.jsonScalarText("r.card", "pipeline_tag") + `)`
 	pipelineClause := andClause(clause, pipeline+` IS NOT NULL AND `+pipeline+` <> ''`)
 	from, elem := s.d.jsonArrayElements("r.card", "task_categories")
@@ -669,7 +683,7 @@ func (s *Store) taskFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem, e
 // counts distinct repositories: a merge naming three base models is one merge,
 // not three.
 func (s *Store) relationFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem, error) {
-	clause, args := buildRepoWhere(s.d, f, repoFilterScope{tags: true, license: true, task: true})
+	clause, args := buildRepoWhere(s.d, f, relationFacetScope)
 	bind := binder(&args)
 	// With a base model selected, only the edges pointing at *it* may be
 	// counted. baseModelClause constrains BaseModel and Relation to the same

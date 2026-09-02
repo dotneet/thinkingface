@@ -126,6 +126,14 @@ export const org = {
       confirmRemoveTitle: "{username} をメンバーから削除しますか？",
       confirmRemove:
         "{username} を {org} から削除しますか？ メンバーシップを失い、リポジトリへの push ができなくなります。",
+      changingRole: "変更中…",
+      // 権限の変更は管理画面と同じく確認を挟む。ここは <select> が起点なので、
+      // ホイールの誤操作だけで新しいロールが書き込まれてしまっていた。
+      confirmRoleTitle: "{username} のロールを変更しますか？",
+      confirmRole: "{org} での {username} のロールを {from} から {to} に変更します。",
+      confirmRoleAdmin:
+        "admin はメンバーの追加・削除、全員のロール変更、組織の設定と Webhook の管理ができます。",
+      confirmRoleConfirm: "ロールを変更",
       emptyTitle: "メンバーがいません",
       emptyDescription: "ユーザー名を指定してメンバーを追加してください。",
       loadFailed: "メンバーを読み込めませんでした",

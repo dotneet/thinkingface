@@ -45,11 +45,43 @@ variable "bucket_soft_delete_retention_days" {
 variable "tmp_uploads_retention_days" {
   description = <<-EOT
     Days before an object under tmp/uploads/ is deleted. The LFS proxy upload
-    path removes its staging object as soon as the copy succeeds, so this rule
-    exists purely to collect the orphans left by uploads that failed midway.
+    path removes its staging object as soon as the copy into lfs/ succeeds, so
+    this rule is a backstop: it collects the orphans left by uploads that
+    failed midway.
+
+    The matching lifecycle_rule sets no with_state, which the provider
+    documents as matching live *and* archived objects, so this one window also
+    covers the noncurrent staging version that versioning leaves behind when
+    the promote handler deletes the live one. `git-lfs push` stages the
+    object's full contents, so without that the bucket would keep a permanent
+    second copy of every uploaded LFS object; a separate
+    days_since_noncurrent_time rule is unnecessary because it could only ever
+    fire later than this one.
   EOT
   type        = number
   default     = 1
+}
+
+variable "wal_pack_noncurrent_retention_days" {
+  description = <<-EOT
+    Days after a WAL pack (wal/**/*.pack) becomes a noncurrent version before
+    that version is deleted. WAL compaction folds a run of entry packs into a
+    new base pack and deletes the superseded ones; with versioning enabled
+    that delete only archives them, so compaction reported reclaimed space
+    the bucket never gave back and a busy repository accrued one
+    permanently-billed noncurrent pack per push.
+
+    Scoped by suffix so it never touches wal/{storage_path}/index.json, whose
+    generations remain the only recovery path for a corrupted WAL index
+    (docs/dev/continuity-design.md §13, open issue 5; procedure in
+    docs/dev/wal-index-recovery.md) and are kept indefinitely. It does bound
+    that recovery: rolling back to an index generation older than this window
+    can only restore refs whose packs still exist. In practice recovery
+    targets the newest good generation, whose packs are the live ones and
+    never noncurrent at all.
+  EOT
+  type        = number
+  default     = 30
 }
 
 variable "lfs_blobs_noncurrent_retention_days" {
@@ -66,7 +98,9 @@ variable "lfs_blobs_noncurrent_retention_days" {
     or deleted WAL index (docs/dev/continuity-design.md §13, open issue 5;
     procedure in docs/dev/wal-index-recovery.md) and must be kept
     indefinitely, so the matching lifecycle_rule in main.tf is scoped to
-    lfs/ and blobs/ only.
+    lfs/ and blobs/ only. WAL *packs* are pruned by a rule of their own --
+    see wal_pack_noncurrent_retention_days, which matches by ".pack" suffix
+    and so cannot touch the index.
   EOT
   type        = number
   default     = 30

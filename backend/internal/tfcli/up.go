@@ -36,6 +36,9 @@ Flags:
   --desc TEXT            set the description in the repository card
   --include GLOB          only include files matching GLOB (repeatable)
   --exclude GLOB          exclude files matching GLOB (repeatable)
+  --hidden               also upload dot-files and dot-directories found
+                         under PATH (default: skipped, except
+                         .gitattributes and .gitignore)
   --delete               remove remote files that are not present locally
                          (the root .gitattributes and README.md are kept)
   --dry-run              show what would happen without changing anything
@@ -59,6 +62,7 @@ type upOptions struct {
 	desc    string
 	include sliceFlag
 	exclude sliceFlag
+	hidden  bool
 	del     bool
 	dryRun  bool
 	workers int
@@ -107,6 +111,7 @@ func runUp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.StringVar(&opt.desc, "desc", "", "description")
 	fs.Var(&opt.include, "include", "include glob (repeatable)")
 	fs.Var(&opt.exclude, "exclude", "exclude glob (repeatable)")
+	fs.BoolVar(&opt.hidden, "hidden", false, "also upload dot-files and dot-directories")
 	fs.BoolVar(&opt.del, "delete", false, "delete remote files missing locally")
 	fs.BoolVar(&opt.dryRun, "dry-run", false, "show what would happen")
 	fs.IntVar(&opt.workers, "workers", 4, "concurrent LFS transfers")
@@ -141,7 +146,11 @@ func runUp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// question: paths the walk left out, and (its Dir entries) directories
 	// it never looked inside, which --delete must not treat as empty. One
 	// scan produces all three.
-	files, allPaths, skipped, err := local.Scan(path, local.Options{Include: opt.include.values, Exclude: opt.exclude.values})
+	files, allPaths, skipped, err := local.Scan(path, local.Options{
+		Include: opt.include.values,
+		Exclude: opt.exclude.values,
+		Hidden:  opt.hidden,
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "tf: %s\n", err)
 		return exitError
@@ -329,18 +338,31 @@ const maxSkipWarnings = 10
 // A symlinked directory is the case that matters: it is not followed (a link
 // back up the tree would loop), so its files simply never appear -- which,
 // without a word on stderr, looks exactly like an upload that had nothing to
-// do. The routine exclusions (.git, __pycache__) are not Notable and stay
-// quiet. Nothing here is deleted from the remote either: hub.Plan's
-// LocalUnknownDirs keeps --delete away from those paths.
+// do. Dot-paths are reported too, on one grouped line naming the flag that
+// includes them: leaving a ".env" out is the right default, but a user who
+// wanted it uploaded has to be able to find out why it wasn't. The routine
+// exclusions (.git, __pycache__) are not Notable and stay quiet. Nothing
+// here is deleted from the remote either: hub.Plan's LocalPaths and
+// LocalUnknownDirs keep --delete away from these paths.
 func warnSkipped(stderr io.Writer, skipped []local.Skipped) {
+	var hiddenPaths []string
 	shown := 0
-	hidden := 0
+	unshown := 0
 	for _, s := range skipped {
 		if !s.Notable() {
 			continue
 		}
+		if s.Reason == local.ReasonHidden {
+			// A trailing "/" says the whole subtree went unread.
+			if s.Dir {
+				hiddenPaths = append(hiddenPaths, s.RepoPath+"/")
+			} else {
+				hiddenPaths = append(hiddenPaths, s.RepoPath)
+			}
+			continue
+		}
 		if shown >= maxSkipWarnings {
-			hidden++
+			unshown++
 			continue
 		}
 		shown++
@@ -350,9 +372,28 @@ func warnSkipped(stderr io.Writer, skipped []local.Skipped) {
 		}
 		fmt.Fprintf(stderr, "tf: warning: not uploading %s (%s)\n", s.RepoPath, s.Reason)
 	}
-	if hidden > 0 {
-		fmt.Fprintf(stderr, "tf: warning: %d more path(s) skipped\n", hidden)
+	if unshown > 0 {
+		fmt.Fprintf(stderr, "tf: warning: %d more path(s) skipped\n", unshown)
 	}
+	warnHidden(stderr, hiddenPaths)
+}
+
+// warnHidden prints the one grouped line about skipped dot-paths. It is a
+// single line however many there are: a project directory can easily hold a
+// dozen, and ten separate warnings would push the real output off the screen
+// for something that is the documented default.
+func warnHidden(stderr io.Writer, paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	listed := paths
+	suffix := ""
+	if len(listed) > maxSkipWarnings {
+		listed = listed[:maxSkipWarnings]
+		suffix = fmt.Sprintf(" and %d more", len(paths)-maxSkipWarnings)
+	}
+	fmt.Fprintf(stderr, "tf: warning: not uploading %d hidden path(s): %s%s (pass --hidden to include them)\n",
+		len(paths), strings.Join(listed, ", "), suffix)
 }
 
 // reportNewRepoDryRun prints and (with --json) writes the dry-run result for

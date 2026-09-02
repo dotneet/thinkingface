@@ -21,7 +21,10 @@ export default async function OrgStorageSettingsPage({
 }: {
   params: Promise<{ name: string }>;
 }) {
-  const [{ name }, t] = await Promise.all([params, getT()]);
+  // Decoded like every other page boundary (and like this file's own
+  // `generateMetadata`), so `StorageUsage` and the login-return href get the
+  // real organisation name rather than its percent-encoded URL segment.
+  const [{ name }, t] = await Promise.all([params.then(decodeRouteParams), getT()]);
   return (
     <div className="flex flex-col gap-6">
       <div>

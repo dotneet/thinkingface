@@ -74,35 +74,43 @@ func (ix *Indexer) IndexRepo(ctx context.Context, repo *store.Repo) error {
 
 func (ix *Indexer) indexProject(ctx context.Context, repo *store.Repo, gitRepo *gitrepo.Repo, layout Layout) error {
 	aggregates := map[string]*runAggregate{}
-	err := ix.scanMetricRows(ctx, repo, gitRepo, repo.DefaultBranch, layout.MetricsPath, viewer.ScanRequest{},
-		func(run string, row map[string]any, cols map[string]bool) error {
-			agg, ok := aggregates[run]
-			if !ok {
-				agg = &runAggregate{lastValues: map[string]float64{}, keys: map[string]bool{}}
-				aggregates[run] = agg
-			}
-			agg.numPoints++
-
-			if stepCol := stepColumn(cols); stepCol != "" {
-				if step, ok := toInt(row[stepCol]); ok && step > agg.lastStep {
-					agg.lastStep = step
+	// Every file the project's rows live in, oldest first: a rotated project
+	// whose newest points are in a continuation file would otherwise be
+	// indexed as if it had stopped logging at the rotation point, and its
+	// summary would freeze at whatever value it held then. The order is
+	// load-bearing beyond that -- lastValues below keeps the last value it
+	// sees -- and layout.MetricsFiles is what guarantees it is chronological.
+	for _, metricsPath := range layout.MetricsFiles() {
+		err := ix.scanMetricRows(ctx, repo, gitRepo, repo.DefaultBranch, metricsPath, viewer.ScanRequest{},
+			func(run string, row map[string]any, cols map[string]bool) error {
+				agg, ok := aggregates[run]
+				if !ok {
+					agg = &runAggregate{lastValues: map[string]float64{}, keys: map[string]bool{}}
+					aggregates[run] = agg
 				}
-			}
-			if tsCol := timeColumn(cols); tsCol != "" {
-				if ts, ok := toTime(row[tsCol]); ok {
-					if agg.firstTS.IsZero() || ts.Before(agg.firstTS) {
-						agg.firstTS = ts
+				agg.numPoints++
+
+				if stepCol := stepColumn(cols); stepCol != "" {
+					if step, ok := toInt(row[stepCol]); ok && step > agg.lastStep {
+						agg.lastStep = step
 					}
 				}
-			}
-			forEachMetricValue(row, "", func(name string, v float64) {
-				agg.keys[name] = true
-				agg.lastValues[name] = v
+				if tsCol := timeColumn(cols); tsCol != "" {
+					if ts, ok := toTime(row[tsCol]); ok {
+						if agg.firstTS.IsZero() || ts.Before(agg.firstTS) {
+							agg.firstTS = ts
+						}
+					}
+				}
+				forEachMetricValue(row, "", func(name string, v float64) {
+					agg.keys[name] = true
+					agg.lastValues[name] = v
+				})
+				return nil
 			})
-			return nil
-		})
-	if err != nil {
-		return err
+		if err != nil {
+			return err
+		}
 	}
 	if len(aggregates) == 0 {
 		return nil

@@ -80,6 +80,23 @@ export function SqlConsole({
     let cancelled = false;
     let session: SqlSession | null = null;
 
+    // Back to square one for the new file. Only nulling `sessionRef` (which is
+    // what the cleanup below does) left `phase` at "ready" and the previous
+    // file's rows on screen, so `run()` — which returns early without a
+    // session — silently did nothing while the console still looked live.
+    //
+    // Unreachable as things stand: Next 15 keys each route segment's subtree,
+    // so opening a different file remounts the viewer and this component with
+    // it, and `filePath`/`resolveUrl` never change in place. It becomes
+    // reachable the moment they can (a file picker inside the viewer, a
+    // client-side swap between two files of one route). Resetting here rather
+    // than relying on that remount keeps the effect honest about its own
+    // dependencies.
+    setPhase("loading");
+    setInitError(null);
+    setResult(null);
+    setQueryError(null);
+
     (async () => {
       try {
         // Straight to the API origin rather than through apiFetch: this is a

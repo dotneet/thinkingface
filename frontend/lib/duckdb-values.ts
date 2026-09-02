@@ -18,20 +18,124 @@
 export const MAX_INLINE_BYTES = 8 * 1024 * 1024;
 
 /**
- * Arrow renders DATE and TIMESTAMP columns as epoch milliseconds, which would
- * reach the table as an eleven-digit integer. The column's Arrow type is the
- * only thing that distinguishes them from a genuine bigint, so it is matched
- * on the type's string form rather than by importing apache-arrow's type ids
- * (this module deliberately keeps arrow out of the static import graph).
+ * How a temporal Arrow column has to be read. Every one of these arrives as a
+ * bare number the table would otherwise print as an integer:
+ *
+ * - `datetime` (DATE / TIMESTAMP) — epoch milliseconds, an eleven-digit int.
+ * - `time` (TIME) — ticks since midnight. Arrow's `getTimeMicrosecond` returns
+ *   the element itself, so `SELECT CAST('12:34:56' AS TIME)` used to render as
+ *   `45296000000`.
+ * - `duration` (DURATION) — the same, as a length rather than a clock reading.
+ * - `interval` (INTERVAL) — a *pair* of int32s, which fell through to
+ *   `toPlainValue` and printed as `{"0":…,"1":…}`.
+ *
+ * The column's Arrow type is the only thing that distinguishes any of them
+ * from a genuine bigint, so they are matched on the type's string form rather
+ * than by importing apache-arrow's type ids (this module deliberately keeps
+ * arrow out of the static import graph). The spellings are apache-arrow 17's
+ * `DataType#toString`: `Timestamp<MICROSECOND>`, `Date32<DAY>`,
+ * `Time64<MICROSECOND>`, `Time32<SECOND>`, `Duration<MICROSECOND>`,
+ * `Interval<DAY_TIME>`, `Interval<YEAR_MONTH>`.
  */
-const TEMPORAL_TYPE_RE = /^(Timestamp|Date)/;
+export type TemporalKind = "datetime" | "time" | "duration" | "interval";
 
-export function isTemporalHint(hint: string | undefined): boolean {
-  return TEMPORAL_TYPE_RE.test(hint ?? "");
+export function temporalKind(hint: string | undefined): TemporalKind | undefined {
+  const type = hint ?? "";
+  // `Timestamp` also starts with "Time", so this test has to come first.
+  if (/^(Timestamp|Date)/.test(type)) return "datetime";
+  if (/^Time(32|64)?(<|$)/.test(type)) return "time";
+  if (/^Duration(<|$)/.test(type)) return "duration";
+  if (/^Interval(<|$)/.test(type)) return "interval";
+  return undefined;
 }
 
-export function toTemporalValue(value: unknown): unknown {
+export function isTemporalHint(hint: string | undefined): boolean {
+  return temporalKind(hint) !== undefined;
+}
+
+/** Ticks per second for the TimeUnit named inside the Arrow type string. */
+const MILLISECOND = 1000n;
+const MICROSECOND = 1000000n;
+const TICKS_PER_SECOND: Record<string, bigint> = {
+  SECOND: 1n,
+  MILLISECOND,
+  MICROSECOND,
+  NANOSECOND: 1000000000n,
+};
+
+function ticksPerSecond(hint: string | undefined): bigint {
+  const unit = /<([A-Z_]+)/.exec(hint ?? "")?.[1] ?? "";
+  // Microseconds is both DuckDB's own TIME/INTERVAL resolution and Arrow's
+  // most common spelling, so it is the safest guess for a type string that
+  // somehow carries no unit.
+  return TICKS_PER_SECOND[unit] ?? MICROSECOND;
+}
+
+/**
+ * Renders a tick count as `[-]HH:MM:SS[.fff]`. Used for both a clock reading
+ * (TIME, always under 24h) and a length (DURATION, where the hours field is
+ * free to run past 24) — the two are the same shape and only differ in how far
+ * the first field counts, so one formatter covers both. Digits, colons and a
+ * minus sign only: nothing here needs translating.
+ *
+ * Returns undefined for anything that is not an integer tick count, leaving
+ * the caller on its `toPlainValue` fallback.
+ */
+function formatTicks(value: unknown, perSecond: bigint): string | undefined {
+  let ticks: bigint;
+  if (typeof value === "bigint") ticks = value;
+  else if (typeof value === "number" && Number.isFinite(value)) ticks = BigInt(Math.trunc(value));
+  else return undefined;
+
+  const sign = ticks < 0n ? "-" : "";
+  const abs = ticks < 0n ? -ticks : ticks;
+  const seconds = abs / perSecond;
+  const pad = (n: bigint) => String(n).padStart(2, "0");
+  const clock = `${pad(seconds / 3600n)}:${pad((seconds % 3600n) / 60n)}:${pad(seconds % 60n)}`;
+
+  const remainder = abs % perSecond;
+  if (remainder === 0n) return `${sign}${clock}`;
+  // Sub-second digits, trailing zeros trimmed: `.5`, not `.500000`.
+  const digits = String(perSecond).length - 1;
+  const fraction = String(remainder).padStart(digits, "0").replace(/0+$/, "");
+  return `${sign}${clock}.${fraction}`;
+}
+
+/**
+ * Arrow hands an INTERVAL back as two int32s — `[years, months]` for
+ * YEAR_MONTH, `[days, milliseconds]` for DAY_TIME.
+ *
+ * DAY_TIME folds into the same `HH:MM:SS` reading as a DURATION (a day is
+ * 24 hours here, so 1 day 2 hours is `26:00:00`). YEAR_MONTH cannot: months
+ * are not a fixed number of seconds, so it renders as the ISO 8601 duration
+ * `P1Y2M` — a notation, not prose, so it needs no dictionary entry either.
+ */
+function formatInterval(value: unknown, hint: string | undefined): string | undefined {
+  const pair = value as ArrayLike<unknown> | null | undefined;
+  if (typeof pair !== "object" || pair === null || pair.length !== 2) return undefined;
+  const [first, second] = [pair[0], pair[1]];
+  if (typeof first !== "number" || typeof second !== "number") return undefined;
+
+  if (/YEAR_MONTH/.test(hint ?? "")) {
+    if (first === 0 && second === 0) return "P0M";
+    return `P${first === 0 ? "" : `${first}Y`}${second === 0 ? "" : `${second}M`}`;
+  }
+  const MS_PER_DAY = 86400000n;
+  return formatTicks(BigInt(first) * MS_PER_DAY + BigInt(second), MILLISECOND);
+}
+
+/**
+ * Renders one temporal cell. `hint` is the column's Arrow type string; without
+ * it the value is read as a DATE/TIMESTAMP, which is what this did before the
+ * other three kinds were recognised.
+ */
+export function toTemporalValue(value: unknown, hint?: string): unknown {
   if (value === null || value === undefined) return null;
+  const kind = temporalKind(hint) ?? "datetime";
+  if (kind === "time" || kind === "duration") {
+    return formatTicks(value, ticksPerSecond(hint)) ?? toPlainValue(value);
+  }
+  if (kind === "interval") return formatInterval(value, hint) ?? toPlainValue(value);
   if (value instanceof Date) return value.toISOString();
   if (typeof value === "number" || typeof value === "bigint") {
     const date = new Date(Number(value));

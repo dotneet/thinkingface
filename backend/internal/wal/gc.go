@@ -29,13 +29,46 @@ const DefaultGCGracePeriod = 24 * time.Hour
 //     previous index may still be materialising from it. minAge must exceed the
 //     longest plausible materialisation; DefaultGCGracePeriod is that number.
 //
+// Rule 2 has a limit worth stating plainly, because it is not obvious from the
+// code: obj.Updated is the pack's *upload* time, not the moment it stopped
+// being referenced. For a CAS loser the two coincide, so minAge means what it
+// says. For a pack a compaction folded away they do not — compaction only
+// triggers past DefaultCompactionThreshold entries, which by definition took
+// time to accumulate, so those packs are already older than minAge when the
+// CAS drops them. Age therefore cannot supply their grace, and this function
+// does not try to: the caller supplies it, by passing the pre-compaction index
+// as extra protection. That is what the unexported form below takes and what
+// CompactAndSweep passes; this exported form protects nothing extra and is for
+// callers that did not just change the index.
+//
 // index.json is structurally out of reach: it lives under neither base/ nor
 // entries/, so it is never listed as a candidate.
+//
+// A repository with packs but no index returns ErrIndexMissing and sweeps
+// nothing. "No index" reads as "nothing is referenced", and acting on that
+// would delete every base/ and entries/ pack the repository has — which is
+// precisely the material docs/dev/wal-index-recovery.md restores an index
+// from. The scheduled compaction job would otherwise turn a recoverable
+// incident into an unrecoverable one on its next tick. A repository with no
+// packs at all is a genuine empty WAL and stays a silent no-op.
 //
 // Deletion is per object and best effort in the sense that a failure stops the
 // sweep — the packs already deleted are returned so the caller can log what
 // happened — but never in the sense of deleting something referenced.
 func GCOrphans(ctx context.Context, st storage.Storage, storagePath string, minAge time.Duration) ([]string, error) {
+	return gcOrphans(ctx, st, storagePath, minAge, nil)
+}
+
+// gcOrphans is GCOrphans with a set of pack keys that must survive this sweep
+// whatever the current index says.
+//
+// protected is a *union* with the current index's own references, never a
+// replacement, so passing more can only ever delete less — which is why it is
+// safe for the caller to read its copy of the index before the listing that
+// rule 1 above orders so carefully.
+func gcOrphans(ctx context.Context, st storage.Storage, storagePath string,
+	minAge time.Duration, protected map[string]bool,
+) ([]string, error) {
 	candidates, err := listPacks(ctx, st, storagePath)
 	if err != nil {
 		return nil, err
@@ -46,22 +79,20 @@ func GCOrphans(ctx context.Context, st storage.Storage, storagePath string, minA
 
 	// Read the index *after* listing, and use nothing older: it must reflect at
 	// least everything the listing saw (rule 1 above).
-	idx, _, err := ReadIndex(ctx, st, storagePath)
+	idx, gen, err := ReadIndex(ctx, st, storagePath)
 	if err != nil {
 		return nil, err
 	}
-	referenced := make(map[string]bool, len(idx.Entries)+1)
-	if idx.Base != "" {
-		referenced[storage.WALKey(storagePath, idx.Base)] = true
+	if gen == 0 {
+		return nil, fmt.Errorf("%w: %s (%d packs present, sweep skipped)",
+			ErrIndexMissing, storagePath, len(candidates))
 	}
-	for _, entry := range idx.Entries {
-		referenced[storage.WALKey(storagePath, entry)] = true
-	}
+	referenced := referencedKeys(storagePath, idx)
 
 	cutoff := time.Now().Add(-minAge)
 	deleted := make([]string, 0)
 	for _, obj := range candidates {
-		if referenced[obj.Key] || obj.Updated.After(cutoff) {
+		if referenced[obj.Key] || protected[obj.Key] || obj.Updated.After(cutoff) {
 			continue
 		}
 		if err := st.Delete(ctx, obj.Key); err != nil {
@@ -70,6 +101,22 @@ func GCOrphans(ctx context.Context, st storage.Storage, storagePath string, minA
 		deleted = append(deleted, obj.Key)
 	}
 	return deleted, nil
+}
+
+// referencedKeys is the set of storage keys one index revision names. Kept in
+// one place because two callers depend on the two sets meaning the same thing:
+// the sweep's "still referenced" and CompactAndSweep's "referenced one run
+// ago" have to be comparable, or protecting the second protects the wrong
+// objects.
+func referencedKeys(storagePath string, idx *Index) map[string]bool {
+	keys := make(map[string]bool, len(idx.Entries)+1)
+	if idx.Base != "" {
+		keys[storage.WALKey(storagePath, idx.Base)] = true
+	}
+	for _, entry := range idx.Entries {
+		keys[storage.WALKey(storagePath, entry)] = true
+	}
+	return keys
 }
 
 // listPacks enumerates both pack prefixes in one sorted slice, so the sweep

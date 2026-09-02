@@ -33,24 +33,8 @@ func (ix *Indexer) Series(ctx context.Context, repo *store.Repo, req SeriesReque
 	if req.Max <= 0 {
 		req.Max = 1000
 	}
-	runFilter := toSet(req.Runs)
-	keyFilter := toSet(req.Keys)
-
-	collected := map[string]map[string][][2]float64{}
-	appendPoint := func(run, key string, x, y float64) {
-		if len(runFilter) > 0 && !runFilter[run] {
-			return
-		}
-		if len(keyFilter) > 0 && !keyFilter[key] {
-			return
-		}
-		byKey, ok := collected[run]
-		if !ok {
-			byKey = map[string][][2]float64{}
-			collected[run] = byKey
-		}
-		byKey[key] = append(byKey[key], [2]float64{x, y})
-	}
+	collect := newSeriesCollector(toSet(req.Runs), toSet(req.Keys))
+	appendPoint := collect.add
 
 	// Two different things can put two values on one (run, key, step), and
 	// they are resolved by two different mechanisms -- do not conflate them:
@@ -78,9 +62,21 @@ func (ix *Indexer) Series(ctx context.Context, repo *store.Repo, req SeriesReque
 		return nil, err
 	}
 
+	if dropped := collect.droppedSeries; dropped > 0 {
+		// Nothing in the response says "truncated" -- ExpMetricsResponse is a
+		// list of series and adding a field to it is a wire change -- so the
+		// only place this can be reported is the log. It takes a repository
+		// with more than maxSeriesCount distinct (run, metric) pairs to reach,
+		// which no chart the UI draws comes near.
+		slog.Warn("metric series truncated: too many distinct traces",
+			"repo", repo.FullName(), "project", req.Project,
+			"kept", maxSeriesCount, "dropped", dropped)
+	}
+
 	out := []Series{}
-	for run, byKey := range collected {
-		for key, points := range byKey {
+	for run, byKey := range collect.series {
+		for key, buf := range byKey {
+			points := buf.finish()
 			// SliceStable, not Slice: points that share an x must keep the
 			// order they were collected in, because that order is what
 			// dedupeLastWins resolves the tie with.
@@ -102,6 +98,160 @@ func (ix *Indexer) Series(ctx context.Context, repo *store.Repo, req SeriesReque
 		return out[i].Run < out[j].Run
 	})
 	return out, nil
+}
+
+// maxSeriesScanPoints bounds how many [x, y] pairs one Series() call holds at
+// once, across every trace it is building.
+//
+// The write path has capped its half of this allocation since the beginning
+// (MaxFlushPoints, maxExistingFlushRows, maxLiveSeriesPoints); the read path
+// had no equivalent, and it is the half that is reachable without
+// authentication. `GET .../{project}/metrics` used to materialise one
+// [2]float64 per numeric cell of the whole parquet before max_points was so
+// much as looked at, so a repository carrying a large metrics file turned an
+// anonymous GET into a several-hundred-megabyte allocation in the API process
+// -- repeatable, and concurrently.
+//
+// A million pairs is 16 MiB of payload (plus append's headroom). It is two
+// hundred times the largest response this endpoint will emit
+// (api.maxMetricPoints), so no honest chart ever reaches it and the thinning
+// below is invisible in practice.
+//
+// A var only so the tests can lower it; nothing changes it at runtime.
+var maxSeriesScanPoints = 1_000_000
+
+// maxSeriesCount bounds the *other* dimension: the number of distinct
+// (run, metric) traces. Thinning the points of ten million one-point traces
+// would still leave ten million map entries and headers, so the trace count
+// needs its own ceiling. Well above any real project -- a sweep of a thousand
+// runs logging twenty metrics is 20,000 traces and the UI asks for a handful
+// of keys at a time -- and low enough that the map cannot become the leak the
+// points cap just closed.
+//
+// A var only so the tests can lower it; nothing changes it at runtime.
+var maxSeriesCount = 20_000
+
+// seriesPoints accumulates one trace under the collector's global stride.
+type seriesPoints struct {
+	points [][2]float64
+	// seen counts every point offered for this trace, retained or not: it is
+	// what the stride is applied to, so that thinning stays uniform along the
+	// trace rather than dropping its tail.
+	seen int64
+	// last is the most recent point offered, kept whether or not the stride
+	// retained it. downsample() promises the chart's endpoints are truthful,
+	// and a stride that happens to skip the final point would quietly break
+	// that promise -- the chart would stop short of where the run actually is.
+	last    [2]float64
+	hasLast bool
+}
+
+// finish returns the trace's points with its true final point restored.
+func (s *seriesPoints) finish() [][2]float64 {
+	if !s.hasLast {
+		return s.points
+	}
+	if n := len(s.points); n > 0 && s.points[n-1] == s.last {
+		return s.points
+	}
+	return append(s.points, s.last)
+}
+
+// seriesCollector accumulates the traces one Series() call is building, inside
+// a fixed memory budget.
+//
+// The bound cannot be "stop at N points": a chart that stopped scanning
+// halfway through the file would show the run ending halfway through, which is
+// worse than a coarse chart because it is wrong rather than approximate. So
+// the scan always runs to the end and it is the *resolution* that gives way:
+// once the budget is full every trace is halved in place and the stride
+// doubles, so what is held stays a uniform sample of everything seen so far.
+// That is the same trade downsample() makes at the end of the call, applied
+// early enough to bound the heap.
+type seriesCollector struct {
+	runFilter map[string]bool
+	keyFilter map[string]bool
+
+	series map[string]map[string]*seriesPoints
+	// keepEvery is the current stride: a point is retained when its position
+	// within its trace is a multiple of it. Doubling it on every halving is
+	// what keeps the retained set exactly "every keepEvery-th point", since
+	// halving drops precisely the odd-indexed survivors of the previous
+	// stride.
+	keepEvery int64
+	held      int
+	numSeries int
+	// droppedSeries counts traces refused once maxSeriesCount was reached.
+	// Reported by the caller; silently returning fewer traces than the data
+	// holds is the kind of thing that has to be visible somewhere.
+	droppedSeries int
+}
+
+func newSeriesCollector(runFilter, keyFilter map[string]bool) *seriesCollector {
+	return &seriesCollector{
+		runFilter: runFilter, keyFilter: keyFilter,
+		series: map[string]map[string]*seriesPoints{}, keepEvery: 1,
+	}
+}
+
+func (c *seriesCollector) add(run, key string, x, y float64) {
+	if len(c.runFilter) > 0 && !c.runFilter[run] {
+		return
+	}
+	if len(c.keyFilter) > 0 && !c.keyFilter[key] {
+		return
+	}
+	byKey, ok := c.series[run]
+	if !ok {
+		if c.numSeries >= maxSeriesCount {
+			c.droppedSeries++
+			return
+		}
+		byKey = map[string]*seriesPoints{}
+		c.series[run] = byKey
+	}
+	buf, ok := byKey[key]
+	if !ok {
+		if c.numSeries >= maxSeriesCount {
+			c.droppedSeries++
+			return
+		}
+		buf = &seriesPoints{}
+		byKey[key] = buf
+		c.numSeries++
+	}
+
+	p := [2]float64{x, y}
+	if buf.seen%c.keepEvery == 0 {
+		buf.points = append(buf.points, p)
+		c.held++
+	}
+	buf.seen++
+	buf.last, buf.hasLast = p, true
+
+	if c.held >= maxSeriesScanPoints {
+		c.halve()
+	}
+}
+
+// halve drops every second retained point of every trace and doubles the
+// stride, freeing half the budget without disturbing the order of what is
+// left -- which matters, because that order is what dedupeLastWins resolves
+// ties with.
+func (c *seriesCollector) halve() {
+	held := 0
+	for _, byKey := range c.series {
+		for _, buf := range byKey {
+			kept := buf.points[:0]
+			for i := 0; i < len(buf.points); i += 2 {
+				kept = append(kept, buf.points[i])
+			}
+			buf.points = kept
+			held += len(kept)
+		}
+	}
+	c.held = held
+	c.keepEvery *= 2
 }
 
 func (ix *Indexer) scanParquetSeries(ctx context.Context, repo *store.Repo, req SeriesRequest,
@@ -133,8 +283,13 @@ func (ix *Indexer) scanParquetSeries(ctx context.Context, repo *store.Repo, req 
 		return fmt.Errorf("open git repository: %w", err)
 	}
 
-	if err := ix.scanSeriesFile(ctx, gitRepo, repo, layout.MetricsPath, "", req, flushed, appendPoint); err != nil {
-		return err
+	// The chain in part order, oldest file first: that is chronological (the
+	// writer only ever appends to its newest file, layout.MetricsFiles), which
+	// is what the "later value wins" tie-break below depends on.
+	for _, metricsPath := range layout.MetricsFiles() {
+		if err := ix.scanSeriesFile(ctx, gitRepo, repo, metricsPath, "", req, flushed, appendPoint); err != nil {
+			return err
+		}
 	}
 	if layout.SystemMetricsPath == "" {
 		return nil

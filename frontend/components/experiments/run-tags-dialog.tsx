@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useId, useState } from "react";
+import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
@@ -19,12 +20,22 @@ export function RunTagsDialog({
   run,
   open,
   saving,
+  error,
   onClose,
   onSave,
 }: {
   run: ExpRun | null;
   open: boolean;
   saving: boolean;
+  /**
+   * Failure of the save this dialog started. Required for the dialog to be
+   * usable at all: it only closes from the mutation's onSuccess, so a failed
+   * PATCH leaves it open with nothing to show — the page-level Alert that used
+   * to be the only report sits behind the native <dialog>'s backdrop, and
+   * re-clicking Save just fires the same doomed request again. Same contract
+   * as ConfirmDialog's `error`.
+   */
+  error?: string;
   onClose: () => void;
   onSave: (run: string, tags: string[]) => void;
 }) {
@@ -78,6 +89,9 @@ export function RunTagsDialog({
           </Button>
         </>
       }
+      // Below the action row, not inside the body: an Alert in the body grows
+      // the panel and moves the buttons even though the footer is pinned (§8).
+      footerNote={error ? <Alert tone="negative">{error}</Alert> : undefined}
     >
       <form
         id={formId}

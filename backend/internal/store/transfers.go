@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -311,6 +312,31 @@ func (s *Store) CreateRepoTransfer(ctx context.Context, spec TransferSpec, ttl t
 	}
 
 	now := time.Now()
+
+	// Reconcile a request nobody answered before retiring it. Expiry is lazy
+	// -- only a decision endpoint flips 'pending' to 'expired' -- but every
+	// path that could *find* the row filters on expires_at, so once the TTL
+	// passes there is no endpoint left that would touch it: GET .../transfer
+	// and DELETE .../transfer both answer 404, and it appears in neither
+	// party's /me/transfers. The row nevertheless still counts as pending for
+	// idx_repo_transfers_one_pending, so without this it would answer every
+	// later request for this repository with ErrConflict forever, and a repo
+	// whose owner cannot write any other namespace could never be offered
+	// again. This runs under resolveTransferTarget's FOR UPDATE lock on the
+	// repository, the same lock TransferRepo takes, so a concurrent create
+	// cannot slip an insert between the expiry and ours.
+	//
+	// Deliberately not done on the read paths (PendingRepoTransfer,
+	// ListRepoTransfersForUser): they already report an expired row as absent,
+	// which is the truth, and making a page load write would charge every
+	// visit for a state nobody can observe.
+	if _, err := tx.Exec(ctx,
+		`UPDATE repo_transfers SET status = 'expired'
+		 WHERE repo_id = $1 AND status = 'pending' AND expires_at <= $2`,
+		spec.RepoID, now); err != nil {
+		return nil, err
+	}
+
 	var id int64
 	err = tx.QueryRow(ctx,
 		`INSERT INTO repo_transfers (repo_id, from_namespace_id, from_name, to_namespace_id, to_name,
@@ -351,13 +377,44 @@ func (s *Store) PendingRepoTransfer(ctx context.Context, repoID int64) (*RepoTra
 		 WHERE t.repo_id = $1 AND t.status = 'pending' AND t.expires_at > $2`, repoID, time.Now()))
 }
 
-// ListRepoTransfersForUser splits the pending, unexpired transfers relevant
-// to a user: incoming are the ones they could accept or reject (write
-// access to the target namespace: its owner, or an org member with role
-// admin/write), outgoing are the ones they could cancel (the same, for the
-// source namespace). A pending row past its expires_at is treated as if it
-// were not pending; it is flipped to 'expired' lazily on first touch by the
-// decision methods rather than through a cleanup job
+// maxTransfersListed caps each side of ListRepoTransfersForUser. The listing
+// runs on every signed-in page render (the header badge counts the incoming
+// side), and while a user only ever sees requests aimed at namespaces they
+// write, anybody may aim one there: a single account with a thousand
+// repositories can file a thousand pending requests at a namespace it has no
+// relationship with. The cap is what keeps that from being a thousand rows
+// per page view. It is set far above any queue a person would actually work
+// through, so the badge is the true count in every real case; a user holding
+// more than this many undecided requests sees the newest maxTransfersListed
+// of them and a badge reading maxTransfersListed, which api-contract.md §
+// "Transfer (for the Web UI)" states. The rest become reachable as these are
+// decided, and expire on their own after seven days.
+//
+// A var rather than a const only so the tests can shrink it; nothing outside
+// them assigns to it.
+var maxTransfersListed = 200
+
+// ListRepoTransfersForUser splits the pending, unexpired transfers that are
+// the user's own to act on: incoming are the ones aimed at a namespace they
+// hold write access in (its owner, or an org member with role admin/write --
+// see namespaceWritable), outgoing are the ones leaving such a namespace,
+// which they could cancel.
+//
+// This deliberately does not answer the same question as the accept/reject
+// endpoint's permission check, and the difference is the point: that check
+// authorises one named actor against one named transfer ("may this actor do
+// this?"), while this is an inbox ("what is waiting for me?"). A site
+// administrator may decide any transfer on the instance by id
+// (docs/dev/repo-transfer-design.md §5, api.roleIn) but is listed only the
+// ones addressed to namespaces that are actually theirs -- see
+// namespaceWritable for what listing them everything did to the header badge.
+//
+// Each side is capped at maxTransfersListed, newest first.
+//
+// A pending row past its expires_at is treated as if it were not pending; it
+// is flipped to 'expired' lazily rather than through a cleanup job -- by the
+// decision methods on first touch, and by CreateRepoTransfer, which is the
+// only path that can still reach a row nobody ever answered
 // (docs/dev/repo-transfer-design.md §7.2).
 func (s *Store) ListRepoTransfersForUser(ctx context.Context, userID int64) (incoming, outgoing []RepoTransfer, err error) {
 	now := time.Now()
@@ -377,7 +434,8 @@ func (s *Store) ListRepoTransfersForUser(ctx context.Context, userID int64) (inc
 
 func (s *Store) queryRepoTransfers(ctx context.Context, where string, args ...any) ([]RepoTransfer, error) {
 	return collect(ctx, s.db,
-		`SELECT `+repoTransferColumns+` FROM `+repoTransferFrom+` WHERE `+where+` ORDER BY t.created_at DESC`,
+		`SELECT `+repoTransferColumns+` FROM `+repoTransferFrom+` WHERE `+where+
+			` ORDER BY t.created_at DESC LIMIT `+strconv.Itoa(maxTransfersListed),
 		args,
 		func(row rowScanner) (RepoTransfer, error) {
 			t, err := scanRepoTransfer(row)
