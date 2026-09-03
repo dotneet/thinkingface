@@ -99,6 +99,11 @@ export function WebhooksManager({
     setWebhooks(null);
     setRepos(null);
     setReposError(false);
+    // A scope like `model/foo` selected under namespace A must not survive
+    // a switch to B: the option list is rebuilt, but a stale value is still
+    // submitted, and create then 400s for a repo that isn't in B.
+    setRepoScope("");
+    setCreateError(null);
     // The signing secret belongs to the namespace it was minted in. Left
     // behind, it kept sitting above another namespace's list — and stayed in
     // the DOM long after the person who created it had walked away.
