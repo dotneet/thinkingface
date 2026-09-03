@@ -948,6 +948,44 @@ func TestLFSProxy_NoRepositoryExistenceOracle(t *testing.T) {
 	}
 }
 
+// A linked oid whose bytes are not in storage must not answer differently
+// from an oid the repository never linked. The two 404s used to differ
+// ("object not found" vs "object <oid> not found"), so anyone who could
+// name a repo id and a sha256 could walk content hashes and learn which
+// objects the repository had registered — even when they could not download
+// them. Same class as TestLFSProxy_NoRepositoryExistenceOracle, which only
+// compared missing vs existing *repositories*.
+func TestLFSProxyDownload_NoObjectLinkExistenceOracle(t *testing.T) {
+	f := newSecFixture(t)
+	f.user("alice", "correct horse battery")
+	repo := f.repo("alice", "weights", "model")
+	sum := sha256.Sum256([]byte("never stored"))
+	oid := hex.EncodeToString(sum[:])
+
+	unlinked := f.do(secRequest{
+		method: "GET",
+		path:   "/api/v1/lfs/" + strconv.FormatInt(repo.ID, 10) + "/" + oid,
+	})
+
+	if err := f.st.RecordLFSObject(context.Background(), repo.ID, oid, 12, func(string) (bool, error) {
+		return true, nil
+	}); err != nil {
+		t.Fatalf("RecordLFSObject: %v", err)
+	}
+
+	linked := f.do(secRequest{
+		method: "GET",
+		path:   "/api/v1/lfs/" + strconv.FormatInt(repo.ID, 10) + "/" + oid,
+	})
+	if unlinked.Code != http.StatusNotFound || linked.Code != http.StatusNotFound {
+		t.Fatalf("unlinked -> %d, linked-but-absent -> %d; want 404 both", unlinked.Code, linked.Code)
+	}
+	if unlinked.Body.String() != linked.Body.String() {
+		t.Fatalf("bodies differ, so the link is still distinguishable:\n unlinked: %s\n   linked: %s",
+			unlinked.Body.String(), linked.Body.String())
+	}
+}
+
 // ------------------------------------------------------------------ [S19]
 
 func TestValidateYAML_RequiresAuthentication(t *testing.T) {
@@ -1020,6 +1058,10 @@ func TestDecideTransfer_HidesTheDestinationFromOutsiders(t *testing.T) {
 			})
 			if absent.Code != real.Code {
 				t.Errorf("existing transfer -> %d, absent one -> %d; the ids are distinguishable", real.Code, absent.Code)
+			}
+			if absent.Body.String() != real.Body.String() {
+				t.Errorf("bodies differ, so the transfer id is still distinguishable:\n existing: %s\n  missing: %s",
+					real.Body.String(), absent.Body.String())
 			}
 		})
 	}
