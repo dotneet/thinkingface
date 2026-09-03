@@ -95,7 +95,17 @@ export async function RepoListPage({
   const archived = listTriState(sp.archived);
   const copy = COPY[kind];
   const listBase = basePath ?? copy.basePath;
-  const clearHref = withPreservedParams(listBase, sp, preserveParams);
+  // "Clear filters" removes every filter, not the sort order: sort decides
+  // how the (unfiltered) results are arranged, it doesn't narrow which ones
+  // match, and a chip's own × already carries `sort` across via
+  // repoListHref. Before this, "Clear filters" and a chip's × both claimed to
+  // do the same thing — drop everything but this one filter's worth of
+  // narrowing — while disagreeing on whether sort counted as a filter.
+  const clearHref = withPreservedParams(
+    listBase,
+    sp,
+    Array.from(new Set([...preserveParams, "sort"])),
+  );
   const hasFilters =
     search !== "" ||
     tags.length > 0 ||
@@ -132,6 +142,11 @@ export async function RepoListPage({
     { headers: await authHeaders() },
   );
   const facets = result.ok ? result.data.facets : EMPTY_FACETS;
+  // Told to the sidebar so it never prints a fabricated "0" next to a
+  // selected filter when the listing request itself failed (DESIGN.md §9-1)
+  // — the row still has to stay so the filter is removable (§8-4), but the
+  // count under a failed request isn't a real zero, it's "unknown".
+  const facetsAvailable = result.ok;
   // Distinguishes "nothing matches" from "you've paged past the end of a
   // non-empty list" (e.g. a bookmarked ?offset=, a browser back after
   // someone else deleted repos, or Prev/Next racing a shrinking count).
@@ -155,7 +170,13 @@ export async function RepoListPage({
 
       <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
         <Suspense>
-          <RepoFacetSidebar basePath={listBase} clearHref={clearHref} kind={kind} facets={facets} />
+          <RepoFacetSidebar
+            basePath={listBase}
+            clearHref={clearHref}
+            kind={kind}
+            facets={facets}
+            facetsAvailable={facetsAvailable}
+          />
         </Suspense>
 
         <div className="flex min-w-0 flex-1 flex-col gap-4">

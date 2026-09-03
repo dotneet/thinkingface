@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   bytesToBase64,
+  decimalScale,
   fromJsonish,
+  isDecimalHint,
   isTemporalHint,
   MAX_INLINE_BYTES,
   temporalKind,
+  toDecimalValue,
   toPlainValue,
   toTemporalValue,
 } from "@/lib/duckdb-values";
@@ -167,5 +170,73 @@ describe("toTemporalValue", () => {
 
   it("still reads a hintless value as epoch milliseconds", () => {
     expect(toTemporalValue(0, "Timestamp<MILLISECOND>")).toBe("1970-01-01T00:00:00.000Z");
+  });
+});
+
+/** Mimics DuckDB's DecimalBigNum: toJSON() returns a quoted, unscaled digit string. */
+function decimalLike(unscaledDigits: string) {
+  return { toJSON: () => JSON.stringify(unscaledDigits) };
+}
+
+describe("decimalScale", () => {
+  it("reads the scale out of apache-arrow's Decimal#toString format", () => {
+    // Decimal[<precision>e<sign><scale>] — see apache-arrow's type.mjs.
+    expect(decimalScale("Decimal[10e+2]")).toBe(2);
+    expect(decimalScale("Decimal[10e0]")).toBe(0);
+    expect(decimalScale("Decimal[38e+18]")).toBe(18);
+  });
+
+  it("returns undefined for a non-decimal or missing hint", () => {
+    expect(decimalScale("Int64")).toBeUndefined();
+    expect(decimalScale(undefined)).toBeUndefined();
+  });
+});
+
+describe("isDecimalHint", () => {
+  it("matches only Decimal type strings", () => {
+    expect(isDecimalHint("Decimal[10e+2]")).toBe(true);
+    expect(isDecimalHint("Int64")).toBe(false);
+    expect(isDecimalHint(undefined)).toBe(false);
+  });
+});
+
+describe("toDecimalValue", () => {
+  it("applies the scale from the hint instead of showing the unscaled integer", () => {
+    // DECIMAL(10,2) 1.50 arrives from apache-arrow as the unscaled "150".
+    expect(toDecimalValue(decimalLike("150"), "Decimal[10e+2]")).toBe(1.5);
+  });
+
+  it("handles a negative decimal", () => {
+    expect(toDecimalValue(decimalLike("-150"), "Decimal[10e+2]")).toBe(-1.5);
+  });
+
+  it("handles scale 0 (a plain integer DECIMAL)", () => {
+    expect(toDecimalValue(decimalLike("42"), "Decimal[10e0]")).toBe(42);
+  });
+
+  it("pads the fractional part when the unscaled value is short", () => {
+    // DECIMAL(10,4) 0.0007 -> unscaled "7".
+    expect(toDecimalValue(decimalLike("7"), "Decimal[10e+4]")).toBe(0.0007);
+  });
+
+  it("keeps an out-of-safe-range decimal as an exact string rather than rounding", () => {
+    const hugeUnscaled = "9".repeat(30); // far past Number.MAX_SAFE_INTEGER
+    const result = toDecimalValue(decimalLike(hugeUnscaled), "Decimal[38e+2]");
+    expect(result).toBe(`${"9".repeat(28)}.99`);
+  });
+
+  it("passes null/undefined through as null", () => {
+    expect(toDecimalValue(null, "Decimal[10e+2]")).toBeNull();
+    expect(toDecimalValue(undefined, "Decimal[10e+2]")).toBeNull();
+  });
+
+  it("falls back to the unscaled toPlainValue reading without a decimal hint", () => {
+    expect(toDecimalValue(decimalLike("150"), undefined)).toBe("150");
+    expect(toDecimalValue(decimalLike("150"), "Int64")).toBe("150");
+  });
+
+  it("accepts a bigint or plain integer directly, not just a toJSON wrapper", () => {
+    expect(toDecimalValue(150n, "Decimal[10e+2]")).toBe(1.5);
+    expect(toDecimalValue(150, "Decimal[10e+2]")).toBe(1.5);
   });
 });

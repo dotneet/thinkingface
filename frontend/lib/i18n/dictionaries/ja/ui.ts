@@ -5,7 +5,9 @@ export const ui = {
   skipToContent: "コンテンツへスキップ",
   copy: "コピー",
   copied: "コピーしました",
+  copyFailed: "コピーできませんでした。テキストを選択して手動でコピーしてください",
   close: "閉じる",
+  closeBusy: "閉じる（実行中の処理が終わるまで操作できません）",
   cellValue: "セルの値",
   viewFullValue: "クリックで全体を表示",
   // Table cell rendering (ValueCell / CellModal / JsonTree). The caller

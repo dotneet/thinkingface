@@ -21,6 +21,11 @@ export const repoList = {
     license: "License",
     task: "Task",
     relation: "Relation",
+    // Read by the count column when the listing request itself failed: the
+    // row still has to be there (a selected value stays removable even when
+    // its facet dropped out), but a count drawn from a failed response would
+    // be a fabricated zero, not a real one (DESIGN.md §9-1).
+    countUnavailable: "Count unavailable",
   },
   lineage: {
     title: "Lineage",

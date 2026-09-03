@@ -156,11 +156,58 @@ file the sync worker publishes after a push), and, when the Continuity migration
 (see below), `wal/` (the git write-ahead log). All three are content-addressed, meaning
 distinct pushes that produce the same file share storage.
 
+### The bucket needs CORS configured, or two browser features break { #bucket-cors }
+
+Two things in the Web UI fetch object bytes directly from your browser rather than through a
+plain download link: the dataset viewer's [SQL mode](../guides/dataset-viewer.md#query-with-sql)
+(DuckDB-WASM downloads the whole Parquet file to query it locally) and the plain-file
+preview's full-text fallback for CSV / JSON Lines files over 512 KB (see
+[Browsing the Web UI](../guides/web-ui.md#view-a-file)). Both go through the same resolve
+endpoint, and with `STORAGE_DRIVER=gcs` that endpoint answers with a redirect to a short-lived
+signed URL on `storage.googleapis.com` rather than streaming the bytes itself — a different
+origin from both the web UI and the API. Unless the bucket is configured to answer a
+cross-origin browser request for that origin with CORS headers, the browser refuses to read
+the response, and both features fail — usually reported as a generic "network error" rather
+than anything naming CORS or GCS, which makes the cause easy to miss.
+
+This is specific to `STORAGE_DRIVER=gcs`. Under `gcs-emulator` (what `docker compose up` uses)
+the API streams the bytes itself instead of redirecting, so the browser's request never
+leaves the API's own origin and no bucket CORS policy is involved — which is also why this is
+easy to not notice until you point a deployment at a real bucket for the first time.
+
+If you provision the bucket with the Terraform in `infra/`, this is already handled: see
+["The bucket needs CORS configured" under Production on GCP](#bucket-cors-terraform) below.
+If you provision the bucket yourself — by hand, or with different infrastructure tooling —
+configure the same policy directly, for example:
+
+```bash
+cat > cors.json <<'EOF'
+[
+  {
+    "origin": ["https://your-web-ui-origin.example.com"],
+    "method": ["GET", "HEAD"],
+    "responseHeader": ["Content-Type", "Content-Length", "Content-Range", "ETag"],
+    "maxAgeSeconds": 3600
+  }
+]
+EOF
+gcloud storage buckets update gs://your-bucket --cors-file=cors.json
+```
+
+Use the exact origin your browser loads the web UI from (scheme, host, and port) — a bucket
+CORS policy has no wildcard-subdomain form, so list every origin you actually serve the UI
+from, and never `"*"`: every object behind this bucket becomes reachable through a signed URL
+the moment someone gets a browser to fetch one, so naming the origin explicitly is what keeps
+that read scoped to your own deployment. `GET`/`HEAD` cover both features above; nothing in
+the Web UI writes to the bucket directly from the browser even with `STORAGE_DRIVER=gcs` —
+uploads always go through the API.
+
 ## Production on GCP
 
 The `infra/` directory holds Terraform for a GCP production deployment. It provisions:
 
-- A GCS bucket for `lfs/`, `blobs/`, and (when applicable) `wal/`
+- A GCS bucket for `lfs/`, `blobs/`, and (when applicable) `wal/`, with a CORS policy allowing
+  the web UI's origin (see below)
 - An Artifact Registry repository for the backend and frontend images
 - A `google_cloud_run_v2_service` for the API (gen2, `h2c`, `min_instance_count = 1`, CPU
   always allocated, Direct VPC egress to reach the database)
@@ -204,6 +251,21 @@ covered in full in `infra/README.md`'s "After `apply`" walkthrough:
 Not provisioned by this Terraform: a custom domain or TLS front end. Cloud Run terminates
 TLS itself and serves each service on its own `*.run.app` URL, which is enough to get
 started; add a domain mapping or a load balancer once you have decided on a domain strategy.
+
+### The bucket needs CORS configured { #bucket-cors-terraform }
+
+See ["The bucket needs CORS configured, or two browser features break"](#bucket-cors) above
+for what this is for. `infra/`'s bucket resource already carries the right policy, derived
+from the same value `TF_ALLOWED_ORIGINS` is: `web_public_url` if you set it, otherwise the
+`web` Cloud Run service's own `*.run.app` URL — the same single source of truth
+`TF_ALLOWED_ORIGINS` uses, so the two allow-lists cannot drift apart. Like
+`TF_ALLOWED_ORIGINS`, this resolves to a real value from the first `apply` onward (`web`'s
+`*.run.app` URL is deterministic from its name/region/project, unlike `api_public_url`, which
+falls back to a placeholder and does need the manual re-apply described above) — no extra
+step needed unless you later put a custom domain in front of `web`, at which point set
+`web_public_url` and re-apply so both allow-lists follow it. The policy's cache lifetime is
+`var.bucket_cors_max_age_seconds` (default 1 hour, see its description in
+`infra/variables.tf`).
 
 ### Database on GCP: Cloud SQL vs. SQLite + Litestream
 

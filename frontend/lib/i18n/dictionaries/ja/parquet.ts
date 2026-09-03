@@ -1,6 +1,8 @@
 // Parquet viewer: rows table, schema panel, SQL console.
 export const parquet = {
   errorTitle: "読み込めませんでした",
+  // 「行」タブの行取得失敗と、SQL タブのダウンロード / wasm 起動失敗で共有する再試行ラベル。
+  retry: "再試行",
   viewer: {
     rowsOne: "{count} 行",
     rowsOther: "{count} 行",
@@ -42,11 +44,14 @@ export const parquet = {
     initFailedTitle: "SQL コンソールを起動できませんでした",
     initFailedFallback: "DuckDB の起動に失敗しました。",
     initFailedHint:
-      "ページを再読み込みして再試行してください。「行」タブは DuckDB なしで動作します。",
+      "下の「再試行」を使うか、ページを再読み込みしてください。「行」タブは DuckDB なしで動作します。",
     downloadFailed: "ファイルをダウンロードできませんでした（{status}）。",
     queryAria: "SQL クエリ",
     run: "実行",
     runningQuery: "クエリを実行中",
+    cancel: "キャンセル",
+    cancelledTitle: "クエリをキャンセルしました",
+    cancelled: "完了する前にクエリを停止しました。",
     shortcutRuns: "でも実行できます。",
     runsLocally: "クエリはローカルで実行され、サーバーには何も送信されません。",
     resultStatsOne: "{count} 行（{ms} ms）",

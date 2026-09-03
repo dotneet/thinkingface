@@ -20,7 +20,28 @@ import (
 // viewer wrote moments ago, for a revision whose repo_files rows are not
 // committed yet. A day is far longer than either takes and costs only the
 // storage of a handful of objects until the next run.
+//
+// It is no longer what makes the pass safe, and it never could have been.
+// gitrepo.PublishBlob skips an object that is already at its key, so a second
+// repository starting to reference a year-old blob does not move that
+// object's Updated timestamp by a single second -- no age threshold can see
+// that reference arriving. store.DeleteOrphanedBlob is what does: it takes a
+// blob_deletions row and re-checks repo_files under it, against the same row
+// the sync pipeline's repair pass takes. What the grace still buys is what
+// untrackedLFSGrace buys on the other layer -- an object being written right
+// now is not offered to that machinery at all.
 const blobGrace = 24 * time.Hour
+
+// deletionLedgerGrace is how long a blob_deletions row is kept after nothing
+// references its sha any more. The row exists so a revision that names a
+// collected sha can have the bytes put back (store.RepairDeletedBlobs); once
+// no revision names it, it is only waiting to be pruned. The floor matters
+// because the intent is recorded *before* the bytes go, and the push that
+// would claim the sha may still be minutes from committing its repo_files
+// rows -- pruning on sight would throw away the repair record for exactly the
+// race the ledger exists to survive. A day, for the same reason blobGrace is
+// a day, and it costs one small row per collected blob until then.
+const deletionLedgerGrace = 24 * time.Hour
 
 // untrackedLFSGrace is how long an lfs/ object may exist with no lfs_objects
 // row before gc reads it as leaked rather than mid-upload. Every write path
@@ -78,6 +99,8 @@ type gcDB interface {
 	DeleteOrphanedLFSObject(ctx context.Context, oid string, removeStorage func() error) (deleted bool, err error)
 	DeleteUntrackedLFSObject(ctx context.Context, oid string, removeStorage func() error) (deleted bool, err error)
 	ListReferencedBlobSHAs(ctx context.Context) (map[string]bool, error)
+	DeleteOrphanedBlob(ctx context.Context, sha string, removeStorage func() error) (deleted bool, err error)
+	PruneBlobDeletions(ctx context.Context, before time.Time) (int64, error)
 }
 
 // gcStorage is the object-store surface runGC needs.
@@ -299,12 +322,23 @@ func gcLFSUntracked(ctx context.Context, db gcDB, obj gcStorage, untracked []sto
 
 // gcBlobs collects blobs/ objects no indexed revision carries any more.
 //
-// There is no row to lock here, so the reference set is read after the (slow)
-// bucket listing: a push whose repo_files rows commit while the listing runs
-// is seen. The remaining window -- a push landing between that read and the
-// delete, on a sha that had been orphaned for over a day -- is what blobGrace
-// cannot cover; running the collector against a quiet instance is the answer,
-// and a lost blob is re-published by the next push to any ref carrying it.
+// The reference set is read after the (slow) bucket listing, so a push whose
+// repo_files rows commit while the listing runs is seen rather than mistaken
+// for a leak -- the same ordering, for the same reason, that gcLFS uses. That
+// snapshot is only how candidates are *chosen*, though. What makes a delete
+// safe is store.DeleteOrphanedBlob, which records the removal in
+// blob_deletions, re-checks repo_files under that row and deletes storage
+// before committing, against the same row store.RepairDeletedBlobs takes at
+// the end of every push's sync pipeline. So a push that starts referencing a
+// candidate after the scan either commits first and is seen by the re-check,
+// or is blocked and then re-publishes the bytes it needs.
+//
+// The comment this replaces asked for the pass to be run "against a quiet
+// instance", which the shipped deployment -- a Cloud Run Job on a schedule,
+// beside a service that is always accepting pushes -- was never going to be.
+//
+// The prune at the end is what keeps the ledger from growing with every
+// object ever reclaimed: a sha nothing references has nothing left to repair.
 func gcBlobs(ctx context.Context, db gcDB, obj gcStorage, execute bool) error {
 	objects, err := obj.List(ctx, "blobs/")
 	if err != nil {
@@ -330,21 +364,46 @@ func gcBlobs(ctx context.Context, db gcDB, obj gcStorage, execute bool) error {
 
 	var deleted int
 	var deletedBytes int64
+	var skipped int
 	var storageFailures int
 	for _, o := range orphaned {
-		if err := obj.Delete(ctx, o.Key); err != nil {
+		sha := path.Base(o.Key)
+		ok, err := db.DeleteOrphanedBlob(ctx, sha, func() error {
+			return obj.Delete(ctx, o.Key)
+		})
+		if err != nil {
 			slog.Error("gc: delete failed, leaving the blob for a later retry", "key", o.Key, "error", err)
 			storageFailures++
+			continue
+		}
+		if !ok {
+			skipped++
 			continue
 		}
 		deleted++
 		deletedBytes += o.Size
 	}
 	fmt.Printf("deleted %d of %d orphaned blobs (%d bytes)\n", deleted, len(orphaned), deletedBytes)
-	if storageFailures > 0 {
-		return fmt.Errorf("%d blobs failed to delete from storage; see the logged errors above", storageFailures)
+	if skipped > 0 {
+		fmt.Printf("skipped %d blobs that gained a revision reference since the scan\n", skipped)
 	}
-	return nil
+
+	// Pruning runs whatever the deletes did: the rows it clears are last
+	// run's, not this one's, and a storage failure above is no reason to let
+	// the ledger keep growing.
+	pruned, pruneErr := db.PruneBlobDeletions(ctx, time.Now().Add(-deletionLedgerGrace))
+	if pruneErr != nil {
+		pruneErr = fmt.Errorf("prune blob deletion ledger: %w", pruneErr)
+	} else if pruned > 0 {
+		fmt.Printf("forgot %d blob deletion records nothing references any more\n", pruned)
+	}
+
+	if storageFailures > 0 {
+		return errors.Join(
+			fmt.Errorf("%d blobs failed to delete from storage; see the logged errors above", storageFailures),
+			pruneErr)
+	}
+	return pruneErr
 }
 
 // gcStaging collects tmp/uploads/ objects abandoned by interrupted LFS

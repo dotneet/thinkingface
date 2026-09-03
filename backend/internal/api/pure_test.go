@@ -299,28 +299,15 @@ func TestValidateIngestName(t *testing.T) {
 
 // ------------------------------------------------------------ run annotations
 
-func TestDecodeRunSegment(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		// chi hands back the segment with %2F intact but everything else
-		// already decoded, which is what these cases pin down.
-		{"plain name is untouched", "run-1", "run-1"},
-		{"encoded slash", "sweep%2Frun-1", "sweep/run-1"},
-		{"lowercase encoded slash", "sweep%2frun-1", "sweep/run-1"},
-		{"several encoded slashes", "a%2Fb%2Fc", "a/b/c"},
-		{"an already-decoded space stays decoded", "run 1", "run 1"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := decodeRunSegment(tt.input); got != tt.want {
-				t.Fatalf("decodeRunSegment(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
+// The run segment used to be decoded here by a decodeRunSegment of its own,
+// which turned "%2F" back into a slash and assumed chi had already decoded
+// everything else. That assumption is wrong precisely when a "%2F" is present
+// (it is what makes chi route on the escaped path, where *nothing* is
+// decoded), so the test that pinned it down went with it. Run and project
+// names now go through pathParam like every other path parameter --
+// urlparams.go for the rule, TestChiURLParamEncodingContract for chi's half of
+// it, and TestExperimentRunRoutes_NamesThatNeedEscaping in experiments_test.go
+// for these two routes end to end.
 
 func TestNormalizeTags(t *testing.T) {
 	tests := []struct {
@@ -422,11 +409,20 @@ func TestCascadeDeleteRoute(t *testing.T) {
 		{"DELETE", "/api/v1/repos/datasets/alice/squad", true},
 		{"DELETE", "/api/repos/delete", true},
 		{"DELETE", "/api/v1/experiments/alice/exp/proj/runs/run-1", true},
+		// A run whose name holds a slash ("sweep/seed-2", sent as %2F) is one
+		// path segment like any other, and typically the one with the most
+		// points to cascade through. Counting segments on the *decoded* path
+		// found one slash too many here and handed exactly those runs the
+		// deadline this exemption exists to lift.
+		{"DELETE", "/api/v1/experiments/alice/exp/proj/runs/sweep%2Fseed-2", true},
+		{"DELETE", "/api/v1/experiments/alice/exp/proj/runs/exp%201%2Fseed-2", true},
+		{"DELETE", "/api/v1/experiments/alice/exp/proj/runs/%E5%AE%9F%E9%A8%93%2F1", true},
 
 		// Same prefixes, but a single-row write in every case.
 		{"DELETE", "/api/v1/repos/models/alice/bert/archive", false},
 		{"DELETE", "/api/v1/repos/models/alice/bert/transfer", false},
 		{"DELETE", "/api/v1/experiments/alice/exp/proj/runs/run-1/artifacts", false},
+		{"DELETE", "/api/v1/experiments/alice/exp/proj/runs/sweep%2Fseed-2/artifacts", false},
 		// The exemption is for the delete, not for the route.
 		{"GET", "/api/v1/repos/models/alice/bert", false},
 		{"PATCH", "/api/v1/repos/models/alice/bert", false},

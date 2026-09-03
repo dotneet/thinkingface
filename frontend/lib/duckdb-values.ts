@@ -189,9 +189,12 @@ export function toPlainValue(value: unknown, depth = 0): unknown {
  * `"15"` — quotes included — in the cell. Parse those back into the value they
  * encode, and leave anything that is not JSON alone.
  *
- * (apache-arrow renders DECIMAL unscaled, so a DECIMAL(21,1) of 1.5 still
- * reads as 15. That is upstream behaviour, not something this can recover:
- * the scale lives on the field type, not the value.)
+ * apache-arrow renders DECIMAL unscaled (a DECIMAL(21,1) of 1.5 reads as `15`
+ * here), because the scale lives on the field type, not the value. This
+ * function has no access to that type, so it cannot correct for it — callers
+ * that *do* have the column's type string (the `hint` produced in
+ * lib/duckdb.ts) must go through `toDecimalValue` below instead, which reads
+ * the scale back out of the hint before falling back to this path.
  */
 export function fromJsonish(value: unknown, depth: number): unknown {
   if (typeof value !== "string") return toPlainValue(value, depth + 1);
@@ -201,6 +204,84 @@ export function fromJsonish(value: unknown, depth: number): unknown {
   } catch {
     return value;
   }
+}
+
+/**
+ * Extracts the scale out of an Arrow Decimal type string. apache-arrow 17's
+ * `Decimal#toString` renders `Decimal[<precision>e<sign><scale>]` — e.g.
+ * `Decimal[10e+2]` for a `DECIMAL(10,2)`, `Decimal[10e0]` for scale 0 — so the
+ * exponent after `e` *is* the scale (see node_modules/apache-arrow/type.mjs).
+ * Returns undefined for anything else, including a missing hint.
+ */
+export function decimalScale(hint: string | undefined): number | undefined {
+  const match = /^Decimal\[\d+e([+-]?\d+)\]$/.exec(hint ?? "");
+  if (!match) return undefined;
+  return Number(match[1]);
+}
+
+export function isDecimalHint(hint: string | undefined): boolean {
+  return decimalScale(hint) !== undefined;
+}
+
+/**
+ * Renders one DECIMAL cell with its scale applied, using the column's Arrow
+ * type string (`hint`, from `lib/duckdb.ts`) to recover the scale that
+ * `DecimalBigNum.toJSON()` strips. Without a recognisable hint this falls
+ * back to the unscaled `toPlainValue` reading rather than guessing.
+ */
+export function toDecimalValue(value: unknown, hint?: string): unknown {
+  if (value === null || value === undefined) return null;
+  const scale = decimalScale(hint);
+  if (scale === undefined) return toPlainValue(value);
+  const unscaled = unscaledDecimalDigits(value);
+  if (unscaled === undefined) return toPlainValue(value);
+  return applyDecimalScale(unscaled, scale);
+}
+
+/** Pulls the exact unscaled integer (as a digit string) out of a decimal cell. */
+function unscaledDecimalDigits(value: unknown): string | undefined {
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "number" && Number.isInteger(value)) return String(value);
+  if (typeof value !== "object" || value === null) return undefined;
+  const source = value as { toJSON?: () => unknown };
+  if (typeof source.toJSON !== "function") return undefined;
+  const json = source.toJSON();
+  if (typeof json !== "string") return undefined;
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (typeof parsed === "string" && /^-?\d+$/.test(parsed)) return parsed;
+    if (typeof parsed === "number" && Number.isInteger(parsed)) return String(parsed);
+  } catch {
+    // Not JSON at all; fall through to undefined below.
+  }
+  return undefined;
+}
+
+/**
+ * Inserts the decimal point `scale` digits from the right of an exact integer
+ * digit string, mirroring how `toPlainValue` treats out-of-range bigints:
+ * small results become a JS number (still sorts/formats like a number), and
+ * anything whose unscaled part falls outside the safe-integer range stays an
+ * exact string rather than being rounded by a float division.
+ */
+function applyDecimalScale(unscaled: string, scale: number): unknown {
+  const negative = unscaled.startsWith("-");
+  const digits = negative ? unscaled.slice(1) : unscaled;
+
+  const text =
+    scale <= 0
+      ? digits + "0".repeat(-scale)
+      : (() => {
+          const padded = digits.padStart(scale + 1, "0");
+          const cut = padded.length - scale;
+          return `${padded.slice(0, cut)}.${padded.slice(cut)}`;
+        })();
+  const signed = negative ? `-${text}` : text;
+
+  // `digits` (the unscaled magnitude) is never signed, so only the upper
+  // bound needs checking.
+  const safe = BigInt(digits || "0") <= BigInt(Number.MAX_SAFE_INTEGER);
+  return safe ? Number(signed) : signed;
 }
 
 /**

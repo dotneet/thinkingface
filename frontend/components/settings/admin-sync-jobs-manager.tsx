@@ -122,6 +122,11 @@ export function AdminSyncJobsManager() {
           title={t("settings.adminSyncJobs.loadFailed")}
           message={loadError ?? t("settings.adminSyncJobs.loadFailed")}
           hint={t("settings.adminSyncJobs.loadFailedHint")}
+          action={
+            <Button size="sm" onClick={() => handleReload()}>
+              {t("ui.unexpectedError.retry")}
+            </Button>
+          }
         />
       ) : jobs.length === 0 ? (
         outOfRange ? (

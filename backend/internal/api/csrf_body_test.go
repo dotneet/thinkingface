@@ -159,3 +159,120 @@ func TestSameOrigin_BearerTokenIsNotGatedByOrigin(t *testing.T) {
 		t.Fatalf("status = %d, body = %s; want the request accepted", rec.Code, rec.Body.String())
 	}
 }
+
+// The gap the two tests above did not cover, and the one an attacker would
+// actually find: the WWW-Authenticate dialog takes *whatever* is typed into
+// it, and what this project documents for git is `any-username / tf_...`. So
+// the credential a browser caches and re-attaches to this origin is, in
+// practice, an access token -- which resolveCredential classifies as authToken
+// (auth.go), the same class as a Bearer header a page would have had to set
+// deliberately. Gating on that classification therefore exempted the one Basic
+// credential most likely to exist.
+func TestSameOrigin_CoversAnAccessTokenUsedAsABasicPassword(t *testing.T) {
+	f := newSecFixture(t)
+	alice := f.user("alice", "correct horse battery")
+	tok := f.token(alice, "write")
+
+	hostile := f.do(secRequest{
+		method: "POST", path: "/api/v1/repos",
+		body: createRepoBody("forged"),
+		headers: map[string]string{
+			"Authorization": basicAuth("alice", tok),
+			"Origin":        "https://evil.example",
+		},
+	})
+	if hostile.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %s; want 403", hostile.Code, hostile.Body.String())
+	}
+	if repoExists(t, f, "forged") {
+		t.Error("a cross-origin write authenticated with a token in the Basic dialog went through")
+	}
+}
+
+// The same credential from an origin this instance actually serves is the Web
+// UI, and has to keep working.
+func TestSameOrigin_TokenAsBasicPasswordFromAnAllowedOrigin(t *testing.T) {
+	f := newSecFixture(t)
+	alice := f.user("alice", "correct horse battery")
+	tok := f.token(alice, "write")
+
+	rec := f.do(secRequest{
+		method: "POST", path: "/api/v1/repos",
+		body: createRepoBody("legit"),
+		headers: map[string]string{
+			"Authorization": basicAuth("alice", tok),
+			"Origin":        "http://web.test.local",
+		},
+	})
+	if rec.Code >= 400 {
+		t.Fatalf("status = %d, body = %s; want the request accepted", rec.Code, rec.Body.String())
+	}
+	if !repoExists(t, f, "legit") {
+		t.Error("the repository was not created")
+	}
+}
+
+// And with no Origin at all it is `git`, `git-lfs` or huggingface_hub, none of
+// which a page can steer. This is the case the whole check is shaped around:
+// those clients authenticate with exactly this header on every request.
+func TestSameOrigin_TokenAsBasicPasswordWithoutAnOriginStillWorks(t *testing.T) {
+	f := newSecFixture(t)
+	alice := f.user("alice", "correct horse battery")
+	tok := f.token(alice, "write")
+
+	rec := f.do(secRequest{
+		method: "POST", path: "/api/v1/repos",
+		body:    createRepoBody("legit"),
+		headers: map[string]string{"Authorization": basicAuth("alice", tok)},
+	})
+	if rec.Code >= 400 {
+		t.Fatalf("status = %d, body = %s; want the request accepted", rec.Code, rec.Body.String())
+	}
+	if !repoExists(t, f, "legit") {
+		t.Error("the repository was not created")
+	}
+}
+
+// The exploit the JSON tests above only stand in for. A multipart form needs
+// no preflight and no JSON Content-Type, and handleUploadFiles reads the body
+// with r.MultipartReader() -- there is no media type for decodeJSON to refuse.
+// The origin check is the only thing between a hostile page and a commit in
+// the victim's name, so it has to fire before the handler reads a byte.
+func TestSameOrigin_CoversTheMultipartUploadAFormCanSubmit(t *testing.T) {
+	f := newSecFixture(t)
+	alice := f.user("alice", "correct horse battery")
+	tok := f.token(alice, "write")
+	f.repo("alice", "x", "model")
+
+	const body = "--x\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\nhi\r\n--x--\r\n"
+	headers := func(origin string) map[string]string {
+		h := map[string]string{
+			"Content-Type":  "multipart/form-data; boundary=x",
+			"Authorization": basicAuth("alice", tok),
+		}
+		if origin != "" {
+			h["Origin"] = origin
+		}
+		return h
+	}
+
+	hostile := f.do(secRequest{
+		method: "POST", path: "/api/v1/upload/model/alice/x/main",
+		rawBody: []byte(body), headers: headers("https://evil.example"),
+	})
+	if hostile.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin upload status = %d, body = %s; want 403",
+			hostile.Code, hostile.Body.String())
+	}
+
+	// git and the CLI post no Origin, and must still reach the handler. What
+	// the handler then makes of the body is its own business; all that is
+	// asserted here is that the CSRF gate let it through.
+	local := f.do(secRequest{
+		method: "POST", path: "/api/v1/upload/model/alice/x/main",
+		rawBody: []byte(body), headers: headers(""),
+	})
+	if local.Code == http.StatusForbidden {
+		t.Fatalf("upload without an Origin was refused as cross-origin: %s", local.Body.String())
+	}
+}

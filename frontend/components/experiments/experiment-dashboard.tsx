@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FlaskConical } from "lucide-react";
 import { useMemo, useState } from "react";
 import { ConfigDiffTable } from "@/components/experiments/config-diff-table";
@@ -228,6 +228,16 @@ export function ExperimentDashboard({
     // drawing a line, so re-reading the series for it would buy nothing.
     refetchInterval: hasLiveRun(selectedRuns) ? LIVE_REFRESH_INTERVAL_MS : false,
     refetchIntervalInBackground: false,
+    // Keep the previous key's series on screen while the new one loads:
+    // toggling a run's checkbox, flipping step/time, or unhiding archived
+    // runs all change this query's key, and every one of those used to
+    // unmount every chart and drop to MetricsChartsSkeleton until the new
+    // response came back — losing the zoom, the tab and the sync state on
+    // what was already on screen for a change that isn't a first load
+    // (DESIGN.md §4: Skeleton is for first paint, not for refreshing content
+    // that's already there — the toolbar's own spinner, `fetching={isFetching}`
+    // below, already covers "this is updating").
+    placeholderData: keepPreviousData,
   });
 
   if (runs.length === 0) {
@@ -375,9 +385,14 @@ export function ExperimentDashboard({
         error={annotateError}
         // Ignored while the PATCH is in flight, the same way delete-file-button
         // guards its dialog: Escape or a backdrop click would otherwise read as
-        // a cancel for a write that is still on its way to the server.
+        // a cancel for a write that is still on its way to the server. Also
+        // drops a failed save's error: without this, dismissing the dialog
+        // after a failed save left the same error to reappear as the
+        // table-level banner the moment the dialog closed.
         onClose={() => {
-          if (!annotate.isPending) setTagsFor(null);
+          if (annotate.isPending) return;
+          annotateReset();
+          setTagsFor(null);
         }}
         onSave={(run, tags) => annotate.mutate({ run, body: { tags } })}
       />

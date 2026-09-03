@@ -20,8 +20,15 @@ export function DropdownMenu({
   trigger: (props: {
     open: boolean;
     toggle: () => void;
-    /** Spread onto the trigger element so it announces itself correctly. */
-    triggerProps: { "aria-expanded": boolean; "aria-haspopup": "menu" };
+    /**
+     * Spread onto the trigger element so it announces itself correctly.
+     * Deliberately just `aria-expanded` (a disclosure button), not
+     * `aria-haspopup="menu"`: the panel below renders plain links/buttons,
+     * not `role="menu"`/`menuitem` with arrow-key navigation, and claiming
+     * "menu" semantics without them left screen reader users expecting
+     * behaviour (Up/Down between items) that was never implemented.
+     */
+    triggerProps: { "aria-expanded": boolean };
   }) => React.ReactNode;
   children: (props: { close: () => void }) => React.ReactNode;
   align?: "start" | "end";
@@ -41,7 +48,7 @@ export function DropdownMenu({
       {trigger({
         open,
         toggle: () => setOpen((v) => !v),
-        triggerProps: { "aria-expanded": open, "aria-haspopup": "menu" },
+        triggerProps: { "aria-expanded": open },
       })}
       {open && (
         <div

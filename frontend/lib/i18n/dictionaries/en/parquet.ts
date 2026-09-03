@@ -2,6 +2,9 @@
 // NOTE: the en dictionary is the source of truth for shape, so it must not be `as const`.
 export const parquet = {
   errorTitle: "Couldn't load this",
+  // Shared retry label for the Rows tab's row-fetch failure and the SQL
+  // tab's download/wasm-boot failure.
+  retry: "Retry",
   viewer: {
     rowsOne: "{count} row",
     rowsOther: "{count} rows",
@@ -42,11 +45,14 @@ export const parquet = {
     downloading: "Downloading {size} and starting DuckDB in your browser…",
     initFailedTitle: "Couldn't start the SQL console",
     initFailedFallback: "DuckDB failed to start.",
-    initFailedHint: "Reload the page to try again. The Rows tab works without DuckDB.",
+    initFailedHint: "Retry below, or reload the page. The Rows tab works without DuckDB.",
     downloadFailed: "Couldn't download the file ({status}).",
     queryAria: "SQL query",
     run: "Run",
     runningQuery: "Running query",
+    cancel: "Cancel",
+    cancelledTitle: "Query cancelled",
+    cancelled: "The query was stopped before it finished.",
     shortcutRuns: "also runs the query.",
     runsLocally: "Queries run locally — nothing is sent back to the server.",
     resultStatsOne: "{count} row in {ms} ms",

@@ -112,7 +112,7 @@ export function ProfileSettings() {
         </div>
       </Field>
       <p className="-mt-2 text-xs font-medium text-fg-subtle">
-        {t("settings.profile.usernameLockedHint")}{" "}
+        {t("settings.profile.usernameLockedHint", { username: profile.name })}{" "}
         <Link href="/settings/transfers" className="text-accent hover:underline">
           {t("settings.profile.usernameLockedTransferLink")}
         </Link>

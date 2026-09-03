@@ -100,6 +100,78 @@ func TestParse_CRLFLineEndings(t *testing.T) {
 	}
 }
 
+// TestParse_LeadingBlankLines documents the fix for a card being silently
+// dropped when the README starts with one or more blank lines before the
+// opening "---" fence -- something an editor's own newline normalization can
+// introduce without the author noticing. huggingface_hub's card-loading
+// regex is `^\s*---`, so a README that HF reads correctly must not lose its
+// front matter here.
+func TestParse_LeadingBlankLines(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		prefix string
+	}{
+		{"one blank line", "\n"},
+		{"several blank lines", "\n\n\n"},
+		{"leading spaces then newline", "  \n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			readme := tc.prefix + "---\nlicense: mit\ntags: [nlp, ja]\n---\nbody\n"
+			card := Parse([]byte(readme))
+			if card.Data["license"] != "mit" {
+				t.Errorf("Data[license] = %v, want mit", card.Data["license"])
+			}
+			tags := card.Tags()
+			if len(tags) != 2 || tags[0] != "nlp" || tags[1] != "ja" {
+				t.Errorf("Tags() = %v, want [nlp ja]", tags)
+			}
+			if card.Body != "body\n" {
+				t.Errorf("Body = %q, want %q", card.Body, "body\n")
+			}
+		})
+	}
+}
+
+// TestParse_UTF8BOM documents the fix for a card being silently dropped when
+// the README starts with a UTF-8 byte-order mark, with or without a leading
+// blank line after it -- some editors write a BOM by default, and it is
+// invisible in most viewers.
+func TestParse_UTF8BOM(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		prefix string
+	}{
+		{"BOM only", "\uFEFF"},
+		{"BOM then blank line", "\uFEFF\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			readme := tc.prefix + "---\nlicense: mit\n---\nbody\n"
+			card := Parse([]byte(readme))
+			if card.Data["license"] != "mit" {
+				t.Errorf("Data[license] = %v, want mit", card.Data["license"])
+			}
+			if card.Body != "body\n" {
+				t.Errorf("Body = %q, want %q", card.Body, "body\n")
+			}
+		})
+	}
+}
+
+// TestParse_ConventionalLeadingFenceStillWorks guards against a regression
+// where skipping leading whitespace before the fence changes behaviour for
+// the ordinary case, where "---" is already the very first thing in the
+// file.
+func TestParse_ConventionalLeadingFenceStillWorks(t *testing.T) {
+	readme := "---\nlicense: mit\n---\nbody\n"
+	card := Parse([]byte(readme))
+	if card.Data["license"] != "mit" {
+		t.Errorf("Data[license] = %v, want mit", card.Data["license"])
+	}
+	if card.Body != "body\n" {
+		t.Errorf("Body = %q, want %q", card.Body, "body\n")
+	}
+}
+
 func TestTags_StringForm(t *testing.T) {
 	card := Parse([]byte("---\ntags: trackio\n---\nbody\n"))
 	tags := card.Tags()

@@ -136,7 +136,9 @@ export function RefsManager({
                   className="flex items-center gap-2 border-b border-border px-3 py-2 last:border-0"
                 >
                   <GitBranch size={14} className="shrink-0 text-fg-subtle" />
-                  <span className="min-w-0 truncate font-mono text-sm text-fg">{branch.name}</span>
+                  <span className="min-w-0 truncate font-mono text-sm text-fg" title={branch.name}>
+                    {branch.name}
+                  </span>
                   {isDefault && <Badge tone="accent">{t("repo.refs.defaultBadge")}</Badge>}
                   <span className="ml-auto shrink-0 font-mono text-xs font-medium text-fg-subtle">
                     {shortOid(branch.target_oid)}
@@ -180,7 +182,9 @@ export function RefsManager({
                 className="flex items-center gap-2 border-b border-border px-3 py-2 last:border-0"
               >
                 <Tag size={14} className="shrink-0 text-fg-subtle" />
-                <span className="min-w-0 truncate font-mono text-sm text-fg">{tag.name}</span>
+                <span className="min-w-0 truncate font-mono text-sm text-fg" title={tag.name}>
+                  {tag.name}
+                </span>
                 <span className="ml-auto shrink-0 font-mono text-xs font-medium text-fg-subtle">
                   {shortOid(tag.target_oid)}
                 </span>
@@ -250,9 +254,11 @@ export function RefsManager({
       {pending && (
         <ConfirmDialog
           open={pending !== null}
-          onClose={() => {
-            if (!deleting) setPending(null);
-          }}
+          // `confirming={deleting}` below is the same flag the old
+          // `if (!deleting)` guard tested, and ConfirmDialog now hands it to
+          // Dialog's `busy` — which also covers the header ×, the one route
+          // the call-site guard never saw.
+          onClose={() => setPending(null)}
           onConfirm={() => void confirmDelete()}
           title={t(
             pending.kind === "branch" ? "repo.refs.deleteBranchTitle" : "repo.refs.deleteTagTitle",

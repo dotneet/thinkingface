@@ -34,6 +34,37 @@ type fakeGCDB struct {
 	removedUntracked []string
 	// blobRefs is what ListReferencedBlobSHAs answers.
 	blobRefs map[string]bool
+	// liveBlobRefs is the blob reference set at delete time, which the scan
+	// snapshot in blobRefs cannot see: nothing about a push rewrites a blob
+	// that is already at its key, so a sha claimed after the listing looks
+	// exactly as orphaned and exactly as old as it did before.
+	liveBlobRefs map[string]bool
+	removedBlobs []string
+	// prunedBefore records the cutoff the ledger prune was asked for, so a
+	// test can tell "it ran" from "it was skipped".
+	prunedBefore  []time.Time
+	pruneRows     int64
+	pruneErr      error
+	deleteBlobErr error
+}
+
+func (f *fakeGCDB) DeleteOrphanedBlob(_ context.Context, sha string, removeStorage func() error) (bool, error) {
+	if f.deleteBlobErr != nil {
+		return false, f.deleteBlobErr
+	}
+	if f.liveBlobRefs[sha] {
+		return false, nil
+	}
+	if err := removeStorage(); err != nil {
+		return false, err
+	}
+	f.removedBlobs = append(f.removedBlobs, sha)
+	return true, nil
+}
+
+func (f *fakeGCDB) PruneBlobDeletions(_ context.Context, before time.Time) (int64, error) {
+	f.prunedBefore = append(f.prunedBefore, before)
+	return f.pruneRows, f.pruneErr
 }
 
 func (f *fakeGCDB) ListReferencedBlobSHAs(context.Context) (map[string]bool, error) {
@@ -258,6 +289,87 @@ func TestRunGC_BlobStorageFailureIsReported(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("runGC: want a blob storage failure, got nil")
+	}
+}
+
+// The blob pass's scan is a snapshot, and the window after it is not one an
+// age threshold can cover: gitrepo.PublishBlob skips an object already at its
+// key, so a push that starts referencing a year-old blob leaves its Updated
+// timestamp exactly where it was. Deleting anyway cost the file for good --
+// every later push skips a sha the ref's index already names. The decision
+// therefore belongs to store.DeleteOrphanedBlob, which re-checks under the
+// row it holds, and this pins that the pass asks it rather than deleting.
+func TestRunGC_SkipsBlobThatGainedAReferenceAfterTheScan(t *testing.T) {
+	claimed := "bbbb2222"
+	db := &fakeGCDB{
+		referenced: map[string]bool{},
+		liveRefs:   map[string]bool{},
+		// The scan found neither sha referenced...
+		blobRefs: map[string]bool{},
+		// ...but by delete time a push had claimed one of them.
+		liveBlobRefs: map[string]bool{claimed: true},
+	}
+	obj := &fakeGCStorage{objects: []storage.ObjectInfo{
+		blobObject(claimed, 90*24*time.Hour),
+		blobObject("cccc3333", 90*24*time.Hour),
+	}}
+
+	err := withDiscardedStdout(func() error {
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
+	})
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	want := storage.BlobKey("cccc3333")
+	if len(obj.deleted) != 1 || obj.deleted[0] != want {
+		t.Fatalf("deleted = %v, want only [%s]: the other sha was referenced by delete time", obj.deleted, want)
+	}
+	if len(db.removedBlobs) != 1 || db.removedBlobs[0] != "cccc3333" {
+		t.Fatalf("collected = %v, want only the still-orphaned sha", db.removedBlobs)
+	}
+}
+
+// The ledger is one row per collected blob, so something has to forget them.
+// A sha nothing references any more is one no push will ever ask to have put
+// back, and the prune runs on every pass -- including one that deleted
+// nothing, since the rows it clears are a previous run's.
+func TestRunGC_PrunesTheBlobDeletionLedger(t *testing.T) {
+	db := &fakeGCDB{
+		referenced: map[string]bool{}, liveRefs: map[string]bool{},
+		blobRefs: map[string]bool{}, pruneRows: 3,
+	}
+	obj := &fakeGCStorage{}
+
+	err := withDiscardedStdout(func() error {
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, []string{"--yes"})
+	})
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if len(db.prunedBefore) != 1 {
+		t.Fatalf("prune ran %d times, want once", len(db.prunedBefore))
+	}
+	// Never "now": the record is written before the bytes go, and the push
+	// that claims the sha may still be committing its repo_files rows.
+	if age := time.Since(db.prunedBefore[0]); age < deletionLedgerGrace {
+		t.Errorf("pruned rows younger than %s (cutoff was %s ago)", deletionLedgerGrace, age)
+	}
+}
+
+// A dry run reports and touches nothing -- the ledger included, since pruning
+// it is a write like any other.
+func TestRunGC_DryRunLeavesTheDeletionLedgerAlone(t *testing.T) {
+	db := &fakeGCDB{referenced: map[string]bool{}, liveRefs: map[string]bool{}, blobRefs: map[string]bool{}}
+	obj := &fakeGCStorage{objects: []storage.ObjectInfo{blobObject("bbbb2222", 90*24*time.Hour)}}
+
+	err := withDiscardedStdout(func() error {
+		return runGC(context.Background(), db, obj, testSignedURLMaxTTL, nil)
+	})
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if len(db.prunedBefore) != 0 {
+		t.Errorf("dry run pruned the ledger %d times, want 0", len(db.prunedBefore))
 	}
 }
 

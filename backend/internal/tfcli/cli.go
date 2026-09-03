@@ -227,9 +227,14 @@ func userAgent() string {
 	return "thinkingface-tf/" + Version
 }
 
-// readLine reads one line from r, trimming the trailing newline (and a
-// preceding carriage return). io.EOF with no data yet read is still an error
-// here: callers need a value, not silence.
+// readLine reads one line from r, trimming only the trailing newline (and a
+// preceding carriage return) -- like `docker login --password-stdin`, not a
+// general whitespace trim. This is also used for --password-stdin and
+// --token -, and a password or token can legitimately start or end with a
+// space; a plain strings.TrimSpace here would silently change the value
+// being logged in with, and the mismatch shows up as an opaque
+// authentication failure rather than at this boundary. io.EOF with no data
+// yet read is still an error here: callers need a value, not silence.
 func readLine(r io.Reader) (string, error) {
 	line, err := bufio.NewReader(r).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -240,7 +245,7 @@ func readLine(r io.Reader) (string, error) {
 	}
 	line = strings.TrimSuffix(line, "\n")
 	line = strings.TrimSuffix(line, "\r")
-	return strings.TrimSpace(line), nil
+	return line, nil
 }
 
 // isTerminalReader reports whether r is an *os.File connected to a terminal.

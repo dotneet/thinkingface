@@ -1,7 +1,15 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, ChevronsLeft, Database, Rows3, Terminal } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  Database,
+  RefreshCw,
+  Rows3,
+  Terminal,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { SchemaPanel } from "@/components/parquet/schema-panel";
 import { SqlConsole } from "@/components/parquet/sql-console";
@@ -74,7 +82,7 @@ export function ParquetViewer({
   // Only the Rows tab talks to the backend viewer API; the SQL tab pulls the
   // file itself and queries it in the browser, so pause this query while it is
   // showing rather than paging in the background.
-  const { data, isFetching, isError, error } = useQuery({
+  const { data, isFetching, isError, error, refetch } = useQuery({
     // Skipped with every column hidden: `getParquetRows` drops an empty
     // `columns` list from the query string, and the backend reads that as
     // "no column filter" -- so "hide all" would fetch a full page of every
@@ -232,6 +240,9 @@ export function ParquetViewer({
                       setLimit(Number(e.target.value));
                       setOffset(0);
                     }}
+                    // The preceding <span> is a visual label only, not a
+                    // <label for>, so this had no accessible name of its own.
+                    aria-label={t("parquet.viewer.rowsPerPage")}
                     className="w-auto px-2 py-1 text-sm"
                   >
                     {PAGE_SIZES.map((size) => (
@@ -293,6 +304,16 @@ export function ParquetViewer({
                 <ErrorState
                   title={t("parquet.errorTitle")}
                   message={queryErrorMessage(t, error, t("parquet.viewer.loadRowsFailed"))}
+                  action={
+                    // react-query's own retry (QueryClient default: retry: 1,
+                    // see app/providers.tsx) already ran once by the time this
+                    // renders; without this, a transient 5xx stayed failed
+                    // until the reader navigated away and back or reloaded.
+                    <Button variant="secondary" size="sm" onClick={() => void refetch()}>
+                      <RefreshCw size={13} />
+                      {t("parquet.retry")}
+                    </Button>
+                  }
                 />
               ) : debouncedColumnNames.length === 0 ? (
                 // The *selection*, not the response: with every column hidden

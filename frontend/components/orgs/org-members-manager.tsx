@@ -1,6 +1,7 @@
 "use client";
 
 import { UserPlus, Users } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { orgRoleLabelKey } from "@/components/orgs/org-role-badge";
 import { Alert } from "@/components/ui/alert";
@@ -16,6 +17,7 @@ import { TimeText } from "@/components/ui/time-text";
 import { usePagedList } from "@/hooks/use-paged-list";
 import { errorMessage } from "@/lib/api-error-message";
 import { useT } from "@/lib/i18n/client";
+import { namespaceHref } from "@/lib/namespace";
 import {
   addMember,
   isOrgRole,
@@ -40,6 +42,7 @@ export function OrgMembersManager({
   viewer: string;
 }) {
   const t = useT();
+  const router = useRouter();
   // Every write on this screen (remove, role change) is started from a
   // confirmation dialog and reported back inside it. That is the only place
   // the message renders, so both dialogs ignore a close while their request is
@@ -115,6 +118,7 @@ export function OrgMembersManager({
   }
 
   async function applyRoleChange(member: OrgMember, next: OrgRole) {
+    const isSelf = member.username === viewer;
     setBusy({ username: member.username, kind: "role" });
     setDialogError(null);
     const result = await updateMemberRole(org, member.username, next);
@@ -127,6 +131,15 @@ export function OrgMembersManager({
       return;
     }
     setConfirmRole(null);
+    if (isSelf) {
+      // OrgSettingsLayout is a Server Component that only re-checks
+      // canAdminOrg() on navigation. refresh()ing in place would leave this
+      // screen's role/remove controls on the page after they have started
+      // 403ing on every click (the change just applied was to the viewer's
+      // own row). Leave the settings screens entirely instead.
+      router.push(namespaceHref(org));
+      return;
+    }
     await refresh();
   }
 
@@ -135,6 +148,7 @@ export function OrgMembersManager({
   // it the instant the request left, which also made `confirming` permanently
   // false: the removal ran with nothing on screen to say so.
   async function handleRemove(member: OrgMember) {
+    const isSelf = member.username === viewer;
     setBusy({ username: member.username, kind: "remove" });
     setDialogError(null);
     const result = await removeMember(org, member.username);
@@ -145,6 +159,13 @@ export function OrgMembersManager({
       return;
     }
     setConfirmTarget(null);
+    if (isSelf) {
+      // Same reasoning as applyRoleChange: a self-removal makes every
+      // control on this screen 403 immediately, and refresh() would just
+      // redraw the now-broken screen instead of leaving it.
+      router.push(namespaceHref(org));
+      return;
+    }
     await refresh();
   }
 
@@ -291,9 +312,11 @@ export function OrgMembersManager({
 
       <ConfirmDialog
         open={confirmTarget !== null}
-        // Ignored while the DELETE is in flight: Escape, a backdrop click or
-        // the header × would read as a cancel for a request that is still on
-        // its way, and would take the only place its failure renders with it.
+        // Kept even though Dialog now guards `busy` itself: the primitive only
+        // sees `confirming` (a *remove* in flight), while `busy` is shared with
+        // the row-level role changes. A PATCH running on another member would
+        // otherwise let this dialog close and route its failure into a
+        // `dialogError` nothing renders.
         onClose={() => {
           if (busy) return;
           setConfirmTarget(null);
@@ -306,12 +329,23 @@ export function OrgMembersManager({
           username: confirmTarget?.username ?? "",
         })}
         description={
-          <p className="text-sm text-fg-muted">
-            {t("org.settings.members.confirmRemove", {
-              username: confirmTarget?.username ?? "",
-              org,
-            })}
-          </p>
+          <>
+            <p className="text-sm text-fg-muted">
+              {t("org.settings.members.confirmRemove", {
+                username: confirmTarget?.username ?? "",
+                org,
+              })}
+            </p>
+            {/* Nothing above this says the target is the viewer themselves —
+                without it, removing yourself reads exactly like removing
+                anyone else (DESIGN.md §9: don't let one state stand in for
+                another). */}
+            {confirmTarget?.username === viewer && (
+              <Alert tone="warning">
+                {t("org.settings.members.confirmRemoveSelfWarning", { org })}
+              </Alert>
+            )}
+          </>
         }
         confirmLabel={t("org.settings.members.remove")}
         confirmingLabel={t("org.settings.members.removing")}
@@ -321,9 +355,11 @@ export function OrgMembersManager({
 
       <ConfirmDialog
         open={confirmRole !== null}
-        // Same guard as the removal dialog above: a PATCH dismissed mid-flight
-        // would 403 into a dialog that is no longer mounted, leaving the user
-        // with a <select> that quietly snaps back and no explanation.
+        // Same guard as the removal dialog above, kept for the same reason:
+        // `busy` is broader than this dialog's `confirming`, and a PATCH
+        // dismissed mid-flight would 403 into a dialog that is no longer
+        // mounted, leaving the user with a <select> that quietly snaps back
+        // and no explanation.
         onClose={() => {
           if (busy) return;
           setConfirmRole(null);
@@ -353,6 +389,11 @@ export function OrgMembersManager({
               <p className="mt-2 text-sm text-fg-muted">
                 {t("org.settings.members.confirmRoleAdmin")}
               </p>
+            )}
+            {/* Same reasoning as the removal dialog's warning above: say out
+                loud that this row is the viewer's own. */}
+            {confirmRole?.member.username === viewer && (
+              <Alert tone="warning">{t("org.settings.members.confirmRoleSelfWarning")}</Alert>
             )}
           </>
         }

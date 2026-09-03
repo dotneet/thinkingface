@@ -124,7 +124,11 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, kind 
 // The deletion half is what a loop over `after` structurally cannot see: a
 // branch that is gone is absent from `after`, so scanning it announced every
 // case except the one a mirror most needs to hear about. `before` is where a
-// deleted branch still exists.
+// deleted branch still exists. That half now also drops the branch's cached
+// index (dropBranchIndex): a push that removes a ref is the only notice this
+// server ever gets that those rows are dead, and left behind they keep
+// answering ListRepoFiles and keep their blobs out of `thinkingface gc`'s
+// reach for good.
 //
 // Only branches, because that is all HeadsAfterPush lists: `git push --delete
 // v1.0` on a *tag* is invisible from here and stays invisible. The API's tag
@@ -145,6 +149,7 @@ func (s *Server) schedulePostPush(ctx context.Context, repo *store.Repo, before,
 		if _, kept := after[branch]; kept {
 			continue
 		}
+		s.dropBranchIndex(ctx, repo, branch)
 		s.fireRefDeleted(ctx, repo, "branch", branch, oldSHA)
 	}
 }

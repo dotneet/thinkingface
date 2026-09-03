@@ -22,11 +22,16 @@ import type { SSHKeyItem } from "@/types/api";
 export function SSHKeysManager() {
   const t = useT();
   const [keys, setKeys] = useState<SSHKeyItem[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Split from the add-form's own error (see handleAdd): they used to share
+  // one `error` state, so a list-load failure and an add failure could each
+  // stomp on the other's message, and the ErrorState meant for "the list
+  // didn't load" could end up showing the add form's error text instead.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newKey, setNewKey] = useState("");
   const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
   const [justAdded, setJustAdded] = useState<SSHKeyItem | null>(null);
   // Id of the row whose delete is in flight, so a second click on the same
   // button can't fire a second DELETE (the first succeeds, the second 404s and
@@ -47,12 +52,12 @@ export function SSHKeysManager() {
       // 401 here means "you're signed out", not "something broke" — say so
       // and point at the fix instead of surfacing the raw API error.
       setNeedsLogin(isUnauthorized(result));
-      setError(errorMessage(t, result));
+      setLoadError(errorMessage(t, result));
       setKeys(null);
       return;
     }
     setNeedsLogin(false);
-    setError(null);
+    setLoadError(null);
     setKeys(result.data.items);
   }
 
@@ -64,6 +69,11 @@ export function SSHKeysManager() {
     e.preventDefault();
     if (!newKey.trim()) return;
     setAdding(true);
+    setAddError(null);
+    // Drop the previous key's "added" banner before asking for a new one: a
+    // failed add would otherwise leave key A's banner standing where it
+    // reads as the result of the attempt that just failed for key B.
+    setJustAdded(null);
     const result = await createSSHKey(newTitle.trim(), newKey.trim());
     setAdding(false);
     if (!result.ok) {
@@ -71,14 +81,13 @@ export function SSHKeysManager() {
       // must be at least 2048 bits", "this key is already registered"), which
       // is written for the person pasting the key — show it verbatim
       // (bad_request keeps its detail, see lib/api-error-message.ts).
-      setError(
+      setAddError(
         isUnauthorized(result)
           ? t("settings.sshKeys.sessionExpiredCreate")
           : errorMessage(t, result),
       );
       return;
     }
-    setError(null);
     setJustAdded(result.data);
     setNewTitle("");
     setNewKey("");
@@ -144,6 +153,10 @@ export function SSHKeysManager() {
               {adding ? t("settings.sshKeys.adding") : t("settings.sshKeys.add")}
             </Button>
           </div>
+          {/* Below the submit button, and its own state from the list-load
+              error below (DESIGN.md §8): a failed add must never be mistaken
+              for the list having failed to load, or vice versa. */}
+          {addError && <Alert tone="negative">{addError}</Alert>}
         </form>
       )}
 
@@ -156,17 +169,20 @@ export function SSHKeysManager() {
         </Alert>
       )}
 
-      {error && !(keys === null && needsLogin) && <Alert tone="negative">{error}</Alert>}
-
-      {keys === null && !error ? (
+      {keys === null && !loadError ? (
         <SkeletonLines lines={3} />
       ) : keys === null && needsLogin ? (
         <LoginRequiredState next="/settings/ssh-keys" />
       ) : keys === null ? (
         <ErrorState
           title={t("settings.errorTitle")}
-          message={error ?? t("settings.sshKeys.loadFailed")}
+          message={loadError ?? t("settings.sshKeys.loadFailed")}
           hint={t("settings.sshKeys.loadFailedHint")}
+          action={
+            <Button size="sm" onClick={() => refresh()}>
+              {t("ui.unexpectedError.retry")}
+            </Button>
+          }
         />
       ) : keys.length === 0 ? (
         <EmptyState

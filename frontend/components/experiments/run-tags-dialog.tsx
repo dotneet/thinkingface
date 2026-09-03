@@ -76,6 +76,9 @@ export function RunTagsDialog({
     <Dialog
       open={open}
       onClose={onClose}
+      // The save is already announced by the SpinnerSlot in the footer; the
+      // dialog stays until it lands so a rejection has somewhere to render.
+      busy={saving}
       title={t("experiments.tagsDialog.title", { name: run.name })}
       className="max-w-lg"
       footer={

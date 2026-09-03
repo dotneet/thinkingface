@@ -36,7 +36,8 @@ deliberate design goal.
   staging copy the promote handler's delete leaves behind. Versioning and soft
   delete otherwise stay purely as a safety net against operator error. The bucket
   also carries `lifecycle { prevent_destroy = true }`, so tearing it down on
-  purpose means removing that block first
+  purpose means removing that block first. It also carries a `cors` block —
+  see "Browser access to GCS needs bucket CORS" below
 - `google_artifact_registry_repository.images` — Docker repo for
   backend/frontend images
 - `google_sql_database_instance.main` — Cloud SQL for PostgreSQL 17, private
@@ -95,6 +96,57 @@ URL, which is enough to get started; add a
 `google_cloud_run_domain_mapping` (or an External HTTPS LB + Cloud Armor/IAP
 in front of both services, per the old §14 diagram) once you've decided on a
 domain strategy for your environment.
+
+## Browser access to GCS needs bucket CORS
+
+Two Web UI features fetch object bytes straight from the browser instead of through a plain
+download link: the dataset viewer's SQL mode (DuckDB-WASM downloads the whole Parquet file to
+query it client-side) and the tabular file preview's full-text fallback for CSV/JSON Lines
+files over 512 KB. Both go through `api`'s resolve handler
+(`backend/internal/api/resolve.go`), which — once `SupportsSignedURL()` is true, i.e.
+`STORAGE_DRIVER=gcs` as this Terraform always configures — answers with a `302` to a
+short-lived signed URL on `storage.googleapis.com` rather than streaming the bytes itself.
+That's a third origin (neither `api`'s nor `web`'s), so the browser's CORS check runs against
+the *bucket*, not against `api`, and `TF_ALLOWED_ORIGINS` (which only governs `api`'s own CORS
+responses) does nothing for it.
+
+`google_storage_bucket.main` therefore carries its own `cors` block, allowing `GET`/`HEAD` from
+`local.web_origin` — the exact same value `TF_ALLOWED_ORIGINS` is built from (`web_public_url`
+if set, else `google_cloud_run_v2_service.web.uri`), so the two allow-lists cannot drift apart
+by construction. `response_header` exposes `Content-Type`, `Content-Length`, `Content-Range`
+and `ETag` (what a Range/ETag-aware reader inspects); `max_age_seconds` is
+`var.bucket_cors_max_age_seconds` (default 1 hour). See the resource's own comment in
+`main.tf` for the full reasoning, including why a wildcard origin is never the right answer
+here (every object behind the bucket becomes reachable through a signed URL the moment a
+browser is made to fetch one).
+
+**This bucket CORS policy is necessary but not sufficient on its own.** Both browser fetches
+above are issued with `credentials: "include"` (so the initial, same-call hop to `api` carries
+the `tf_session` cookie for a private repository), and a plain `fetch()` with the default
+`redirect: "follow"` reuses that same credentials mode across the redirect it follows
+automatically — so the follow-up request to the signed GCS URL is credentialed too. GCS never
+answers with `Access-Control-Allow-Credentials: true` (there is no such setting to give it),
+so a browser refuses to read a credentialed cross-origin response no matter how permissive
+`origin`/`method`/`response_header` are. Making both features actually work end-to-end also
+needs a frontend change — e.g. having `api` hand back the signed URL as JSON instead of a
+`302` so the browser can issue a second, credential-less `fetch()` for the bytes — which is
+tracked separately and is not part of this Terraform.
+
+Deploying the bucket outside this Terraform? Reproduce the same policy by hand, e.g.:
+
+```bash
+cat > cors.json <<'EOF'
+[
+  {
+    "origin": ["https://your-web-origin.example.com"],
+    "method": ["GET", "HEAD"],
+    "responseHeader": ["Content-Type", "Content-Length", "Content-Range", "ETag"],
+    "maxAgeSeconds": 3600
+  }
+]
+EOF
+gcloud storage buckets update gs://your-bucket --cors-file=cors.json
+```
 
 ## Cloud Run settings (api)
 

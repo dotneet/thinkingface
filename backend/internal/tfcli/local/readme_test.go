@@ -256,3 +256,83 @@ func TestMergeReadmeLeavesSafeValuesUnquoted(t *testing.T) {
 		t.Errorf("MergeReadme() =\n%q\nwant\n%q", got, want)
 	}
 }
+
+// A `tags:` field that is a single scalar (a card wrote "tags: nlp" instead
+// of a list) must have that value kept as the first tag, not silently
+// dropped in favour of only the flags' own --tag values.
+func TestMergeReadmeScalarTagsBecomesList(t *testing.T) {
+	existing := "---\ntags: nlp\n---\n\nBody\n"
+	out, err := MergeReadme([]byte(existing), CardOptions{Tags: []string{"ja"}})
+	if err != nil {
+		t.Fatalf("MergeReadme: %v", err)
+	}
+	got := string(out)
+	want := "---\ntags:\n  - nlp\n  - ja\n---\n\nBody\n"
+	if got != want {
+		t.Errorf("MergeReadme() =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// The same case but adding a tag that duplicates the existing scalar: it
+// must not appear twice.
+func TestMergeReadmeScalarTagsDeduplicates(t *testing.T) {
+	existing := "---\ntags: nlp\n---\n\nBody\n"
+	out, err := MergeReadme([]byte(existing), CardOptions{Tags: []string{"nlp", "ja"}})
+	if err != nil {
+		t.Fatalf("MergeReadme: %v", err)
+	}
+	got := string(out)
+	want := "---\ntags:\n  - nlp\n  - ja\n---\n\nBody\n"
+	if got != want {
+		t.Errorf("MergeReadme() =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// A README that opens with a "---" horizontal rule but never had front
+// matter to begin with (a fenceless README that also happens to have a
+// "---" rule further down, a common Markdown idiom) must still get a fresh
+// front-matter block prepended, not be misread as if the rule were a
+// closing fence for content that was never YAML.
+func TestMergeReadmeHorizontalRuleIsNotMistakenForClosingFence(t *testing.T) {
+	existing := "---\n\n# Title\n\nintro\n\n---\n\nbody\n"
+	out, err := MergeReadme([]byte(existing), CardOptions{License: "mit"})
+	if err != nil {
+		t.Fatalf("MergeReadme: %v", err)
+	}
+	got := string(out)
+	want := "---\nlicense: mit\n---\n\n" + existing
+	if got != want {
+		t.Errorf("MergeReadme() =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// A line that merely starts with "---" but has more content after it (e.g.
+// a run of four-plus dashes, or "---" followed by text) is not a fence line
+// and must not be mistaken for the closing one either.
+func TestMergeReadmeFourDashesIsNotMistakenForClosingFence(t *testing.T) {
+	existing := "---\n\n# Title\n\n----\n\nbody\n"
+	out, err := MergeReadme([]byte(existing), CardOptions{License: "mit"})
+	if err != nil {
+		t.Fatalf("MergeReadme: %v", err)
+	}
+	got := string(out)
+	want := "---\nlicense: mit\n---\n\n" + existing
+	if got != want {
+		t.Errorf("MergeReadme() =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// A genuine front-matter block followed, in the body, by a "---" horizontal
+// rule must still close at the real fence and keep the rule as body text.
+func TestMergeReadmeClosesAtFirstGenuineFenceNotLaterRule(t *testing.T) {
+	existing := "---\nlicense: apache-2.0\n---\n\n# Title\n\n---\n\nmore text\n"
+	out, err := MergeReadme([]byte(existing), CardOptions{License: "mit"})
+	if err != nil {
+		t.Fatalf("MergeReadme: %v", err)
+	}
+	got := string(out)
+	want := "---\nlicense: mit\n---\n\n# Title\n\n---\n\nmore text\n"
+	if got != want {
+		t.Errorf("MergeReadme() =\n%q\nwant\n%q", got, want)
+	}
+}

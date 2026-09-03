@@ -5,6 +5,7 @@ import uPlot from "uplot";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { chartDataEquals, planLogScale } from "@/lib/chart-scale";
+import { spanGapsForMode } from "@/lib/chart-utils";
 import { useT } from "@/lib/i18n/client";
 import {
   CHART_THEME_FALLBACKS,
@@ -200,7 +201,7 @@ export function UplotChart({
           // runs at the same x do not get joined into a meaningless line.
           ...(mode === "scatter"
             ? { paths: () => null, points: { show: true, size: s.pointSize ?? 9, fill: s.color } }
-            : { points: { show: false } }),
+            : { points: { show: false }, spanGaps: spanGapsForMode(mode) }),
         })),
       ],
     };
@@ -279,7 +280,11 @@ export function UplotChart({
 
   return (
     <div className="relative w-full">
-      <div ref={containerRef} className="w-full" />
+      {/* uPlot draws into this div with its own canvases; it never touches the
+          div's own attributes, so role/aria-label placed here survive and give
+          the chart the same accessible name a screen reader gets from the
+          parallel-coordinates <svg> (which sets role="img" directly). */}
+      <div ref={containerRef} className="w-full" role="img" aria-label={title} />
       {isZoomed && (
         <Button
           variant="secondary"

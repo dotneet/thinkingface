@@ -74,6 +74,11 @@ export function ConfirmDialog({
     <Dialog
       open={open}
       onClose={onClose}
+      // Every route out of the dialog is shut while the confirmed write is in
+      // flight, not just the Cancel button below. Callers report the failure
+      // through `error`, which is rendered *inside* this dialog — closing
+      // early threw that message away and the user saw nothing at all.
+      busy={confirming}
       title={title}
       footer={
         <>

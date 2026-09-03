@@ -187,7 +187,22 @@ func (d *Dispatcher) step(ctx context.Context) (bool, error) {
 		slog.Warn("webhook delivery failed", "delivery", job.DeliveryID, "webhook", job.WebhookID,
 			"event", job.Event, "attempt", job.Attempts, "error", deliverErr)
 	}
-	err = d.store.FinishWebhookDelivery(ctx, job.DeliveryID, success, job.Attempts, MaxAttempts,
+	// The outcome is written on a background context when this one is
+	// already cancelled, the same way syncer.step finishes its job and for
+	// the same reason: FinishWebhookDelivery is what decides
+	// retry-with-backoff versus park-as-failed, and skipping it does not
+	// leave the delivery untouched -- the claim already spent an attempt.
+	// Shutting down mid-delivery would otherwise burn one attempt per deploy
+	// while recording nothing about what the endpoint said, so a webhook
+	// could exhaust MaxAttempts across a handful of restarts without ever
+	// having been reported as failing.
+	finishCtx := ctx
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		finishCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+	}
+	err = d.store.FinishWebhookDelivery(finishCtx, job.DeliveryID, success, job.Attempts, MaxAttempts,
 		respStatus, respBody, BackoffDuration(job.Attempts))
 	if err != nil {
 		return true, fmt.Errorf("finish delivery %d: %w", job.DeliveryID, err)

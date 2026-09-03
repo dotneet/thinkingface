@@ -432,9 +432,20 @@ export const repo = {
     commitMessagePlaceholder: "Upload files",
     submit: "Upload",
     uploading: "Uploading…",
+    // Shown on the same footer button as `repo.editor.cancel` once an
+    // upload is in flight — this repository's files run to gigabytes, and
+    // it now actually aborts the request rather than only refusing to close.
+    cancelUploading: "Cancel upload",
     progressLabel: "Upload progress",
     progressCount: "{done} of {total} sent",
     tooMany: "You can upload at most {count} files at once.",
+    duplicatePath: "{path} is already in this upload.",
+    fileTooLarge: "{file} is larger than the {limit} limit for a single upload.",
+    inlineTotalTooLarge:
+      "Together, the files under 10 MiB in this selection add up to more than {limit} — anything that size or larger is stored with Git LFS instead and doesn't count toward it. Remove some, or upload them in a smaller batch.",
+    // Always shown, whether or not any files are picked yet: this dialog has
+    // no way to know what's already in the directory it's uploading to.
+    overwriteNote: "A file already in this repository with the same name will be replaced.",
     lfsNote: "Large files and known binary formats are stored with Git LFS automatically.",
   },
   // Deleting a file from the file view. Destructive, so it always goes
@@ -463,6 +474,13 @@ export const repo = {
   editor: {
     conflict:
       "This file changed while you were editing. Reload the page and reapply your changes — your edit is still here in the meantime.",
+    // A creation conflict is a different event from an edit conflict: nobody
+    // moved the file out from under this editor, someone else created it.
+    // Saying "changed while you were editing" about a file the author never
+    // saw would send them looking for a version of their own that does not
+    // exist.
+    conflictNewFile:
+      "Someone else created this file while you were writing. Reload the page to see theirs and reapply your changes — your text is still here in the meantime.",
     editAria: "Edit {file}",
     commitMessageLabel: "Commit message",
     commitMessagePlaceholder: "Update {file}",

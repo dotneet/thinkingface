@@ -20,10 +20,20 @@ func Parse(readme []byte) Card {
 	text := strings.ReplaceAll(string(readme), "\r\n", "\n")
 	card := Card{Data: map[string]any{}, Body: text}
 
-	if !strings.HasPrefix(text, "---\n") {
+	// huggingface_hub's own card-loading regex is `^\s*---`, which tolerates
+	// a leading UTF-8 BOM and leading blank lines before the opening fence.
+	// A README that HF reads correctly must not lose its front matter here
+	// just because an editor's newline normalization left a blank line (or a
+	// BOM) at the very top of the file -- that would silently drop license,
+	// tags, and lineage on the next sync. Skip both before looking for the
+	// fence; neither is part of the front matter or the body either way.
+	scan := strings.TrimPrefix(text, "\uFEFF")
+	scan = strings.TrimLeft(scan, " \t\n")
+
+	if !strings.HasPrefix(scan, "---\n") {
 		return card
 	}
-	rest := text[len("---\n"):]
+	rest := scan[len("---\n"):]
 	end := strings.Index(rest, "\n---")
 	if end < 0 {
 		return card

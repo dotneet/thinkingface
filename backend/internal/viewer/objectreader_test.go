@@ -3,15 +3,20 @@ package viewer
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/parquet-go/parquet-go"
+	"github.com/parquet-go/parquet-go/encoding/thrift"
+	"github.com/parquet-go/parquet-go/format"
 
 	"github.com/dotneet/thinkingface/backend/internal/storage"
 )
@@ -248,10 +253,21 @@ func TestObjectReader_ConcurrentReadAt(t *testing.T) {
 
 // --- tailCache ---
 
-// fakeParquetBytes returns n bytes that pass fetchTail's magic check without
-// being a real parquet file -- enough to exercise the cache itself.
+// fakeParquetBytes returns n bytes that pass fetchTail's checks -- a trailer
+// whose declared footer length fits in the object, and the magic -- without
+// being a real parquet file. Enough to exercise the cache itself.
 func fakeParquetBytes(n int) []byte {
-	return append(bytes.Repeat([]byte("x"), n-4), []byte("PAR1")...)
+	return fakeParquetBytesWithFooterLen(n, uint32(n-minParquetFileSize))
+}
+
+// fakeParquetBytesWithFooterLen is fakeParquetBytes with the declared footer
+// length spelled out, so a test can craft the one the footer trailer is not
+// allowed to carry.
+func fakeParquetBytesWithFooterLen(n int, footerLen uint32) []byte {
+	b := bytes.Repeat([]byte("x"), n)
+	binary.LittleEndian.PutUint32(b[n-footerTrailerSize:], footerLen)
+	copy(b[n-4:], "PAR1")
+	return b
 }
 
 // TestFetchTail_RejectsNonParquet covers the check that lets openParquetFile
@@ -276,6 +292,231 @@ func TestFetchTail_RejectsNonParquet(t *testing.T) {
 		if !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("fetchTail(%s) = %v, want an error mentioning %q", tc.key, err, tc.want)
 		}
+	}
+}
+
+// TestFetchTail_RejectsOversizedFooterLength covers the crafted-footer denial
+// of service: the 4 bytes in front of the trailing magic are the footer's
+// length and parquet-go allocates exactly that many bytes before reading them,
+// so an unvalidated 0xFFFFFFFF there is a 4 GiB allocation -- a fatal runtime
+// error no recover can catch -- driven by a file any user can push.
+func TestFetchTail_RejectsOversizedFooterLength(t *testing.T) {
+	ctx := context.Background()
+	st := newMemStorage()
+
+	const size = 1000
+	cases := map[string]uint32{
+		"far past the end":   1 << 29, // 512 MiB, from a 1000-byte object
+		"whole 32-bit range": ^uint32(0),
+		"one byte too long":  size - footerTrailerSize + 1,
+		"the whole object":   size, // the footer and its trailer cannot both fit
+	}
+	for name, footerLen := range cases {
+		t.Run(name, func(t *testing.T) {
+			key := "crafted-" + name
+			putParquet(t, st, key, fakeParquetBytesWithFooterLen(size, footerLen))
+			_, err := fetchTail(ctx, st, key)
+			if err == nil {
+				t.Fatalf("fetchTail accepted a footer length of %d in a %d-byte object", footerLen, size)
+			}
+			if !strings.Contains(err.Error(), "footer length") {
+				t.Fatalf("fetchTail = %v, want an error mentioning the footer length", err)
+			}
+		})
+	}
+
+	// The largest footer that does fit is still accepted: the check is a
+	// bound, not a new minimum size.
+	putParquet(t, st, "ok", fakeParquetBytesWithFooterLen(size, size-footerTrailerSize))
+	if _, err := fetchTail(ctx, st, "ok"); err != nil {
+		t.Fatalf("fetchTail rejected a footer that exactly fills the object: %v", err)
+	}
+}
+
+// TestFetchTail_RejectsTruncatedObject guards the read of that same trailer:
+// an object too short to hold one must be rejected before it is indexed into.
+func TestFetchTail_RejectsTruncatedObject(t *testing.T) {
+	ctx := context.Background()
+	st := newMemStorage()
+	for _, n := range []int{4, 8, minParquetFileSize - 1} {
+		key := fmt.Sprintf("short-%d", n)
+		// Ends with the magic, so only the length check can reject it.
+		putParquet(t, st, key, append(bytes.Repeat([]byte("x"), n-4), []byte("PAR1")...))
+		if _, err := fetchTail(ctx, st, key); err == nil {
+			t.Errorf("fetchTail accepted a %d-byte object", n)
+		}
+	}
+}
+
+// TestSchema_CraftedFooterAllocatesNothing is the end-to-end half: the crafted
+// file goes through the same Reader the API and the syncer use, and the
+// process neither allocates the declared footer nor dies trying.
+func TestSchema_CraftedFooterAllocatesNothing(t *testing.T) {
+	st := newMemStorage()
+	const key = "lfs/cr/af/crafted.parquet"
+	// 512 MiB: unmistakably an attack on a 1000-byte object, yet small enough
+	// that a machine running this test survives the regression it guards.
+	putParquet(t, st, key, fakeParquetBytesWithFooterLen(1000, 1<<29))
+
+	r := New(st, 64<<20)
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := r.Schema(context.Background(), key)
+	runtime.ReadMemStats(&after)
+
+	if err == nil {
+		t.Fatal("Schema accepted a file whose footer length overruns it")
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 8<<20 {
+		t.Errorf("rejecting a 1000-byte crafted file allocated %d bytes; want a bounded amount", grew)
+	}
+}
+
+// --- the footer's other declared lengths: the page index ---
+
+// rewriteFooter re-encodes data's footer with mutate applied to it, producing
+// a file that is well-formed everywhere except where the test bent it.
+func rewriteFooter(t *testing.T, data []byte, mutate func(*format.FileMetaData)) []byte {
+	t.Helper()
+	size := int64(binary.LittleEndian.Uint32(data[len(data)-footerTrailerSize : len(data)-4]))
+	start := int64(len(data)) - (size + footerTrailerSize)
+
+	var md format.FileMetaData
+	if err := thrift.Unmarshal(new(thrift.CompactProtocol), data[start:start+size], &md); err != nil {
+		t.Fatalf("decode footer: %v", err)
+	}
+	mutate(&md)
+	enc, err := thrift.Marshal(new(thrift.CompactProtocol), &md)
+	if err != nil {
+		t.Fatalf("encode footer: %v", err)
+	}
+
+	out := make([]byte, 0, int(start)+len(enc)+footerTrailerSize)
+	out = append(out, data[:start]...)
+	out = append(out, enc...)
+	var trailer [footerTrailerSize]byte
+	binary.LittleEndian.PutUint32(trailer[:4], uint32(len(enc)))
+	copy(trailer[4:], "PAR1")
+	return append(out, trailer[:]...)
+}
+
+// TestSchema_RejectsCraftedPageIndexLengths is the footer-length hazard one
+// layer in: ReadPageIndex sums every column chunk's declared ColumnIndexLength
+// and OffsetIndexLength and allocates that much before reading, so a file a
+// couple of kilobytes long can ask for gigabytes. The declared lengths here
+// come to ~960 MiB -- unmistakably an attack on a file this size, and small
+// enough that a machine running this test survives the regression.
+func TestSchema_RejectsCraftedPageIndexLengths(t *testing.T) {
+	base := buildRunGroupedParquet(t, pruneRuns)
+
+	// The round trip through thrift on its own must leave a readable file, or
+	// the cases below would prove nothing.
+	untouched := rewriteFooter(t, base, func(*format.FileMetaData) {})
+	st := newMemStorage()
+	putParquet(t, st, "sane", untouched)
+	if _, err := New(st, 64<<20).Schema(context.Background(), "sane"); err != nil {
+		t.Fatalf("re-encoding the footer unchanged broke the file: %v", err)
+	}
+
+	cases := map[string]func(*format.FileMetaData){
+		"column index length": func(md *format.FileMetaData) {
+			for i := range md.RowGroups {
+				for j := range md.RowGroups[i].Columns {
+					md.RowGroups[i].Columns[j].ColumnIndexLength = 1 << 26
+				}
+			}
+		},
+		"offset index length": func(md *format.FileMetaData) {
+			for i := range md.RowGroups {
+				for j := range md.RowGroups[i].Columns {
+					md.RowGroups[i].Columns[j].OffsetIndexLength = 1 << 26
+				}
+			}
+		},
+		"column index offset past the end": func(md *format.FileMetaData) {
+			md.RowGroups[0].Columns[0].ColumnIndexOffset = 1 << 40
+		},
+		// ReadPageIndex indexes its result by the first row group's column
+		// count, so a row group that disagrees walks off the end of the slice.
+		"row groups disagree on their column count": func(md *format.FileMetaData) {
+			c := md.RowGroups[1].Columns[0]
+			md.RowGroups[1].Columns = append(md.RowGroups[1].Columns, c, c)
+		},
+	}
+
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			st := newMemStorage()
+			const key = "lfs/cr/af/page-index.parquet"
+			putParquet(t, st, key, rewriteFooter(t, base, mutate))
+
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			_, err := New(st, 64<<20).Schema(context.Background(), key)
+			runtime.ReadMemStats(&after)
+
+			if err == nil {
+				t.Fatal("Schema accepted a footer whose page index cannot exist")
+			}
+			if grew := after.TotalAlloc - before.TotalAlloc; grew > 8<<20 {
+				t.Errorf("rejecting the file allocated %d bytes; want a bounded amount", grew)
+			}
+		})
+	}
+}
+
+func TestCheckPageIndexSections(t *testing.T) {
+	const size = 1000
+	chunk := func(colOff, colLen, offOff, offLen int64) format.ColumnChunk {
+		return format.ColumnChunk{
+			ColumnIndexOffset: colOff,
+			ColumnIndexLength: int32(colLen),
+			OffsetIndexOffset: offOff,
+			OffsetIndexLength: int32(offLen),
+		}
+	}
+	md := func(groups ...[]format.ColumnChunk) *format.FileMetaData {
+		out := &format.FileMetaData{}
+		for _, g := range groups {
+			out.RowGroups = append(out.RowGroups, format.RowGroup{Columns: g})
+		}
+		return out
+	}
+
+	cases := map[string]struct {
+		md   *format.FileMetaData
+		want bool // true = must be rejected
+	}{
+		"no row groups":     {md(), false},
+		"sections fit":      {md([]format.ColumnChunk{chunk(100, 50, 200, 50)}), false},
+		"no page index":     {md([]format.ColumnChunk{chunk(0, 0, 0, 0)}), false},
+		"ends exactly":      {md([]format.ColumnChunk{chunk(950, 50, 0, 0)}), false},
+		"one byte past":     {md([]format.ColumnChunk{chunk(950, 51, 0, 0)}), true},
+		"offset index past": {md([]format.ColumnChunk{chunk(0, 0, 950, 51)}), true},
+		"negative length": {&format.FileMetaData{RowGroups: []format.RowGroup{{
+			Columns: []format.ColumnChunk{{ColumnIndexOffset: 100, ColumnIndexLength: -1}},
+		}}}, true},
+		// offset+length would wrap negative and slip past a naive
+		// "offset+length <= size".
+		"offset near MaxInt64": {md([]format.ColumnChunk{chunk(math.MaxInt64-10, 1<<20, 0, 0)}), true},
+		// A length that fits nowhere is rejected even with the offset zeroed:
+		// ReadPageIndex sums the lengths of every chunk, absent or not.
+		"length without an offset":  {md([]format.ColumnChunk{chunk(1, 10, 0, 0), chunk(0, 1<<20, 0, 0)}), true},
+		"row group with no columns": {md([]format.ColumnChunk{}), true},
+		"column counts disagree": {md(
+			[]format.ColumnChunk{chunk(100, 10, 0, 0)},
+			[]format.ColumnChunk{chunk(100, 10, 0, 0), chunk(110, 10, 0, 0)},
+		), true},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := checkPageIndexSections(tc.md, size)
+			if got := err != nil; got != tc.want {
+				t.Fatalf("checkPageIndexSections = %v, want rejected=%v", err, tc.want)
+			}
+		})
 	}
 }
 

@@ -10,7 +10,7 @@ import { Field, Input } from "@/components/ui/field";
 import { errorMessage } from "@/lib/api-error-message";
 import { renameFile } from "@/lib/edit";
 import { useT } from "@/lib/i18n/client";
-import { repoBlobHref } from "@/lib/paths";
+import { repoBlobHref, resolveNewFilePath } from "@/lib/paths";
 
 import type { RepoKind } from "@/types/api";
 
@@ -70,15 +70,21 @@ export function RenameFileButton({
     }
   }, [open, currentPath]);
 
-  const trimmed = newPath.trim();
-  const unchanged = trimmed === currentPath;
+  // Reuses the same check "Create a new file" applies (resolveNewFilePath),
+  // with an empty `dir` since this field holds the whole path already rather
+  // than one relative to a directory being browsed. Without it, a "." / ".."
+  // or ".git" segment only got refused after a round trip to the server —
+  // the create dialog has caught these client-side from the start.
+  const resolved = resolveNewFilePath([], newPath);
+  const unchanged = resolved.status === "ok" && resolved.path === currentPath;
+  const canSubmit = resolved.status === "ok" && !unchanged;
 
   async function submit() {
-    if (trimmed === "" || unchanged || renaming) return;
+    if (resolved.status !== "ok" || unchanged || renaming) return;
     setRenaming(true);
     setError(null);
     const result = await renameFile(kind, ns, name, rev, path, {
-      new_path: trimmed,
+      new_path: resolved.path,
       base_oid: baseOid,
     });
     setRenaming(false);
@@ -117,12 +123,13 @@ export function RenameFileButton({
       {open && (
         <Dialog
           open={open}
-          // Ignored while the rename is in flight, the same way the delete
-          // dialog refuses to close mid-request: dismissing then would read as
-          // a cancel for something that was never cancelled.
-          onClose={() => {
-            if (!renaming) setOpen(false);
-          }}
+          onClose={() => setOpen(false)}
+          // Every dismissal route is ignored while the rename is in flight:
+          // dismissing then would read as a cancel for something that was
+          // never cancelled, and the error below would have nowhere to land.
+          // (Dialog enforces this, so the old `if (!renaming)` in `onClose` —
+          // which the header × bypassed anyway — is gone.)
+          busy={renaming}
           title={t("repo.renameFile.title")}
           footer={
             <>
@@ -133,7 +140,7 @@ export function RenameFileButton({
                 type="submit"
                 form={formId}
                 variant="primary"
-                disabled={renaming || trimmed === "" || unchanged}
+                disabled={renaming || !canSubmit}
               >
                 {renaming ? t("repo.renameFile.renaming") : t("repo.renameFile.confirm")}
               </Button>
@@ -161,8 +168,21 @@ export function RenameFileButton({
                 onChange={(e) => setNewPath(e.target.value)}
                 placeholder={currentPath}
                 disabled={renaming}
+                aria-invalid={resolved.status === "invalid"}
               />
             </Field>
+            {/* Same wording the "Create a new file" dialog uses for the same
+                two refusals (DESIGN.md §9: an unusable value explains itself
+                rather than leaving Confirm disabled with no stated reason). */}
+            {resolved.status === "invalid" && (
+              <p className="text-xs font-medium text-negative">
+                {t(
+                  resolved.issue === "gitDirectory"
+                    ? "repo.upload.newFileGitDirectory"
+                    : "repo.upload.newFileRelativeSegment",
+                )}
+              </p>
+            )}
           </form>
         </Dialog>
       )}

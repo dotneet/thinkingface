@@ -21,6 +21,19 @@ import (
 // deliberately always octet-stream -- the key says nothing about the path the
 // bytes arrived on, and the same object may be a .json in one repository and
 // a .txt in another.
+//
+// **The Stat skip means a re-reference leaves no trace on the object.** A
+// second repository committing content that has been in blobs/ for a year
+// does not move its Updated timestamp, so nothing about the object says it
+// has just become live again -- which is precisely why `thinkingface gc`'s
+// blob pass cannot be an age judgement (its 24h grace only ever protected
+// objects that were freshly *written*). The collector guards the gap on the
+// database side instead, with a blob_deletions row it holds while it
+// re-checks repo_files and that store.RepairDeletedBlobs takes to put the
+// bytes back; see store.DeleteOrphanedBlob. Rewriting the object here to
+// refresh its timestamp was the alternative and is deliberately not done: it
+// would copy whole model files on every push that mentions them, and would
+// still lose to a collector that had already listed the bucket.
 func (r *Repo) PublishBlob(ctx context.Context, obj storage.Storage, hash plumbing.Hash) (string, error) {
 	key := storage.BlobKey(hash.String())
 	_, err := obj.Stat(ctx, key)

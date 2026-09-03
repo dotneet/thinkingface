@@ -81,6 +81,7 @@ export function AdminUserResetDialog({
     <Dialog
       open={target !== null}
       onClose={onClose}
+      busy={submitting}
       title={t("settings.adminUsers.resetTitle", { username })}
       footer={
         <>

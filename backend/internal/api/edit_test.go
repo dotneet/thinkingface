@@ -1,6 +1,7 @@
 package api
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 
@@ -41,28 +42,35 @@ func TestEditConflict(t *testing.T) {
 	tests := []struct {
 		name          string
 		baseOID       string
+		mustNotExist  bool
 		exists        bool
 		currentOID    string
 		wantConflict  bool
 		wantMsgSubstr string
 	}{
-		{"no base_oid never conflicts", "", false, "", false, ""},
-		{"no base_oid ignores existing content", "", true, "abc123", false, ""},
-		{"matching base_oid on existing file", "abc123", true, "abc123", false, ""},
-		{"stale base_oid on existing file", "abc123", true, "def456", true, "current blob is def456"},
-		{"base_oid but file now missing", "abc123", false, "", true, "no longer exists"},
+		{"no claim never conflicts", "", false, false, "", false, ""},
+		{"no claim ignores existing content", "", false, true, "abc123", false, ""},
+		{"matching base_oid on existing file", "abc123", false, true, "abc123", false, ""},
+		{"stale base_oid on existing file", "abc123", false, true, "def456", true, "current blob is def456"},
+		{"base_oid but file now missing", "abc123", false, false, "", true, "no longer exists"},
+
+		// A creation claims the path was empty. Someone else creating the
+		// same path first is the race the claim exists to catch: without it
+		// the second save silently replaced the first.
+		{"must_not_exist on a free path", "", true, false, "", false, ""},
+		{"must_not_exist on an occupied path", "", true, true, "abc123", true, "already exists"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg, isConflict := editConflict(tt.baseOID, tt.exists, tt.currentOID)
+			msg, isConflict := editConflict(tt.baseOID, tt.mustNotExist, tt.exists, tt.currentOID)
 			if isConflict != tt.wantConflict {
-				t.Fatalf("editConflict(%q, %v, %q) isConflict = %v, want %v", tt.baseOID, tt.exists, tt.currentOID, isConflict, tt.wantConflict)
+				t.Fatalf("editConflict(%q, %v, %v, %q) isConflict = %v, want %v", tt.baseOID, tt.mustNotExist, tt.exists, tt.currentOID, isConflict, tt.wantConflict)
 			}
 			if tt.wantConflict && !strings.Contains(msg, tt.wantMsgSubstr) {
-				t.Errorf("editConflict(%q, %v, %q) message = %q, want substring %q", tt.baseOID, tt.exists, tt.currentOID, msg, tt.wantMsgSubstr)
+				t.Errorf("editConflict(%q, %v, %v, %q) message = %q, want substring %q", tt.baseOID, tt.mustNotExist, tt.exists, tt.currentOID, msg, tt.wantMsgSubstr)
 			}
 			if !tt.wantConflict && msg != "" {
-				t.Errorf("editConflict(%q, %v, %q) message = %q, want empty", tt.baseOID, tt.exists, tt.currentOID, msg)
+				t.Errorf("editConflict(%q, %v, %v, %q) message = %q, want empty", tt.baseOID, tt.mustNotExist, tt.exists, tt.currentOID, msg)
 			}
 		})
 	}
@@ -334,6 +342,74 @@ func TestRenameFile_RejectsADetachedRevision(t *testing.T) {
 	resp := f.do("POST", "/api/v1/rename/model/alice/foo/"+head.String()+"/notes.txt", tok,
 		apitypes.RenameFileRequest{NewPath: "b.txt"})
 	if resp.status() != 400 {
+		t.Fatalf("status = %d, want 400; body = %s", resp.status(), resp.rec.Body.String())
+	}
+}
+
+// ---------------------------------------------- must_not_exist end-to-end
+
+// Two people clicking "Add file" on the same path used to resolve to whoever
+// saved last: a creation sent no base_oid, an empty base_oid meant "not
+// tracking staleness", and so the second commit replaced the first with no
+// 409 and no warning. The claim is explicit now, and the precondition that
+// enforces it lives inside Commit, under the mutex that picks the parent.
+func TestEditFile_MustNotExistRefusesAnOccupiedPath(t *testing.T) {
+	f := newArchiveFixture(t)
+	f.repo("alice", "weights", "model")
+	tok := f.token(f.alice, "write")
+
+	const path = "docs/notes.md"
+	first := f.do("PUT", "/api/v1/edit/model/alice/weights/main/"+path, tok,
+		map[string]any{"content": "first author\n", "must_not_exist": true})
+	if first.status() != http.StatusOK {
+		t.Fatalf("first create status = %d, want 200; body = %s", first.status(), first.rec.Body.String())
+	}
+
+	second := f.do("PUT", "/api/v1/edit/model/alice/weights/main/"+path, tok,
+		map[string]any{"content": "second author\n", "must_not_exist": true})
+	if second.status() != http.StatusConflict {
+		t.Fatalf("second create status = %d, want 409; body = %s", second.status(), second.rec.Body.String())
+	}
+
+	// The first author's bytes survive: the point of the 409 is that nothing
+	// was overwritten on the way to it.
+	raw := f.do("GET", "/api/v1/raw/model/alice/weights/main/"+path, tok, nil)
+	if raw.status() != http.StatusOK {
+		t.Fatalf("raw status = %d, want 200; body = %s", raw.status(), raw.rec.Body.String())
+	}
+	if body := raw.rec.Body.String(); !strings.Contains(body, "first author") {
+		t.Errorf("stored content = %s, want the first author's text", body)
+	}
+}
+
+// A caller that sends neither claim keeps the old "just write these bytes"
+// behaviour, which is what a script hitting this endpoint expects.
+func TestEditFile_NoClaimStillOverwrites(t *testing.T) {
+	f := newArchiveFixture(t)
+	f.repo("alice", "weights", "model")
+	tok := f.token(f.alice, "write")
+
+	const path = "a.txt"
+	if resp := f.do("PUT", "/api/v1/edit/model/alice/weights/main/"+path, tok,
+		map[string]any{"content": "one\n"}); resp.status() != http.StatusOK {
+		t.Fatalf("first write status = %d, want 200; body = %s", resp.status(), resp.rec.Body.String())
+	}
+	if resp := f.do("PUT", "/api/v1/edit/model/alice/weights/main/"+path, tok,
+		map[string]any{"content": "two\n"}); resp.status() != http.StatusOK {
+		t.Fatalf("second write status = %d, want 200; body = %s", resp.status(), resp.rec.Body.String())
+	}
+}
+
+// The two claims contradict each other, so a request carrying both is a
+// caller bug rather than something to resolve in the server's favour.
+func TestEditFile_BothClaimsRejected(t *testing.T) {
+	f := newArchiveFixture(t)
+	f.repo("alice", "weights", "model")
+	tok := f.token(f.alice, "write")
+
+	resp := f.do("PUT", "/api/v1/edit/model/alice/weights/main/a.txt", tok,
+		map[string]any{"content": "x\n", "must_not_exist": true, "base_oid": "abc123"})
+	if resp.status() != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", resp.status(), resp.rec.Body.String())
 	}
 }

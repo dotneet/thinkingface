@@ -4,6 +4,7 @@ import { X } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
+import { dialogDismiss, isDialogBackdropClick } from "@/lib/dialog-dismiss";
 import { useT } from "@/lib/i18n/client";
 
 /**
@@ -15,6 +16,7 @@ import { useT } from "@/lib/i18n/client";
 export function Dialog({
   open,
   onClose,
+  busy = false,
   title,
   headerAction,
   footer,
@@ -24,6 +26,22 @@ export function Dialog({
 }: {
   open: boolean;
   onClose: () => void;
+  /**
+   * An action started from inside this dialog is still in flight. While it is
+   * set, **every** way out is suppressed — Escape, a backdrop click and the
+   * header's × — and the × is disabled so that reads on screen too.
+   *
+   * This is not politeness: a dialog that closes mid-request takes its own
+   * error slot with it, and callers report failures into dialog-local state
+   * (`ConfirmDialog`'s `error`, a `footerNote` Alert). A rejection arriving
+   * after the close was rendered nowhere at all, so a write that failed
+   * looked exactly like a write that never ran — and the user retried it.
+   *
+   * `ConfirmDialog` passes its own `confirming` here, so its callers get the
+   * guard without wiring anything. A dialog that owns its in-flight state
+   * (upload, create-branch, rename) passes that state itself.
+   */
+  busy?: boolean;
   title: string;
   /** Extra controls rendered next to the close button, e.g. a copy button. */
   headerAction?: React.ReactNode;
@@ -73,16 +91,22 @@ export function Dialog({
     <dialog
       ref={ref}
       aria-label={title}
+      // Announces the in-flight state to assistive tech at the container the
+      // guard applies to, so "why can I not close this" has an answer that is
+      // not just a greyed-out ×.
+      aria-busy={busy}
       // `cancel` fires for Escape; without preventDefault the element closes
       // itself and the `open` prop would drift out of sync with the DOM.
       onCancel={(e) => {
-        e.preventDefault();
-        onClose();
+        const { close, preventDefault } = dialogDismiss("escape", busy);
+        if (preventDefault) e.preventDefault();
+        if (close) onClose();
       }}
       onClick={(e) => {
         // A click that lands on the <dialog> itself (rather than on the panel
         // inside it) is a backdrop click.
-        if (e.target === e.currentTarget) onClose();
+        if (!isDialogBackdropClick(e.target, e.currentTarget)) return;
+        if (dialogDismiss("backdrop", busy).close) onClose();
       }}
       className={cn(
         // Anchored near the top rather than `m-auto`: a vertically centred
@@ -100,7 +124,22 @@ export function Dialog({
           <span className="text-sm font-medium">{title}</span>
           <div className="flex items-center gap-2">
             {headerAction}
-            <Button variant="ghost" size="sm" onClick={onClose} aria-label={t("ui.close")}>
+            <Button
+              variant="ghost"
+              size="sm"
+              // `disabled` rather than a click that quietly does nothing: it
+              // is the same "in-flight controls are disabled" treatment the
+              // footer buttons already use (DESIGN.md §8), and Button's base
+              // class dims it to 40% opacity so the refusal is visible. The
+              // redundant `aria-disabled` is spelled out because the label
+              // below changes with it — the two belong together.
+              disabled={busy}
+              aria-disabled={busy}
+              onClick={() => {
+                if (dialogDismiss("closeButton", busy).close) onClose();
+              }}
+              aria-label={busy ? t("ui.closeBusy") : t("ui.close")}
+            >
               <X size={16} />
             </Button>
           </div>

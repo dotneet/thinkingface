@@ -77,6 +77,56 @@ func (s *Store) ReplaceRepoFiles(ctx context.Context, repoID int64, ref string, 
 	return tx.Commit(ctx)
 }
 
+// DeleteRefIndex drops every cached row for one ref: the file listing and the
+// parquet metadata built from it. It is what a ref *disappearing* needs, and
+// until it existed there was no such path at all -- ReplaceRepoFiles was the
+// only writer, and it is only ever reached from a sync job, which is only ever
+// enqueued for a ref that still exists.
+//
+// So `git push --delete feature` and DELETE /api/{type}s/{ns}/{name}/branch/
+// {feature} both left the branch's rows behind for the life of the
+// repository. They are not inert: ListRepoFiles(repo, "feature") kept
+// answering with the files of a branch that is gone, and -- the expensive
+// half -- ListReferencedBlobSHAs counted their blobs as referenced, so
+// `thinkingface gc` could never reclaim content whose last ref had been
+// deleted. `thinkingface resync` does not find them either: it walks the
+// refs git still has.
+//
+// Only branches, and that is not an oversight. repo_files.ref holds a branch
+// short name -- HeadsAfterPush lists branches, the HF commit API refuses a
+// {rev} that is a tag (api.ensureBranchRev), and creating a tag schedules no
+// sync job -- so a tag has no rows to remove, and one short name can be both
+// a branch and a tag at once. Deleting by a tag's name would take the
+// identically named branch's index with it.
+//
+// A repository deleted in the meantime is not an error: the rows went with
+// it through ON DELETE CASCADE, which is the outcome asked for.
+func (s *Store) DeleteRefIndex(ctx context.Context, repoID int64, ref string) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Same parent-row-first ordering as ReplaceRepoFiles (see lockRepoRow):
+	// this deletes rows of the same two child tables the rebuilders write, so
+	// taking the repositories row up front is what keeps it from deadlocking
+	// against a concurrent DeleteRepo cascading the other way.
+	if err := s.lockRepoRow(ctx, tx, repoID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM repo_files WHERE repo_id = $1 AND ref = $2`, repoID, ref); err != nil {
+		return fmt.Errorf("clear repo_files: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM parquet_files WHERE repo_id = $1 AND ref = $2`, repoID, ref); err != nil {
+		return fmt.Errorf("clear parquet_files: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *Store) ListRepoFiles(ctx context.Context, repoID int64, ref string) ([]RepoFile, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT path, size, blob_sha, lfs_oid FROM repo_files

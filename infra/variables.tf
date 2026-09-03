@@ -106,6 +106,29 @@ variable "lfs_blobs_noncurrent_retention_days" {
   default     = 30
 }
 
+variable "bucket_cors_max_age_seconds" {
+  description = <<-EOT
+    How long (seconds) a browser may cache the bucket's CORS preflight
+    response before re-checking it, via the `cors { max_age_seconds }` block
+    on google_storage_bucket.main. That block is what lets the Web UI read
+    the response when the api's resolve handler 302-redirects a browser
+    fetch to a signed GCS URL (SupportsSignedURL() / STORAGE_DRIVER=gcs) --
+    without it, the dataset viewer's SQL mode and the tabular file preview's
+    full-text fallback both fail cross-origin reads against
+    storage.googleapis.com. See the resource's own comment for the full
+    picture, including why the frontend has to fetch these without
+    credentials for this block to have any effect.
+
+    1 hour is comfortably below the ~2 hour ceiling most browsers enforce on
+    Access-Control-Max-Age regardless of what a higher value here would ask
+    for, so raising it further buys little; lowering it only adds preflight
+    round trips without a correctness benefit, since origin/method/
+    response_header rarely change on a running deployment.
+  EOT
+  type        = number
+  default     = 3600
+}
+
 variable "bucket_reader_members" {
   description = <<-EOT
     IAM members granted read-only access to the bucket, for consumers that

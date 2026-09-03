@@ -287,6 +287,10 @@ export function TransferRepoForm({ kind, ns, name }: { kind: RepoKind; ns: strin
         <Dialog
           open={confirmOpen}
           onClose={() => setConfirmOpen(false)}
+          // A transfer in flight hands the repository to somebody else; the
+          // dialog stays put until it settles so its `footerNote` failure is
+          // still on screen to read.
+          busy={submitting}
           title={t("repo.settings.transfer.confirmTitle")}
           footer={
             <>

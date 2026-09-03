@@ -1,7 +1,8 @@
 "use client";
 
 import { ScrollText } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
@@ -31,6 +32,11 @@ export function OrgAuditLog({ org }: { org: string }) {
   const [nextBefore, setNextBefore] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  // loadMore is triggered from a click handler rather than an effect, so it
+  // needs its own unmount guard (the initial-load effect above gets one for
+  // free from its cleanup's `cancelled` flag) — otherwise a slow request that
+  // outlives navigating away still lands a setState on a gone component.
+  const mountedRef = useRef(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -51,15 +57,28 @@ export function OrgAuditLog({ org }: { org: string }) {
     };
   }, [org]);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   async function loadMore() {
     if (!nextBefore) return;
     setLoadingMore(true);
     const result = await listAuditLog(org, { before: nextBefore, limit: PAGE_SIZE });
+    if (!mountedRef.current) return;
     setLoadingMore(false);
     if (!result.ok) {
       setError(errorMessage(t, result));
       return;
     }
+    // Clear a previous "load more" failure — otherwise a retry that succeeds
+    // still leaves the table sitting above a permanent ErrorState claiming
+    // the log couldn't be read at all (DESIGN.md §9: a state that has since
+    // resolved must not keep standing in for the current one).
+    setError(null);
     setEntries((prev) => [...(prev ?? []), ...result.data.items]);
     setNextBefore(result.data.next_before);
   }
@@ -109,8 +128,6 @@ export function OrgAuditLog({ org }: { org: string }) {
         </TBody>
       </Table>
 
-      {error && <ErrorState title={t("org.settings.auditLog.loadFailed")} message={error} />}
-
       {nextBefore > 0 && (
         <Button onClick={loadMore} disabled={loadingMore} className="self-center">
           {loadingMore
@@ -118,6 +135,13 @@ export function OrgAuditLog({ org }: { org: string }) {
             : t("org.settings.auditLog.loadMore")}
         </Button>
       )}
+
+      {/* Below the button rather than between the table and it (DESIGN.md
+          §8.1): the table already loaded fine, so a "load more" failure is
+          an inline Alert next to its own retry — not a full-screen
+          ErrorState — and it must never appear above the button the user is
+          about to click again. */}
+      {error && <Alert tone="negative">{error}</Alert>}
     </div>
   );
 }

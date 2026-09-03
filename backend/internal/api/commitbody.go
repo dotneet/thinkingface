@@ -11,6 +11,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -46,7 +47,13 @@ type commitPlan struct {
 // Nothing here writes: the plan it produces is applied by the caller in one
 // commitThroughWAL. That is what makes refusing a bad line safe -- half a
 // commit is never on disk to be undone.
-func (s *Server) parseCommitBody(w http.ResponseWriter, r *http.Request, repo *store.Repo) (*commitPlan, bool) {
+//
+// rules is the LFS routing in force at the revision being committed to -- the
+// same rules preupload answered with -- and may be nil, in which case no
+// routing is enforced.
+func (s *Server) parseCommitBody(w http.ResponseWriter, r *http.Request,
+	repo *store.Repo, rules *gitrepo.LFSRules,
+) (*commitPlan, bool) {
 	plan := &commitPlan{summary: "Upload files"}
 
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxCommitBody))
@@ -98,10 +105,21 @@ func (s *Server) parseCommitBody(w http.ResponseWriter, r *http.Request, repo *s
 			}
 
 		case "file":
+			// Refused on the raw line, before anything is unmarshalled out of
+			// it: decoding first would allocate the whole content a second
+			// time, which is precisely the cost this bound exists to avoid.
+			// The message cannot name the path for the same reason.
+			if len(line.Value) > maxCommitInlineLine {
+				inlineFileTooLarge(w, "")
+				return nil, false
+			}
 			var v struct {
-				Path     string `json:"path"`
-				Content  string `json:"content"`
-				Encoding string `json:"encoding"`
+				Path string `json:"path"`
+				// Raw, not string: the content is base64 for every client that
+				// matters, and a string field would copy the encoded bytes
+				// once more before the decode copies them again.
+				Content  json.RawMessage `json:"content"`
+				Encoding string          `json:"encoding"`
 			}
 			if err := json.Unmarshal(line.Value, &v); err != nil {
 				badRequest(w, "invalid file entry")
@@ -110,17 +128,28 @@ func (s *Server) parseCommitBody(w http.ResponseWriter, r *http.Request, repo *s
 			if !checkOpPath(w, "file", v.Path) {
 				return nil, false
 			}
-			data := []byte(v.Content)
-			if v.Encoding == "base64" || v.Encoding == "" {
-				decoded, err := base64.StdEncoding.DecodeString(v.Content)
-				if err != nil {
-					if v.Encoding == "base64" {
-						badRequest(w, "file "+v.Path+": content is not valid base64")
-						return nil, false
-					}
-				} else {
-					data = decoded
-				}
+			data, ok := decodeInlineFile(w, v.Path, v.Content, v.Encoding)
+			if !ok {
+				return nil, false
+			}
+			// The routing preupload just told this client to use. An inline
+			// entry for a path .gitattributes tracks with LFS is an answer to
+			// a question this server did not ask: huggingface_hub and the tf
+			// CLI both read uploadMode and send an `lfsFile` line instead, so
+			// nothing that honours the contract lands here. What did land
+			// here was a 400 MiB *.safetensors blob written straight into the
+			// git object database, past every LFS quota and dedupe path.
+			//
+			// Only above the threshold, deliberately. Below it the routing is
+			// a storage preference and a client that ignores it costs
+			// nothing, so a small file keeps being accepted whatever the
+			// patterns say -- which is the behaviour every existing caller
+			// already has.
+			if rules != nil && int64(len(data)) >= gitrepo.LFSInlineThreshold &&
+				rules.ShouldUseLFS(v.Path, int64(len(data))) {
+				badRequest(w, "file "+v.Path+": this path is tracked by git-lfs at this revision; "+
+					"upload the content through the LFS batch API and commit it as an lfsFile entry")
+				return nil, false
 			}
 			plan.ops = append(plan.ops, gitrepo.Op{Kind: gitrepo.OpAdd, Path: v.Path, Data: data})
 
@@ -226,6 +255,86 @@ func (s *Server) parseCommitBody(w http.ResponseWriter, r *http.Request, repo *s
 	}
 
 	return plan, true
+}
+
+// decodeInlineFile turns one `file` line's content into the bytes to commit.
+//
+// The bound is on the decoded size and is checked before the decode, so an
+// oversized entry never allocates its own output. maxCommitBody alone was not
+// a bound on anything useful: it let one line carry 512 MiB, and the path from
+// the socket to gitrepo.Op copied that four times over.
+func decodeInlineFile(w http.ResponseWriter, path string, raw json.RawMessage, encoding string) ([]byte, bool) {
+	// An absent content field is an empty file, which is what the previous
+	// string-typed decode produced for it.
+	if len(raw) == 0 {
+		return nil, true
+	}
+	encoded, plain := jsonStringBody(raw)
+	if !plain {
+		// A content value carrying JSON escapes is never base64 -- the
+		// alphabet has nothing an encoder escapes -- but it is legal for the
+		// literal encodings, so it still has to decode.
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			badRequest(w, "file "+path+": content must be a JSON string")
+			return nil, false
+		}
+		encoded = []byte(s)
+	}
+
+	// "" means "base64 if it decodes as base64", which is the shape this
+	// endpoint has always accepted; huggingface_hub always sends "base64".
+	asBase64 := encoding == "base64" || encoding == ""
+	if asBase64 {
+		if base64.StdEncoding.DecodedLen(len(encoded)) > maxCommitInlineFileBytes {
+			inlineFileTooLarge(w, path)
+			return nil, false
+		}
+		out := make([]byte, base64.StdEncoding.DecodedLen(len(encoded)))
+		n, err := base64.StdEncoding.Decode(out, encoded)
+		if err == nil {
+			return out[:n], true
+		}
+		if encoding == "base64" {
+			badRequest(w, "file "+path+": content is not valid base64")
+			return nil, false
+		}
+		// Encoding was unset and the content is not base64: fall through and
+		// take it literally, exactly as before.
+	}
+	if len(encoded) > maxCommitInlineFileBytes {
+		inlineFileTooLarge(w, path)
+		return nil, false
+	}
+	return encoded, true
+}
+
+// jsonStringBody returns the bytes between the quotes of a JSON string value,
+// and false for anything that is not a plain string or carries an escape.
+// Base64 needs no escaping, so the common case is the one that avoids a copy.
+func jsonStringBody(raw json.RawMessage) ([]byte, bool) {
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return nil, false
+	}
+	body := raw[1 : len(raw)-1]
+	if bytes.IndexByte(body, '\\') >= 0 {
+		return nil, false
+	}
+	return body, true
+}
+
+// inlineFileTooLarge answers an inline entry that is over the ceiling. It
+// names LFS, because that is what the caller is expected to do instead and
+// what preupload would have told them to do. path may be empty when the entry
+// was refused before it was parsed.
+func inlineFileTooLarge(w http.ResponseWriter, path string) {
+	what := "an inline file"
+	if path != "" {
+		what = "file " + path
+	}
+	writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+		fmt.Sprintf("%s is larger than the %d MiB inline limit; upload it through the LFS batch API instead",
+			what, maxCommitInlineFileBytes>>20))
 }
 
 // verifyCommitLFSFile checks that an `lfsFile` line names an object this

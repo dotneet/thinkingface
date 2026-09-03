@@ -42,11 +42,20 @@ export function DefaultBranchForm({
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
+  // `branches` can shrink out from under `selected`: the Branches section of
+  // this same settings page (RefsManager) deletes a branch by calling
+  // router.refresh(), which updates this component's `branches` prop but has
+  // no way to touch `selected` state here. Left alone, the <select> would
+  // fall back to rendering its first option while `selected` kept naming the
+  // now-deleted branch, and Save would PATCH a default_branch the server no
+  // longer has. Same fallback refs-manager.tsx's `selectedRev` uses.
+  const selectedBranch = branches.includes(selected) ? selected : (branches[0] ?? "");
+
   async function handleSave() {
     setSaving(true);
     setError(null);
     setSaved(false);
-    const result = await updateRepo(kind, ns, name, { default_branch: selected });
+    const result = await updateRepo(kind, ns, name, { default_branch: selectedBranch });
     setSaving(false);
     if (!result.ok) {
       setError(errorMessage(t, result));
@@ -77,7 +86,7 @@ export function DefaultBranchForm({
         hint={t("repo.settings.defaultBranch.hint")}
       >
         <Select
-          value={selected}
+          value={selectedBranch}
           onChange={(e) => {
             setSelected(e.target.value);
             setSaved(false);

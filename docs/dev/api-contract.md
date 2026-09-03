@@ -1394,8 +1394,13 @@ is created under the old name.
 - Web UI-facing API (`/api/v1/...`): **404** +
   `{"error":{"type":"repo_moved","message":...,"moved_to":{"namespace","name"}}}` (the frontend
   does a `permanentRedirect`)
-- `create` under the old name: allowed (the redirect disappears). `DELETE /api/repos/delete` under
-  the old name: 404
+- `create` under the old name: allowed (the redirect disappears).
+- **The two endpoints that name the repository in the body rather than the path answer 404
+  instead of redirecting**: `DELETE /api/repos/delete` and `POST /api/repos/move`. A redirect
+  is built by rewriting the `/{ns}/{name}` segment of the request path, and neither of these
+  paths has one -- the Location would come back identical to the URL just requested, which a
+  client follows until it gives up (`requests` raises `TooManyRedirects`). A 404 says what is
+  actually true: there is no repository at the name the body asked about
 
 ### `GET /api/{datasets|models}/{ns}/{name}` and `.../revision/{rev}`  (HF-compatible)
 res 200:
@@ -1533,6 +1538,13 @@ Errors — **the status codes are a compatibility contract, not a style choice**
   server-side; the caller retries. 503 falls through `hf_raise_for_status` to a plain
   `HfHubHTTPError`, and these four calls use `get_session()` directly rather than `http_backoff`,
   so the client surfaces it rather than silently retrying.
+- **Deleting a branch drops that ref's file index** (`repo_files` / `parquet_files`), through
+  the same path a `git push --delete` takes. Without it the rows outlived the branch: the
+  file listing kept answering for a ref that no longer existed, and — because
+  `ListReferencedBlobSHAs` reads those rows — the blobs they named were counted as
+  referenced and could never be collected. **Deleting a tag does not**, deliberately:
+  `repo_files.ref` holds branch short names, a branch and a tag may share a name, and
+  deleting by name would take the identically named branch's index with it.
 - **404 + `X-Error-Code: RevisionNotFound`** for a `startingPoint` / `{rev}` that does not
   resolve, and for deleting a ref that is not there. The header is what makes `huggingface_hub`
   raise `RevisionNotFoundError` instead of a bare `HfHubHTTPError`.
@@ -1970,6 +1982,22 @@ Content-Type: `application/x-ndjson`. One operation per line.
 {"key":"copyFile","value":{"path":"new.bin","srcPath":"old.bin","srcRevision":null}}
 ```
 
+**Size limits on an inline `file`.** The whole body is capped at 512 MiB, and one `file`
+entry at 32 MiB after base64 decoding; over either is a **413 `payload_too_large`** naming
+LFS as the route for anything bigger. 32 MiB is well clear of what a compliant client sends
+inline: preupload answers `uploadMode` for every path, `huggingface_hub`, `datasets` and the
+`tf` CLI all honour it, and the default LFS threshold is 10 MiB
+(`gitrepo.LFSInlineThreshold`) — so an inline file over that is already a client ignoring
+the answer it was given. It also matches what the Web UI's own upload endpoint accepts per
+file, which the two paths previously disagreed about.
+
+**A `file` the LFS rules claim is a 400**, but only at or above that same 10 MiB threshold:
+a path `.gitattributes` tracks (or an unmatched path over the threshold) has to arrive as
+an `lfsFile` pointer. Below the threshold nothing changes — a small file on an LFS-tracked
+path is still accepted inline, which is what a repository that has just rewritten its
+`.gitattributes` relies on. The rules are read with the same `loadLFSRules` call preupload
+uses, so the two steps cannot disagree about a path.
+
 Those six keys are the whole set. **A line naming any other `key` is a 400**, and so is a `header`
 that will not parse. There used to be no such check, and an unknown operation was skipped in
 silence: a commit that mixed one supported operation with one unsupported one applied half of what
@@ -2078,7 +2106,8 @@ req:
   content: string      // New file content (UTF-8)
   message: string      // Defaults to "Update {path}" when omitted
   description: string  // Optional. Appended to the body of the commit message
-  base_oid: string     // Optional. The blob SHA at the time editing started
+  base_oid: string          // Optional. The blob SHA at the time editing started
+  must_not_exist: boolean   // Optional. Asserts the path was free when editing started
 }
 ```
 res 200:
@@ -2100,7 +2129,7 @@ Constraints and status codes:
 | Character encoding | `content` must be valid UTF-8. Invalid input returns 400 |
 | LFS-managed path | 400 for a path that is (or would become) LFS-managed per `.gitattributes`. Also 400 for an existing file that's already committed as LFS |
 | `rev` | Branch name only. Passing a commit SHA returns 400; a `rev` that resolves to something other than a branch (a tag, an abbreviated SHA, `HEAD`) returns **409 `conflict`**, as on the commit API and for the same reason — reads resolve a tag before a branch of the same name, so the write would land on a branch nobody reads. A `rev` that resolves to nothing still creates the branch. Defaults to the repository's default branch when omitted |
-| Optimistic locking | When `base_oid` is given and it doesn't match the current blob SHA (or the file no longer exists), returns **409 `conflict`** |
+| Optimistic locking | The caller states what they believed about the path, and the commit is refused if that stopped being true. `base_oid` says the path held that blob: a different SHA, or a file that is gone, returns **409 `conflict`**. `must_not_exist` says the path held nothing, which is the claim a caller creating a file makes: anything occupying it by the time the commit lands returns **409 `conflict`** too. Sending both is contradictory and returns 400. Sending neither means the caller is not tracking staleness, and the write proceeds unconditionally |
 | No change | If the saved content is identical to the current content, no new commit is created and the current HEAD and file state are returned as-is |
 | Sync | When a commit is created, a sync job to GCS is enqueued just like any other path (`Enqueue`) |
 | Auth | 401 when unauthenticated; 403 without write permission (a read-scope token also gets 403) |
@@ -2279,8 +2308,13 @@ Constraints and status codes:
 - An LFS file: **302** to a signed URL (proxied and returned as body content in emulator
   environments).
 - **LFS is only returned when the pointer's oid is linked to this repository (`repo_lfs_objects`).**
-  If unlinked, 404 `object not found` (no headers are emitted at all, so nothing leaks even via
-  HEAD). The object itself is content-addressed and shared across the whole instance
+  If unlinked, 404 `object not found`. The headers that would describe the object are cleared
+  before the error is written -- `Cache-Control` so a CDN cannot cache the 404 for the year the
+  success path asks for, and `Content-Disposition` so nothing describes a file that was not
+  served. What the object *is* never leaks: no `Content-Length`, no `ETag`, no `X-Linked-Etag`
+  or `X-Linked-Size`, whether the request was GET or HEAD. The headers that survive say nothing
+  about the object -- `X-Repo-Commit` (the revision the caller already named), `Accept-Ranges`,
+  and `X-Content-Type-Options`. The object itself is content-addressed and shared across the whole instance
   (`lfs/objects/{oid}`), so "is this repository readable" doesn't by itself authorize the object. A
   pointer is just text that anyone can commit, so without this check someone could read another
   repository's content just by committing a pointer that names its oid into their own repository.

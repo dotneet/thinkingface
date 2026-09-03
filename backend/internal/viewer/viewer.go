@@ -32,9 +32,12 @@ package viewer
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 
 	"github.com/parquet-go/parquet-go"
+	"github.com/parquet-go/parquet-go/encoding/thrift"
+	"github.com/parquet-go/parquet-go/format"
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
 	"github.com/dotneet/thinkingface/backend/internal/storage"
@@ -107,6 +110,10 @@ func (r *Reader) openParquetFile(ctx context.Context, key string) (*parquet.File
 		tail:       entry.tail,
 	}
 
+	if err := checkFooterSections(rd, entry); err != nil {
+		return nil, fmt.Errorf("viewer: open parquet file %s: %w", key, err)
+	}
+
 	pf, err := parquet.OpenFile(rd, entry.size,
 		// Read the footer region in one large read instead of an 8-byte
 		// probe followed by a second read, and size that read to the tail
@@ -131,6 +138,112 @@ func (r *Reader) openParquetFile(ctx context.Context, key string) (*parquet.File
 	}
 
 	return pf, nil
+}
+
+// checkFooterSections rejects a file whose footer describes byte ranges that
+// do not exist, before parquet.OpenFile allocates buffers for them.
+//
+// The footer is the writer's word for everything: parquet-go trusts the
+// lengths it declares and allocates first, reads second. fetchTail already
+// bounds the footer's own length that way; the page index is the same shape of
+// hazard one layer in. ReadPageIndex sums every chunk's ColumnIndexLength and
+// OffsetIndexLength -- two int32s per column chunk, straight out of the footer
+// -- and calls make([]byte, sum) before the read that would notice the bytes
+// are missing, so a small crafted file can ask for tens of gigabytes. A Go
+// allocation that large is a fatal runtime error, not a panic: middleware.
+// Recoverer never sees it, and the syncer and the experiments indexer open
+// parquet files from background workers where there is no request to fail in
+// the first place. ReadPageIndex also indexes its result by
+// len(RowGroups[0].Columns), so a file whose row groups disagree on their
+// column count -- or whose first row group has none -- panics out of range
+// there; both are checked here for the same reason.
+//
+// A footer this cannot decode is left alone: parquet.OpenFile decodes the same
+// bytes with the same decoder immediately afterwards, and reports the failure
+// itself. The one input the two treat differently -- a plaintext footer with a
+// trailing AES-GCM signature, which this rejects and parquet-go tolerates --
+// parquet-go then refuses anyway for want of a DecryptionConfig.
+func checkFooterSections(rd *objectReader, entry *tailEntry) error {
+	footer, err := footerBytes(rd, entry)
+	if err != nil {
+		return err
+	}
+	var md format.FileMetaData
+	if err := thrift.Unmarshal(new(thrift.CompactProtocol), footer, &md); err != nil {
+		return nil
+	}
+	return checkPageIndexSections(&md, entry.size)
+}
+
+// footerBytes returns the thrift-encoded FileMetaData that precedes the
+// object's 8-byte trailer, from the cached tail when it reaches that far back.
+// fetchTail has already checked the declared length against the object's size,
+// so the fallback allocation below is bounded by the file itself.
+func footerBytes(rd *objectReader, entry *tailEntry) ([]byte, error) {
+	trailer := entry.tail[len(entry.tail)-footerTrailerSize:]
+	size := int64(binary.LittleEndian.Uint32(trailer[:4]))
+	start := entry.size - (size + footerTrailerSize)
+	if start < 0 {
+		// Unreachable via fetchTail, which rejects such a file outright.
+		return nil, fmt.Errorf("footer length %d does not fit in %d bytes", size, entry.size)
+	}
+	if start >= entry.tailOffset {
+		off := start - entry.tailOffset
+		return entry.tail[off : off+size], nil
+	}
+	// A footer larger than the probed tail. parquet.OpenFile is about to read
+	// the same range again; that costs one extra request on a file whose
+	// footer alone runs past footerProbeSize (at least 128 KiB), which no
+	// writer this hub sees produces.
+	buf := make([]byte, size)
+	if _, err := rd.ReadAt(buf, start); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+// checkPageIndexSections reports an error when any column chunk's page index
+// falls outside a file of the given size, or when the row groups disagree on
+// how many columns they hold. See checkFooterSections for why.
+func checkPageIndexSections(md *format.FileMetaData, size int64) error {
+	if len(md.RowGroups) == 0 {
+		return nil
+	}
+	numColumns := len(md.RowGroups[0].Columns)
+	if numColumns == 0 {
+		return fmt.Errorf("row group 0 declares no columns")
+	}
+	for i := range md.RowGroups {
+		rg := &md.RowGroups[i]
+		if len(rg.Columns) != numColumns {
+			return fmt.Errorf("row group %d declares %d columns, row group 0 declares %d",
+				i, len(rg.Columns), numColumns)
+		}
+		for j := range rg.Columns {
+			c := &rg.Columns[j]
+			if !sectionFits(c.ColumnIndexOffset, int64(c.ColumnIndexLength), size) {
+				return fmt.Errorf("column index of row group %d column %d (%d bytes at %d) is outside the %d-byte object",
+					i, j, c.ColumnIndexLength, c.ColumnIndexOffset, size)
+			}
+			if !sectionFits(c.OffsetIndexOffset, int64(c.OffsetIndexLength), size) {
+				return fmt.Errorf("offset index of row group %d column %d (%d bytes at %d) is outside the %d-byte object",
+					i, j, c.OffsetIndexLength, c.OffsetIndexOffset, size)
+			}
+		}
+	}
+	return nil
+}
+
+// sectionFits reports whether [offset, offset+length) lies inside a file of
+// the given size. Both bounds come from the footer, so both are checked: an
+// offset of 0 is how parquet says "this chunk has no such section" (its length
+// is still summed, so it is still bounded), and a negative length is not a
+// section at all. The comparison is written as length <= size-offset rather
+// than offset+length <= size because offset is an unvalidated int64 straight
+// out of the footer: the sum of a near-MaxInt64 offset would wrap negative and
+// pass.
+func sectionFits(offset, length, size int64) bool {
+	return offset >= 0 && length >= 0 && offset <= size && length <= size-offset
 }
 
 // Schema returns the schema and file-level metadata of the parquet object

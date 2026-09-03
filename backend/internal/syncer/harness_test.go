@@ -230,7 +230,7 @@ func (h *harness) step() {
 		h.t.Fatal("step: no pending sync job")
 	}
 	jobErr := h.syn.process(h.ctx, job)
-	if err := h.st.FinishSyncJob(h.ctx, job.ID, job.Attempts, jobErr); err != nil {
+	if err := h.st.FinishSyncJob(h.ctx, job, jobErr); err != nil {
 		h.t.Fatalf("finish sync job: %v", err)
 	}
 	if jobErr != nil {

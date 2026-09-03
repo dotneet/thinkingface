@@ -253,6 +253,8 @@ export const experiments = {
     yAxis: "Y 軸",
     logY: "Y 軸を対数",
     vsTitle: "{y} vs {x}",
+    axisConfigPrefix: "設定",
+    axisMetricPrefix: "メトリクス",
   },
   chart: {
     baselineSuffix: "{run}（ベースライン）",

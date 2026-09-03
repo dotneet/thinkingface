@@ -14,6 +14,19 @@ import (
 // table's payload column is unused -- storage keys no longer carry a
 // repository's name, so a transfer or a rename moves no object at all and
 // there is no second kind of work to parameterise.
+//
+// The two counters mean different things and must not be confused:
+//
+//   - Attempts is the retry budget. EnqueueSync resets it to 0 on a pending
+//     row on purpose (see the comment there), so it moves both ways.
+//   - ClaimSeq is the fencing token. Only ClaimSyncJob ever changes it, and
+//     only by adding one, so a value handed out for a row is never handed out
+//     for that row again. HeartbeatSyncJob and FinishSyncJob match on it,
+//     which is what makes "I still hold this claim" decidable.
+//
+// A claimed job is passed back to those two whole rather than field by field:
+// two bare ints of the same type at a call site is exactly how the token and
+// the budget got swapped in the first place.
 type SyncJob struct {
 	ID       int64
 	RepoID   int64
@@ -21,6 +34,7 @@ type SyncJob struct {
 	OldSHA   string
 	NewSHA   string
 	Attempts int
+	ClaimSeq int64
 	Kind     string
 }
 
@@ -94,6 +108,11 @@ func (s *Store) EnqueueSync(ctx context.Context, repoID int64, ref, oldSHA, newS
 	// parked job needs a human, an unparked one keeps trying. The gap is
 	// covered from the other side instead -- `thinkingface resync` finds an
 	// index that has drifted regardless of what the queue thinks.
+	//
+	// Note what is *not* reset: claim_seq. This reset is precisely why the
+	// attempt counter cannot serve as the claim's fencing token -- a swept
+	// job whose counter a push has zeroed hands the next worker the same
+	// value the previous one holds. See the 0005 migration.
 	n, err := s.db.Exec(ctx,
 		`UPDATE sync_jobs
 		 SET new_sha = $3, attempts = 0, next_attempt_at = NULL, last_error = '', updated_at = now()
@@ -151,11 +170,19 @@ func (s *Store) EnqueueSync(ctx context.Context, repoID int64, ref, oldSHA, newS
 // next_attempt_at IS NULL means "due now": it is unset on a fresh row and
 // cleared by EnqueueSync, and only FinishSyncJob ever sets it (see the
 // migration for why there is no DEFAULT now()).
+//
+// The claim also mints the fencing token the holder will present later:
+// claim_seq goes up by one here and nowhere else, so the returned value
+// identifies this claim and no other. Both engines get that for free -- on
+// Postgres the row is locked by this UPDATE (SKIP LOCKED only moves other
+// workers onto different rows), and on SQLite the whole statement runs alone
+// on the single writer connection.
 func (s *Store) ClaimSyncJob(ctx context.Context, leaseDuration time.Duration) (*SyncJob, error) {
 	j := &SyncJob{}
 	err := s.db.QueryRow(ctx,
 		`UPDATE sync_jobs
-		 SET status = 'running', attempts = attempts + 1, updated_at = now(),
+		 SET status = 'running', attempts = attempts + 1, claim_seq = claim_seq + 1,
+		     updated_at = now(),
 		     lease_expires_at = `+s.d.nowPlusSeconds("$1")+`
 		 WHERE id = (SELECT j.id FROM sync_jobs j
 		              WHERE j.status = 'pending'
@@ -166,9 +193,9 @@ func (s *Store) ClaimSyncJob(ctx context.Context, leaseDuration time.Duration) (
 		                                        OR (s.status = 'pending' AND s.id < j.id)))
 		              ORDER BY j.id`+
 			s.d.forUpdate(" SKIP LOCKED")+` LIMIT 1)
-		 RETURNING id, repo_id, ref, old_sha, new_sha, attempts, kind`,
+		 RETURNING id, repo_id, ref, old_sha, new_sha, attempts, claim_seq, kind`,
 		leaseDuration.Seconds(),
-	).Scan(&j.ID, &j.RepoID, &j.Ref, &j.OldSHA, &j.NewSHA, &j.Attempts, &j.Kind)
+	).Scan(&j.ID, &j.RepoID, &j.Ref, &j.OldSHA, &j.NewSHA, &j.Attempts, &j.ClaimSeq, &j.Kind)
 	if isNoRows(err) {
 		return nil, nil
 	}
@@ -185,53 +212,69 @@ func (s *Store) ClaimSyncJob(ctx context.Context, leaseDuration time.Duration) (
 //
 // It touches only a row this worker still holds: once the sweeper has taken
 // the job back the status is no longer 'running' and the update matches
-// nothing, so a heartbeat arriving late cannot resurrect a stolen claim.
-func (s *Store) HeartbeatSyncJob(ctx context.Context, id int64, attempts int, leaseDuration time.Duration) error {
+// nothing, so a heartbeat arriving late cannot resurrect a stolen claim. The
+// claim_seq test covers the other half -- a row swept back to 'pending' and
+// then reclaimed by somebody else is 'running' again, and only the token
+// tells the two claims apart (FinishSyncJob explains why that matters).
+func (s *Store) HeartbeatSyncJob(ctx context.Context, job *SyncJob, leaseDuration time.Duration) error {
 	_, err := s.db.Exec(ctx,
 		`UPDATE sync_jobs SET lease_expires_at = `+s.d.nowPlusSeconds("$3")+`
-		 WHERE id = $1 AND status = 'running' AND attempts = $2`,
-		id, attempts, leaseDuration.Seconds())
+		 WHERE id = $1 AND status = 'running' AND claim_seq = $2`,
+		job.ID, job.ClaimSeq, leaseDuration.Seconds())
 	return err
 }
 
 // FinishSyncJob records the outcome of a claimed job and drops its lease.
+// job is the value ClaimSyncJob returned, and the two counters on it play
+// different parts: ClaimSeq fences the write, Attempts decides retry versus
+// park.
 //
-// attempts is the count the claim returned, and it is the fencing token: every
-// statement here also requires status = 'running' AND attempts = that value, so
-// a worker can only write the outcome of the claim it still holds. Without it
-// the lease closes only half the race. A worker whose lease lapsed, was swept
-// back to 'pending' and reclaimed by somebody else would still write 'done'
-// over the row the new holder is working -- and once that ref has no 'running'
-// row, ClaimSyncJob's NOT EXISTS lets a third worker start on it alongside the
-// second, which is exactly the concurrent-index-rebuild the lease exists to
-// prevent.
+// Every statement here requires status = 'running' AND claim_seq = the value
+// the claim returned, so a worker can only write the outcome of the claim it
+// still holds. Without that the lease closes only half the race. A worker
+// whose lease lapsed, was swept back to 'pending' and reclaimed by somebody
+// else would still write 'done' over the row the new holder is working -- and
+// once that ref has no 'running' row, ClaimSyncJob's NOT EXISTS lets a third
+// worker start on it alongside the second, which is exactly the
+// concurrent-index-rebuild the lease exists to prevent.
+//
+// The token used to be attempts, and that was wrong in a way the lease hides
+// until a push lands at the wrong moment: EnqueueSync resets attempts to 0 on
+// a pending row, so lapse -> sweep -> push -> reclaim hands the second worker
+// the same number the first one is still holding, and the first one's late
+// 'done' matches. claim_seq only ever counts up, and only in the claim, so
+// there is no sequence of pushes, sweeps or retries that can mint a duplicate
+// (see the 0005 migration).
 //
 // A no-op update therefore means the claim was lost, which is not an error:
 // whoever holds it now is responsible for the outcome.
 //
-// FinishWebhookDelivery (webhooks.go) is the same shape over the other
-// leased queue in this package; the two are kept in step deliberately.
-func (s *Store) FinishSyncJob(ctx context.Context, id int64, attempts int, jobErr error) error {
+// FinishWebhookDelivery (webhooks.go) is the same shape over the other leased
+// queue in this package. It still fences on attempts, and soundly: nothing
+// resets a delivery's counter -- the claim is the only writer of it, and it
+// only increments -- so there attempts *is* a monotonic per-claim token.
+func (s *Store) FinishSyncJob(ctx context.Context, job *SyncJob, jobErr error) error {
 	if jobErr == nil {
 		_, err := s.db.Exec(ctx,
 			`UPDATE sync_jobs
 			 SET status = 'done', last_error = '', lease_expires_at = NULL, updated_at = now()
-			 WHERE id = $1 AND status = 'running' AND attempts = $2`, id, attempts)
+			 WHERE id = $1 AND status = 'running' AND claim_seq = $2`, job.ID, job.ClaimSeq)
 		return err
 	}
-	if attempts >= SyncMaxAttempts {
+	if job.Attempts >= SyncMaxAttempts {
 		_, err := s.db.Exec(ctx,
 			`UPDATE sync_jobs
 			 SET status = 'failed', last_error = $3, lease_expires_at = NULL, updated_at = now()
-			 WHERE id = $1 AND status = 'running' AND attempts = $2`, id, attempts, jobErr.Error())
+			 WHERE id = $1 AND status = 'running' AND claim_seq = $2`,
+			job.ID, job.ClaimSeq, jobErr.Error())
 		return err
 	}
 	_, err := s.db.Exec(ctx,
 		`UPDATE sync_jobs
 		 SET status = 'pending', last_error = $3, lease_expires_at = NULL, updated_at = now(),
 		     next_attempt_at = `+s.d.nowPlusSeconds("$4")+`
-		 WHERE id = $1 AND status = 'running' AND attempts = $2`,
-		id, attempts, jobErr.Error(), retryDelay(attempts).Seconds())
+		 WHERE id = $1 AND status = 'running' AND claim_seq = $2`,
+		job.ID, job.ClaimSeq, jobErr.Error(), retryDelay(job.Attempts).Seconds())
 	return err
 }
 
@@ -248,6 +291,10 @@ func (s *Store) FinishSyncJob(ctx context.Context, id int64, attempts int, jobEr
 // A row with no lease at all is treated as expired: those are jobs claimed by
 // a binary from before this migration, and leaving them stuck 'running'
 // forever would be worse than one requeue at upgrade time.
+//
+// It leaves claim_seq alone. The next claim raises it, which is what fences
+// out the worker whose lease this sweep just took away: a straggler still
+// finishing the previous claim presents a token the row has moved past.
 func (s *Store) RequeueExpiredSyncJobs(ctx context.Context) (int64, error) {
 	return s.db.Exec(ctx,
 		`UPDATE sync_jobs
@@ -306,6 +353,10 @@ func (s *Store) ListFailedSyncJobs(ctx context.Context, limit, offset int) ([]Fa
 // budget, reporting whether it matched. It is deliberately restricted to
 // 'failed' rows: retrying a job that is pending or running would reset the
 // attempt counter of work already in flight.
+//
+// Only the budget is reset. claim_seq is not, here or anywhere else outside
+// the claim, so an operator retrying a job cannot re-issue a token some
+// straggler still holds.
 func (s *Store) RetrySyncJob(ctx context.Context, id int64) (bool, error) {
 	n, err := s.db.Exec(ctx,
 		`UPDATE sync_jobs

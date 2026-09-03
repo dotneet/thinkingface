@@ -3,9 +3,11 @@ package store
 import (
 	"context"
 	"errors"
-	"github.com/dotneet/thinkingface/backend/internal/storage"
+	"fmt"
 	"path"
 	"time"
+
+	"github.com/dotneet/thinkingface/backend/internal/storage"
 )
 
 // LFSObjectRef is one row of lfs_objects, minimal enough for the GC scan.
@@ -281,4 +283,209 @@ func (s *Store) DeleteUntrackedLFSObject(ctx context.Context, oid string, remove
 		}
 		return true, nil
 	})
+}
+
+// ---------------------------------------------------- blobs/ deletion ledger
+
+// DeleteOrphanedBlob removes one blobs/ object, but only if no indexed
+// revision names its sha at the moment it goes -- and it records the removal
+// so that a revision which names it *anyway* can be repaired.
+//
+// It is the blob layer's answer to DeleteOrphanedLFSObject, and it has to
+// build the thing that method is handed for free. An LFS object has a row,
+// and every writer of a reference to it takes that row's lock, so "claim,
+// re-check, delete" is a single transaction. A blob has no row: the push path
+// writes the bytes (gitrepo.PublishBlob) and the index rows
+// (ReplaceRepoFiles) with nothing in between that a collector could block on,
+// and PublishBlob skips an object that is already at its key, so the object's
+// own Updated timestamp does not even move when a second repository starts
+// referencing it. Age -- the only signal the pass used to have -- therefore
+// cannot see the reference coming.
+//
+// blob_deletions is the row that was missing, and it is written by the
+// collector rather than by the push path so that the common case (every file
+// of every push) stays free. The sequence is:
+//
+//  1. Record the intent in its own transaction, so it is durable *before* any
+//     byte is removed. A crash anywhere after this leaves a ledger row for an
+//     object that may still exist, which the repair pass answers with one
+//     idempotent PublishBlob -- the safe direction. Recording it inside the
+//     delete transaction would have the opposite failure: bytes gone, no
+//     record, and nothing short of `thinkingface resync` to notice.
+//  2. Take that row FOR UPDATE, re-check repo_files under it, and delete
+//     storage before committing. RepairDeletedBlobs takes the same rows, so
+//     the collector and the sync pipeline's repair serialise on them: if the
+//     repair got there first, its ReplaceRepoFiles has already committed and
+//     the re-check below sees the reference; if the collector got there
+//     first, the repair blocks, then sees the ledger row and re-publishes.
+//  3. Keep the row. It is what stops ListIndexedBlobSHAs' "already published"
+//     shortcut from making the loss permanent; RepairDeletedBlobs removes it
+//     once the bytes are back, and PruneBlobDeletions removes it once nothing
+//     references the sha at all.
+//
+// Returns deleted=false with a nil error when the sha gained a reference, or
+// when somebody else already holds the ledger row; neither is a fault.
+//
+// **The serialisation is Postgres'.** forUpdate renders nothing on SQLite,
+// where there are no row locks -- but `thinkingface gc` is refused outright in
+// SQLite mode (backend/entrypoint.sh), so this method has no concurrent
+// counterpart there to race with.
+func (s *Store) DeleteOrphanedBlob(ctx context.Context, sha string, removeStorage func() error) (bool, error) {
+	if sha == "" {
+		return false, nil
+	}
+	if removeStorage == nil {
+		return false, errors.New("removeStorage is required")
+	}
+
+	// Step 1: the intent, committed on its own. ON CONFLICT DO UPDATE rather
+	// than DO NOTHING so a sha considered by two runs (or reconsidered after
+	// a failure) has its timestamp refreshed and cannot be pruned out from
+	// under the second one.
+	if _, err := s.db.Exec(ctx,
+		`INSERT INTO blob_deletions (blob_sha, deleted_at) VALUES ($1, now())
+		 ON CONFLICT (blob_sha) DO UPDATE SET deleted_at = now()`, sha); err != nil {
+		return false, fmt.Errorf("record blob deletion: %w", err)
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Step 2. A row that is not there any more means a repair pass took it
+	// between the insert above and this lock, which is that pass saying the
+	// sha is referenced and the bytes are wanted. Backing off is the whole
+	// point of asking.
+	var claimed string
+	err = tx.QueryRow(ctx,
+		`SELECT blob_sha FROM blob_deletions WHERE blob_sha = $1`+s.d.forUpdate(""), sha).Scan(&claimed)
+	if isNoRows(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("claim blob deletion: %w", err)
+	}
+
+	var referenced bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM repo_files WHERE blob_sha = $1 AND lfs_oid IS NULL)`,
+		sha).Scan(&referenced); err != nil {
+		return false, fmt.Errorf("re-check blob references: %w", err)
+	}
+	if referenced {
+		// Rolled back rather than committed: nothing was removed, so the
+		// ledger row is left as the repair pass found it. If a *previous*
+		// run really did take these bytes, that row is the only record of
+		// it, and dropping it here would throw the repair away.
+		return false, nil
+	}
+
+	if err := removeStorage(); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// RepairDeletedBlobs re-publishes the blobs of one ref that the collector has
+// removed, and forgets them once they are back. It runs at the end of the
+// post-push pipeline, after ReplaceRepoFiles has committed, and in the
+// ordinary case it is one indexed SELECT that returns nothing.
+//
+// It is the other half of DeleteOrphanedBlob, and the reason the pair closes
+// the window rather than merely narrowing it. The rows are taken FOR UPDATE,
+// so:
+//
+//   - a collector that already committed its intent holds the row until its
+//     own delete is done; this blocks, then sees the row and re-publishes
+//   - a collector that has not started yet blocks on this transaction, and by
+//     the time it runs its re-check the caller's repo_files rows are
+//     committed, so it refuses to delete
+//
+// republish must be idempotent and must tolerate an object that is still
+// there -- gitrepo.PublishBlob is exactly that, one Stat when the bytes
+// survived. It is called with the transaction open, deliberately: releasing
+// the rows first would put the delete back in play while the bytes are still
+// missing. That is a storage round trip under a row lock, the same trade
+// deleteLFSObjectUnderClaim makes, and it is paid only when there is
+// something to repair.
+//
+// Returns how many shas were re-published.
+//
+// The EXISTS is a semi-join either engine may drive from whichever side is
+// smaller, which is what keeps it off the push path's critical path: the
+// ledger is normally empty or close to it (PruneBlobDeletions), and even
+// straight after a large collection the repo_files probe is the partial index
+// migration 0006 adds. SQLite never writes this table at all -- `thinkingface
+// gc` is refused there -- so the query is a scan of nothing.
+func (s *Store) RepairDeletedBlobs(ctx context.Context, repoID int64, ref string, republish func(sha string) error) (int, error) {
+	if republish == nil {
+		return 0, errors.New("republish is required")
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// ORDER BY so two refs of one repository that share a damaged sha take
+	// the rows in the same sequence rather than deadlocking on each other.
+	shas, err := collect(ctx, tx,
+		`SELECT d.blob_sha FROM blob_deletions d
+		 WHERE EXISTS (
+		     SELECT 1 FROM repo_files f
+		     WHERE f.repo_id = $1 AND f.ref = $2 AND f.lfs_oid IS NULL
+		       AND f.blob_sha = d.blob_sha)
+		 ORDER BY d.blob_sha`+s.d.forUpdate(" OF d"),
+		[]any{repoID, ref},
+		func(row rowScanner) (string, error) {
+			var sha string
+			err := row.Scan(&sha)
+			return sha, err
+		})
+	if err != nil {
+		return 0, fmt.Errorf("list deleted blobs: %w", err)
+	}
+	if len(shas) == 0 {
+		// Nothing locked, nothing to write: end the transaction rather than
+		// leave it open across the caller's remaining work.
+		return 0, tx.Commit(ctx)
+	}
+
+	for _, sha := range shas {
+		if err := republish(sha); err != nil {
+			return 0, fmt.Errorf("republish blob %s: %w", sha, err)
+		}
+	}
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM blob_deletions WHERE blob_sha `+s.d.inArray("$1"), s.d.stringArrayArg(shas)); err != nil {
+		return 0, fmt.Errorf("forget blob deletions: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return len(shas), nil
+}
+
+// PruneBlobDeletions drops ledger rows that have outlived their purpose: a
+// sha no indexed revision names is one nothing will ever ask to be repaired,
+// and the row would otherwise sit there for the life of the instance. That is
+// the ordinary outcome of a successful collection, so this is what keeps the
+// table proportional to the damage rather than to the bytes reclaimed.
+//
+// before is an age floor rather than a nicety. A row is inserted before the
+// bytes are removed, and the push that would claim the sha may be minutes
+// from committing its repo_files rows, so a row deleted the instant it looks
+// unreferenced could take the repair record with it.
+func (s *Store) PruneBlobDeletions(ctx context.Context, before time.Time) (int64, error) {
+	return s.db.Exec(ctx,
+		`DELETE FROM blob_deletions
+		 WHERE deleted_at < $1
+		   AND NOT EXISTS (
+		       SELECT 1 FROM repo_files f
+		       WHERE f.blob_sha = blob_deletions.blob_sha AND f.lfs_oid IS NULL)`, before)
 }

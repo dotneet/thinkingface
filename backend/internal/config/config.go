@@ -152,10 +152,18 @@ type Config struct {
 	// attempts are capped at half this. Zero disables the limiter entirely,
 	// which is only sensible in tests.
 	AuthRateLimitPerMinute int
-	// TrustProxyIPs makes the rate limiter read the client address from the
-	// leftmost X-Forwarded-For entry. Only enable it when a proxy you control
-	// rewrites that header, otherwise a client picks its own bucket key.
+	// TrustProxyIPs makes the rate limiter and the authentication log read
+	// the client address out of X-Forwarded-For instead of the connection
+	// peer. Only enable it when a proxy you control is in front: with no
+	// proxy there, the header is whatever the client typed.
 	TrustProxyIPs bool
+	// TrustedProxyHops is how many X-Forwarded-For entries were appended by
+	// those proxies, counted from the right. It is the deployment's own
+	// topology and cannot be inferred: one for Cloud Run reached directly,
+	// two behind a Google load balancer. Zero means one, which is what
+	// TrustProxyIPs meant on its own. Ignored entirely when TrustProxyIPs is
+	// false.
+	TrustedProxyHops int
 
 	// ExpFlushInterval is how long the native ingest API's points may stay
 	// database-only before the sync worker writes them into the dataset
@@ -258,6 +266,7 @@ func Load() (*Config, error) {
 		CookieSecure:           e.boolPtr("TF_COOKIE_SECURE"),
 		AuthRateLimitPerMinute: e.int("TF_AUTH_RATE_LIMIT_PER_MIN", 10),
 		TrustProxyIPs:          e.bool("TF_TRUST_PROXY_IPS", false),
+		TrustedProxyHops:       e.int("TF_TRUSTED_PROXY_HOPS", 1),
 	}
 	c.AllowedOrigins = parseOrigins(env("TF_ALLOWED_ORIGINS", ""), c.PublicURL)
 

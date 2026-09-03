@@ -3,6 +3,7 @@ package api
 import (
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -222,20 +223,34 @@ func (g *authGuard) releaseBcrypt() {
 // RemoteAddr by default, exactly as the note in Handler() prescribes:
 // X-Forwarded-For is client-controlled, and reading it unconditionally would
 // let an attacker pick a fresh bucket per request. TF_TRUST_PROXY_IPS opts in
-// for deployments where a proxy the operator controls rewrites the header.
+// for deployments where a proxy the operator controls sits in front.
+//
+// Counted from the *right*, never from the left. Every proxy this server is
+// deployed behind appends rather than overwrites -- GCLB and Cloud Run do,
+// and so does nginx under its own default (`proxy_add_x_forwarded_for`) -- so
+// the leftmost entry is whatever the client chose to send and the rightmost
+// entries are the ones a trusted hop wrote. Reading the leftmost entry was
+// therefore not "trusting the proxy" at all: with the flag on, `X-Forwarded-For:
+// <random>` bought a fresh addr: bucket on every request and put a forged
+// address in the authentication log next to it.
+//
+// TF_TRUSTED_PROXY_HOPS says how many appending hops stand in front, because
+// that number is a property of the deployment and not something this server
+// can infer: one for Cloud Run reached directly (its front end appends the
+// real peer), two behind a Google load balancer (GCLB appends the client and
+// then the GFE). A header carrying fewer entries than that does not match the
+// configured topology, so it is not read at all -- RemoteAddr, which no
+// client can forge, is the answer instead.
 //
 // This is the *only* implementation of that rule. The rate limiter and the
-// authentication logs both need an address, and two readings of
-// TF_TRUST_PROXY_IPS would eventually disagree -- at which point the address
-// an operator sees in a log would not be the one the failure budget was
-// charged against, and a report of a guessing run would name the wrong host.
+// authentication logs both need an address, and two readings of these
+// settings would eventually disagree -- at which point the address an
+// operator sees in a log would not be the one the failure budget was charged
+// against, and a report of a guessing run would name the wrong host.
 func (s *Server) clientIP(r *http.Request) string {
-	if s.cfg != nil && s.cfg.TrustProxyIPs {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			first, _, _ := strings.Cut(xff, ",")
-			if first = strings.TrimSpace(first); first != "" {
-				return first
-			}
+	if hops := s.trustedProxyHops(); hops > 0 {
+		if ip, ok := forwardedClientIP(r.Header.Values("X-Forwarded-For"), hops); ok {
+			return ip
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -243,6 +258,72 @@ func (s *Server) clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// trustedProxyHops is how many trailing X-Forwarded-For entries were written
+// by a proxy the operator controls. Zero means the header is ignored.
+func (s *Server) trustedProxyHops() int {
+	if s == nil || s.cfg == nil || !s.cfg.TrustProxyIPs {
+		return 0
+	}
+	// The flag on with no hop count is the single-proxy case, which is what
+	// TF_TRUST_PROXY_IPS meant on its own before the count existed.
+	if s.cfg.TrustedProxyHops < 1 {
+		return 1
+	}
+	return s.cfg.TrustedProxyHops
+}
+
+// forwardedClientIP picks the client out of an appended X-Forwarded-For
+// chain: the entry hops places from the right, since each trusted proxy
+// appended exactly one. It reports false when the header cannot be trusted to
+// hold that entry, and the caller falls back to RemoteAddr.
+func forwardedClientIP(values []string, hops int) (string, bool) {
+	if hops < 1 {
+		return "", false
+	}
+	// One header line per proxy or one comma-separated line are the same
+	// chain; net/http keeps them in the order they arrived.
+	var chain []string
+	for _, v := range values {
+		for _, part := range strings.Split(v, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				chain = append(chain, p)
+			}
+		}
+	}
+	// Fewer entries than trusted hops means the chain is not the one the
+	// configuration describes. Taking the leftmost entry anyway is exactly
+	// the bug this replaced: a client that strips the header would hand
+	// itself the first slot.
+	if len(chain) < hops {
+		return "", false
+	}
+	return normalizeClientIP(chain[len(chain)-hops])
+}
+
+// normalizeClientIP reduces one X-Forwarded-For entry to a bare IP address.
+// Anything that is not one is refused rather than used as a bucket key: an
+// obfuscated identifier ("_hidden"), "unknown" and a hostname are all legal
+// in the header, and none of them is an address the failure budget or the
+// authentication log should name.
+func normalizeClientIP(entry string) (string, bool) {
+	// Some proxies append host:port. SplitHostPort fails on a bare IPv6
+	// address (too many colons), which is the case that must survive.
+	if host, _, err := net.SplitHostPort(entry); err == nil {
+		entry = host
+	}
+	entry = strings.TrimPrefix(strings.TrimSuffix(entry, "]"), "[")
+	// A zone ("fe80::1%eth0") is the sender's interface, not part of the
+	// identity of the peer.
+	if i := strings.IndexByte(entry, '%'); i > 0 {
+		entry = entry[:i]
+	}
+	ip, err := netip.ParseAddr(entry)
+	if err != nil {
+		return "", false
+	}
+	return ip.String(), true
 }
 
 // clientAddrKey is clientIP as a failure-bucket key. The prefix keeps the

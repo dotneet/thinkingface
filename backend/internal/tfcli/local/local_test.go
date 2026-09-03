@@ -570,3 +570,12 @@ func TestScanHiddenSymlinkedDirectoryStaysABlindSpot(t *testing.T) {
 		t.Fatalf("SkippedDirs = %v, want [.cache]", SkippedDirs(skipped))
 	}
 }
+
+func containsString(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}

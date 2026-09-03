@@ -206,6 +206,52 @@ func TestLoginPasswordFlowMintsAndSavesToken(t *testing.T) {
 	}
 }
 
+// TestLoginPasswordStdinPreservesSurroundingWhitespace is the regression
+// test for a password with a leading or trailing space being unusable via
+// --password-stdin: readLine used to run the piped line through
+// strings.TrimSpace, so the password thinkingface actually sent to the
+// server differed from what was piped in.
+func TestLoginPasswordStdinPreservesSurroundingWhitespace(t *testing.T) {
+	isolateEnv(t)
+
+	const password = " hunter2 " // leading and trailing space, on purpose
+	var gotPassword string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		var req struct{ Username, Password string }
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		gotPassword = req.Password
+		if req.Password != password {
+			w.WriteHeader(http.StatusUnauthorized)
+			writeJSON(t, w, map[string]any{"error": map[string]string{"message": "bad password"}})
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: "session", Value: "s"})
+		writeJSON(t, w, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/v1/tokens", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, map[string]any{"id": 1, "name": "tok", "scope": "write", "token": "minted-token"})
+	})
+	mux.HandleFunc("GET /api/whoami-v2", whoamiHandler(t, "alice", "write"))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	var out, errOut bytes.Buffer
+	code := Main([]string{
+		"login", srv.URL,
+		"--username", "alice",
+		"--password-stdin",
+	}, strings.NewReader(password+"\n"), &out, &errOut)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut.String())
+	}
+	if gotPassword != password {
+		t.Errorf("server received password %q, want %q unchanged", gotPassword, password)
+	}
+}
+
 func TestLoginPasswordFlowNonInteractiveWithoutFlagsIsUsageError(t *testing.T) {
 	isolateEnv(t)
 

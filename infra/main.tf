@@ -1,6 +1,15 @@
 locals {
   bucket_name    = var.bucket_name != "" ? var.bucket_name : "${var.project_id}-thinkingface"
   api_public_url = var.api_public_url != "" ? var.api_public_url : "https://api.${var.environment}.example.com"
+
+  # The single source of truth for "what origin does a browser load the web
+  # UI from". Two unrelated things need this exact value and must never
+  # drift apart: the api's CORS allow-list (TF_ALLOWED_ORIGINS, below, for
+  # credentialed XHR/fetch calls to api itself) and the bucket's own CORS
+  # config (google_storage_bucket.main.cors, for the browser's cross-origin
+  # read of a signed GCS URL the api redirects it to -- see that resource's
+  # comment for why STORAGE_DRIVER=gcs needs this and the emulator doesn't).
+  web_origin = var.web_public_url != "" ? var.web_public_url : google_cloud_run_v2_service.web.uri
 }
 
 # ---------------------------------------------------------------------------
@@ -180,6 +189,61 @@ resource "google_storage_bucket" "main" {
     action {
       type = "Delete"
     }
+  }
+
+  # Lets a browser read the response of the signed GCS URL that
+  # google_cloud_run_v2_service.api's resolve handler 302-redirects it to
+  # (backend/internal/api/resolve.go, guarded by SupportsSignedURL()). Two Web
+  # UI features fetch object bytes this way: the dataset viewer's SQL mode
+  # (DuckDB-WASM needs the whole Parquet file --
+  # frontend/components/parquet/sql-console.tsx) and the plain-file preview's
+  # full-text fallback for CSV/JSON Lines over 512 KB
+  # (frontend/components/repo/tabular-preview.tsx). Without this block the
+  # browser's CORS check fails on the redirect target (storage.googleapis.com,
+  # a different origin from both api and web) and both features break --
+  # silently in the sense that the error the user sees ("network error" /
+  # a stalled query) names neither GCS nor CORS. The STORAGE_DRIVER=gcs-emulator
+  # path this bucket doesn't apply to never hits this: there the api streams
+  # bytes through itself rather than redirecting to storage, so the browser's
+  # cross-origin request is to api (already covered by TF_ALLOWED_ORIGINS),
+  # never to GCS.
+  #
+  # origin is local.web_origin -- the same value TF_ALLOWED_ORIGINS is built
+  # from below -- rather than a separate variable, so the two allow-lists
+  # cannot drift apart. Deliberately not "*": a wildcard origin is the one
+  # thing this bucket must never answer with, since every object behind it is
+  # reachable through a signed URL the moment someone gets a browser to fetch
+  # one.
+  #
+  # method is GET/HEAD only -- nothing here ever needs the browser to write to
+  # the bucket directly; every write goes through api (LFS batch, commit,
+  # git push) even in STORAGE_DRIVER=gcs mode. response_header only needs to
+  # cover what a Range/ETag-aware reader inspects: Content-Type, Content-Length
+  # and Content-Range for the transfer itself, ETag for conditional re-fetches
+  # (DuckDB-WASM and the tabular preview's fetch don't send If-None-Match today,
+  # but there's no reason to withhold the header from a future caller that
+  # does). GCS handles the CORS preflight itself once a method is listed here;
+  # OPTIONS does not need to appear in `method`.
+  #
+  # This block is half of the fix; the other half lives in the frontend and is
+  # already in place. Those two fetches used to be issued with
+  # `credentials: "include"`, and a fetch() with the default
+  # `redirect: "follow"` carries its credentials mode across the redirect it
+  # follows -- which made the request to the signed GCS URL credentialed too.
+  # A credentialed cross-origin response is only readable when the server
+  # answers Access-Control-Allow-Credentials: true, and GCS never does (there
+  # is no such setting in this cors block), so no amount of origin/method/
+  # response_header here would have been enough. They send
+  # `credentials: "omit"` now, which costs nothing because resolve performs no
+  # permission check -- this system has no private-repository concept
+  # (docs/dev/thinkingface-design.md §11). Introducing repository visibility
+  # would break that assumption and require the signed URL to be handed back
+  # as data and fetched in a second, uncredentialed request.
+  cors {
+    origin          = [local.web_origin]
+    method          = ["GET", "HEAD"]
+    response_header = ["Content-Type", "Content-Length", "Content-Range", "ETag"]
+    max_age_seconds = var.bucket_cors_max_age_seconds
   }
 
   labels = var.labels
@@ -581,7 +645,7 @@ locals {
       # auto-allows TF_PUBLIC_URL's own origin (plus localhost dev ports),
       # so every credentialed non-GET request from the browser (token
       # management, repo settings, webhooks, ...) gets rejected by CORS.
-      TF_ALLOWED_ORIGINS = var.web_public_url != "" ? var.web_public_url : google_cloud_run_v2_service.web.uri
+      TF_ALLOWED_ORIGINS = local.web_origin
       TF_SIGNED_URL_TTL  = "1h"
       TF_SYNC_WORKERS    = "4"
       TF_ALLOW_SIGNUP    = "false"

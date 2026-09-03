@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/dotneet/thinkingface/backend/internal/api"
@@ -47,7 +48,15 @@ func runServe(ctx context.Context, cfg *config.Config, db *store.Store) error {
 		}
 	}
 
-	if err := seedAdmin(ctx, db, cfg); err != nil {
+	// Under the same cross-process lock Migrate takes, and for the same
+	// reason: seedAdmin counts the users and creates one when there are none,
+	// and a rollout starts every replica at the same instant. Both count zero,
+	// both insert, and the loser dies on the username unique index before it
+	// has served a request. `tf seed` run by hand (main.go) is a deliberate,
+	// single invocation and is left as it is.
+	if err := db.WithBootstrapLock(ctx, "seed-admin", func(ctx context.Context) error {
+		return seedAdmin(ctx, db, cfg)
+	}); err != nil {
 		return err
 	}
 
@@ -74,12 +83,14 @@ func runServe(ctx context.Context, cfg *config.Config, db *store.Store) error {
 		AllowPrivateTargets: cfg.AllowPrivateWebhookTargets,
 		Workers:             cfg.WebhookWorkers,
 	})
-	sync := syncer.New(db, gitManager, obj, parquet, indexer, hooks, cfg.SyncWorkers)
+	// Named syncWorker rather than sync: the shutdown below needs the
+	// standard library's sync package in the same scope.
+	syncWorker := syncer.New(db, gitManager, obj, parquet, indexer, hooks, cfg.SyncWorkers)
 	// Route B's ingest buffer is only a buffer: the source of truth stays the
 	// parquet inside the dataset repository (docs/dev/thinkingface-design.md §8),
 	// so the sync worker periodically commits the buffered points there.
 	if cfg.ExpFlushInterval > 0 {
-		sync.EnableFlush(experiments.NewFlusher(db, gitManager, obj, parquet, cfg.WALMode), cfg.ExpFlushInterval)
+		syncWorker.EnableFlush(experiments.NewFlusher(db, gitManager, obj, parquet, cfg.WALMode), cfg.ExpFlushInterval)
 	}
 
 	server := api.NewServer(api.Deps{
@@ -89,7 +100,7 @@ func runServe(ctx context.Context, cfg *config.Config, db *store.Store) error {
 		Storage:     obj,
 		Viewer:      parquet,
 		Sessions:    auth.NewSessions(cfg.SessionSecret, cfg.SessionTTL),
-		Syncer:      sync,
+		Syncer:      syncWorker,
 		Experiments: indexer,
 		ModelMeta:   checkpoints,
 		Webhooks:    hooks,
@@ -107,9 +118,21 @@ func runServe(ctx context.Context, cfg *config.Config, db *store.Store) error {
 		slog.Info("requeued sync jobs whose lease had expired", "count", n)
 	}
 
-	go sync.Run(ctx)
-	go sync.RunFlush(ctx)
-	go hooks.Run(ctx)
+	// The background workers are owned by this function, not fired and
+	// forgotten. run() closes the database as soon as runServe returns, so a
+	// worker still finishing a job at that moment loses the pool underneath
+	// it: FinishSyncJob fails, the job keeps its 'running' lease for the full
+	// two minutes before another replica may touch it, and the attempt it
+	// spent on its own cancellation is gone for good -- five deploys across
+	// one long job park it as failed.
+	//
+	// Deferred so both exits are covered, and after the HTTP drain in the
+	// ctx.Done() path: an in-flight request may still be enqueueing work.
+	workers := newWorkerGroup(ctx)
+	defer workers.stop()
+	workers.start(syncWorker.Run)
+	workers.start(syncWorker.RunFlush)
+	workers.start(hooks.Run)
 
 	// Unencrypted HTTP/2 (h2c, prior knowledge) lets Cloud Run's "HTTP/2
 	// end-to-end" reach the container without TLS termination, which is the
@@ -188,6 +211,73 @@ func runServe(ctx context.Context, cfg *config.Config, db *store.Store) error {
 // over HTTP are unrelated transfers, and one being slow is no reason to cut
 // the other short.
 const shutdownGrace = 20 * time.Second
+
+// workerDrainGrace bounds the wait for the background workers once they have
+// been told to stop. It is spent after the listeners have drained, so it adds
+// to shutdownGrace rather than sharing it.
+//
+// A bound is not optional. The workers stop at the first cancellation-aware
+// call they make, but "first" is not "immediately": a sync job that is
+// halfway through publishing a large push finishes its current step, and
+// FinishSyncJob deliberately runs on a detached context worth five more
+// seconds. Waiting without a ceiling would mean a SIGTERM that never takes
+// effect -- the platform then kills the process anyway, at a moment nobody
+// chose. Ten seconds covers the detached finish with room to spare; past
+// that, whatever is still running is left to its lease.
+const workerDrainGrace = 10 * time.Second
+
+// workerGroup owns the long-running background workers: it starts them under
+// a cancellation of its own and, at shutdown, waits for them to actually stop.
+//
+// The cancellation is its own rather than the caller's because runServe has
+// two exits. On SIGTERM the caller's context is already cancelled and the
+// workers are on their way out anyway; on a listener failure nothing has
+// cancelled anything, and a group that only waited would hang the process
+// instead of reporting the failure that made it return.
+type workerGroup struct {
+	wg     sync.WaitGroup
+	ctx    context.Context
+	cancel context.CancelFunc
+	// grace is how long stop waits; a field so tests need not spend it.
+	grace time.Duration
+}
+
+func newWorkerGroup(parent context.Context) *workerGroup {
+	ctx, cancel := context.WithCancel(parent)
+	return &workerGroup{ctx: ctx, cancel: cancel, grace: workerDrainGrace}
+}
+
+// start runs fn in the group. fn is expected to return when its context is
+// cancelled, which is what every worker here does (Syncer.Run, RunFlush and
+// Dispatcher.Run all block until then and wait on their own goroutines).
+func (g *workerGroup) start(fn func(context.Context)) {
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		fn(g.ctx)
+	}()
+}
+
+// stop cancels the workers and waits for them, up to the grace period.
+func (g *workerGroup) stop() {
+	g.cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		g.wg.Wait()
+	}()
+	timer := time.NewTimer(g.grace)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		// Worth a warning rather than silence: the database handle is closed
+		// the moment this returns, so anything still running is about to
+		// fail its next query, and the job it was holding waits out its
+		// lease before another replica may retry it.
+		slog.Warn("background workers did not stop within the grace period", "grace", g.grace)
+	}
+}
 
 // drain stops both listeners at once and gives each its own budget.
 //

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LineChart } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
@@ -148,6 +148,13 @@ export function RunDetail({
     // itself, everything else is a static page.
     refetchInterval: isLiveRun(run) ? LIVE_REFRESH_INTERVAL_MS : false,
     refetchIntervalInBackground: false,
+    // Keep the previous x mode's series on screen while the new one loads,
+    // rather than unmounting every chart down to MetricsChartsSkeleton on a
+    // step/time toggle — the same reasoning as the dashboard's identical
+    // query (experiment-dashboard.tsx), and DESIGN.md §4 (Skeleton is for
+    // first paint; the toolbar's `fetching={metrics.isFetching}` spinner
+    // below already covers an in-place refresh).
+    placeholderData: keepPreviousData,
   });
 
   const config = useMemo(() => splitRunConfig(run?.config), [run]);
@@ -165,9 +172,24 @@ export function RunDetail({
     );
   }
 
+  // The banner below, the tags dialog and RunNoteCard would otherwise all
+  // render the same mutation's failure — but `annotate` is shared across
+  // four unrelated writes (tags / archived / baseline / note), and only one
+  // of them is ever in flight at a time. Failing to distinguish which one
+  // used to mean: rejecting a baseline toggle for lack of write access also
+  // painted "failed to save" under the run's note (which the click never
+  // touched), and disabled the note's edit button — with a spinner — for as
+  // long as that unrelated request was in flight. `annotate.variables` is
+  // the body of whichever PATCH is (or was) last in flight, and every call
+  // site sends exactly one field, so a `note` key on it identifies a
+  // note-triggered mutation; tags/archived/baseline never do.
+  const annotateIsNote = annotate.variables !== undefined && "note" in annotate.variables;
   const annotateError = annotate.isError
     ? queryErrorMessage(t, annotate.error, t("experiments.dashboard.updateFailed"))
     : undefined;
+  const bannerAnnotateError = annotateError && !annotateIsNote ? annotateError : undefined;
+  const noteError = annotateError && annotateIsNote ? annotateError : undefined;
+  const noteSaving = annotate.isPending && annotateIsNote;
   const deleteError = remove.isError
     ? queryErrorMessage(t, remove.error, t("experiments.deleteRun.failed"))
     : undefined;
@@ -176,10 +198,12 @@ export function RunDetail({
     <div className="flex flex-col gap-8">
       {/* Suppressed while the tags dialog is up: it renders the same failure in
           its own footer, and two copies read as two failures (the danger zone
-          below does the same with the delete error). */}
-      {annotateError && !tagsOpen && (
+          below does the same with the delete error). A note-save failure is
+          never shown here at all — RunNoteCard renders its own copy right
+          below the note it belongs to. */}
+      {bannerAnnotateError && !tagsOpen && (
         <Alert tone="negative" title={t("experiments.dashboard.annotateErrorTitle")}>
-          {annotateError}{" "}
+          {bannerAnnotateError}{" "}
           {t("experiments.dashboard.writeAccessRequired", { repo: `${ns}/${repo}` })}
         </Alert>
       )}
@@ -273,8 +297,8 @@ export function RunDetail({
         <RunNoteCard
           note={run.note}
           canWrite={canWrite}
-          saving={annotate.isPending}
-          error={annotateError}
+          saving={noteSaving}
+          error={noteError}
           onSave={async (note) => {
             // mutateAsync rather than mutate: the note card needs to know
             // whether the save landed before it leaves edit mode, or a
@@ -334,8 +358,13 @@ export function RunDetail({
         // Ignored while the PATCH is in flight (the pattern
         // components/repo/delete-file-button.tsx uses): Escape or a backdrop
         // click would otherwise read as a cancel for a write already sent.
+        // Also drops a failed save's error: without this, dismissing the
+        // dialog after a failed save left the same error to reappear as the
+        // page-level banner the moment the dialog closed.
         onClose={() => {
-          if (!annotate.isPending) setTagsOpen(false);
+          if (annotate.isPending) return;
+          annotate.reset();
+          setTagsOpen(false);
         }}
         onSave={(_, tags) => annotate.mutate({ tags })}
       />

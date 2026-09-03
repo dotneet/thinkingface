@@ -60,12 +60,22 @@ export function ParallelCoordinates({
   const axes = useMemo(() => parallelAxes(runs), [runs]);
   // One lookup instead of a scan of the project per line and per legend chip.
   const colorIndex = useMemo(() => runColorIndex(runOrder), [runOrder]);
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  // Lazily initialized from `axes` (already computed above) rather than
+  // starting at [] and fixing it up in the effect below: starting empty made
+  // the very first paint of every mount — including switching back to this
+  // view — render `shown.length === 0` and flash the "pick two axes"
+  // EmptyState before the effect ever ran (DESIGN.md §9 — a state that is
+  // right one tick later still reads as wrong on first paint).
+  const [selectedIds, setSelectedIds] = useState<string[]>(() =>
+    axes.slice(0, DEFAULT_AXES).map((a) => a.id),
+  );
   const [highlight, setHighlight] = useState<string | null>(null);
   const [pinned, setPinned] = useState<string | null>(null);
 
-  // Seed and repair the axis choice as the selection changes: a run leaving
-  // the selection can take the last value for an axis with it.
+  // Repairs the axis choice as the selection changes after mount: a run
+  // leaving the selection can take the last value for an axis with it. A
+  // no-op on the very first run (the lazy initializer above already matches),
+  // so it only ever fires for a real change.
   useEffect(() => {
     setSelectedIds((current) => {
       const kept = current.filter((id) => axes.some((a) => a.id === id));
@@ -262,7 +272,8 @@ function AxisColumn({ axis, index, count }: { axis: ParallelAxis; index: number;
         const t = ticks.length <= 1 ? 0.5 : i / (ticks.length - 1);
         return (
           <text
-            key={label}
+            // biome-ignore lint/suspicious/noArrayIndexKey: two values can round to the same displayed string (formatNumeric, lib/run-parallel.ts), so the label collides where the index cannot; ticks are recomputed whole and never reordered
+            key={`${axis.id}-${i}`}
             x={x}
             y={axisY(t, HEIGHT, PAD_Y) + 4}
             textAnchor={index === 0 ? "end" : "start"}

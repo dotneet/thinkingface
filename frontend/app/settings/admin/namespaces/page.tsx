@@ -1,4 +1,6 @@
+import type { Metadata } from "next";
 import Link from "next/link";
+import { titleMetadata } from "@/app/page-metadata";
 import { AdminNamespacesManager } from "@/components/settings/admin-namespaces-manager";
 import { buttonClass } from "@/components/ui/button";
 import { ErrorState } from "@/components/ui/error-state";
@@ -8,6 +10,11 @@ import { getT } from "@/lib/i18n/server";
 import { authHeaders } from "@/lib/server-auth";
 
 export const dynamic = "force-dynamic";
+
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getT();
+  return titleMetadata(t("meta.settings"), t("meta.adminQuotas"));
+}
 
 /**
  * Site administration: what each namespace stores and the ceiling it is held

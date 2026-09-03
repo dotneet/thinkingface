@@ -147,11 +147,14 @@ export function AdminUserRow({
               onClick={() => actions.toggleAdmin(user)}
             >
               {user.is_admin ? <ShieldOff size={13} /> : <ShieldCheck size={13} />}
-              {busy
-                ? t("settings.adminUsers.working")
-                : user.is_admin
-                  ? t("settings.adminUsers.demote")
-                  : t("settings.adminUsers.promote")}
+              {/* Unlike the other buttons on this row, this one used to swap
+                  its own label to "Working…" whenever *any* write on the row
+                  was in flight — so pressing Approve alone made the promote
+                  button read "Working…" too, misrepresenting what was
+                  actually running. `SpinnerSlot` above is already the row's
+                  one "something is happening" signal (DESIGN.md §8.3); this
+                  button just disables like every other one here. */}
+              {user.is_admin ? t("settings.adminUsers.demote") : t("settings.adminUsers.promote")}
             </Button>
           )}
         </div>

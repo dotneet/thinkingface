@@ -29,7 +29,7 @@ export const settings = {
     // never editable; this explains why and links to the one way to get a
     // different one — a new account plus a repository transfer (§5.4).
     usernameLockedHint:
-      "Your username is your namespace (alice/*) and can't be changed. To use a different name, create a new account and",
+      "Your username is your namespace ({username}/*) and can't be changed. To use a different name, create a new account and",
     usernameLockedTransferLink: "transfer your repositories to it.",
     displayNameLabel: "Display name",
     bioLabel: "Bio",
@@ -161,6 +161,8 @@ export const settings = {
     descriptionSuffix: "so you can verify it came from this server.",
     accountLoadFailed: "Failed to load your account",
     accountLoadFailedHint: "The backend API may be unreachable.",
+    loadFailed: "Failed to load webhooks",
+    loadFailedHint: "The backend API may be unreachable. Try reloading the page.",
     noNamespaceTitle: "No namespace to manage",
     noNamespaceDescription: "You need admin access to a namespace to configure webhooks.",
     namespaceLabel: "Namespace",
@@ -254,6 +256,14 @@ export const settings = {
     confirmAccept: "You'll become the owner of {repo}. This can't be undone from here.",
     reject: "Reject",
     rejecting: "Rejecting…",
+    // Reject sits right next to Accept, so a confirmation earns its keep here
+    // even though the sender could in principle re-request: unlike Cancel
+    // below (which withdraws the viewer's *own* request and is trivially
+    // self-recoverable), rejecting discards someone else's request, and
+    // nothing tells them it was a misclick rather than a deliberate no.
+    confirmRejectTitle: "Reject this transfer request?",
+    confirmReject:
+      "Reject the transfer of {repo}? The sender would need to send a new request to try again.",
     cancel: "Cancel",
     cancelling: "Cancelling…",
   },
@@ -275,6 +285,14 @@ export const settings = {
     membersOther: "{count} members",
     reposOne: "{count} repository",
     reposOther: "{count} repositories",
+    // Shown when the org list loaded fine but confirming *who's asking*
+    // (getMe) failed. Leave needs the viewer's own username (DELETE
+    // /orgs/{org}/members/{self}), so every Leave button is disabled without
+    // it — silently, unless this says why (DESIGN.md §9: don't let a failure
+    // masquerade as "nothing to do here").
+    identityUnknown:
+      "Couldn't confirm your account, so Leave is unavailable. Try reloading the page.",
+    leaveDisabledHint: "Unavailable: couldn't confirm your account.",
   },
   deliveries: {
     loadFailed: "Failed to load deliveries",

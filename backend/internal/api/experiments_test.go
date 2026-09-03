@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"math"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -557,5 +558,109 @@ func TestLoadRunState_FailsRatherThanReportingAnEmptyRun(t *testing.T) {
 	if state, err := f.s.loadRunState(ctx, repo.ID, "proj", "run-1"); err == nil {
 		t.Fatalf("loadRunState over a closed database = %+v with no error; a truncated "+
 			"state would then be written over the run's real metric_keys and summary", state)
+	}
+}
+
+// ------------------------------------------------------- run names in a URL
+
+// A run's name is the free-est text in any URL this server serves: ingest
+// accepts anything that is not a control character (validateIngestName), so
+// "exp 1/seed-2", "実験/1" and "100%/x" are all names a client may create, and
+// the Web UI sends each of them back encodeURIComponent'd.
+//
+// Every per-run route has to survive the round trip, and one of them used not
+// to. chi routes on the escaped path whenever the request has one -- which a
+// single "%2F" is enough to cause -- and hands the parameter over still
+// encoded; the run handlers undid only "%2F" and trusted chi for the rest, so
+// a name holding a slash *and* anything else needing an escape reached the
+// store as "exp%201/seed-2". No row has that name, so the run page's artifacts
+// errored and every tag, baseline, archive and note write 404'd on a run the
+// ingest API had accepted moments earlier.
+func TestExperimentRunRoutes_NamesThatNeedEscaping(t *testing.T) {
+	for _, runName := range []string{
+		"plain-run",    // the case that always worked; it has to keep working
+		"exp 1/seed-2", // a space and a slash: the shape that was broken
+		"実験/1",         // multi-byte, so every byte of the name is an escape
+		"100%/x",       // a literal "%", which a second decode would destroy
+		"a+b/c",        // "+" is escaped by encodeURIComponent, not by net/url
+	} {
+		t.Run(runName, func(t *testing.T) {
+			f := newExpFixture(t)
+			f.repo("alice", "exp", "dataset")
+			tok := f.token(f.alice, "write")
+			f.logBatch(tok, map[string]any{
+				"run":    runName,
+				"points": []map[string]any{point(1, map[string]any{"loss": 0.5})},
+			})
+
+			base := "/api/v1/experiments/alice/exp/proj/runs/" + url.PathEscape(runName)
+
+			// The artifact listing: an empty list, not an error, for a run that
+			// stored nothing.
+			arts := f.do("GET", base+"/artifacts", tok, nil)
+			if arts.status() != 200 {
+				t.Fatalf("artifacts status = %d, body = %s", arts.status(), arts.rec.Body.String())
+			}
+			var artBody apitypes.ExpArtifactListResponse
+			arts.json(t, &artBody)
+			if want := RunArtifactDir("proj", runName); artBody.Path != want {
+				t.Fatalf("artifact dir = %q, want %q", artBody.Path, want)
+			}
+
+			// The annotation write, and the run it landed on.
+			patch := f.do("PATCH", base, tok, apitypes.ExpRunAnnotationRequest{
+				Tags: &[]string{"keep"},
+			})
+			if patch.status() != 200 {
+				t.Fatalf("annotation status = %d, body = %s", patch.status(), patch.rec.Body.String())
+			}
+			var annotated apitypes.ExpRunAnnotationResponse
+			patch.json(t, &annotated)
+			if annotated.Run.Name != runName {
+				t.Fatalf("annotated run = %q, want %q", annotated.Run.Name, runName)
+			}
+			if stored := f.runNamed(t, tok, runName); len(stored.Tags) != 1 || stored.Tags[0] != "keep" {
+				t.Fatalf("tags = %v, want [keep] on the run itself", stored.Tags)
+			}
+
+			// And the delete, which is the same lookup again.
+			if got := f.do("DELETE", base, tok, nil).status(); got != 204 {
+				t.Fatalf("delete status = %d, want 204", got)
+			}
+			var runs apitypes.ExpRunListResponse
+			f.do("GET", "/api/v1/experiments/alice/exp/proj/runs", tok, nil).json(t, &runs)
+			for _, run := range runs.Runs {
+				if run.Name == runName {
+					t.Fatalf("run %q is still listed after being deleted", runName)
+				}
+			}
+		})
+	}
+}
+
+// The other half of "decode exactly once": a name that never needed escaping
+// must not be decoded anyway. A run genuinely called "100%20x" is a different
+// run from one called "100 x", and both can exist at the same time.
+func TestExperimentRunRoutes_ALiteralEscapeInANameIsNotDecoded(t *testing.T) {
+	f := newExpFixture(t)
+	f.repo("alice", "exp", "dataset")
+	tok := f.token(f.alice, "write")
+
+	for _, name := range []string{"100%20x", "100 x"} {
+		f.logBatch(tok, map[string]any{
+			"run":    name,
+			"points": []map[string]any{point(1, map[string]any{"loss": 0.5})},
+		})
+	}
+
+	// Deleting the literal one leaves the other alone.
+	base := "/api/v1/experiments/alice/exp/proj/runs/" + url.PathEscape("100%20x")
+	if got := f.do("DELETE", base, tok, nil).status(); got != 204 {
+		t.Fatalf("delete status = %d, want 204", got)
+	}
+	var runs apitypes.ExpRunListResponse
+	f.do("GET", "/api/v1/experiments/alice/exp/proj/runs", tok, nil).json(t, &runs)
+	if len(runs.Runs) != 1 || runs.Runs[0].Name != "100 x" {
+		t.Fatalf("runs after the delete = %+v, want only \"100 x\" left", runs.Runs)
 	}
 }

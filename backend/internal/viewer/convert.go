@@ -2,6 +2,7 @@ package viewer
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"math/big"
@@ -142,7 +143,9 @@ func convertLeafValue(typ parquet.Type, v parquet.Value) any {
 		case *format.DateType:
 			return dateToString(v)
 		case *format.TimestampType:
-			return timestampToString(v, lv.Unit)
+			return timestampToString(v, lv.Unit, lv.IsAdjustedToUTC)
+		case *format.UUIDType:
+			return uuidToString(v.ByteArray())
 		case *format.StringType, *format.EnumType, *format.JsonType:
 			return byteArrayToStringOrBase64(v.ByteArray())
 		}
@@ -282,8 +285,25 @@ func dateToString(v parquet.Value) string {
 	return time.Unix(days*86400, 0).UTC().Format("2006-01-02")
 }
 
-// timestampToString formats a TIMESTAMP value as RFC3339.
-func timestampToString(v parquet.Value, unit format.TimeUnit) string {
+// localTimestampLayout is RFC3339Nano without the zone: the rendering for a
+// TIMESTAMP whose isAdjustedToUTC is false. See timestampToString.
+const localTimestampLayout = "2006-01-02T15:04:05.999999999"
+
+// timestampToString formats a TIMESTAMP value.
+//
+// isAdjustedToUTC is not a detail of the encoding, it is what the column
+// *means* (LogicalTypes.md): true makes the value an instant, normalized to
+// UTC and legitimately printed with a "Z"; false makes it a local wall clock
+// with no zone at all -- which is what pandas writes for a tz-naive
+// datetime64, i.e. most timestamp columns in the datasets this hub serves.
+// Rendering the second kind as RFC3339 claims an offset the file does not
+// have, and makes a tz-aware and a tz-naive column indistinguishable in the
+// viewer, so the naive one is printed with the same digits and no zone.
+//
+// The arithmetic is identical either way: for a naive column the epoch offset
+// is just how the wall clock is stored, and .UTC() is what keeps Go from
+// re-interpreting it in the server's local zone on the way out.
+func timestampToString(v parquet.Value, unit format.TimeUnit, isAdjustedToUTC bool) string {
 	raw := v.Int64()
 	var t time.Time
 	switch unit.Value.(type) {
@@ -294,7 +314,31 @@ func timestampToString(v parquet.Value, unit format.TimeUnit) string {
 	default: // MicroSeconds, and any unrecognized/future unit.
 		t = time.UnixMicro(raw).UTC()
 	}
+	if !isAdjustedToUTC {
+		return t.Format(localTimestampLayout)
+	}
 	return t.Format(time.RFC3339Nano)
+}
+
+// uuidToString renders a UUID logical type in the canonical 8-4-4-4-12 form.
+// The physical representation is a FIXED_LEN_BYTE_ARRAY(16); anything else is
+// not a UUID whatever the annotation claims, so it falls back to the base64
+// every other opaque byte array gets rather than being padded into a lie.
+func uuidToString(b []byte) string {
+	if len(b) != 16 {
+		return base64.StdEncoding.EncodeToString(b)
+	}
+	var out [36]byte
+	hex.Encode(out[0:8], b[0:4])
+	out[8] = '-'
+	hex.Encode(out[9:13], b[4:6])
+	out[13] = '-'
+	hex.Encode(out[14:18], b[6:8])
+	out[18] = '-'
+	hex.Encode(out[19:23], b[8:10])
+	out[23] = '-'
+	hex.Encode(out[24:36], b[10:16])
+	return string(out[:])
 }
 
 // int96ToTime decodes the legacy INT96 timestamp encoding: the low 64 bits

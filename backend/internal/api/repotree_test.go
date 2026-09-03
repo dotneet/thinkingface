@@ -15,6 +15,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
 )
 
 // doForm posts a body the way `requests` does for `data={...}`, which is how
@@ -153,6 +155,75 @@ func TestHFPathsInfo_FormEncodedRespectsTheLimits(t *testing.T) {
 			t.Fatalf("status = %d, body = %s", resp.status(), resp.rec.Body.String())
 		}
 	})
+}
+
+// -------------------------------------------------------- recursive=<bool>
+
+// huggingface_hub's paginate() passes a Python bool straight into the query
+// string, and its two HTTP backends spell one differently: 0.x (requests)
+// title-cases it ("True"/"False"), 1.x (httpx) lowercases it
+// ("true"/"false") -- both observed in the e2e venv. A case-sensitive
+// "true"/"1" check missed every 0.x caller silently: list_repo_files() /
+// list_repo_tree(recursive=True) / HfFileSystem's recursive listing dropped
+// nested files without ever raising, which is worse than an error because
+// nothing in a caller's own code says anything went wrong.
+func TestHFTree_RecursiveAcceptsEveryPythonBoolSpelling(t *testing.T) {
+	f := newRevisionFixture(t)
+	repo := f.repo("alice", "foo")
+	f.commitOps(repo, "main", "Add a nested file",
+		gitrepo.Op{Kind: gitrepo.OpAdd, Path: "sub/nested.txt", Data: []byte("nested")})
+
+	for _, tc := range []struct {
+		recursive string
+		wantDeep  bool
+	}{
+		{"True", true},   // requests' encoding of Python's True (huggingface_hub 0.x)
+		{"true", true},   // httpx's encoding of Python's True (huggingface_hub 1.x)
+		{"1", true},      // queryFlag's other truthy spelling, kept working
+		{"False", false}, // requests' encoding of Python's False (huggingface_hub 0.x)
+		{"false", false}, // httpx's encoding of Python's False (huggingface_hub 1.x)
+		{"0", false},
+		{"", false}, // omitted entirely: the default is non-recursive
+	} {
+		t.Run("recursive="+tc.recursive, func(t *testing.T) {
+			path := "/api/models/alice/foo/tree/main"
+			if tc.recursive != "" {
+				path += "?recursive=" + tc.recursive
+			}
+			resp := f.do("GET", path, "", nil)
+			if resp.status() != 200 {
+				t.Fatalf("status = %d, body = %s", resp.status(), resp.rec.Body.String())
+			}
+			var entries []hfTreeEntry
+			resp.json(t, &entries)
+
+			var paths []string
+			for _, e := range entries {
+				paths = append(paths, e.Path)
+			}
+			gotDeep := false
+			for _, p := range paths {
+				if p == "sub/nested.txt" {
+					gotDeep = true
+				}
+			}
+			if gotDeep != tc.wantDeep {
+				t.Fatalf("recursive=%q: nested file present = %v, want %v (entries = %+v)",
+					tc.recursive, gotDeep, tc.wantDeep, paths)
+			}
+			// The directory entry itself is listed either way -- only whether
+			// its *contents* are inlined changes with recursive.
+			gotDir := false
+			for _, p := range paths {
+				if p == "sub" {
+					gotDir = true
+				}
+			}
+			if !gotDir {
+				t.Fatalf("recursive=%q: entries = %+v, want the \"sub\" directory entry regardless", tc.recursive, paths)
+			}
+		})
+	}
 }
 
 // The revision checks sit in front of the decoder, so they answer the same way

@@ -98,6 +98,11 @@ export function WebhookDeliveriesPanel({ webhookId }: { webhookId: number }) {
         <ErrorState
           title={t("settings.errorTitle")}
           message={loadError ?? t("settings.deliveries.loadFailed")}
+          action={
+            <Button size="sm" onClick={() => refresh()}>
+              {t("ui.unexpectedError.retry")}
+            </Button>
+          }
         />
       ) : deliveries.length === 0 ? (
         outOfRange ? (

@@ -3,9 +3,15 @@ import Link from "next/link";
 import { buttonClass } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { getT } from "@/lib/i18n/server";
+import { getCurrentUser } from "@/lib/session";
 
 export default async function NotFound() {
-  const t = await getT();
+  const [t, me] = await Promise.all([getT(), getCurrentUser()]);
+  // Signed-in visitors already have a session; offering to log in again is
+  // both pointless and, if they've reached this page mid-session, confusing.
+  // `getCurrentUser` never throws (it degrades to "not logged in" on any
+  // failure), so this is safe to call unconditionally.
+  const loggedIn = me.ok;
   return (
     <div className="py-16">
       <EmptyState
@@ -23,9 +29,11 @@ export default async function NotFound() {
                 RepoNotFoundOrLogin (components/repo/repo-not-found.tsx) does
                 that for a repository page specifically. "/" is still a sensible
                 landing spot after logging in from a generic not-found. */}
-            <Link href="/login?next=%2F" className={buttonClass()}>
-              {t("home.notFound.login")}
-            </Link>
+            {!loggedIn && (
+              <Link href="/login?next=%2F" className={buttonClass()}>
+                {t("home.notFound.login")}
+              </Link>
+            )}
           </div>
         }
       />

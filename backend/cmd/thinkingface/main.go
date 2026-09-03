@@ -98,7 +98,12 @@ func run(command string) error {
 		slog.Info("migrations applied")
 		return nil
 	case "seed":
-		return seedAdmin(ctx, db, cfg)
+		// Under the same lock `serve` takes: two of these racing (or one
+		// racing a replica starting up) would both see an empty users table
+		// and both try to create the account.
+		return db.WithBootstrapLock(ctx, "seed-admin", func(ctx context.Context) error {
+			return seedAdmin(ctx, db, cfg)
+		})
 	case "admin":
 		// The break-glass path (admincli.go). Nothing but the database is
 		// needed, so it runs here rather than after the storage driver, the

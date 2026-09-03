@@ -69,6 +69,11 @@ the whole file, so this mode has a 500 MB size cap; a larger file shows a messag
 that and directs you back to the Rows tab or to downloading the file. Results are capped at
 10,000 rows and can be copied out as CSV.
 
+On a production deployment backed by real GCS (`STORAGE_DRIVER=gcs`), that initial download
+goes directly from your browser to the storage bucket rather than through the server, so the
+bucket itself must be configured to allow it — if you're setting up storage yourself, see
+[Deployment](../self-hosting/deployment.md#bucket-cors).
+
 ## What the viewer does not do
 
 - It is read-only. There is no way to edit rows or write back to the file from the viewer.

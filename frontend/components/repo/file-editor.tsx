@@ -71,6 +71,10 @@ export function FileEditor({
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  // Where a click-intercepted in-app navigation should go once the discard is
+  // confirmed. `null` means the dialog was opened from the explicit Cancel
+  // button instead, which always means `leaveHref`.
+  const [pendingHref, setPendingHref] = useState<string | null>(null);
 
   const dirty = content !== initialContent;
   // A new file has nothing to differ from, so `dirty` would keep Commit
@@ -83,7 +87,8 @@ export function FileEditor({
   // listener is only attached while dirty so it doesn't interfere with normal
   // navigation once the content matches what's saved. It does NOT cover
   // in-app navigation — `beforeunload` never fires for a client-side route
-  // change — which is why Cancel goes through ConfirmDialog below.
+  // change — which is why Cancel goes through ConfirmDialog below, and the
+  // next effect covers every other in-app link.
   useEffect(() => {
     if (!dirty) return;
     function handleBeforeUnload(e: BeforeUnloadEvent) {
@@ -92,6 +97,59 @@ export function FileEditor({
     }
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [dirty]);
+
+  // Catch an in-app navigation away from an unsaved edit: the file tabs, the
+  // breadcrumb, the site header — every one of them is a plain <Link>, and
+  // none of it runs through this component, so there was no way to interpose
+  // ConfirmDialog on it beyond the explicit Cancel button below.
+  //
+  // A single capture-phase click listener on `document` is the only place
+  // that can see all of them without reaching into components this task
+  // doesn't own: capture fires before the target <a>'s own (bubble-phase)
+  // click handler — which is where next/link's router.push lives — so
+  // stopping it here also stops the navigation it would have started,
+  // with nothing to undo afterwards. It is only attached while `dirty`, and
+  // it is a single listener rather than anything that watches the DOM.
+  useEffect(() => {
+    if (!dirty) return;
+    function handleClickCapture(e: MouseEvent) {
+      // A modified or non-primary click means "open in a new tab/window" —
+      // this tab's edit is untouched either way, nothing to guard.
+      if (
+        e.defaultPrevented ||
+        e.button !== 0 ||
+        e.metaKey ||
+        e.ctrlKey ||
+        e.shiftKey ||
+        e.altKey
+      ) {
+        return;
+      }
+      const target = e.target;
+      if (!(target instanceof Element)) return;
+      const anchor = target.closest("a");
+      if (!anchor) return;
+      if (anchor.target && anchor.target !== "_self") return;
+      if (anchor.hasAttribute("download")) return;
+      const href = anchor.getAttribute("href");
+      if (!href || href.startsWith("#")) return;
+      let url: URL;
+      try {
+        url = new URL(href, window.location.href);
+      } catch {
+        return;
+      }
+      // A link to another site is already covered by beforeunload; only a
+      // same-document navigation is the kind that never fires it.
+      if (url.origin !== window.location.origin) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setPendingHref(`${url.pathname}${url.search}${url.hash}`);
+      setConfirmDiscard(true);
+    }
+    document.addEventListener("click", handleClickCapture, true);
+    return () => document.removeEventListener("click", handleClickCapture, true);
   }, [dirty]);
 
   async function handleSubmit(e?: React.FormEvent) {
@@ -105,13 +163,18 @@ export function FileEditor({
       // own default commit message rather than us sending a placeholder.
       message,
       description: description.trim() || undefined,
-      base_oid: baseOid,
+      // The two ways of saying "here is what I believed about this path".
+      // A creation has no blob to name, so it claims the path was empty
+      // instead; sending nothing at all used to mean "don't check", which is
+      // how two people creating the same file ended up with the second one
+      // silently replacing the first.
+      ...(isNew ? { must_not_exist: true } : { base_oid: baseOid }),
     });
     setSubmitting(false);
     if (!result.ok) {
       if (result.status === 409) {
         setConflict(true);
-        setError(t("repo.editor.conflict"));
+        setError(t(isNew ? "repo.editor.conflictNewFile" : "repo.editor.conflict"));
       } else {
         setError(errorMessage(t, result));
       }
@@ -174,7 +237,10 @@ export function FileEditor({
             <Button
               variant="ghost"
               className="text-sm text-fg-subtle hover:text-fg"
-              onClick={() => setConfirmDiscard(true)}
+              onClick={() => {
+                setPendingHref(null);
+                setConfirmDiscard(true);
+              }}
             >
               {t("repo.editor.cancel")}
             </Button>
@@ -196,10 +262,16 @@ export function FileEditor({
           hydrate them). */}
       <ConfirmDialog
         open={confirmDiscard}
-        onClose={() => setConfirmDiscard(false)}
+        onClose={() => {
+          setConfirmDiscard(false);
+          setPendingHref(null);
+        }}
         onConfirm={() => {
           setConfirmDiscard(false);
-          router.push(leaveHref);
+          // `pendingHref` is the link the capture handler above intercepted;
+          // absent, this was opened from the explicit Cancel button instead.
+          router.push(pendingHref ?? leaveHref);
+          setPendingHref(null);
         }}
         title={t("repo.editor.discardTitle")}
         description={

@@ -61,14 +61,31 @@
      everywhere, and this is the most-used foreground token in the app. */
   --tf-fg-subtle: oklch(0.52 0.012 265);
 
-  /* Accent: teal-indigo, distinct from HF's orange/yellow identity. */
-  --tf-accent: oklch(0.52 0.14 240);
+  /* Accent: teal-indigo, distinct from HF's orange/yellow identity.
+     0.50, not the 0.52 this used to be: text-accent is documented (DESIGN.md
+     §1) as usable directly on a neutral surface, but at 0.52 it only cleared
+     4.45:1 against bg-hover — under the 4.5 AA floor for text — which showed
+     up as a hover-row link (components/experiments/run-row.tsx) failing the
+     bar the design guide claims for it. 4.83:1 there now. */
+  --tf-accent: oklch(0.5 0.14 240);
   --tf-accent-fg: oklch(0.99 0.005 240);
   --tf-accent-muted: oklch(0.93 0.03 240);
 
-  --tf-positive: oklch(0.55 0.14 155);
-  --tf-negative: oklch(0.55 0.19 25);
-  --tf-warning: oklch(0.72 0.15 80);
+  /* positive/negative/warning: DESIGN.md §1 says the base token (not just
+     `-strong`) is for status-coloured text on a *neutral* surface, but only
+     `negative` actually cleared 4.5:1 there. `warning` in particular measured
+     2.42:1 on bg — barely above large-text AA, nowhere near normal text —
+     because it was tuned to look good as an icon/badge accent, not as body
+     copy. All three are darkened here to the same "text-safe" band `-strong`
+     already occupies (they stay distinct hues and distinct from `-strong`,
+     just closer to it in lightness); the tinted fills these also feed
+     (`bg-positive/15` etc.) get moderately more saturated as a side effect,
+     which is expected and covered by the -strong-on-tint tests below.
+     lib/design-tokens.test.ts asserts the 4.5:1 floor for all four base
+     tokens against every surface so this cannot regress silently again. */
+  --tf-positive: oklch(0.503 0.14 155);
+  --tf-negative: oklch(0.54 0.19 25);
+  --tf-warning: oklch(0.5 0.15 80);
 
   /* `-strong` = the same hue, dense enough to be *text* on its own tinted
      fill. Tinting a surface with `bg-warning/20` darkens it by the same hue

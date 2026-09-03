@@ -20,6 +20,10 @@ import type { RepoDetail } from "@/types/api";
 
 export async function RepoSidebar({ repo }: { repo: RepoDetail }) {
   const t = await getT();
+  // A README card's YAML `tags:` list is copied verbatim, duplicates and all
+  // (store.stringSliceFromCard) — `tags: [nlp, nlp]` would otherwise render
+  // two chips sharing one React key.
+  const tags = Array.from(new Set(repo.tags));
   return (
     <aside className="flex w-full flex-col gap-5 text-sm lg:w-72 lg:shrink-0">
       <div className="flex flex-col gap-2">
@@ -77,13 +81,13 @@ export async function RepoSidebar({ repo }: { repo: RepoDetail }) {
         />
       </div>
 
-      {repo.tags.length > 0 && (
+      {tags.length > 0 && (
         <div>
           <div className="mb-2 text-xs font-medium uppercase tracking-wide text-fg-subtle">
             {t("repo.sidebar.tags")}
           </div>
           <div className="flex flex-wrap gap-1.5">
-            {repo.tags.map((tag) => (
+            {tags.map((tag) => (
               <Link
                 key={tag}
                 href={`/${repo.kind}s?tag=${encodeURIComponent(tag)}`}

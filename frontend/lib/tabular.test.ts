@@ -202,4 +202,49 @@ describe("toCsv", () => {
     const parsed = parseTabular(toCsv(["name", "note"], rows), "csv");
     expect(parsed.ok && parsed.table.rows).toEqual(rows);
   });
+
+  describe("formula injection", () => {
+    it("neutralises values starting with =, @, tab or CR", () => {
+      // Contains quotes and a comma too, so the escaped `'...` value also
+      // needs the ordinary CSV quoting rules applied on top.
+      expect(toCsv(["a"], [{ a: '=HYPERLINK("http://evil","click")' }])).toBe(
+        'a\n"\'=HYPERLINK(""http://evil"",""click"")"',
+      );
+      expect(toCsv(["a"], [{ a: "@SUM(A1:A2)" }])).toBe("a\n'@SUM(A1:A2)");
+      expect(toCsv(["a"], [{ a: "\tcmd" }])).toBe("a\n'\tcmd");
+      // The CR itself also triggers the ordinary CSV quoting rule.
+      expect(toCsv(["a"], [{ a: "\rcmd" }])).toBe('a\n"\'\rcmd"');
+    });
+
+    it("neutralises non-numeric values starting with + or -", () => {
+      expect(toCsv(["a"], [{ a: "-cmd|' /C calc'!A0" }])).toBe("a\n'-cmd|' /C calc'!A0");
+      expect(toCsv(["a"], [{ a: "+cmd" }])).toBe("a\n'+cmd");
+    });
+
+    it("does not mangle a header cell that carries the attack", () => {
+      // Run names, tags, groups and metric keys become header cells too.
+      expect(toCsv(["=cmd|calc"], [{ "=cmd|calc": "1" }])).toBe("'=cmd|calc\n1");
+    });
+
+    it("quotes an escaped value that also needs CSV quoting", () => {
+      expect(toCsv(["a"], [{ a: "=A1,B1" }])).toBe('a\n"\'=A1,B1"');
+    });
+
+    it("leaves plain signed numbers untouched", () => {
+      expect(toCsv(["a"], [{ a: "-1.5" }])).toBe("a\n-1.5");
+      expect(toCsv(["a"], [{ a: "+42" }])).toBe("a\n+42");
+      expect(toCsv(["a"], [{ a: "-1.5e10" }])).toBe("a\n-1.5e10");
+      expect(toCsv(["a"], [{ a: "-.5" }])).toBe("a\n-.5");
+    });
+
+    it("still escapes a value that merely starts like a number", () => {
+      expect(toCsv(["a"], [{ a: "-1.5.6" }])).toBe("a\n'-1.5.6");
+      expect(toCsv(["a"], [{ a: "-1a" }])).toBe("a\n'-1a");
+    });
+
+    it("leaves ordinary text and existing quoting rules alone", () => {
+      expect(toCsv(["a"], [{ a: "hello" }])).toBe("a\nhello");
+      expect(toCsv(["a"], [{ a: "x,y" }])).toBe('a\n"x,y"');
+    });
+  });
 });

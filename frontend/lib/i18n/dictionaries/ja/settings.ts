@@ -22,7 +22,7 @@ export const settings = {
       "バックエンド API に接続できない可能性があります。ページを再読み込みしてください。",
     usernameLabel: "ユーザー名",
     usernameLockedHint:
-      "ユーザー名はあなたの名前空間（alice/*）であり、変更できません。別の名前を使うには、新しいアカウントを作成して",
+      "ユーザー名はあなたの名前空間（{username}/*）であり、変更できません。別の名前を使うには、新しいアカウントを作成して",
     usernameLockedTransferLink: "リポジトリをそちらへ移管してください。",
     displayNameLabel: "表示名",
     bioLabel: "自己紹介",
@@ -153,6 +153,8 @@ export const settings = {
     descriptionSuffix: "が署名として付くため、このサーバーからの配信であることを検証できます。",
     accountLoadFailed: "アカウント情報の読み込みに失敗しました",
     accountLoadFailedHint: "バックエンド API に接続できない可能性があります。",
+    loadFailed: "Webhook を読み込めませんでした",
+    loadFailedHint: "バックエンド API に接続できない可能性があります。再読み込みしてください。",
     noNamespaceTitle: "管理できる名前空間がありません",
     noNamespaceDescription: "Webhook を設定するには、名前空間への admin 権限が必要です。",
     namespaceLabel: "名前空間",
@@ -193,7 +195,9 @@ export const settings = {
     save: "変更を保存",
     saving: "保存中…",
     rotateSecret: "シークレットを更新",
-    confirmRotateTitle: "シークレットを再発行しますか？",
+    // rotateSecret / secretRotatedTitle と用語を揃える。以前は「更新」と
+    // 「再発行」が混在しており、同じ操作を指しているのかが分かりにくかった。
+    confirmRotateTitle: "シークレットを更新しますか？",
     // 「シークレット以外は変わらない」ことまで明示する。この操作は編集パネル
     // 内の「変更を保存」の隣にあり、以前は編集中の内容も一緒に送信していた。
     confirmRotate:
@@ -210,11 +214,11 @@ export const settings = {
     repoDeleted: { label: "リポジトリの削除", hint: "リポジトリが削除された" },
     repoMoved: {
       label: "リポジトリの移管",
-      hint: "リポジトリの名前変更または別の namespace への移管が完了した",
+      hint: "リポジトリの名前変更または別の名前空間への移管が完了した",
     },
     repoTransferRequested: {
       label: "リポジトリ移管のリクエスト",
-      hint: "この namespace への移管リクエストが承認待ちになった",
+      hint: "この名前空間への移管リクエストが承認待ちになった",
     },
     repoArchived: { label: "リポジトリのアーカイブ", hint: "リポジトリが読み取り専用になった" },
     repoUnarchived: {
@@ -248,6 +252,13 @@ export const settings = {
     confirmAccept: "{repo} の所有者になります。この操作はここから取り消せません。",
     reject: "拒否",
     rejecting: "拒否中…",
+    // 「拒否」は「承認」のすぐ隣にあるため確認を挟む。「取り消し」（下）は
+    // 自分自身のリクエストを撤回するだけで、いつでも自分でやり直せるが、
+    // 「拒否」は他人のリクエストを破棄する操作で、誤操作か意図的な拒否かは
+    // 相手に伝わらない。
+    confirmRejectTitle: "この移管リクエストを拒否しますか？",
+    confirmReject:
+      "{repo} の移管リクエストを拒否しますか？ 相手が再度試すには新しくリクエストを送り直す必要があります。",
     cancel: "取り消す",
     cancelling: "取り消し中…",
   },
@@ -258,7 +269,7 @@ export const settings = {
     loadFailedHint: "バックエンド API に接続できない可能性があります。再読み込みしてください。",
     emptyTitle: "所属している組織がありません",
     emptyDescription:
-      "組織を作成してチームでネームスペースを共有するか、管理者に追加を依頼してください。",
+      "組織を作成してチームで名前空間を共有するか、管理者に追加を依頼してください。",
     create: "組織を作成",
     browse: "組織を探す",
     manage: "設定",
@@ -270,6 +281,12 @@ export const settings = {
     membersOther: "メンバー {count} 人",
     reposOne: "リポジトリ {count} 件",
     reposOther: "リポジトリ {count} 件",
+    // 組織一覧の読み込みには成功したが、本人確認（getMe）が失敗した場合に表示。
+    // 離脱は DELETE /orgs/{org}/members/{self} で自分のユーザー名が必要なため、
+    // 取得できないとすべての「脱退」ボタンが理由なく無効化されてしまう。
+    identityUnknown:
+      "アカウントを確認できなかったため、脱退は利用できません。ページを再読み込みしてください。",
+    leaveDisabledHint: "利用できません: アカウントを確認できませんでした。",
   },
   deliveries: {
     loadFailed: "配信履歴の読み込みに失敗しました",
@@ -346,7 +363,7 @@ export const settings = {
     revokeCredentials: "資格情報を失効",
     working: "処理中…",
     seededAdminNote:
-      "`TF_ADMIN_PASSWORD` は空のインスタンスで最初のアカウントを作成するときにだけ使われます。以降のパスワード変更はこの画面から行います。",
+      "TF_ADMIN_PASSWORD は空のインスタンスで最初のアカウントを作成するときにだけ使われます。以降のパスワード変更はこの画面から行います。",
     resetTitle: "{username} のパスワードをリセットしますか？",
     resetDescription:
       "{username} に新しいパスワードを設定します。開いているすべてのブラウザからサインアウトされますが、アクセストークンは引き続き有効です。",
@@ -456,16 +473,16 @@ export const settings = {
     navLabel: "ストレージ上限",
     title: "ストレージ上限",
     description:
-      "各ネームスペースが使っているオブジェクトストレージ量と、その上限です。上限は LFS オブジェクトのアップロード時に判定されるため、上限を下げても既存のデータが削除されることはなく、次回のアップロードが拒否されます。",
+      "各名前空間が使っているオブジェクトストレージ量と、その上限です。上限は LFS オブジェクトのアップロード時に判定されるため、上限を下げても既存のデータが削除されることはなく、次回のアップロードが拒否されます。",
     defaultQuota: "インスタンス既定値: {quota}",
     defaultQuotaUnlimited: "インスタンス既定値: 無制限",
     defaultQuotaNote:
-      "個別の上限を持たないネームスペースにはインスタンス既定値が適用されます。TF_DEFAULT_STORAGE_QUOTA_BYTES で設定し、変更には再デプロイが必要です。",
-    countOne: "ネームスペース {count} 件",
-    countOther: "ネームスペース {count} 件",
-    searchPlaceholder: "ネームスペースを検索",
+      "個別の上限を持たない名前空間にはインスタンス既定値が適用されます。TF_DEFAULT_STORAGE_QUOTA_BYTES で設定し、変更には再デプロイが必要です。",
+    countOne: "名前空間 {count} 件",
+    countOther: "名前空間 {count} 件",
+    searchPlaceholder: "名前空間を検索",
     refresh: "再読み込み",
-    colNamespace: "ネームスペース",
+    colNamespace: "名前空間",
     colKind: "種別",
     colRepos: "リポジトリ数",
     colUsed: "使用量",
@@ -486,16 +503,16 @@ export const settings = {
     cancel: "キャンセル",
     saved: "{namespace} の上限を {quota} にしました。",
     cleared: "{namespace} をインスタンス既定値に戻しました。",
-    loadFailed: "ネームスペースの読み込みに失敗しました",
+    loadFailed: "名前空間の読み込みに失敗しました",
     loadFailedHint:
       "バックエンド API に接続できない可能性があります。ページを再読み込みしてください。",
-    emptyTitle: "ネームスペースが見つかりません",
-    emptyDescription: "その検索条件に一致するネームスペースはありません。",
+    emptyTitle: "名前空間が見つかりません",
+    emptyDescription: "その検索条件に一致する名前空間はありません。",
     accessDeniedTitle: "サイト管理者専用",
     accessDeniedMessage:
       "自分で引き上げられる上限は上限として機能しないため、ストレージ上限は組織の設定画面ではなくサイト管理者が設定します。",
     errors: {
-      namespaceGone: "そのネームスペースは存在しません。",
+      namespaceGone: "その名前空間は存在しません。",
     },
   },
 };

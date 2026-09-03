@@ -63,8 +63,8 @@ type Mode = "table" | "raw";
  *
  * The backend classifies these as plain text and caps the preview it returns at
  * 512KB, so this component parses that preview directly when it is complete and
- * only fetches the whole file (browser → API, with credentials, same as any
- * other resolve download) when the preview was clipped. Anything that fails to
+ * only fetches the whole file (browser → API, uncredentialed, as the fetch
+ * below explains) when the preview was clipped. Anything that fails to
  * parse — or is simply too big — degrades to the text preview rather than
  * showing a half-guessed grid.
  */
@@ -97,10 +97,26 @@ export function TabularPreview({
     setFetchFailure(null);
     (async () => {
       try {
-        // `credentials: "include"` sends tf_session so the request is authenticated; the
-        // backend echoes the Origin and allows credentials (`cors` in
-        // backend/internal/api/server.go).
-        const res = await fetch(downloadUrl, { credentials: "include" });
+        // `credentials: "omit"`, deliberately. In production this URL answers
+        // 302 to a GCS signed URL, and fetch carries the credentials mode
+        // across a redirect it follows -- so `include` makes the *bucket*
+        // request credentialed too, and a credentialed cross-origin response
+        // is only readable when the server answers
+        // `Access-Control-Allow-Credentials: true`. GCS never does, whatever
+        // CORS the bucket is configured with, so `include` left this fetch
+        // permanently unreadable in production while working fine against the
+        // dev emulator (which streams the bytes through the API origin
+        // instead of redirecting).
+        //
+        // Omitting them costs nothing: resolve does no permission check --
+        // there is no private-repository concept in this system
+        // (docs/dev/thinkingface-design.md §11), loadRepoForRead only looks
+        // the repository up -- and its download counter is per repository,
+        // not per user. If repository visibility is ever introduced, this
+        // fetch cannot simply go back to `include`; it needs the signed URL
+        // handed over as data and fetched in a second, uncredentialed
+        // request.
+        const res = await fetch(downloadUrl, { credentials: "omit" });
         if (!res.ok) {
           // Only the status code is kept; the status line is server-authored
           // English and is translated at display time (fetchFailureReason).

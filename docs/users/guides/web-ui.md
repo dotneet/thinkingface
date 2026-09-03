@@ -98,6 +98,11 @@ preview appropriate to the file:
 - CSV, TSV and JSON Lines (`.jsonl`/`.ndjson`) files under 10 MiB render as a sortable table
   with a Table / Raw toggle, up to 50,000 rows and 512 columns — past either limit, or when the
   file doesn't actually parse as tabular data, it falls back to the plain text view instead.
+  When the initial preview is truncated (the file is over 512 KB), the browser fetches the
+  full file itself to build the table; on a production GCS deployment that fetch goes straight
+  to the storage bucket, which needs to allow it — see
+  [Deployment](../self-hosting/deployment.md#bucket-cors) if you're setting up storage
+  yourself.
 - Parquet files show a summary card with an "Open in viewer" link instead of raw content — see
   [Viewing Datasets](dataset-viewer.md).
 - Checkpoint files (safetensors, `.bin`, `.pt`, `.pth`, `.ckpt`) open the model inspector —

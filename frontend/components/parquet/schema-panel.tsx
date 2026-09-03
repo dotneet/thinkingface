@@ -1,10 +1,10 @@
 "use client";
 
-import { Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import { badgeClass } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox, Input } from "@/components/ui/field";
+import { Checkbox } from "@/components/ui/field";
+import { FilterInput } from "@/components/ui/search-input";
 import { useT } from "@/lib/i18n/client";
 import type { ParquetColumn } from "@/types/api";
 
@@ -62,19 +62,12 @@ export function SchemaPanel({
             {t("parquet.schema.columnsShown", { shown: shownCount, total: columns.length })}
           </span>
         </div>
-        <div className="relative">
-          <Search
-            size={13}
-            className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-fg-subtle"
-          />
-          <Input
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            placeholder={t("parquet.schema.filterPlaceholder")}
-            aria-label={t("parquet.schema.filterPlaceholder")}
-            className="py-1 pl-6 pr-2 text-xs"
-          />
-        </div>
+        <FilterInput
+          value={filter}
+          onChange={setFilter}
+          placeholder={t("parquet.schema.filterPlaceholder")}
+          className="py-1 pl-8 pr-2 text-xs"
+        />
         <div className="flex gap-1.5">
           <Button
             size="sm"

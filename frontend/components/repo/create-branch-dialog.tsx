@@ -80,6 +80,12 @@ export function CreateBranchDialog({
     <Dialog
       open={open}
       onClose={onClose}
+      // `onClose` comes from the parent and just flips its state, so nothing
+      // here could stop Escape / a backdrop click / the × from closing the
+      // dialog mid-create. The failure below lands in `footerNote`, and the
+      // effect above wipes it on the next open — so a dismissed create
+      // reported its error nowhere.
+      busy={creating}
       title={t("repo.refs.newBranchTitle")}
       footer={
         <>

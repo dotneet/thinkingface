@@ -229,16 +229,54 @@ func (s *Server) revisionOrEmpty(w http.ResponseWriter, gitRepo *gitrepo.Repo, r
 // both at once.
 //
 // No sync job goes with it, and that asymmetry with creation is deliberate:
-// the file index rows for a deleted ref are already unreachable (every read
-// resolves the revision in git first, and it no longer resolves) and are
-// dropped with the repository, so there is nothing left to re-index. Only
-// something to announce.
+// there is nothing left to re-index for a ref that no longer resolves. What
+// there is, is something to remove -- see dropBranchIndex, which every caller
+// of this for a *branch* runs alongside it.
 func (s *Server) fireRefDeleted(ctx context.Context, repo *store.Repo, refType, name, oldSHA string) {
 	s.fireWebhook(ctx, string(apitypes.WebhookEventRepoRefDeleted), repo.Namespace, &repo.ID, map[string]any{
 		"namespace": repo.Namespace, "repo": repo.Name,
 		"full_name": repo.FullName(), "kind": repo.Kind,
 		"ref": name, "ref_type": refType, "old_sha": oldSHA, "new_sha": "",
 	})
+}
+
+// dropBranchIndex removes the cached index of a branch that is gone: the
+// repo_files listing and the parquet metadata built from it.
+//
+// This used to be nobody's job, on either path. `git push --delete feature`
+// enqueues nothing (handleReceivePack only enqueues for branches present
+// *after* the push) and handleHFDeleteBranch enqueues nothing either, while
+// store.ReplaceRepoFiles -- reachable only from a sync job, and only for a
+// ref that still exists -- was the single writer of those tables. The rows
+// therefore survived for the life of the repository, and the comment that
+// used to excuse it ("already unreachable, and dropped with the repository")
+// was wrong on both counts:
+//
+//   - ListRepoFiles(repo, "feature") answers straight out of the index and
+//     never asks git, so a deleted branch kept listing files
+//   - ListReferencedBlobSHAs counts their blobs as referenced, so
+//     `thinkingface gc` could never reclaim content whose last living ref had
+//     been deleted -- an unbounded leak, one branch at a time
+//
+// `thinkingface resync` does not find them either: it walks the refs git
+// still has, and this ref is not one of them.
+//
+// Branches only. repo_files.ref holds a branch short name and one short name
+// can be a branch and a tag at once, so calling this from the tag deletes
+// would take an identically named branch's index with it -- and a tag never
+// has rows to remove anyway (creating one schedules no sync job, and the
+// commit API refuses a {rev} that is a tag; see ensureBranchRev).
+//
+// Logged rather than surfaced: the ref itself is already gone by the time
+// this runs, so failing the request would describe the opposite of what
+// happened. What is left behind is a stale index the next `thinkingface gc`
+// merely under-collects -- and any later push of a branch by that name
+// replaces the rows outright.
+func (s *Server) dropBranchIndex(ctx context.Context, repo *store.Repo, branch string) {
+	if err := s.store.DeleteRefIndex(ctx, repo.ID, branch); err != nil {
+		slog.Error("drop file index of deleted branch",
+			"repo", repo.FullName(), "branch", branch, "error", err)
+	}
 }
 
 // ------------------------------------------------------------------ branches
@@ -329,14 +367,14 @@ func (s *Server) handleHFDeleteBranch(w http.ResponseWriter, r *http.Request) {
 		writeRefError(w, "branch", branch, err)
 		return
 	}
-	// No sync job: the file index rows for a deleted ref are unreachable
-	// (every read resolves the revision in git first, and it no longer
-	// resolves) and are dropped with the repository. This is what
-	// `git push --delete` already does -- handleReceivePack only enqueues for
-	// branches present *after* the push.
+	// No sync job -- there is no revision left to index -- but the rows that
+	// were indexed for it do have to go, or they outlive the branch and keep
+	// their blobs out of gc's reach. `git push --delete` takes the same two
+	// steps (schedulePostPush).
 	//
-	// A webhook, though: nothing to re-index is not the same as nothing to
+	// A webhook, too: nothing to re-index is not the same as nothing to
 	// announce, and the sync job is what used to carry the announcement.
+	s.dropBranchIndex(r.Context(), repo, branch)
 	s.fireRefDeleted(r.Context(), repo, "branch", branch, old.String())
 	writeJSON(w, http.StatusOK, hfRefResult{
 		Name: branch, Ref: gitrepo.BranchRef(branch), Target: old.String(),

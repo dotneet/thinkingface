@@ -27,12 +27,22 @@ export function RepoFacetSidebar({
   clearHref,
   kind,
   facets,
+  facetsAvailable,
 }: {
   basePath: string;
   /** Where "clear filters" goes; defaults to basePath (see RepoListPage). */
   clearHref?: string;
   kind: RepoKind;
   facets: RepoFacets;
+  /**
+   * False when the listing request failed, so `facets` is only the empty
+   * placeholder RepoListPage falls back to rather than a real (possibly
+   * legitimately empty) response. A selected filter still has to be listed
+   * so it stays removable (DESIGN.md §8-4), but its count is unknown, not
+   * zero, and rendering "0" would state something the failed request never
+   * told us (§9-1).
+   */
+  facetsAvailable: boolean;
 }) {
   const t = useT();
   const router = useRouter();
@@ -196,24 +206,28 @@ export function RepoFacetSidebar({
         items={facets.relations}
         selectedValues={selectedRelation === "" ? [] : [selectedRelation]}
         onToggle={(v) => toggleSingle("relation", v)}
+        countsAvailable={facetsAvailable}
       />
       <FacetGroup
         title={t("repoList.facets.tags")}
         items={facets.tags}
         selectedValues={Array.from(selectedTags)}
         onToggle={toggleTag}
+        countsAvailable={facetsAvailable}
       />
       <FacetGroup
         title={t("repoList.facets.license")}
         items={facets.licenses}
         selectedValues={selectedLicense === "" ? [] : [selectedLicense]}
         onToggle={(v) => toggleSingle("license", v)}
+        countsAvailable={facetsAvailable}
       />
       <FacetGroup
         title={t("repoList.facets.task")}
         items={facets.tasks}
         selectedValues={selectedTask === "" ? [] : [selectedTask]}
         onToggle={(v) => toggleSingle("task", v)}
+        countsAvailable={facetsAvailable}
       />
     </>
   );
@@ -294,13 +308,23 @@ function FacetGroup({
   items,
   selectedValues,
   onToggle,
+  countsAvailable,
 }: {
   title: string;
   items: RepoFacetItem[];
   /** Values currently filtering the listing, from the URL — not from `items`. */
   selectedValues: string[];
   onToggle: (value: string) => void;
+  /**
+   * False when the listing request failed, so every count here — including
+   * the 0 this function synthesizes for a selected-but-absent value below —
+   * would otherwise be read straight from `items`, which is empty because
+   * the whole facets response is the failure placeholder. A count is only
+   * ever drawn from a successful response (DESIGN.md §9-1).
+   */
+  countsAvailable: boolean;
 }) {
+  const t = useT();
   const selected = new Set(selectedValues);
   // The facets for one field are computed with the *other* fields' filters
   // still applied, so a tag that is selected can vanish from `items` once a
@@ -329,12 +353,20 @@ function FacetGroup({
                 className="shrink-0"
               />
               <span
-                className={cn("truncate", item.count === 0 ? "text-fg-subtle" : "text-fg-muted")}
+                className={cn(
+                  "truncate",
+                  countsAvailable && item.count === 0 ? "text-fg-subtle" : "text-fg-muted",
+                )}
               >
                 {item.value}
               </span>
             </span>
-            <span className="shrink-0 tabular-nums text-fg-subtle">{item.count}</span>
+            <span
+              className="shrink-0 tabular-nums text-fg-subtle"
+              aria-label={countsAvailable ? undefined : t("repoList.facets.countUnavailable")}
+            >
+              {countsAvailable ? item.count : "—"}
+            </span>
           </label>
         ))}
       </div>
