@@ -8,6 +8,32 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// ClosingFence returns the offset of the newline that begins the line closing
+// a front-matter block, or -1 when there is none. rest is everything after the
+// opening "---\n".
+//
+// A closing fence is a line that is exactly "---" once trailing spaces and
+// tabs are removed. Both halves of that matter, and the substring search this
+// replaced got both wrong in opposite directions: `strings.Index(rest, "\n---")`
+// also matched "----" and "---foo", so a longer horizontal rule in the body
+// ended the front matter early; requiring an exact "---" instead rejects the
+// trailing whitespace editors leave behind, which drops the whole card.
+//
+// The scan starts at rest's *second* line, so a "---" on the first one -- an
+// empty block, "---\n---" -- does not close the fence it just opened. That is
+// the documented behaviour of BuildReadme in the tf CLI, which shares this
+// rule so the CLI and the server never read one README two ways.
+func ClosingFence(rest string) int {
+	offset := 0
+	for i, line := range strings.Split(rest, "\n") {
+		if i > 0 && strings.TrimRight(line, " \t") == "---" {
+			return offset - 1
+		}
+		offset += len(line) + 1
+	}
+	return -1
+}
+
 // Card is the parsed front matter plus the markdown body that follows it.
 type Card struct {
 	Data map[string]any
@@ -34,7 +60,7 @@ func Parse(readme []byte) Card {
 		return card
 	}
 	rest := scan[len("---\n"):]
-	end := strings.Index(rest, "\n---")
+	end := ClosingFence(rest)
 	if end < 0 {
 		return card
 	}

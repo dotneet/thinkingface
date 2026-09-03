@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/dotneet/thinkingface/backend/internal/repocard"
 )
 
 func TestBuildReadme(t *testing.T) {
@@ -334,5 +336,37 @@ func TestMergeReadmeClosesAtFirstGenuineFenceNotLaterRule(t *testing.T) {
 	want := "---\nlicense: mit\n---\n\n# Title\n\n---\n\nmore text\n"
 	if got != want {
 		t.Errorf("MergeReadme() =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// A closing fence with trailing whitespace is a closing fence. The exact
+// `line == "---"` this replaced refused it, so `tf up --license` on such a
+// README dropped the existing front matter into the body and wrote a second
+// block above it -- while the server's repocard.Parse went on reading the
+// original. Both sides share repocard.ClosingFence now.
+func TestMergeReadmeAcceptsAClosingFenceWithTrailingWhitespace(t *testing.T) {
+	existing := "---\ntags:\n  - nlp\n--- \n\n# Title\n"
+	out, err := MergeReadme([]byte(existing), CardOptions{License: "mit"})
+	if err != nil {
+		t.Fatalf("MergeReadme: %v", err)
+	}
+	got := string(out)
+	if strings.Count(got, "\n---") < 1 || strings.Count(got, "tags:") != 1 {
+		t.Fatalf("MergeReadme produced %q: the original front matter was not merged into", got)
+	}
+	if !strings.Contains(got, "license: mit") {
+		t.Errorf("MergeReadme produced %q, want the new license", got)
+	}
+	if !strings.Contains(got, "- nlp") {
+		t.Errorf("MergeReadme produced %q, want the existing tag preserved", got)
+	}
+	// The server has to agree that this is one card, not a card followed by a
+	// stray block.
+	card := repocard.Parse(out)
+	if card.Data["license"] != "mit" {
+		t.Errorf("repocard.Parse read license = %v from the CLI's output, want mit", card.Data["license"])
+	}
+	if strings.Contains(card.Body, "tags:") {
+		t.Errorf("repocard.Parse left front matter in the body: %q", card.Body)
 	}
 }

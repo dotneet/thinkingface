@@ -296,3 +296,62 @@ func TestIsExperiment(t *testing.T) {
 		})
 	}
 }
+
+// ------------------------------------------------------- ClosingFence
+
+// The fence rule is shared with the tf CLI (tfcli/local.MergeReadme), so both
+// sides read one README the same way. These are the cases the two rules it
+// replaced each got wrong: a substring search for "\n---" ended the block on a
+// longer horizontal rule, and an exact `line == "---"` refused the trailing
+// whitespace editors leave behind and dropped the card entirely.
+func TestClosingFence(t *testing.T) {
+	tests := []struct {
+		name string
+		rest string
+		want bool // is a fence found at all
+	}{
+		{"plain fence", "license: mit\n---\nbody", true},
+		{"fence with a trailing space", "license: mit\n--- \nbody", true},
+		{"fence with a trailing tab", "license: mit\n---\t\nbody", true},
+		{"fence at end of file with no newline", "license: mit\n---", true},
+		{"four dashes is a horizontal rule, not a fence", "license: mit\n----\nbody", false},
+		{"dashes with content is not a fence", "license: mit\n---foo\nbody", false},
+		{"leading space is not a fence", "license: mit\n ---\nbody", false},
+		{"no fence at all", "license: mit\nbody", false},
+		{"the block's own first line does not close it", "---\n", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClosingFence(tt.rest)
+			if (got >= 0) != tt.want {
+				t.Fatalf("ClosingFence(%q) = %d, want found=%v", tt.rest, got, tt.want)
+			}
+		})
+	}
+}
+
+// A trailing space on the closing fence used to be read differently by the
+// two sides: the server accepted it (substring search) while the CLI did not
+// (exact match), so `tf up --license` rewrote a card the sync then declined
+// to read. Parse is the server half of that agreement.
+func TestParse_ClosingFenceWithTrailingWhitespace(t *testing.T) {
+	card := Parse([]byte("---\nlicense: mit\ntags:\n  - nlp\n--- \n\n# Title\n"))
+	if got := card.Data["license"]; got != "mit" {
+		t.Fatalf("license = %v, want mit (the front matter was not recognised)", got)
+	}
+	if !strings.Contains(card.Body, "# Title") {
+		t.Errorf("body = %q, want the markdown after the fence", card.Body)
+	}
+	if strings.Contains(card.Body, "license:") {
+		t.Errorf("body = %q, still contains the front matter", card.Body)
+	}
+}
+
+// The complement: a longer horizontal rule in the body is not a fence, so a
+// README with no front matter keeps all of it as body.
+func TestParse_LongerHorizontalRuleDoesNotCloseTheBlock(t *testing.T) {
+	card := Parse([]byte("---\nnot really yaml front matter\n----\nbody\n"))
+	if len(card.Data) != 0 {
+		t.Fatalf("Data = %v, want empty: ---- is a horizontal rule, not a closing fence", card.Data)
+	}
+}

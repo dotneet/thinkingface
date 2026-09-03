@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/dotneet/thinkingface/backend/internal/repocard"
 )
 
 // CardOptions are the repository-card fields `tf up` can set from flags.
@@ -147,7 +149,7 @@ func MergeReadme(existing []byte, opts CardOptions) ([]byte, error) {
 	front, body := "", text
 	if strings.HasPrefix(text, "---\n") {
 		rest := text[len("---\n"):]
-		if end := findClosingFence(rest); end >= 0 {
+		if end := repocard.ClosingFence(rest); end >= 0 {
 			front = rest[:end]
 			body = strings.TrimPrefix(rest[end+len("\n---"):], "\n")
 		}
@@ -218,33 +220,11 @@ func MergeReadme(existing []byte, opts CardOptions) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// findClosingFence returns the index, within s (everything after the opening
-// "---\n" fence), of the newline that immediately precedes the line that
-// closes the front-matter block. It requires that line to be exactly "---"
-// -- not merely start with it -- so a horizontal rule inside the body that
-// happens to read "---" followed by more content on the same line, or a
-// run of four-or-more dashes ("----"), is never mistaken for the fence. A
-// plain substring search for "\n---" (what this replaced) does exactly
-// that: for a README with no front matter at all but a "---" horizontal
-// rule further down (a common Markdown idiom), it would treat everything up
-// to the rule as YAML and everything after as body, which then usually
-// fails to parse as a mapping. It returns -1 when no such line exists.
-//
-// The search intentionally starts at the *second* line of s: the front
-// matter's own opening line is s's first line, so an immediate "---" there
-// (an empty block) is not treated as a fence closing itself, matching the
-// substring search this replaced and BuildReadme's documented behaviour
-// that an empty "---\n---" block is not a recognised card.
-func findClosingFence(s string) int {
-	offset := 0
-	for i, line := range strings.Split(s, "\n") {
-		if i > 0 && line == "---" {
-			return offset - 1
-		}
-		offset += len(line) + 1
-	}
-	return -1
-}
+// The closing-fence rule lives in repocard.ClosingFence, which the server's
+// repocard.Parse uses on the same file. Sharing it is the point: a README the
+// server reads as having front matter has to be the same one `tf up --license`
+// merges into, or the CLI would rewrite a card the next sync then declines to
+// read (and vice versa).
 
 // mappingGet returns the value node for key in a YAML mapping node, or nil.
 func mappingGet(mapping *yaml.Node, key string) *yaml.Node {
