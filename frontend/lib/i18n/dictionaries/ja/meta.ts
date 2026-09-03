@@ -26,6 +26,9 @@ export const meta: Dict["meta"] = {
   members: "メンバー",
   auditLog: "監査ログ",
   dangerZone: "危険な操作",
+  adminUsers: "ユーザー",
+  adminSyncJobs: "同期ジョブ",
+  adminQuotas: "ストレージ上限",
 
   newRepository: "新しいリポジトリ",
   newOrganization: "新しい組織",

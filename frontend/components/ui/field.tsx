@@ -1,3 +1,4 @@
+import { cloneElement, isValidElement, useId } from "react";
 import { cn } from "@/lib/cn";
 
 // The shared look that used to live in globals.css as `.tf-input`. Keeping it
@@ -56,6 +57,15 @@ export function Slider({
 /**
  * Label + control pair. The control is passed as `children` and wrapped by the
  * <label>, so clicking the text focuses it without needing matching ids.
+ *
+ * `hint`, when given, is wired to the control with `aria-describedby` rather
+ * than being rendered inside the `<label>` with everything else. A wrapping
+ * `<label>`'s full text content becomes the accessible *name* of whatever it
+ * wraps, so a hint left inside it used to get read as part of the control's
+ * name — a role select whose hint spelled out all three roles announced as
+ * "role read grants membership only, write can push ... combobox". Splitting
+ * the hint out into its own `id`, referenced via `aria-describedby`, makes it
+ * a *description* instead, which every call site gets for free.
  */
 export function Field({
   label,
@@ -68,11 +78,34 @@ export function Field({
   className?: string;
   children: React.ReactNode;
 }) {
+  const hintId = useId();
+
+  if (!hint) {
+    return (
+      <label className={cn("flex flex-col gap-1 text-sm", className)}>
+        <span className="font-medium text-fg-muted">{label}</span>
+        {children}
+      </label>
+    );
+  }
+
+  const describedControl = isValidElement<{ "aria-describedby"?: string }>(children)
+    ? cloneElement(children, {
+        "aria-describedby": children.props["aria-describedby"]
+          ? `${children.props["aria-describedby"]} ${hintId}`
+          : hintId,
+      })
+    : children;
+
   return (
-    <label className={cn("flex flex-col gap-1 text-sm", className)}>
-      <span className="font-medium text-fg-muted">{label}</span>
-      {children}
-      {hint && <span className="text-xs font-medium text-fg-subtle">{hint}</span>}
-    </label>
+    <div className={cn("flex flex-col gap-1 text-sm", className)}>
+      <label className="flex flex-col gap-1">
+        <span className="font-medium text-fg-muted">{label}</span>
+        {describedControl}
+      </label>
+      <span id={hintId} className="text-xs font-medium text-fg-subtle">
+        {hint}
+      </span>
+    </div>
   );
 }

@@ -93,7 +93,11 @@ func (s *Server) handleExperimentRuns(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	project, err := s.store.GetExpProject(r.Context(), repo.ID, chi.URLParam(r, "project"))
+	projectName, ok := expNameParam(w, r, "project", "project")
+	if !ok {
+		return
+	}
+	project, err := s.store.GetExpProject(r.Context(), repo.ID, projectName)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeJSON(w, http.StatusOK, apitypes.ExpRunListResponse{Runs: []apitypes.ExpRun{}})
@@ -122,6 +126,10 @@ func (s *Server) handleExperimentMetrics(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	projectName, ok := expNameParam(w, r, "project", "project")
+	if !ok {
+		return
+	}
 	q := r.URL.Query()
 	maxPoints, _ := strconv.Atoi(q.Get("max_points"))
 	// Clamped, like every other caller-supplied limit here. Downsampling
@@ -135,7 +143,7 @@ func (s *Server) handleExperimentMetrics(w http.ResponseWriter, r *http.Request)
 	}
 
 	series, err := s.experiments().Series(r.Context(), repo, experiments.SeriesRequest{
-		Project: chi.URLParam(r, "project"),
+		Project: projectName,
 		Runs:    selectedNames(q, "run", "runs"),
 		Keys:    selectedNames(q, "key", "keys"),
 		XAxis:   q.Get("x"),
@@ -321,12 +329,33 @@ func normalizeTags(raw []string) ([]string, error) {
 	return out, nil
 }
 
-// decodeRunSegment undoes the one escape chi leaves in a path parameter. chi
-// routes on the raw path, so an encoded slash arrives as %2F while every other
-// escape (%20 and friends) has already been decoded for us — and run names may
-// contain slashes, since ingest only forbids control characters.
-func decodeRunSegment(raw string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(raw, "%2F", "/"), "%2f", "/")
+// expNameParam reads a {project} or {run} segment out of the URL path,
+// decoded exactly once by pathParam (urlparams.go) and answering the request
+// itself when the segment is not valid percent-encoding. `what` names the
+// thing in that message.
+//
+// It exists because these two names are the free-est text in any URL this
+// server serves: ingest forbids only control characters (validateIngestName),
+// so "sweep/seed-2", "exp 1", "実験/1" and "100%" are all names a client may
+// create, and the Web UI sends each of them encodeURIComponent'd.
+//
+// The conditional decode is the whole point, and this is where it used to be
+// got wrong. The old decodeRunSegment turned "%2F" back into a slash and left
+// every other escape alone, on the belief that chi decodes the rest for you.
+// chi decodes the rest only when it routed on the plain path -- and a single
+// "%2F" anywhere in the request is what puts net/url's RawPath, and therefore
+// chi's routing, on the *escaped* path, where nothing is decoded. So a run
+// called "exp 1/seed-2" reached the store as "exp%201/seed-2", a name no row
+// has: its annotations, its deletion and its artifact listing all answered 404
+// on a run the ingest API had just accepted. The same "%2F" leaves the
+// {project} of that request encoded too, which is why both go through here.
+func expNameParam(w http.ResponseWriter, r *http.Request, key, what string) (string, bool) {
+	name, err := pathParam(r, key)
+	if err != nil {
+		badRequest(w, what+" name is not valid percent-encoding")
+		return "", false
+	}
+	return name, true
 }
 
 // handleExperimentRunAnnotation updates the hand-maintained metadata on one
@@ -373,12 +402,19 @@ func (s *Server) handleExperimentRunAnnotation(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	project, err := s.store.GetExpProject(r.Context(), repo.ID, chi.URLParam(r, "project"))
+	projectName, ok := expNameParam(w, r, "project", "project")
+	if !ok {
+		return
+	}
+	runName, ok := expNameParam(w, r, "run", "run")
+	if !ok {
+		return
+	}
+	project, err := s.store.GetExpProject(r.Context(), repo.ID, projectName)
 	if err != nil {
 		handleStoreError(w, "load experiment project", err)
 		return
 	}
-	runName := decodeRunSegment(chi.URLParam(r, "run"))
 	run, err := s.store.UpdateExpRunAnnotation(r.Context(), project.ID, runName, upd)
 	if err != nil {
 		handleStoreError(w, "update run annotations", err)
@@ -442,8 +478,14 @@ func (s *Server) handleExperimentRunArtifacts(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	project := chi.URLParam(r, "project")
-	runName := decodeRunSegment(chi.URLParam(r, "run"))
+	project, ok := expNameParam(w, r, "project", "project")
+	if !ok {
+		return
+	}
+	runName, ok := expNameParam(w, r, "run", "run")
+	if !ok {
+		return
+	}
 	dir, safe := safeRunArtifactDir(project, runName)
 	if !safe {
 		badRequest(w, "project and run must not contain path traversal segments")
@@ -498,12 +540,19 @@ func (s *Server) handleDeleteExperimentRun(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	project, err := s.store.GetExpProject(r.Context(), repo.ID, chi.URLParam(r, "project"))
+	projectName, ok := expNameParam(w, r, "project", "project")
+	if !ok {
+		return
+	}
+	runName, ok := expNameParam(w, r, "run", "run")
+	if !ok {
+		return
+	}
+	project, err := s.store.GetExpProject(r.Context(), repo.ID, projectName)
 	if err != nil {
 		handleStoreError(w, "load experiment project", err)
 		return
 	}
-	runName := decodeRunSegment(chi.URLParam(r, "run"))
 	if err := s.store.DeleteExpRun(r.Context(), project.ID, runName); err != nil {
 		handleStoreError(w, "delete run", err)
 		return

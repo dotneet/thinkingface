@@ -58,13 +58,27 @@ export function buildConfigDiff(runs: ExpRun[]): ConfigDiffRow[] {
 export type ScatterAxis = {
   /** Stable identifier, e.g. "config:lr" or "metric:loss". */
   id: string;
-  label: string;
   source: "config" | "metric";
   key: string;
 };
 
 export function axisId(source: ScatterAxis["source"], key: string): string {
   return `${source}:${key}`;
+}
+
+/**
+ * Human-readable label for a scatter axis, e.g. "config: lr" — the prefix
+ * disambiguates a config key from a metric of the same name across the axis
+ * `<select>`s, the chart's axis titles and its title (`run-scatter.tsx`).
+ * This module stays framework- and i18n-free on purpose (see the file
+ * header), so the caller passes in the already-translated prefix for each
+ * source rather than this reaching into the dictionary itself.
+ */
+export function axisLabel(
+  axis: Pick<ScatterAxis, "source" | "key">,
+  prefixes: { config: string; metric: string },
+): string {
+  return `${axis.source === "config" ? prefixes.config : prefixes.metric}: ${axis.key}`;
 }
 
 /**
@@ -87,13 +101,11 @@ export function scatterAxes(runs: ExpRun[]): ScatterAxis[] {
   return [
     ...sorted(configKeys).map((key) => ({
       id: axisId("config", key),
-      label: `config: ${key}`,
       source: "config" as const,
       key,
     })),
     ...sorted(metricKeys).map((key) => ({
       id: axisId("metric", key),
-      label: `metric: ${key}`,
       source: "metric" as const,
       key,
     })),

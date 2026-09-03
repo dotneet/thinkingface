@@ -490,3 +490,110 @@ func TestMyTransfers_OmitsTransfersBetweenStrangersForASiteAdmin(t *testing.T) {
 		t.Fatalf("repository namespace = %q, want bob", r.Namespace)
 	}
 }
+
+// move_repo() called on a name the repository has already left must answer
+// "no such repository", not a redirect.
+//
+// This route names both repositories in its *body*: the request path is a
+// constant "/api/repos/move" with no {ns}/{name} in it for movedLocation to
+// rewrite, so a 308 here carries a Location equal to the URL just requested.
+// requests replays a 308 with the same body, so the client walks that circle
+// until it gives up with TooManyRedirects -- and if it ever did land, it would
+// be moving the repository that now sits at the *new* name, which the caller
+// never asked for. DELETE /api/repos/delete answers a moved repository the
+// same way, for the same two reasons.
+func TestHFMoveRepo_OldNameIsNotFoundRatherThanARedirect(t *testing.T) {
+	f := newTransferFixture(t)
+	f.repo("alice", "foo", "model")
+	f.org("acme", f.alice) // alice is admin of "acme" too, so this completes at once
+	tok := f.token(f.alice, "write")
+
+	if got := f.do("POST", "/api/repos/move", tok, map[string]any{
+		"fromRepo": "alice/foo", "toRepo": "acme/foo", "type": "model",
+	}).status(); got != 200 {
+		t.Fatalf("first move status = %d, want 200", got)
+	}
+
+	// The same call again, still naming the old location.
+	resp := f.do("POST", "/api/repos/move", tok, map[string]any{
+		"fromRepo": "alice/foo", "toRepo": "acme/bar", "type": "model",
+	})
+	if resp.status() != 404 {
+		t.Fatalf("move from the old name = %d, body = %s, want 404",
+			resp.status(), resp.rec.Body.String())
+	}
+	if loc := resp.rec.Header().Get("Location"); loc != "" {
+		t.Fatalf("Location = %q, want none: a redirect on this route points at itself", loc)
+	}
+	// The header huggingface_hub needs to raise RepositoryNotFoundError rather
+	// than a bare HfHubHTTPError.
+	if got := resp.rec.Header().Get("X-Error-Code"); got != "RepoNotFound" {
+		t.Fatalf("X-Error-Code = %q, want RepoNotFound", got)
+	}
+
+	// Nothing moved on the strength of the old name: the repository is where
+	// the first call put it, and the second call's destination was never made.
+	ctx := context.Background()
+	if r, err := f.st.GetRepo(ctx, "model", "acme", "foo"); err != nil {
+		t.Fatalf("repository should still be at acme/foo: %v", err)
+	} else if r.Name != "foo" {
+		t.Fatalf("repository name = %q, want foo", r.Name)
+	}
+	if _, err := f.st.GetRepo(ctx, "model", "acme", "bar"); err == nil {
+		t.Fatal("the second move went through against the old name")
+	}
+}
+
+// Cancelling a transfer is the same authority as starting one
+// (docs/dev/repo-transfer-design.md §7): admin on the source namespace.
+//
+// It used to stop at write access, which under an organisation is a strictly
+// larger set -- startTransfer refuses a `write` member outright
+// (TestHFMoveRepo_ForbiddenForOrgWriteMember), so a member who could not have
+// filed the request could still withdraw the admin's.
+func TestCancelTransfer_RequiresAdminOnTheSourceNamespace(t *testing.T) {
+	f := newTransferFixture(t)
+	acme := f.org("acme", f.alice) // alice: org admin
+	f.addOrgMember(acme.ID, f.bob.ID, "write")
+	f.repo("acme", "thing", "model")
+
+	aliceTok, bobTok := f.token(f.alice, "write"), f.token(f.bob, "write")
+
+	// alice files a request nobody has accepted yet: she holds no role in
+	// bob's personal namespace, so it waits for him.
+	resp := f.do("POST", "/api/v1/repos/model/acme/thing/transfer", aliceTok,
+		apitypes.RepoTransferRequest{Namespace: "bob"})
+	if resp.status() != 202 {
+		t.Fatalf("start transfer = %d, body = %s, want 202 (pending)",
+			resp.status(), resp.rec.Body.String())
+	}
+
+	// bob may write to acme, and that is not enough.
+	cancel := f.do("DELETE", "/api/v1/repos/model/acme/thing/transfer", bobTok, nil)
+	if cancel.status() != 403 {
+		t.Fatalf("write member cancelling = %d, body = %s, want 403",
+			cancel.status(), cancel.rec.Body.String())
+	}
+	if _, err := f.st.PendingRepoTransfer(context.Background(), f.mustRepo("model", "acme", "thing").ID); err != nil {
+		t.Fatalf("the request should still be pending after the refused cancel: %v", err)
+	}
+
+	// The person who filed it still can.
+	if got := f.do("DELETE", "/api/v1/repos/model/acme/thing/transfer", aliceTok, nil).status(); got != 204 {
+		t.Fatalf("org admin cancelling = %d, want 204", got)
+	}
+	if _, err := f.st.PendingRepoTransfer(context.Background(), f.mustRepo("model", "acme", "thing").ID); err == nil {
+		t.Fatal("the transfer is still pending after the admin cancelled it")
+	}
+}
+
+// mustRepo reads a repository straight out of the store, for the assertions
+// that are about stored state rather than about a response.
+func (f *transferFixture) mustRepo(kind, ns, name string) *store.Repo {
+	f.t.Helper()
+	r, err := f.st.GetRepo(context.Background(), kind, ns, name)
+	if err != nil {
+		f.t.Fatalf("get repo %s/%s: %v", ns, name, err)
+	}
+	return r
+}

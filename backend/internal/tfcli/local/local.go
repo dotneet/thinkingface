@@ -237,6 +237,17 @@ func Scan(root string, opts Options) (files []File, allPaths []string, skipped [
 				skipped = append(skipped, Skipped{RepoPath: repoPath, Reason: ReasonHidden})
 				return nil
 			}
+			if !target.Mode().IsRegular() {
+				// A symlink whose target is a FIFO, device node, or socket
+				// has no byte content to commit -- the same reason the
+				// non-symlink branch below skips one directly. Without this
+				// check keep() would report the target's Size() (often 0,
+				// as for /dev/zero or a FIFO) and the file would be treated
+				// as an ordinary empty-or-small file, so a later os.Open +
+				// io.Copy on it hangs instead of failing.
+				skipped = append(skipped, Skipped{RepoPath: repoPath, Reason: ReasonIrregular})
+				return nil
+			}
 			keep(target.Size())
 			return nil
 		}

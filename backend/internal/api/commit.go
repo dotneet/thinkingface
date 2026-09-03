@@ -14,9 +14,34 @@ import (
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
 
-// maxCommitBody bounds an inline upload. Anything larger is expected to arrive
-// through LFS, which never passes through this endpoint.
+// maxCommitBody bounds a whole commit body. A commit legitimately carries many
+// inline files at once -- `upload_folder` over a few hundred small ones is one
+// request -- so this stays generous; the per-file ceiling below is what bounds
+// any single one of them.
 const maxCommitBody = 512 << 20
+
+// maxCommitInlineFileBytes bounds one inline `file` entry, decoded.
+//
+// The value follows from what a client is told to send inline. preupload
+// routes a path to LFS when .gitattributes tracks it or when it reaches
+// gitrepo.LFSInlineThreshold (10 MiB), and huggingface_hub, the `datasets`
+// library and the tf CLI all send an `lfsFile` pointer for everything that
+// comes back "lfs" -- so a legitimate inline entry is under 10 MiB unless the
+// repository has explicitly untracked the pattern (`-filter=lfs`). 32 MiB
+// leaves better than three times that headroom, and is the same ceiling the
+// Web UI's upload endpoint applies to a non-LFS file (maxUploadInlineBytes),
+// so the two write paths no longer disagree about how big "inline" is.
+//
+// Without it, `{"key":"file","value":{"path":"m.safetensors","content":"<400
+// MiB of base64>"}}` was a 200: a 400 MiB blob in the git object database,
+// and a body that was copied through a raw message, a string, a byte slice
+// and a decode buffer on the way there.
+const maxCommitInlineFileBytes = 32 << 20
+
+// maxCommitInlineLine bounds the raw JSON of a `file` entry, so an oversized
+// one is refused before it is unmarshalled. It is the base64 expansion of the
+// ceiling above plus room for the entry's other fields.
+const maxCommitInlineLine = maxCommitInlineFileBytes/3*4 + 4 + 64<<10
 
 // loadLFSRules reads .gitattributes at a revision. A repository whose own copy
 // cannot be read falls back to the list its kind was seeded with, so the
@@ -448,7 +473,12 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	plan, ok := s.parseCommitBody(w, r, repo)
+	// Read before the body, from the revision the commit is being applied to
+	// -- the same rules preupload answered this client with, so the two steps
+	// of one upload cannot disagree about which files belong in LFS.
+	rules := s.loadLFSRules(gitRepo, rev, repo.Kind)
+
+	plan, ok := s.parseCommitBody(w, r, repo, rules)
 	if !ok {
 		return
 	}

@@ -444,23 +444,31 @@ func streamingRoute(p string) bool {
 // (loadRepoForDelete / loadRepoForWrite), so this is not a goroutine an
 // anonymous caller can pin, and the work is a database statement the server
 // is waiting on rather than a loop of its own.
+//
+// The segment counting below is done on EscapedPath(), never on Path, and for
+// the same reason chi routes on the escaped path: a run may be called
+// "sweep/seed-2", which the client sends as %2F. Counted on the decoded Path
+// that run's DELETE has one slash too many, falls out of the last case and is
+// handed the timeout the case exists to lift -- exactly on the runs with the
+// most points to cascade through.
 func cascadeDeleteRoute(r *http.Request) bool {
 	if r.Method != http.MethodDelete {
 		return false
 	}
+	path := r.URL.EscapedPath()
 	switch {
-	case r.URL.Path == "/api/repos/delete":
+	case path == "/api/repos/delete":
 		// The HF-compatible spelling (huggingface_hub.delete_repo); the same
 		// handler as the one below.
 		return true
-	case strings.HasPrefix(r.URL.Path, "/api/v1/repos/") && strings.Count(r.URL.Path, "/") == 6:
+	case strings.HasPrefix(path, "/api/v1/repos/") && strings.Count(path, "/") == 6:
 		// /api/v1/repos/{kind}/{ns}/{name} exactly. The segment count is what
 		// keeps the sub-routes on the same prefix -- DELETE .../archive
 		// (unarchive) and DELETE .../transfer (cancel) -- timed: both are a
 		// single-row update.
 		return true
-	case strings.HasPrefix(r.URL.Path, "/api/v1/experiments/") &&
-		strings.Contains(r.URL.Path, "/runs/") && strings.Count(r.URL.Path, "/") == 8:
+	case strings.HasPrefix(path, "/api/v1/experiments/") &&
+		strings.Contains(path, "/runs/") && strings.Count(path, "/") == 8:
 		// /api/v1/experiments/{ns}/{repo}/{project}/runs/{run} exactly; the
 		// run's name is percent-encoded, so it holds no slash of its own.
 		return true
@@ -590,9 +598,13 @@ func (s *Server) cors(next http.Handler) http.Handler {
 // answers `WWW-Authenticate: Basic realm="thinkingface"`, so anyone who has
 // ever filled in that dialog has credentials the browser re-attaches to this
 // origin on its own -- including on a cross-site top-level form POST, which is
-// exactly the shape the cookie clause exists to stop. A Bearer token is not
-// ambient in that sense (a page has to go and put it in a header, which a form
-// cannot do and a preflight would catch), so it is deliberately not gated here.
+// exactly the shape the cookie clause exists to stop. *Every* Basic credential
+// counts, not just an account password: the dialog takes whatever is typed
+// into it, and `username / tf_...` is the very shape this project documents
+// for git, so a token pasted there is cached and re-attached exactly like a
+// password. A Bearer token is not ambient in that sense (a page has to go and
+// put it in a header, which a form cannot do and a preflight would catch), so
+// it is deliberately not gated here.
 //
 // A request with neither header passes. That is not a hole: every current
 // browser attaches Origin to a cross-site POST, form submissions included, so
@@ -602,7 +614,7 @@ func (s *Server) cors(next http.Handler) http.Handler {
 // the only thing this check exists to stop.
 func (s *Server) requireSameOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if safeMethod(r.Method) || !ambientBrowserCredential(r.Context()) {
+		if safeMethod(r.Method) || !ambientBrowserCredential(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -615,23 +627,35 @@ func (s *Server) requireSameOrigin(next http.Handler) http.Handler {
 }
 
 // ambientBrowserCredential reports whether this request authenticated with
-// something a browser sends on its own initiative: the session cookie, or a
-// Basic password cached from the WWW-Authenticate dialog. Those are the two
-// credentials a hostile page can borrow without being able to read anything,
-// which is precisely the CSRF condition.
+// something a browser sends on its own initiative: the session cookie, or an
+// HTTP Basic credential cached from the WWW-Authenticate dialog. Those are the
+// two credentials a hostile page can borrow without being able to read
+// anything, which is precisely the CSRF condition.
 //
-// The auth method is read off the record requestLogger installs and identify
-// fills in (authRecord below). That is the only place it survives past the
-// identify middleware -- the alternative would be a second context key saying
-// almost the same thing as ctxKeyCookieAuth. A nil record means no middleware
-// stack ran, which is a handler under direct test; those are anonymous or
-// token-authenticated and answer false, exactly as they did before.
-func ambientBrowserCredential(ctx context.Context) bool {
+// The Basic half is decided by the *transport* -- was there an
+// `Authorization: Basic` header -- rather than by what resolveCredential made
+// of the password. It used to read the recorded authMethod instead, and that
+// left the hole this closes: a password typed into the dialog is authPassword,
+// but a `tf_...` token typed into the same dialog is classified authToken
+// (auth.go), so the credential a browser was caching and re-attaching all by
+// itself was exempted from the check as if a page had had to set the header.
+// The classification is right for what it is used for elsewhere and is
+// deliberately left alone; the question here is a different one.
+//
+// A request whose Basic credential resolved to nobody is anonymous, and a
+// request nobody authenticated has nothing for a hostile page to ride, so the
+// caller is only gated once an identity exists. A handler under direct test
+// runs with neither, and answers false exactly as it did before.
+func ambientBrowserCredential(r *http.Request) bool {
+	ctx := r.Context()
 	if cookieAuthenticated(ctx) {
 		return true
 	}
-	rec := authRecordFrom(ctx)
-	return rec != nil && rec.method == authPassword
+	if currentUser(ctx) == nil {
+		return false
+	}
+	_, _, basic := r.BasicAuth()
+	return basic
 }
 
 func safeMethod(method string) bool {

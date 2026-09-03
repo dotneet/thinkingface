@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, ChevronRight, KeyRound, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, KeyRound, Trash2, X } from "lucide-react";
 import { useState } from "react";
 import { WebhookDeliveriesPanel } from "@/components/settings/webhook-deliveries-panel";
 import { WEBHOOK_EVENT_OPTIONS } from "@/components/settings/webhook-events";
@@ -8,6 +8,7 @@ import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { CopyButton } from "@/components/ui/copy-button";
 import { Checkbox, Field, Input } from "@/components/ui/field";
 import { useFormattedTime } from "@/components/ui/time-text";
 import { errorMessage } from "@/lib/api-error-message";
@@ -38,6 +39,9 @@ export function WebhookRow({
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [confirmRotateOpen, setConfirmRotateOpen] = useState(false);
+  // Static rather than useId(): it only has to be unique among this row's own
+  // elements, and webhook.id already guarantees that across rows.
+  const deliveriesPanelId = `webhook-${webhook.id}-deliveries`;
 
   function toggleEvent(e: WebhookEvent) {
     setEvents((prev) => {
@@ -154,6 +158,8 @@ export function WebhookRow({
           size="sm"
           onClick={() => setShowDeliveries((v) => !v)}
           className="px-1 text-fg-subtle hover:text-fg"
+          aria-expanded={showDeliveries}
+          aria-controls={deliveriesPanelId}
           aria-label={
             showDeliveries
               ? t("settings.webhooks.hideDeliveries")
@@ -218,9 +224,24 @@ export function WebhookRow({
               <p className="text-xs font-medium text-fg-subtle">
                 {t("settings.webhooks.secretRotatedCopy")}
               </p>
-              <code className="mt-1.5 block scroll-x whitespace-pre rounded-md border border-border bg-bg-raised p-2 font-mono text-xs">
-                {rotatedSecret}
-              </code>
+              {/* Same shape as the create-time banner (webhooks-manager.tsx):
+                  a bare <code> block told the user to "copy this now" with
+                  nothing to click and no way to dismiss it short of a page
+                  reload. */}
+              <div className="mt-1.5 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-raised p-2.5">
+                <code className="scroll-x whitespace-pre font-mono text-xs">{rotatedSecret}</code>
+                <div className="flex shrink-0 items-center gap-1">
+                  <CopyButton value={rotatedSecret} />
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    aria-label={t("settings.webhooks.dismissSecret")}
+                    onClick={() => setRotatedSecret(null)}
+                  >
+                    <X size={14} />
+                  </Button>
+                </div>
+              </div>
             </Alert>
           )}
           <Field label={t("settings.webhooks.urlLabel")}>
@@ -230,10 +251,14 @@ export function WebhookRow({
               placeholder="https://example.com/hook"
             />
           </Field>
-          <div className="flex flex-col gap-1.5">
-            <span className="text-sm font-medium text-fg-muted">
+          {/* fieldset/legend rather than a <div>/<span> heading: without it a
+              screen reader announces ten unrelated checkboxes with no
+              indication they form the "Events" group (same pattern as
+              ui/segmented-control.tsx). */}
+          <fieldset className="m-0 flex min-w-0 flex-col gap-1.5 border-0 p-0">
+            <legend className="p-0 text-sm font-medium text-fg-muted">
               {t("settings.webhooks.eventsLabel")}
-            </span>
+            </legend>
             <div className="flex flex-col gap-1.5">
               {WEBHOOK_EVENT_OPTIONS.map((opt) => (
                 <label key={opt.value} className="flex items-center gap-2 text-sm text-fg-muted">
@@ -246,7 +271,7 @@ export function WebhookRow({
                 </label>
               ))}
             </div>
-          </div>
+          </fieldset>
           <label className="flex items-center gap-2 text-sm text-fg-muted">
             <Checkbox checked={active} onChange={(e) => setActive(e.target.checked)} />
             {t("settings.webhooks.active")}
@@ -272,7 +297,7 @@ export function WebhookRow({
       )}
 
       {showDeliveries && (
-        <div className="border-t border-border p-3">
+        <div id={deliveriesPanelId} className="border-t border-border p-3">
           <WebhookDeliveriesPanel webhookId={webhook.id} />
         </div>
       )}

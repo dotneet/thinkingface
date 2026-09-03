@@ -3,7 +3,13 @@
 import { useId, useMemo, useState } from "react";
 import { UplotChart } from "@/components/experiments/uplot-chart";
 import { SegmentedControl } from "@/components/ui/segmented-control";
-import { alignSeriesForKey, colorForRun, emaSmooth, groupByKey } from "@/lib/chart-utils";
+import {
+  alignSeriesForKey,
+  colorForRun,
+  dashForRun,
+  emaSmooth,
+  groupByKey,
+} from "@/lib/chart-utils";
 import { useT } from "@/lib/i18n/client";
 import type { ExpMetricSeries } from "@/types/api";
 
@@ -65,6 +71,16 @@ export function MetricsCharts({
     });
     return map;
   }, [runOrder]);
+  // A comparison that outgrows the palette wraps colours (run 21 repeats run
+  // 1's hue); the dash pattern changes on the same wrap, so a repeated
+  // colour still reads as a different run.
+  const runDash = useMemo(() => {
+    const map = new Map<string, number[] | undefined>();
+    runOrder.forEach((run, i) => {
+      map.set(run, dashForRun(i));
+    });
+    return map;
+  }, [runOrder]);
 
   // One chart's worth of plot input, built once per data change rather than
   // once per render. Alignment and smoothing are the expensive part, but the
@@ -123,7 +139,7 @@ export function MetricsCharts({
                       ? t("experiments.chart.baselineSuffix", { run: s.run })
                       : s.run,
                   color: runColor.get(s.run) ?? "#5b8def",
-                  dash: s.run === baseline ? BASELINE_DASH : undefined,
+                  dash: s.run === baseline ? BASELINE_DASH : runDash.get(s.run),
                   width: s.run === baseline ? 2.5 : undefined,
                 }))}
                 xIsTime={xIsTime}

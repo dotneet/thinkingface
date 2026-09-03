@@ -2,8 +2,9 @@
 
 import { HardDrive } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { LoginRequiredState } from "@/components/settings/login-required-state";
+import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
@@ -58,11 +59,12 @@ export function StorageUsage({
   const [error, setError] = useState<FailedApiResult | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
+  // Extracted so the ErrorState's retry action below can re-run the exact
+  // same fetch instead of sending the visitor to reload the whole page.
+  const load = useCallback(
+    async (isStale: () => boolean = () => false) => {
       const result = await getUsage();
-      if (cancelled) return;
+      if (isStale()) return;
       if (!result.ok) {
         setNeedsLogin(isUnauthorized(result));
         setError(result);
@@ -72,11 +74,17 @@ export function StorageUsage({
       setNeedsLogin(false);
       setError(null);
       setUsage(namespace ? narrowToNamespace(result.data, namespace) : result.data);
-    })();
+    },
+    [namespace],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    load(() => cancelled);
     return () => {
       cancelled = true;
     };
-  }, [namespace]);
+  }, [load]);
 
   if (usage === null && !error) {
     return <SkeletonLines lines={5} />;
@@ -92,6 +100,11 @@ export function StorageUsage({
         title={t("settings.errorTitle")}
         message={error ? errorMessage(t, error) : t("settings.storage.loadFailed")}
         hint={t("settings.storage.loadFailedHint")}
+        action={
+          <Button size="sm" onClick={() => load()}>
+            {t("ui.unexpectedError.retry")}
+          </Button>
+        }
       />
     );
   }

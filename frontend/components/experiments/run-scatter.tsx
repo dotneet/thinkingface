@@ -7,7 +7,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Checkbox, Select } from "@/components/ui/field";
 import { colorForRun } from "@/lib/chart-utils";
 import { useT } from "@/lib/i18n/client";
-import { scatterAxes, scatterPoints } from "@/lib/run-compare";
+import { axisLabel, scatterAxes, scatterPoints } from "@/lib/run-compare";
 import type { ExpRun } from "@/types/api";
 
 /**
@@ -31,12 +31,35 @@ export function RunScatter({
 }) {
   const t = useT();
   const axes = useMemo(() => scatterAxes(runs), [runs]);
-  const [xId, setXId] = useState("");
-  const [yId, setYId] = useState("");
+  // Translated once per render and handed to axisLabel(), which stays
+  // framework-free — see its doc comment in lib/run-compare.ts.
+  const axisPrefixes = useMemo(
+    () => ({
+      config: t("experiments.scatter.axisConfigPrefix"),
+      metric: t("experiments.scatter.axisMetricPrefix"),
+    }),
+    [t],
+  );
+  // Lazily initialized from `axes` (already computed above) rather than
+  // starting at "" and fixing it up in the effect below: starting empty made
+  // the very first paint of every mount — including switching back to this
+  // view — render with no axis chosen and flash the "no comparable runs"
+  // EmptyState before the effect ever ran (DESIGN.md §9 — a state that is
+  // right one tick later still reads as wrong on first paint).
+  const [xId, setXId] = useState(() => {
+    const config = axes.find((a) => a.source === "config");
+    return (config ?? axes[0])?.id ?? "";
+  });
+  const [yId, setYId] = useState(() => {
+    const metric = axes.find((a) => a.source === "metric");
+    return (metric ?? axes[axes.length - 1])?.id ?? "";
+  });
   const [logScale, setLogScale] = useState(false);
 
-  // Seed and repair the axis choice as the selection changes: a run leaving the
-  // selection can take the last numeric value for an axis with it.
+  // Repairs the axis choice as the selection changes after mount: a run
+  // leaving the selection can take the last numeric value for an axis with
+  // it. A no-op on the very first run (the lazy initializers above already
+  // match), so it only ever fires for a real change.
   useEffect(() => {
     if (axes.length === 0) return;
     setXId((current) => {
@@ -98,7 +121,7 @@ export function RunScatter({
           >
             {axes.map((axis) => (
               <option key={axis.id} value={axis.id}>
-                {axis.label}
+                {axisLabel(axis, axisPrefixes)}
               </option>
             ))}
           </Select>
@@ -113,7 +136,7 @@ export function RunScatter({
           >
             {axes.map((axis) => (
               <option key={axis.id} value={axis.id}>
-                {axis.label}
+                {axisLabel(axis, axisPrefixes)}
               </option>
             ))}
           </Select>
@@ -135,8 +158,8 @@ export function RunScatter({
         <div className="rounded-lg border border-border bg-bg-raised p-3">
           <UplotChart
             title={t("experiments.scatter.vsTitle", {
-              y: yAxis?.label ?? "",
-              x: xAxis?.label ?? "",
+              y: yAxis ? axisLabel(yAxis, axisPrefixes) : "",
+              x: xAxis ? axisLabel(xAxis, axisPrefixes) : "",
             })}
             data={data}
             series={points.map((p) => ({
@@ -148,8 +171,8 @@ export function RunScatter({
             mode="scatter"
             xIsTime={false}
             logScale={logScale}
-            xLabel={xAxis?.label}
-            yLabel={yAxis?.label}
+            xLabel={xAxis ? axisLabel(xAxis, axisPrefixes) : undefined}
+            yLabel={yAxis ? axisLabel(yAxis, axisPrefixes) : undefined}
             height={320}
           />
         </div>

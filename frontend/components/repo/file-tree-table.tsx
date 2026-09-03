@@ -4,6 +4,7 @@ import { CommitBar } from "@/components/repo/commit-bar";
 import { EntryIcon } from "@/components/repo/file-icon";
 import { RenameFileButton } from "@/components/repo/rename-file-button";
 import { Badge } from "@/components/ui/badge";
+import { TBody, Td, THead, Th, Tr } from "@/components/ui/table";
 import { TimeText } from "@/components/ui/time-text";
 import { formatBytes } from "@/lib/format";
 import { getT } from "@/lib/i18n/server";
@@ -46,34 +47,32 @@ export async function FileTreeTable({
     path.length > 0 ? repoTreeHref(kind, ns, name, rev, path.slice(0, -1).join("/")) : null;
 
   return (
-    <div className="scroll-x rounded-lg border border-border">
+    // `max-h-[70vh] overflow-y-auto` alongside `scroll-x`, the same pairing
+    // run-table.tsx uses: THead's `sticky` positions relative to the nearest
+    // *scrolling* ancestor, and without a bounded one here that would be the
+    // page itself — sticking the header at viewport y=0, directly under the
+    // site header's own `sticky top-0` (site-header.tsx), rather than at the
+    // top of this box.
+    <div className="scroll-x max-h-[70vh] overflow-y-auto rounded-lg border border-border">
       {latestCommit && (
         <CommitBar commit={latestCommit} historyHref={commitsHref} className="border-b" />
       )}
       <table className="w-full min-w-[480px] border-collapse text-sm">
-        <thead>
-          <tr className="border-b border-border text-left text-xs font-medium text-fg-subtle">
-            <th scope="col" className="px-3 py-2 font-medium">
-              {t("repo.treeTable.name")}
-            </th>
-            <th scope="col" className="px-3 py-2 font-medium">
-              {t("repo.treeTable.lastCommit")}
-            </th>
-            <th scope="col" className="px-3 py-2 font-medium">
-              {t("repo.treeTable.size")}
-            </th>
-            <th scope="col" className="px-3 py-2 text-right font-medium">
-              {t("repo.treeTable.updated")}
-            </th>
-            <th scope="col" className="px-3 py-2 font-medium">
-              <span className="sr-only">{t("repo.treeTable.actionsSr")}</span>
-            </th>
-          </tr>
-        </thead>
-        <tbody>
+        <THead sticky>
+          <Th scope="col">{t("repo.treeTable.name")}</Th>
+          <Th scope="col">{t("repo.treeTable.lastCommit")}</Th>
+          <Th scope="col">{t("repo.treeTable.size")}</Th>
+          <Th scope="col" align="right">
+            {t("repo.treeTable.updated")}
+          </Th>
+          <Th scope="col">
+            <span className="sr-only">{t("repo.treeTable.actionsSr")}</span>
+          </Th>
+        </THead>
+        <TBody>
           {parentHref && (
-            <tr className="border-b border-border last:border-0 hover:bg-bg-hover">
-              <td className="p-0" colSpan={5}>
+            <Tr className="hover:bg-bg-hover">
+              <Td className="p-0" colSpan={5}>
                 <Link
                   href={parentHref}
                   className="flex items-center gap-2 px-3 py-2 text-fg-subtle hover:text-fg"
@@ -81,8 +80,8 @@ export async function FileTreeTable({
                   <CornerLeftUp size={14} />
                   {t("repo.treeTable.upDir")}
                 </Link>
-              </td>
-            </tr>
+              </Td>
+            </Tr>
           )}
           {sorted.map((entry) => {
             const href =
@@ -97,11 +96,8 @@ export async function FileTreeTable({
               // 128+) implements it. The other cells' links sit above the
               // overlay with `relative z-10` instead of nesting inside it,
               // which would be invalid HTML.
-              <tr
-                key={entry.path}
-                className="relative border-b border-border last:border-0 hover:bg-bg-hover"
-              >
-                <td className="px-3 py-2">
+              <Tr key={entry.path} className="relative hover:bg-bg-hover">
+                <Td>
                   <Link
                     href={href}
                     className="flex items-center gap-2 text-fg after:absolute after:inset-0 after:content-['']"
@@ -115,11 +111,11 @@ export async function FileTreeTable({
                     </span>
                     {entry.lfs && <Badge tone="accent">LFS</Badge>}
                   </Link>
-                </td>
+                </Td>
                 {/* `max-w-0` lets this column give its width to the others,
                     which means the commit message is clipped at almost any
                     viewport width; the tooltip is the only way to read it. */}
-                <td className="max-w-0 truncate px-3 py-2 text-fg-subtle">
+                <Td className="max-w-0 truncate text-fg-subtle">
                   {entry.last_commit ? (
                     <Link
                       href={repoCommitsHref(kind, ns, name, rev, entry.path)}
@@ -131,18 +127,18 @@ export async function FileTreeTable({
                   ) : (
                     "—"
                   )}
-                </td>
-                <td className="tabular-nums px-3 py-2 text-fg-subtle">
+                </Td>
+                <Td className="tabular-nums text-fg-subtle">
                   {entry.type === "file" ? formatBytes(entry.size) : "—"}
-                </td>
-                <td className="px-3 py-2 text-right text-fg-subtle">
+                </Td>
+                <Td align="right" className="text-fg-subtle">
                   {entry.last_commit ? (
                     <TimeText iso={entry.last_commit.date} style="relative" />
                   ) : (
                     "—"
                   )}
-                </td>
-                <td className="px-3 py-2 text-right">
+                </Td>
+                <Td align="right">
                   <div className="flex items-center justify-end gap-2">
                     {entry.is_parquet && (
                       <Link
@@ -169,11 +165,11 @@ export async function FileTreeTable({
                       />
                     )}
                   </div>
-                </td>
-              </tr>
+                </Td>
+              </Tr>
             );
           })}
-        </tbody>
+        </TBody>
       </table>
     </div>
   );

@@ -735,6 +735,149 @@ func TestUploadDeleteMissingKeepsUnknownDirectories(t *testing.T) {
 	}
 }
 
+// TestUploadHashingLoopStopsOnContextCancellation is the regression test for
+// a second Ctrl-C during the hashing phase having nothing to interrupt: the
+// per-file loop in Upload never looked at ctx, so once every file's oid was
+// wanted, only kill -9 could stop it. Two files are planned. preuploadModes
+// opens every file once up front for its sample read (before the per-file
+// hashing loop, and unaffected by this fix); fileA's Open cancels ctx only
+// on its *second* open -- the hashing loop's own -- once that hash has been
+// computed, simulating the interrupt landing right as the current file
+// finishes. By the time the loop would move on to fileB, ctx is already
+// done, so fileB must never be opened a second time for real hashing: only
+// preuploadModes' one sample-read open should ever happen.
+func TestUploadHashingLoopStopsOnContextCancellation(t *testing.T) {
+	hub := newFakeHub(t)
+	hub.seedRegular(t, ".gitattributes", "*.bin filter=lfs diff=lfs merge=lfs -text\n")
+	c := hub.client()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	contentA := []byte("file a content")
+	var aOpens int
+	fileA := LocalFile{
+		RepoPath: "a.txt",
+		Size:     int64(len(contentA)),
+		Open: func() (io.ReadCloser, error) {
+			aOpens++
+			onClose := func() {} // preuploadModes' sample open: don't cancel yet
+			if aOpens >= 2 {
+				onClose = cancel // the hashing loop's own open
+			}
+			return cancelOnCloseReader{Reader: bytes.NewReader(contentA), onClose: onClose}, nil
+		},
+	}
+
+	contentB := []byte("file b content")
+	var bOpens int
+	fileB := LocalFile{
+		RepoPath: "b.txt",
+		Size:     int64(len(contentB)),
+		Open: func() (io.ReadCloser, error) {
+			bOpens++
+			return io.NopCloser(bytes.NewReader(contentB)), nil
+		},
+	}
+
+	res, err := Upload(ctx, c, Plan{Ref: testRef(), Rev: "main", Files: []LocalFile{fileA, fileB}}, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if res == nil {
+		t.Fatal("res = nil, want a partial result even on cancellation")
+	}
+	if len(res.Regular) != 1 || res.Regular[0] != "a.txt" {
+		t.Errorf("Regular = %v, want [a.txt]: a.txt's own hash should have completed before cancellation was observed", res.Regular)
+	}
+	// preuploadModes' sample read opens every file once before the loop
+	// starts; the loop's own hashing must not add a second open for a file
+	// it never got to.
+	if bOpens != 1 {
+		t.Errorf("b.txt was opened %d times, want exactly 1 (the preupload sample only -- the hashing loop must have stopped before reaching it)", bOpens)
+	}
+	if puts, commits := hub.counts(); puts != 0 || commits != 0 {
+		t.Errorf("puts = %d, commits = %d, want 0, 0: cancellation must stop before any transfer or commit", puts, commits)
+	}
+}
+
+// cancelOnCloseReader runs onClose once the reader is closed, i.e. once
+// whatever was reading it (readSample / hashGitBlob / hashSHA256, here) has
+// finished with it.
+type cancelOnCloseReader struct {
+	io.Reader
+	onClose func()
+}
+
+func (r cancelOnCloseReader) Close() error {
+	r.onClose()
+	return nil
+}
+
+// TestHashGitBlobStopsMidFileOnContextCancellation is the regression test
+// for hashing a single large file not being interruptible: hashGitBlob (and
+// hashSHA256, exercised the same way just below) must stop reading as soon
+// as ctx is cancelled, rather than only noticing between files. The fake
+// reader here cancels ctx during its very first Read and would keep
+// supplying data forever after that if asked again; if the read loop only
+// checked ctx between files, this test would hang.
+func TestHashGitBlobStopsMidFileOnContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r := &cancelAfterFirstReadReader{cancel: cancel, chunk: bytes.Repeat([]byte("x"), 64)}
+	f := LocalFile{
+		RepoPath: "huge.bin",
+		Size:     1 << 30, // declared size is irrelevant: reading must stop long before it would matter
+		Open:     func() (io.ReadCloser, error) { return io.NopCloser(r), nil },
+	}
+
+	if _, err := hashGitBlob(ctx, f); !errors.Is(err, context.Canceled) {
+		t.Fatalf("hashGitBlob err = %v, want context.Canceled", err)
+	}
+	if r.reads != 1 {
+		t.Errorf("underlying reader was Read %d times, want exactly 1: the ctx check must short-circuit the next Read, not let it run", r.reads)
+	}
+}
+
+func TestHashSHA256StopsMidFileOnContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r := &cancelAfterFirstReadReader{cancel: cancel, chunk: bytes.Repeat([]byte("x"), 64)}
+	f := LocalFile{
+		RepoPath: "huge.bin",
+		Size:     1 << 30,
+		Open:     func() (io.ReadCloser, error) { return io.NopCloser(r), nil },
+	}
+
+	if _, _, err := hashSHA256(ctx, f); !errors.Is(err, context.Canceled) {
+		t.Fatalf("hashSHA256 err = %v, want context.Canceled", err)
+	}
+	if r.reads != 1 {
+		t.Errorf("underlying reader was Read %d times, want exactly 1", r.reads)
+	}
+}
+
+// cancelAfterFirstReadReader cancels ctx on its first Read and would keep
+// returning chunk on every subsequent call, forever, if one ever came --
+// simulating a file far larger than any ctx-aware read loop should actually
+// finish reading once cancelled.
+type cancelAfterFirstReadReader struct {
+	cancel context.CancelFunc
+	chunk  []byte
+	reads  int
+}
+
+func (r *cancelAfterFirstReadReader) Read(p []byte) (int, error) {
+	r.reads++
+	n := copy(p, r.chunk)
+	if r.reads == 1 {
+		r.cancel()
+	}
+	return n, nil
+}
+
 func TestUnderUnknownDir(t *testing.T) {
 	dirs := []string{"data", "a/b"}
 	tests := []struct {

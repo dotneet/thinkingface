@@ -171,7 +171,16 @@ func (s *Server) handleHFTree(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	recursive := r.URL.Query().Get("recursive") == "true" || r.URL.Query().Get("recursive") == "1"
+	// huggingface_hub's paginate() passes a Python bool straight into the
+	// query string: 0.x (requests) encodes it "True"/"False", 1.x (httpx)
+	// encodes it lowercase "true"/"false" -- verified against both in the
+	// e2e venv (?recursive=True&expand=False vs ?recursive=true). A
+	// case-sensitive "true"/"1" check silently missed every 0.x caller, so
+	// list_repo_files() / list_repo_tree(recursive=True) / HfFileSystem's
+	// recursive listing dropped nested files without ever raising. Reuse the
+	// same lowercase-then-queryFlag fold hfListWantsCard (repolist.go) uses
+	// for the same reason.
+	recursive := queryFlag(strings.ToLower(r.URL.Query().Get("recursive")))
 	rev, ok := revParam(w, r, "rev", repo)
 	if !ok {
 		return

@@ -35,11 +35,26 @@ func commitSummary(path, message, description string) string {
 	return summary
 }
 
-// editConflict checks the caller's base_oid, captured when they opened the
-// editor, against the path's current state. An empty base_oid means the
-// caller isn't tracking staleness (e.g. creating a new file) and is always
-// accepted.
-func editConflict(baseOID string, exists bool, currentOID string) (message string, isConflict bool) {
+// editConflict checks what the caller believed about the path when they
+// opened the editor against what the path holds now.
+//
+// There are two beliefs to check, and which one applies is the caller's to
+// say. Someone editing a file sends the blob SHA they started from, which
+// must still be what the path holds. Someone creating one sends
+// mustNotExist: the path was absent, and anything occupying it now means
+// another author got there first.
+//
+// Creation used to say nothing at all, because an absent file has no blob
+// SHA to send -- and "nothing" is also how a caller says it is not tracking
+// staleness, so two people creating the same path resolved to whoever saved
+// last, silently. The two cases are separate claims now.
+func editConflict(baseOID string, mustNotExist, exists bool, currentOID string) (message string, isConflict bool) {
+	if mustNotExist {
+		if exists {
+			return "a file already exists at this path; reload the page to edit it instead", true
+		}
+		return "", false
+	}
 	if baseOID == "" {
 		return "", false
 	}
@@ -118,6 +133,14 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, maxEditBytes, &req, "request body must be JSON with a content field") {
 		return
 	}
+	// The two staleness claims are mutually exclusive: base_oid says "the
+	// path held this blob", must_not_exist says "the path held nothing".
+	// Sending both is a caller bug, and silently honouring one of them would
+	// hide it.
+	if req.MustNotExist && req.BaseOID != "" {
+		badRequest(w, "base_oid and must_not_exist cannot both be set")
+		return
+	}
 	content := []byte(req.Content)
 	if !utf8.ValidString(req.Content) {
 		badRequest(w, "content must be valid UTF-8")
@@ -165,7 +188,7 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request) {
 	if exists {
 		currentOID = entry.Hash.String()
 	}
-	if message, isConflict := editConflict(req.BaseOID, exists, currentOID); isConflict {
+	if message, isConflict := editConflict(req.BaseOID, req.MustNotExist, exists, currentOID); isConflict {
 		writeError(w, http.StatusConflict, "conflict", message)
 		return
 	}
@@ -195,12 +218,18 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request) {
 	// push landing in that window would otherwise become the parent and
 	// slip past a check made against the old head.
 	//
-	// Only when the caller supplied a base_oid, though: an empty one means
-	// "not tracking staleness" (see editConflict), which must keep allowing
-	// overwrites of existing files. An unconditional precondition would read
-	// the empty OID as "path must be absent" and turn those into 409s.
+	// Which precondition depends on what the caller claimed (see
+	// editConflict). A creation asserts the path is absent, which is what an
+	// empty OID means to gitrepo -- the same assertion the rename endpoint
+	// makes about its destination. An edit asserts the blob it started from.
+	// A caller claiming neither is not tracking staleness, and an
+	// unconditional precondition would read that as "path must be absent"
+	// and turn every such overwrite into a 409.
 	var preconditions []gitrepo.PathPrecondition
-	if req.BaseOID != "" {
+	switch {
+	case req.MustNotExist:
+		preconditions = []gitrepo.PathPrecondition{{Path: path, OID: ""}}
+	case req.BaseOID != "":
 		preconditions = []gitrepo.PathPrecondition{{Path: path, OID: req.BaseOID}}
 	}
 	newHash, oldHash, err := s.commitThroughWAL(r.Context(), repo, gitrepo.CommitRequest{
@@ -318,7 +347,9 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if message, isConflict := editConflict(req.BaseOID, true, entry.Hash.String()); isConflict {
+	// mustNotExist is false: delete and rename both start from a file that is
+	// already there, so the only claim their callers can make is base_oid.
+	if message, isConflict := editConflict(req.BaseOID, false, true, entry.Hash.String()); isConflict {
 		writeError(w, http.StatusConflict, "conflict", message)
 		return
 	}
@@ -444,7 +475,9 @@ func (s *Server) handleRenameFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if message, isConflict := editConflict(req.BaseOID, true, entry.Hash.String()); isConflict {
+	// mustNotExist is false: delete and rename both start from a file that is
+	// already there, so the only claim their callers can make is base_oid.
+	if message, isConflict := editConflict(req.BaseOID, false, true, entry.Hash.String()); isConflict {
 		writeError(w, http.StatusConflict, "conflict", message)
 		return
 	}

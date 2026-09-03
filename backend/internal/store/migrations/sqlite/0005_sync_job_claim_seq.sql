@@ -1,0 +1,47 @@
+-- A fencing token for sync job claims that only ever counts up.
+--
+-- The lease does not by itself decide who owns a job. A worker can lose its
+-- lease -- paused process, a long stop-the-world pause, its own connection to
+-- the database dropping while everything else keeps running -- and come back
+-- believing it still holds a claim the sweeper has since handed to somebody
+-- else. So HeartbeatSyncJob and FinishSyncJob match on a token as well as on
+-- status = 'running', and a write that matches nothing means "your claim is
+-- gone, the new holder owns the outcome".
+--
+-- That token used to be `attempts`, which is not a token at all, because it
+-- is not monotonic. EnqueueSync resets it to 0 on a pending row, and that
+-- reset is deliberate (a new push is new work and must not inherit the
+-- penalty of a previous failure -- see the comment there). The reset is what
+-- breaks the fence:
+--
+--   1. W1 claims job J             -> attempts = 1, running
+--   2. W1 stalls past its lease
+--   3. the sweeper returns J to the queue  -> pending, attempts still 1
+--   4. a push arrives              -> EnqueueSync sets attempts = 0
+--   5. W2 claims J                 -> attempts = 1, running
+--   6. W1 wakes up and finishes    -> status = 'running' AND attempts = 1
+--                                     matches, and W1 writes 'done'
+--
+-- After step 6 the ref has no 'running' row while W2 is still rebuilding it.
+-- W2's result is discarded (and, if it failed, never retried), and
+-- ClaimSyncJob's NOT EXISTS now lets a third worker start on the same ref
+-- alongside W2 -- two concurrent rebuilds of one ref's index, whichever
+-- commits last winning, which is exactly the "indexed at a state the
+-- repository has moved past" hazard the lease and that clause exist to
+-- prevent.
+--
+-- claim_seq separates the two jobs the counter was doing. `attempts` goes
+-- back to being only a retry budget, resettable by a push; claim_seq is
+-- incremented by ClaimSyncJob and by nothing else -- no push, retry, sweep or
+-- finish touches it -- so a value handed to a worker is never handed out
+-- again for that row, and a straggler's write can no longer match.
+--
+-- Existing rows start at 0 and get their first real token from their next
+-- claim, which is all they need: the token only has to be unique per claim of
+-- a row, not globally. A row left 'running' by the previous binary is swept
+-- back to 'pending' the usual way and reclaimed at claim_seq = 1.
+--
+-- SQLite has no ADD COLUMN IF NOT EXISTS; the migration runner is what makes
+-- this run once (schema_migrations records the file name), exactly as in
+-- 0002. INTEGER here is the same 64-bit column Postgres spells BIGINT.
+ALTER TABLE sync_jobs ADD COLUMN claim_seq INTEGER NOT NULL DEFAULT 0;

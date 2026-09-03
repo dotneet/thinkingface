@@ -6,7 +6,15 @@ export const ui = {
   skipToContent: "Skip to content",
   copy: "Copy",
   copied: "Copied",
+  // Shown when the copy did not happen. The browser only exposes a clipboard
+  // API on a secure context, so a self-hosted instance served over plain HTTP
+  // reaches this even though nothing is wrong with the page -- hence the
+  // instruction to copy by hand rather than an invitation to retry.
+  copyFailed: "Couldn't copy — select the text and copy it manually",
   close: "Close",
+  // Replaces `close` on the dialog's × while the action it started is still
+  // running: the button is disabled then, and "Close" alone would not say why.
+  closeBusy: "Close (unavailable until the current action finishes)",
   cellValue: "Cell value",
   viewFullValue: "Click to view full value",
   // Table cell renderers: image thumbnails and the JSON tree (ValueCell /

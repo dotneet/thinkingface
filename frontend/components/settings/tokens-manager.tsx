@@ -46,7 +46,13 @@ function isTokenExpired(token: TokenItem): boolean {
 export function TokensManager() {
   const t = useT();
   const [tokens, setTokens] = useState<TokenItem[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Split from the create-form's own error: they used to share one `error`
+  // state, so starting a create cleared whatever the list-load failure had
+  // said (`setError(null)` at the top of handleCreate), and a create that
+  // then failed rendered its message inside the ErrorState meant for the load
+  // failure — under a hint ("the backend may be unreachable, try reloading")
+  // that was diagnosing the wrong problem.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [newName, setNewName] = useState("");
   const [newScope, setNewScope] = useState<"read" | "write">("read");
@@ -60,6 +66,7 @@ export function TokensManager() {
   // Id of the row pending confirmation in the ConfirmDialog; null closes it.
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   async function refresh() {
     const result = await listTokens();
@@ -67,12 +74,12 @@ export function TokensManager() {
       // 401 here means "you're signed out", not "something broke" — say so
       // and point at the fix instead of surfacing the raw API error.
       setNeedsLogin(isUnauthorized(result));
-      setError(errorMessage(t, result));
+      setLoadError(errorMessage(t, result));
       setTokens(null);
       return;
     }
     setNeedsLogin(false);
-    setError(null);
+    setLoadError(null);
     setTokens(result.data.items);
   }
 
@@ -84,7 +91,7 @@ export function TokensManager() {
     e.preventDefault();
     if (!newName.trim()) return;
     setCreating(true);
-    setError(null);
+    setCreateError(null);
     // Drop the previous token before asking for a new one: a failed create
     // would otherwise leave the old banner standing where it reads as the
     // result of the attempt that just failed.
@@ -92,7 +99,7 @@ export function TokensManager() {
     const result = await createToken(newName.trim(), newScope, newExpiryDays);
     setCreating(false);
     if (!result.ok) {
-      setError(
+      setCreateError(
         isUnauthorized(result)
           ? t("settings.tokens.sessionExpiredCreate")
           : errorMessage(t, result),
@@ -170,6 +177,10 @@ export function TokensManager() {
           >
             {creating ? t("settings.tokens.creating") : t("settings.tokens.create")}
           </Button>
+          {/* Below the submit button, and its own state from the list-load
+              error above (DESIGN.md §8): a failed create must never be
+              mistaken for the list having failed to load, or vice versa. */}
+          {createError && <Alert tone="negative">{createError}</Alert>}
         </form>
       )}
 
@@ -199,17 +210,20 @@ export function TokensManager() {
         </Alert>
       )}
 
-      {error && !(tokens === null && needsLogin) && <Alert tone="negative">{error}</Alert>}
-
-      {tokens === null && !error ? (
+      {tokens === null && !loadError ? (
         <SkeletonLines lines={3} />
       ) : tokens === null && needsLogin ? (
         <LoginRequiredState next="/settings/tokens" />
       ) : tokens === null ? (
         <ErrorState
           title={t("settings.errorTitle")}
-          message={error ?? t("settings.tokens.loadFailed")}
+          message={loadError ?? t("settings.tokens.loadFailed")}
           hint={t("settings.tokens.loadFailedHint")}
+          action={
+            <Button size="sm" onClick={() => refresh()}>
+              {t("ui.unexpectedError.retry")}
+            </Button>
+          }
         />
       ) : tokens.length === 0 ? (
         <EmptyState

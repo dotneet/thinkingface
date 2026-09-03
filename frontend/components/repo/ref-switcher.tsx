@@ -102,7 +102,9 @@ export function RefSwitcher({
             {...triggerProps}
           >
             {currentTag && !currentBranch ? <Tag size={14} /> : <GitBranch size={14} />}
-            <span className="max-w-[12rem] truncate font-mono">{currentLabel}</span>
+            <span className="max-w-[12rem] truncate font-mono" title={currentLabel}>
+              {currentLabel}
+            </span>
             <ChevronDown size={14} />
           </Button>
         )}
@@ -151,7 +153,9 @@ export function RefSwitcher({
                       }}
                     >
                       <GitBranch size={14} className="shrink-0 text-fg-subtle" />
-                      <span className="truncate">{ref.name}</span>
+                      <span className="truncate" title={ref.name}>
+                        {ref.name}
+                      </span>
                       <RefTarget oid={ref.target_oid} />
                       {ref.name === currentRev && <Check size={14} className="shrink-0" />}
                     </DropdownMenuItem>
@@ -171,7 +175,9 @@ export function RefSwitcher({
                         }}
                       >
                         <Tag size={14} className="shrink-0 text-fg-subtle" />
-                        <span className="truncate">{ref.name}</span>
+                        <span className="truncate" title={ref.name}>
+                          {ref.name}
+                        </span>
                         <RefTarget oid={ref.target_oid} />
                         {ref.name === currentRev && <Check size={14} className="shrink-0" />}
                       </DropdownMenuItem>

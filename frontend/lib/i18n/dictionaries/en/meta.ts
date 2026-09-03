@@ -39,6 +39,9 @@ export const meta = {
   members: "Members",
   auditLog: "Audit log",
   dangerZone: "Danger zone",
+  adminUsers: "Users",
+  adminSyncJobs: "Sync jobs",
+  adminQuotas: "Storage quotas",
 
   // Creation and sign-in.
   newRepository: "New repository",

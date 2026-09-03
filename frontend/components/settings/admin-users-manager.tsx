@@ -246,6 +246,11 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
           title={t("settings.adminUsers.loadFailed")}
           message={loadError ?? t("settings.adminUsers.loadFailed")}
           hint={t("settings.adminUsers.loadFailedHint")}
+          action={
+            <Button size="sm" onClick={() => refresh()}>
+              {t("ui.unexpectedError.retry")}
+            </Button>
+          }
         />
       ) : users.length === 0 ? (
         outOfRange ? (

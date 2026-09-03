@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { alignSeriesForKey, colorForRun, emaSmooth, groupByKey } from "@/lib/chart-utils";
+import {
+  alignSeriesForKey,
+  colorForRun,
+  dashForRun,
+  emaSmooth,
+  groupByKey,
+  spanGapsForMode,
+} from "@/lib/chart-utils";
 import type { ExpMetricSeries } from "@/types/api";
+
+/** Matches the length of the PALETTE array in lib/chart-utils.ts. */
+const PALETTE_SIZE = 20;
 
 describe("colorForRun", () => {
   it("is stable for a given index", () => {
@@ -9,19 +19,64 @@ describe("colorForRun", () => {
   });
 
   it("wraps around the palette", () => {
-    expect(colorForRun(10)).toBe(colorForRun(0));
-    expect(colorForRun(21)).toBe(colorForRun(1));
+    expect(colorForRun(PALETTE_SIZE)).toBe(colorForRun(0));
+    expect(colorForRun(2 * PALETTE_SIZE + 1)).toBe(colorForRun(1));
   });
 
   it("falls back to the first colour for a negative index", () => {
-    // -1 % 10 is -1 in JS, which indexes off the front of the palette.
+    // -1 % 20 is -1 in JS, which indexes off the front of the palette.
     expect(colorForRun(-1)).toBe(colorForRun(0));
   });
 
   it("always returns a hex colour", () => {
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < PALETTE_SIZE + 5; i++) {
       expect(colorForRun(i)).toMatch(/^#[0-9a-f]{6}$/);
     }
+  });
+
+  it("has more colours than a typical sweep selection so 11+ runs stay distinguishable", () => {
+    // Regression guard for the "10-colour palette wraps at run 11" bug: the
+    // 11th run must not collide with the 1st any more.
+    expect(colorForRun(10)).not.toBe(colorForRun(0));
+  });
+});
+
+describe("dashForRun", () => {
+  it("is solid (undefined) for every run within the first lap of the palette", () => {
+    for (let i = 0; i < PALETTE_SIZE; i++) {
+      expect(dashForRun(i)).toBeUndefined();
+    }
+  });
+
+  it("switches dash pattern once the index wraps the palette, distinguishing a colour repeat", () => {
+    // Run PALETTE_SIZE shares a colour with run 0 (colorForRun wraps), so it
+    // must not also share its (solid) dash.
+    expect(dashForRun(PALETTE_SIZE)).not.toBe(dashForRun(0));
+    expect(dashForRun(PALETTE_SIZE)).toBeDefined();
+  });
+
+  it("is stable for a given index", () => {
+    expect(dashForRun(PALETTE_SIZE)).toEqual(dashForRun(PALETTE_SIZE));
+  });
+
+  it("falls back to solid for a negative index, matching colorForRun's fallback", () => {
+    expect(dashForRun(-1)).toBeUndefined();
+  });
+});
+
+describe("spanGapsForMode", () => {
+  it("spans gaps for line charts, so a run's line does not vanish where only ANOTHER run's own null lands", () => {
+    // Regression guard: two runs sampled at different step strides (the
+    // backend downsamples each run to max_points independently) fill each
+    // other's slots with null in alignSeriesForKey's output. Without
+    // spanGaps, uPlot draws neither a line nor a marker through an isolated
+    // null (points.show is false in line mode), which erases the run
+    // entirely wherever its sampling didn't line up with the others'.
+    expect(spanGapsForMode("line")).toBe(true);
+  });
+
+  it("is a no-op for scatter mode, which draws no line at all", () => {
+    expect(spanGapsForMode("scatter")).toBe(false);
   });
 });
 

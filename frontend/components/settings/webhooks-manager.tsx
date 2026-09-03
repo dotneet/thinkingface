@@ -237,10 +237,14 @@ export function WebhooksManager({
             />
           </Field>
         </div>
-        <div className="flex flex-col gap-1.5">
-          <span className="text-sm font-medium text-fg-muted">
+        {/* fieldset/legend rather than a <div>/<span> heading: without it a
+            screen reader announces ten unrelated checkboxes with no
+            indication they form the "Events" group (same pattern as
+            ui/segmented-control.tsx, and webhook-row.tsx's own edit panel). */}
+        <fieldset className="m-0 flex min-w-0 flex-col gap-1.5 border-0 p-0">
+          <legend className="p-0 text-sm font-medium text-fg-muted">
             {t("settings.webhooks.eventsLabel")}
-          </span>
+          </legend>
           <div className="flex flex-wrap gap-x-5 gap-y-1.5">
             {WEBHOOK_EVENT_OPTIONS.map((opt) => (
               <label key={opt.value} className="flex items-center gap-2 text-sm text-fg-muted">
@@ -249,7 +253,7 @@ export function WebhooksManager({
               </label>
             ))}
           </div>
-        </div>
+        </fieldset>
         <Button
           type="submit"
           variant="primary"
@@ -290,11 +294,20 @@ export function WebhooksManager({
         </Alert>
       )}
 
-      {error && <Alert tone="negative">{error}</Alert>}
-
       {webhooks === null && !error ? (
         <SkeletonLines lines={3} />
-      ) : webhooks === null ? null : webhooks.length === 0 ? (
+      ) : webhooks === null ? (
+        <ErrorState
+          title={t("settings.errorTitle")}
+          message={error ?? t("settings.webhooks.loadFailed")}
+          hint={t("settings.webhooks.loadFailedHint")}
+          action={
+            <Button size="sm" onClick={() => refreshWebhooks(namespace)}>
+              {t("ui.unexpectedError.retry")}
+            </Button>
+          }
+        />
+      ) : webhooks.length === 0 ? (
         <EmptyState
           icon={WebhookIcon}
           title={t("settings.webhooks.emptyTitle")}

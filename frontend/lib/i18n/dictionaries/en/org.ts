@@ -141,6 +141,14 @@ export const org = {
       confirmRole: "Change {username}'s role in {org} from {from} to {to}.",
       confirmRoleAdmin:
         "Admins can add and remove members, change everyone's role, and manage the organization's settings and webhooks.",
+      // Shown only when the row being changed/removed belongs to the viewer
+      // themselves. The dialog otherwise reads like it is about someone
+      // else, and a role change or removal that succeeds against your own
+      // account starts 403ing every control on this screen.
+      confirmRoleSelfWarning:
+        "This changes your own role. If it no longer allows managing members, you will immediately lose access to this settings page.",
+      confirmRemoveSelfWarning:
+        "This removes you from {org}. You will immediately lose access to this organization's settings.",
       confirmRoleConfirm: "Change role",
       emptyTitle: "No members",
       emptyDescription: "Add someone by username to give them access.",

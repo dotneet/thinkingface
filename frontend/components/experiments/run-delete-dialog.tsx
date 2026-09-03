@@ -47,6 +47,10 @@ export function RunDeleteDialog({
     <Dialog
       open={open}
       onClose={onClose}
+      // `onClose` belongs to the parent and cannot know a delete is running,
+      // so the guard is stated here: dismissing mid-delete would drop the
+      // dialog the failure is reported in.
+      busy={deleting}
       title={t("experiments.deleteRun.confirmTitle", { name: run })}
       footer={
         <>

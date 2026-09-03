@@ -171,7 +171,11 @@ The comment at the top of the package is itself a summary of the design:
   revision before the Worker gets to it (the parquet viewer, the experiment indexer) fill
   gaps using this same function. Because we **publish first and write `repo_files`
   afterward** (`ReplaceRepoFiles` runs only after publishing completes), the invariant "a
-  row exists in `repo_files` ⇒ that blob exists in `blobs/`" always holds. What gets
+  row exists in `repo_files` ⇒ that blob exists in `blobs/`" always holds. The one thing
+  that can delete out from under it is the collector, and §5's `blob_deletions` ledger is
+  how it is kept: the repair pass runs at the end of this pipeline, after
+  `ReplaceRepoFiles`, and republishes anything the collector took while this push was
+  adopting it. What gets
   published is decided not by the old..new diff of the push but by **shas absent from the
   ref's previous index (`ListIndexedBlobSHAs`)**. Even when jobs for the same ref race, or
   an earlier job dies partway through, the job that writes the index last ends up
@@ -241,16 +245,37 @@ with the same command.
     completed while the List itself was still in progress isn't missed. The pure function
     for the decision is `store.OrphanedBlobs` (placed alongside the LFS-side
     `store.OrphanedLFSObjects`)
-  - **A mandatory 24-hour grace period (`blobGrace`).** Because no row records when a
-    `blobs/` object was written, "no reference exists" is always only an inference. Objects
-    updated within the last 24 hours are left untouched, since we cannot rule out that they
-    belong to a push whose `repo_files` commit hasn't landed yet, or to a cache the viewer
-    just wrote
-  - Even combining these two safeguards leaves a residual window (a push that arrives
-    between the post-List re-read and the delete, for a sha that had already gone orphan
-    more than 24 hours earlier) — this is accepted as tolerable. **A lost blob is not
-    permanently lost**: the next push that includes that sha causes `publishBlobs` to
-    republish it
+  - **A 24-hour grace period (`blobGrace`).** Because no row records when a `blobs/`
+    object was written, "no reference exists" is always only an inference. Objects updated
+    within the last 24 hours are left untouched, since we cannot rule out that they belong
+    to a push whose `repo_files` commit hasn't landed yet, or to a cache the viewer just
+    wrote
+  - **The grace is not what makes it safe.** An earlier revision of this section argued
+    that the residual window was tolerable because "a lost blob is not permanently lost:
+    the next push that includes that sha republishes it." That was wrong in both halves.
+    `PublishBlob` skips an object it Stats as already present, so a push that *re-references*
+    an orphaned sha leaves the object's timestamp untouched and the grace period cannot see
+    it — the window is not a narrow race, it is the ordinary case for deduplicated content.
+    And the next push does not republish, because `ListIndexedBlobSHAs` reports the sha as
+    already published and `publishBlobs` skips it. A blob collected while a push was
+    adopting it stayed gone until somebody ran `thinkingface resync`
+  - **The `blob_deletions` ledger closes it** (migration 0006). The lfs/ passes above lock
+    a row that both the collector and the writers take; blobs/ has no such row, because
+    nothing records a blob when it is written. So the rare side writes it: the collector
+    records its *intent to delete* a sha before it touches storage, and holds that row
+    `FOR UPDATE` while it re-checks `repo_files` and deletes (`store.DeleteOrphanedBlob`).
+    The sync pipeline takes the same row after `ReplaceRepoFiles` commits and republishes
+    anything the collector took (`store.RepairDeletedBlobs`, called from the syncer). The
+    two therefore serialise: whichever runs first, the other sees the outcome — the
+    collector finds the new reference and refuses, or the repair finds the ledger row and
+    puts the bytes back
+  - Rows do not accumulate: the repair pass deletes the ones it answers, and the collector
+    prunes the rest once nothing names the sha (`store.PruneBlobDeletions`), which is the
+    ordinary case for a sha it successfully collected. What remains is a crash between the
+    ledger write and the storage delete, which leaves a row for bytes that may still be
+    there — the repair pass handles that too, since `PublishBlob` is idempotent and costs
+    one Stat. The serialisation argument is PostgreSQL's; SQLite has no row locks and needs
+    none, because `entrypoint.sh` refuses to run `gc` in the Litestream-backed SQLite mode
 - The `--dry-run` (default `true`) / `--yes` convention is shared by every pass
 
 ## 6. New API: `GET /api/v1/repos/{kind}/{ns}/{name}/gcs/{rev}`

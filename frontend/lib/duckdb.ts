@@ -25,7 +25,13 @@
 
 import type { AsyncDuckDB, AsyncDuckDBConnection, DuckDBBundles } from "@duckdb/duckdb-wasm";
 import type { DataTableColumn, DataTableRow } from "@/components/ui/data-table";
-import { isTemporalHint, toPlainValue, toTemporalValue } from "@/lib/duckdb-values";
+import {
+  isDecimalHint,
+  isTemporalHint,
+  toDecimalValue,
+  toPlainValue,
+  toTemporalValue,
+} from "@/lib/duckdb-values";
 
 /**
  * Above this the download alone would be hostile, never mind decoding it in a
@@ -65,6 +71,8 @@ export type SqlSession = {
   /** Name the Parquet file is registered under; interpolate into SQL as-is. */
   readonly tableName: string;
   query(sql: string): Promise<SqlResult>;
+  /** Best-effort interruption of a query() call currently in flight. */
+  cancel(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -163,25 +171,58 @@ export async function createParquetSession(
       // i18n key, translated by the SQL console before display.
       if (closed) throw new Error("parquet.sql.sessionClosed");
       const started = performance.now();
-      const table = await conn.query(sql);
-      const elapsedMs = performance.now() - started;
-
-      const columns: DataTableColumn[] = table.schema.fields.map((field) => ({
+      // `send` rather than `query`: `query` issues a single RUN_QUERY worker
+      // task that runs the whole query as one blocking wasm call, which the
+      // worker's message loop cannot interrupt mid-flight — a `cancel()`
+      // call queued while it runs simply waits for it to finish. `send`
+      // drives DuckDB's pending-query protocol instead (start, then poll
+      // until ready), which executes in interruptible steps and is what
+      // `cancel()` below (AsyncDuckDBConnection#cancelSent) is designed to
+      // interrupt between steps.
+      //
+      // `open()` is not optional here the way it is for the readers
+      // `RecordBatchReader.from()` hands back already opened: `send` returns
+      // an AsyncRecordBatchStreamReader that has not yet read the stream's
+      // schema message, so `reader.schema` is undefined until this resolves
+      // and the `.fields` access below throws.
+      const reader = await (await conn.send(sql)).open();
+      const columns: DataTableColumn[] = reader.schema.fields.map((field) => ({
         key: field.name,
         hint: String(field.type),
       }));
       const rows: DataTableRow[] = [];
-      for (const row of table) {
-        if (rows.length >= SQL_MAX_RESULT_ROWS) break;
-        rows.push(toPlainRow(row, columns));
+      let totalRows = 0;
+      // Every batch is drained (not just up to SQL_MAX_RESULT_ROWS) so
+      // `totalRows` still reports the query's true row count for the
+      // "N of M rows shown" banner. Turning rows into JS objects stops at the
+      // cap, and so does walking them: `numRows` is read off the batch, so
+      // nothing past the cap has to be visited to count it, and iterating a
+      // batch materialises an Arrow proxy per row — a cost worth paying only
+      // for rows that will be displayed.
+      for await (const batch of reader) {
+        totalRows += batch.numRows;
+        if (rows.length >= SQL_MAX_RESULT_ROWS) continue;
+        for (const row of batch) {
+          rows.push(toPlainRow(row, columns));
+          if (rows.length >= SQL_MAX_RESULT_ROWS) break;
+        }
       }
+      const elapsedMs = performance.now() - started;
       return {
         columns,
         rows,
-        totalRows: table.numRows,
-        truncated: table.numRows > rows.length,
+        totalRows,
+        truncated: totalRows > rows.length,
         elapsedMs,
       };
+    },
+    // Best-effort: interrupts a query started by the query() call currently
+    // in flight on this connection, per the trace above. If nothing is
+    // running (or the query has already moved past the interruptible
+    // pending-query phase into pure result transfer), this is a harmless
+    // no-op — the caller does not have to know which case it is.
+    async cancel(): Promise<void> {
+      await conn.cancelSent().catch(() => {});
     },
     async close(): Promise<void> {
       if (closed) return;
@@ -223,10 +264,14 @@ function toPlainRow(row: unknown, columns: DataTableColumn[]): DataTableRow {
     const value = source?.[col.key];
     // The hint goes in as well as gating the call: TIME, DURATION and INTERVAL
     // are temporal too, and each is read differently from a TIMESTAMP's epoch
-    // milliseconds (see temporalKind in lib/duckdb-values.ts).
+    // milliseconds (see temporalKind in lib/duckdb-values.ts). DECIMAL is the
+    // same story: apache-arrow hands it back unscaled, and the scale to apply
+    // lives in this same hint string (see decimalScale).
     out[col.key] = isTemporalHint(col.hint)
       ? toTemporalValue(value, col.hint)
-      : toPlainValue(value);
+      : isDecimalHint(col.hint)
+        ? toDecimalValue(value, col.hint)
+        : toPlainValue(value);
   }
   return out;
 }

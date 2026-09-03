@@ -26,7 +26,7 @@ var pgTables = []string{
 	"users", "namespaces", "org_members", "access_tokens", "repositories", "repo_files",
 	"lfs_objects", "repo_lfs_objects", "parquet_files", "exp_projects", "exp_runs", "exp_points",
 	"sync_jobs", "repo_lineage", "webhooks", "webhook_deliveries", "repo_download_stats",
-	"repo_redirects", "repo_transfers", "user_ssh_keys", "org_audit_log",
+	"repo_redirects", "repo_transfers", "user_ssh_keys", "org_audit_log", "blob_deletions",
 }
 
 type backend struct {
@@ -865,7 +865,7 @@ func TestIntegrationSyncJobs(t *testing.T) {
 		if n, err := s.RequeueExpiredSyncJobs(ctx); err != nil || n != 0 {
 			t.Fatalf("sweeper took a live claim: n=%d, %v", n, err)
 		}
-		if err := s.FinishSyncJob(ctx, j.ID, j.Attempts, errors.New("boom")); err != nil {
+		if err := s.FinishSyncJob(ctx, j, errors.New("boom")); err != nil {
 			t.Fatal(err)
 		}
 		// Failed once: back to pending, but paced. The 'dev' job is the only
@@ -882,7 +882,7 @@ func TestIntegrationSyncJobs(t *testing.T) {
 		if err != nil || j2 == nil || j2.ID != j.ID || j2.Attempts != 2 {
 			t.Fatalf("re-claim = %+v, %v", j2, err)
 		}
-		if err := s.FinishSyncJob(ctx, j2.ID, j2.Attempts, nil); err != nil {
+		if err := s.FinishSyncJob(ctx, j2, nil); err != nil {
 			t.Fatal(err)
 		}
 
@@ -903,7 +903,7 @@ func TestIntegrationSyncJobs(t *testing.T) {
 		// Exhausting the attempt budget parks the job.
 		last := j4
 		for last.Attempts < SyncMaxAttempts {
-			if err := s.FinishSyncJob(ctx, last.ID, last.Attempts, errors.New("x")); err != nil {
+			if err := s.FinishSyncJob(ctx, last, errors.New("x")); err != nil {
 				t.Fatal(err)
 			}
 			clearBackoff()
@@ -916,7 +916,7 @@ func TestIntegrationSyncJobs(t *testing.T) {
 			}
 			last = next
 		}
-		if err := s.FinishSyncJob(ctx, last.ID, last.Attempts, errors.New("x")); err != nil {
+		if err := s.FinishSyncJob(ctx, last, errors.New("x")); err != nil {
 			t.Fatal(err)
 		}
 		clearBackoff()
@@ -951,7 +951,7 @@ func TestIntegrationSyncJobs(t *testing.T) {
 		if err != nil || retried == nil || retried.ID != failed[0].ID || retried.Attempts != 1 {
 			t.Fatalf("claim after retry = %+v, %v", retried, err)
 		}
-		if err := s.FinishSyncJob(ctx, retried.ID, retried.Attempts, nil); err != nil {
+		if err := s.FinishSyncJob(ctx, retried, nil); err != nil {
 			t.Fatal(err)
 		}
 
@@ -977,7 +977,7 @@ func TestIntegrationSyncJobs(t *testing.T) {
 			t.Fatalf("reclaim = %+v, %v", holder, err)
 		}
 		// The straggler reports success against its own (now superseded) claim.
-		if err := s.FinishSyncJob(ctx, stale.ID, stale.Attempts, nil); err != nil {
+		if err := s.FinishSyncJob(ctx, stale, nil); err != nil {
 			t.Fatalf("stale finish returned an error: %v", err)
 		}
 		fencedOut, err := s.ClaimSyncJob(ctx, testLease)
@@ -989,7 +989,7 @@ func TestIntegrationSyncJobs(t *testing.T) {
 				fencedOut, holder.ID)
 		}
 		// The real holder still owns it and its outcome still lands.
-		if err := s.FinishSyncJob(ctx, holder.ID, holder.Attempts, nil); err != nil {
+		if err := s.FinishSyncJob(ctx, holder, nil); err != nil {
 			t.Fatal(err)
 		}
 		if n, _ := s.PendingSyncCount(ctx, r4.ID); n != 0 {
@@ -1025,17 +1025,17 @@ func TestIntegrationSyncJobs(t *testing.T) {
 		if err != nil || other == nil || other.Ref != "dev" {
 			t.Fatalf("claim other ref = %+v, %v", other, err)
 		}
-		_ = s.FinishSyncJob(ctx, other.ID, other.Attempts, nil)
+		_ = s.FinishSyncJob(ctx, other, nil)
 		// Once the running job finishes, the queued one becomes claimable, and
 		// it carries the old_sha the finished job left behind.
-		if err := s.FinishSyncJob(ctx, first.ID, first.Attempts, nil); err != nil {
+		if err := s.FinishSyncJob(ctx, first, nil); err != nil {
 			t.Fatal(err)
 		}
 		queued, err := s.ClaimSyncJob(ctx, testLease)
 		if err != nil || queued == nil || queued.Ref != "main" || queued.OldSHA != "a1" || queued.NewSHA != "a2" {
 			t.Fatalf("claim after finish = %+v, %v", queued, err)
 		}
-		_ = s.FinishSyncJob(ctx, queued.ID, queued.Attempts, nil)
+		_ = s.FinishSyncJob(ctx, queued, nil)
 
 		// ... and never hold two jobs for one ref at the same time, which on
 		// Postgres also has to survive the window where the first claim has
@@ -1088,7 +1088,7 @@ func TestIntegrationSyncJobs(t *testing.T) {
 					activeMu.Lock()
 					active[j.Ref] = false
 					activeMu.Unlock()
-					_ = s.FinishSyncJob(ctx, j.ID, j.Attempts, nil)
+					_ = s.FinishSyncJob(ctx, j, nil)
 				}
 			}()
 		}
@@ -1125,7 +1125,7 @@ func TestIntegrationSyncJobs(t *testing.T) {
 					mu.Lock()
 					seen[j.ID]++
 					mu.Unlock()
-					_ = s.FinishSyncJob(ctx, j.ID, j.Attempts, nil)
+					_ = s.FinishSyncJob(ctx, j, nil)
 				}
 			}()
 		}

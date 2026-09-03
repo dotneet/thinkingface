@@ -73,12 +73,20 @@ export function CellModal({
 
   if (json !== undefined) {
     const raw = prettyJson(json);
+    // What "Copy" hands back must be the cell's actual stored value, not an
+    // echo of it. For a genuine object/array value `raw`'s serialisation is
+    // the only text there ever was, so it is fine — but for a *string*
+    // column that happens to hold JSON (the "json" feature; see
+    // jsonTreeValueFor), `json` is that string *parsed*, and `raw`
+    // re-serialises the parse result with its own whitespace, key order and
+    // number formatting instead of copying what is actually in the cell.
+    const copyValue = typeof value === "string" ? value : raw;
     return (
       <Dialog
         open
         onClose={onClose}
         title={t("ui.cellValue")}
-        headerAction={<CopyButton value={raw} />}
+        headerAction={<CopyButton value={copyValue} />}
       >
         <div className="sticky top-0 shrink-0 border-b border-border bg-bg-raised px-4 py-2">
           <SegmentedControl

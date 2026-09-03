@@ -71,6 +71,11 @@ export function TransfersManager() {
   // which merely decline or withdraw a request the other side can re-send.
   const [confirmAccept, setConfirmAccept] = useState<RepoTransfer | null>(null);
   const [acceptError, setAcceptError] = useState<string | null>(null);
+  // Reject gets the same confirm-dialog treatment as Accept, unlike Cancel
+  // below: it discards *someone else's* request, and the button sits right
+  // next to Accept, so a misclick has a real, silent-to-the-other-side cost.
+  const [confirmReject, setConfirmReject] = useState<RepoTransfer | null>(null);
+  const [rejectError, setRejectError] = useState<string | null>(null);
 
   async function refresh() {
     const result = await listMyTransfers();
@@ -105,13 +110,14 @@ export function TransfersManager() {
 
   async function handleReject(transfer: RepoTransfer) {
     setBusyId(transfer.id);
-    setActionError(null);
+    setRejectError(null);
     const result = await rejectTransfer(transfer.id);
     setBusyId(null);
     if (!result.ok) {
-      setActionError(errorMessage(t, result));
+      setRejectError(errorMessage(t, result));
       return;
     }
+    setConfirmReject(null);
     await refresh();
   }
 
@@ -141,6 +147,11 @@ export function TransfersManager() {
         title={t("settings.errorTitle")}
         message={error ?? t("settings.transfers.loadFailed")}
         hint={t("settings.transfers.loadFailedHint")}
+        action={
+          <Button size="sm" onClick={() => refresh()}>
+            {t("ui.unexpectedError.retry")}
+          </Button>
+        }
       />
     );
   }
@@ -186,7 +197,10 @@ export function TransfersManager() {
                   variant="danger"
                   size="sm"
                   disabled={busyId === tr.id}
-                  onClick={() => handleReject(tr)}
+                  onClick={() => {
+                    setRejectError(null);
+                    setConfirmReject(tr);
+                  }}
                 >
                   {busyId === tr.id
                     ? t("settings.transfers.rejecting")
@@ -231,11 +245,11 @@ export function TransfersManager() {
         )}
       </section>
 
-      {/* Below both lists, never above them: a failed Reject or Cancel
-          reported at the top pushed every remaining request's buttons down by
-          the Alert's height, so the next click landed on the wrong row's
-          Accept (DESIGN.md §8.1). Accepting reports inside its own
-          confirmation dialog instead. */}
+      {/* Below both lists, never above them: a failed Cancel reported at the
+          top pushed every remaining request's buttons down by the Alert's
+          height, so the next click landed on the wrong row's Accept
+          (DESIGN.md §8.1). Accepting and rejecting each report inside their
+          own confirmation dialog instead. */}
       {actionError && <Alert tone="negative">{actionError}</Alert>}
 
       <ConfirmDialog
@@ -266,6 +280,31 @@ export function TransfersManager() {
         tone="primary"
         confirming={busyId !== null && confirmAccept !== null}
         error={acceptError}
+      />
+
+      <ConfirmDialog
+        open={confirmReject !== null}
+        onClose={() => {
+          setConfirmReject(null);
+          setRejectError(null);
+        }}
+        onConfirm={() => {
+          if (confirmReject) void handleReject(confirmReject);
+        }}
+        title={t("settings.transfers.confirmRejectTitle")}
+        description={
+          confirmReject && (
+            <p className="text-sm text-fg-muted">
+              {t("settings.transfers.confirmReject", {
+                repo: `${confirmReject.from_namespace}/${confirmReject.from_name}`,
+              })}
+            </p>
+          )
+        }
+        confirmLabel={t("settings.transfers.reject")}
+        confirmingLabel={t("settings.transfers.rejecting")}
+        confirming={busyId !== null && confirmReject !== null}
+        error={rejectError}
       />
     </div>
   );

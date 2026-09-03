@@ -312,9 +312,16 @@ func (s *Store) ClaimWebhookDelivery(ctx context.Context, leaseDuration time.Dur
 // maxAttempts it is parked as "failed".
 //
 // attempts is the count ClaimWebhookDelivery returned, and it is the fencing
-// token, exactly as it is in FinishSyncJob (jobs.go): every statement here
-// also requires attempts = that value, so a worker can only write the outcome
-// of the claim it still holds. The lease alone closes half the race. A worker
+// token: every statement here also requires attempts = that value, so a
+// worker can only write the outcome of the claim it still holds.
+//
+// FinishSyncJob (jobs.go) fences on a separate claim_seq rather than on
+// attempts, and the difference is not an inconsistency between the two
+// queues. A sync job's attempts is reset to zero by EnqueueSync when a push
+// arrives, so it moves in both directions and two holders can end up with
+// the same value. Nothing resets attempts here -- ClaimWebhookDelivery's
+// increment is the only write to it -- so it really is monotonic per claim,
+// which is what a fencing token has to be. The lease alone closes half the race. A worker
 // whose lease lapsed while its HTTP call hung would otherwise write 'success'
 // -- or park as 'failed' -- over a delivery a second worker has since
 // reclaimed and is still making, either burying an attempt the reclaimer is

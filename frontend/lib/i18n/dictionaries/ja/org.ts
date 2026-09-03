@@ -23,17 +23,17 @@ export const org = {
   },
   directory: {
     title: "組織",
-    blurb: "チームで共有するネームスペース。リポジトリ・メンバー・ポリシーをまとめて管理します。",
+    blurb: "チームで共有する名前空間。リポジトリ・メンバー・ポリシーをまとめて管理します。",
     searchPlaceholder: "組織を検索...",
     search: "検索",
     create: "組織を作成",
     emptyTitle: "組織がありません",
-    emptyDescription: "組織を作成してチームでネームスペースを共有しましょう。",
+    emptyDescription: "組織を作成してチームで名前空間を共有しましょう。",
     noMatchesTitle: "該当する組織がありません",
     noMatchesDescription: "別のキーワードで検索してみてください。",
     clearSearch: "検索条件をクリア",
-    countOne: "{count} 件",
-    countOther: "{count} 件",
+    countOne: "組織 {count} 件",
+    countOther: "組織 {count} 件",
     removeSearchAria: "検索フィルタを解除: {value}",
     loadFailedHint: "バックエンド API に接続できない可能性があります。再読み込みしてください。",
     membersOne: "メンバー {count} 人",
@@ -43,7 +43,7 @@ export const org = {
   },
   create: {
     title: "組織を作成",
-    blurb: "組織は自身のネームスペースでリポジトリを所有します。作成者が最初の管理者になります。",
+    blurb: "組織は自身の名前空間でリポジトリを所有します。作成者が最初の管理者になります。",
     idLabel: "組織 ID（名前空間）",
     idHint: "URL とリポジトリ名に使われます: {example}。あとから変更できません。",
     idPermanent: "組織 ID は変更できません。表示名はいつでも変更できます。",
@@ -89,7 +89,7 @@ export const org = {
       title: "プロフィール",
       description: "公開ページでのこの組織の見え方。",
       nameLabel: "名前",
-      nameHint: "ネームスペース名は変更できません。",
+      nameHint: "名前空間名は変更できません。",
       displayNameLabel: "表示名",
       descriptionLabel: "説明",
       websiteLabel: "Web サイト",
@@ -121,7 +121,7 @@ export const org = {
       colJoined: "参加日",
       colActions: "操作",
       you: "自分",
-      remove: "削除",
+      remove: "メンバーから外す",
       removing: "削除中…",
       confirmRemoveTitle: "{username} をメンバーから削除しますか？",
       confirmRemove:
@@ -132,14 +132,21 @@ export const org = {
       confirmRoleTitle: "{username} のロールを変更しますか？",
       confirmRole: "{org} での {username} のロールを {from} から {to} に変更します。",
       confirmRoleAdmin:
-        "admin はメンバーの追加・削除、全員のロール変更、組織の設定と Webhook の管理ができます。",
+        "管理者はメンバーの追加・削除、全員のロール変更、組織の設定と Webhook の管理ができます。",
+      // 変更・削除の対象が自分自身の行のときだけ表示する。何も出さないと
+      // 「他人についての確認」に見えてしまい、自分への変更が成功した直後に
+      // この画面のあらゆる操作が 403 になってしまう。
+      confirmRoleSelfWarning:
+        "これは自分自身のロールの変更です。メンバー管理の権限を失う変更の場合、確定後すぐにこの設定画面にアクセスできなくなります。",
+      confirmRemoveSelfWarning:
+        "これは {org} から自分自身を削除する操作です。確定後すぐにこの組織の設定にアクセスできなくなります。",
       confirmRoleConfirm: "ロールを変更",
       emptyTitle: "メンバーがいません",
       emptyDescription: "ユーザー名を指定してメンバーを追加してください。",
       loadFailed: "メンバーを読み込めませんでした",
       loadFailedHint: "バックエンド API に接続できない可能性があります。再読み込みしてください。",
       roleHint:
-        "read はメンバーシップのみ、write は組織のリポジトリへの push、admin はさらにメンバーと設定の管理ができます。",
+        "読み取りはメンバーシップのみ、書き込みは組織のリポジトリへの push、管理者はさらにメンバーと設定の管理ができます。",
     },
     webhooks: {
       title: "Webhook",

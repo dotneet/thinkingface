@@ -217,7 +217,16 @@ func (s *Server) handleHFMoveRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	repo, ok := s.loadRepoForWrite(w, r, kind, fromNS, fromName, redirectHF)
+	// redirectNone, not redirectHF, for the same reason DELETE
+	// /api/repos/delete uses it (repos.go, docs/dev/api-contract.md "Accessing
+	// the old name"): the repository this route names is in the *body*, so
+	// there is nothing in the path for movedLocation to rewrite. It would hand
+	// back a 308 to the very URL that was just requested, and requests replays
+	// a 308 with the same body -- so move_repo() called on an old name spins
+	// until it raises TooManyRedirects instead of reporting that the name is
+	// gone. Answering as though the old name never existed also keeps a caller
+	// from moving, by accident, the repository that now sits at the new one.
+	repo, ok := s.loadRepoForWrite(w, r, kind, fromNS, fromName, redirectNone)
 	if !ok {
 		return
 	}
@@ -288,13 +297,28 @@ func (s *Server) handleGetTransfer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, apitypes.RepoTransferResponse{Transfer: toApitypesTransfer(t)})
 }
 
-// handleCancelTransfer answers DELETE .../transfer: the transfer's
-// originator (write access to the source namespace) changed their mind.
-// Allowed on an archived repository: cancelling withdraws a request rather
-// than changing anything about the repository.
+// handleCancelTransfer answers DELETE .../transfer: whoever could have
+// started the transfer changed their mind. Allowed on an archived repository:
+// cancelling withdraws a request rather than changing anything about the
+// repository.
+//
+// "Cancel = whoever could start it" (docs/dev/repo-transfer-design.md §7), so
+// the bar is admin on the source namespace, exactly as startTransfer requires.
+// The write-access gate this used to stop at was looser than the one it undoes:
+// under an organisation, a `write` member who may not transfer a repository out
+// could still cancel the admin's pending request.
 func (s *Server) handleCancelTransfer(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.loadRepoForWriteAllowArchived(w, r, chi.URLParam(r, "kind"), chi.URLParam(r, "ns"), repoName(chi.URLParam(r, "name")), redirectUI)
 	if !ok {
+		return
+	}
+	// After the load, so this answers 403 only to someone who could already
+	// see the repository -- and reads the *current* namespace, which is the
+	// source of the pending transfer (a repository only leaves it once the
+	// transfer is accepted).
+	if !s.canAdmin(r.Context(), repo) {
+		forbidden(w, "you must have admin access to "+repo.Namespace+
+			" to cancel a transfer of "+repo.FullName())
 		return
 	}
 	t, err := s.store.PendingRepoTransfer(r.Context(), repo.ID)

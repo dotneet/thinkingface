@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/dotneet/thinkingface/backend/internal/tfcli/config"
@@ -142,6 +143,13 @@ func runLogin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			}
 			username = line
 		}
+		// Trimmed here rather than inside readLine, which has to hand back
+		// passwords and tokens byte for byte. No username has leading or
+		// trailing whitespace, and a stray space -- picked up from a paste,
+		// or typed at the prompt -- would otherwise come back as "username or
+		// password is incorrect" with nothing to point at. Covers the flag
+		// too, which reaches this the same way.
+		username = strings.TrimSpace(username)
 
 		var password string
 		if passwordStdin {

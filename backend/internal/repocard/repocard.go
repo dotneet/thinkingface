@@ -8,6 +8,32 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// ClosingFence returns the offset of the newline that begins the line closing
+// a front-matter block, or -1 when there is none. rest is everything after the
+// opening "---\n".
+//
+// A closing fence is a line that is exactly "---" once trailing spaces and
+// tabs are removed. Both halves of that matter, and the substring search this
+// replaced got both wrong in opposite directions: `strings.Index(rest, "\n---")`
+// also matched "----" and "---foo", so a longer horizontal rule in the body
+// ended the front matter early; requiring an exact "---" instead rejects the
+// trailing whitespace editors leave behind, which drops the whole card.
+//
+// The scan starts at rest's *second* line, so a "---" on the first one -- an
+// empty block, "---\n---" -- does not close the fence it just opened. That is
+// the documented behaviour of BuildReadme in the tf CLI, which shares this
+// rule so the CLI and the server never read one README two ways.
+func ClosingFence(rest string) int {
+	offset := 0
+	for i, line := range strings.Split(rest, "\n") {
+		if i > 0 && strings.TrimRight(line, " \t") == "---" {
+			return offset - 1
+		}
+		offset += len(line) + 1
+	}
+	return -1
+}
+
 // Card is the parsed front matter plus the markdown body that follows it.
 type Card struct {
 	Data map[string]any
@@ -20,11 +46,21 @@ func Parse(readme []byte) Card {
 	text := strings.ReplaceAll(string(readme), "\r\n", "\n")
 	card := Card{Data: map[string]any{}, Body: text}
 
-	if !strings.HasPrefix(text, "---\n") {
+	// huggingface_hub's own card-loading regex is `^\s*---`, which tolerates
+	// a leading UTF-8 BOM and leading blank lines before the opening fence.
+	// A README that HF reads correctly must not lose its front matter here
+	// just because an editor's newline normalization left a blank line (or a
+	// BOM) at the very top of the file -- that would silently drop license,
+	// tags, and lineage on the next sync. Skip both before looking for the
+	// fence; neither is part of the front matter or the body either way.
+	scan := strings.TrimPrefix(text, "\uFEFF")
+	scan = strings.TrimLeft(scan, " \t\n")
+
+	if !strings.HasPrefix(scan, "---\n") {
 		return card
 	}
-	rest := text[len("---\n"):]
-	end := strings.Index(rest, "\n---")
+	rest := scan[len("---\n"):]
+	end := ClosingFence(rest)
 	if end < 0 {
 		return card
 	}

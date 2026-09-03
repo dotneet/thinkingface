@@ -237,6 +237,15 @@ func Upload(ctx context.Context, c *Client, plan Plan, report func(Event)) (*Res
 	}
 
 	for _, f := range plan.Files {
+		// Hashing every file (LFS or not) means reading it in full, and a
+		// large repository can spend a long time here before there is
+		// anything to commit. Without this check, a second Ctrl-C during
+		// that phase has nothing to interrupt: signal.NotifyContext already
+		// cancelled ctx, but nothing in this loop was looking at it. Only
+		// kill -9 could stop it.
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
 		onDisk[f.RepoPath] = struct{}{}
 		mode := modes[f.RepoPath]
 		if mode != ModeLFS {
@@ -246,9 +255,9 @@ func Upload(ctx context.Context, c *Client, plan Plan, report func(Event)) (*Res
 
 		remoteEntry, onRemote := remoteByPath[f.RepoPath]
 		if mode == ModeLFS {
-			oid, size, err := hashSHA256(f)
+			oid, size, err := hashSHA256(ctx, f)
 			if err != nil {
-				return nil, err
+				return res, err
 			}
 			if onRemote && remoteEntry.LFS != nil && remoteEntry.LFS.OID == oid {
 				res.Unchanged = append(res.Unchanged, f.RepoPath)
@@ -269,9 +278,9 @@ func Upload(ctx context.Context, c *Client, plan Plan, report func(Event)) (*Res
 			continue
 		}
 
-		sha, err := hashGitBlob(f)
+		sha, err := hashGitBlob(ctx, f)
 		if err != nil {
-			return nil, err
+			return res, err
 		}
 		// A path that flipped between inline and LFS storage always travels
 		// again: the remote oid describes the pointer, not the content.
@@ -477,31 +486,59 @@ func readSample(f LocalFile) ([]byte, error) {
 }
 
 // hashSHA256 digests a file for the LFS protocol and reports its real size.
-func hashSHA256(f LocalFile) (string, int64, error) {
+// A large file can take a while to read in full, so the read is wrapped in a
+// ctxReader: cancelling ctx (a second Ctrl-C, say) stops it mid-file instead
+// of only being noticed on the next file in the loop.
+func hashSHA256(ctx context.Context, f LocalFile) (string, int64, error) {
 	rc, err := f.Open()
 	if err != nil {
 		return "", 0, fmt.Errorf("open %s: %w", f.RepoPath, err)
 	}
 	defer rc.Close()
-	oid, size, err := SHA256Hex(rc)
+	oid, size, err := SHA256Hex(ctxReader{ctx: ctx, r: rc})
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", 0, ctxErr
+		}
 		return "", 0, fmt.Errorf("hash %s: %w", f.RepoPath, err)
 	}
 	return oid, size, nil
 }
 
-// hashGitBlob digests a file the way git names a blob.
-func hashGitBlob(f LocalFile) (string, error) {
+// hashGitBlob digests a file the way git names a blob. See hashSHA256 for
+// why the read is wrapped to observe ctx.
+func hashGitBlob(ctx context.Context, f LocalFile) (string, error) {
 	rc, err := f.Open()
 	if err != nil {
 		return "", fmt.Errorf("open %s: %w", f.RepoPath, err)
 	}
 	defer rc.Close()
-	sha, err := GitBlobSHA1(rc, f.Size)
+	sha, err := GitBlobSHA1(ctxReader{ctx: ctx, r: rc}, f.Size)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
 		return "", fmt.Errorf("hash %s: %w", f.RepoPath, err)
 	}
 	return sha, nil
+}
+
+// ctxReader wraps an io.Reader so a read loop notices context cancellation
+// between chunks instead of only after it returns. It does not interrupt a
+// Read already in flight (Go has no portable way to do that for an arbitrary
+// io.Reader); it only refuses to start another one once ctx is done, which
+// bounds how long a cancelled hash keeps running to at most one buffer's
+// worth of I/O.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
 
 // GitBlobSHA1 hashes content the way git does for a blob ("blob <size>\0" +

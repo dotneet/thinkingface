@@ -217,7 +217,15 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, kind stri
 		return
 	}
 	if entry.IsDir {
-		badRequest(w, filePath+" is a directory")
+		// EntryNotFound, not a bare 400: the Hub answers a directory the same
+		// way it answers a missing path (there is no file at this path,
+		// merely a tree entry), and huggingface_hub only raises
+		// EntryNotFoundError -- what hf_hub_download documents for exactly
+		// this case -- when this header is present. A bare 400 surfaces as a
+		// generic HfHubHTTPError instead, indistinguishable from a malformed
+		// request. This runs before writeResolveHeaders, so there is nothing
+		// to clear yet.
+		entryNotFound(w, filePath+" is a directory")
 		return
 	}
 
@@ -264,6 +272,43 @@ func writeResolveHeaders(w http.ResponseWriter, commit plumbing.Hash, rev, fileP
 	return contentType
 }
 
+// clearResolveErrorHeaders strips the headers writeResolveHeaders set that
+// only describe a *successful* resolve response, and must not survive onto an
+// error written after it: the year-long `immutable` Cache-Control for a
+// commit-pinned revision, and the Content-Disposition attachment filename.
+//
+// writeResolveHeaders runs once, ahead of both the LFS and the plain-blob
+// body paths (see its own comment), because the headers must not let a
+// client distinguish a pointer from a plain blob before the body arrives.
+// But several checks downstream of it can still fail -- an oid this
+// repository does not link, a ledger row that has gone missing, a signing
+// failure, a storage read that comes up empty, a range past the end of the
+// file -- and every one of those answers an *error* body, not the file the
+// headers above described. Without this, a CDN or shared cache sitting in
+// front of this server would store that error under `Cache-Control:
+// immutable` for a year: the 404 for an unlinked LFS oid could then never
+// self-heal even once the pointer is fixed, and a stale Content-Disposition
+// would misname the attachment offered for the error page itself.
+//
+// Only these two are cleared because only these two describe the file. What
+// writeResolveHeaders sets besides them says nothing about it: X-Repo-Commit
+// is the revision the caller already named, and Accept-Ranges and
+// X-Content-Type-Options are constants. ETag and Content-Length are not set
+// here at all -- they belong to the body paths, downstream of every check
+// below -- so an error never carries the object's size or hash.
+//
+// Called from every error path reachable after writeResolveHeaders has run
+// (serveGitBlob, serveLFSFile, writeRangeNotSatisfiable, and the
+// lfsObjectOwned / lfsObjectSize gates they share with handleRaw) rather than
+// repeating the two header deletions at each call site. lfsObjectOwned and
+// lfsObjectSize are also called from handleRaw, which never calls
+// writeResolveHeaders in the first place -- clearing headers that were never
+// set is a harmless no-op there.
+func clearResolveErrorHeaders(w http.ResponseWriter) {
+	w.Header().Del("Cache-Control")
+	w.Header().Del("Content-Disposition")
+}
+
 // serveGitBlob streams a plain (non-LFS) file out of the object database,
 // honouring a conditional request and a single Range.
 //
@@ -293,6 +338,7 @@ func serveGitBlob(w http.ResponseWriter, r *http.Request, gitRepo *gitrepo.Repo,
 
 	rc, _, err := gitRepo.BlobReader(entry.Hash)
 	if err != nil {
+		clearResolveErrorHeaders(w)
 		internalError(w, "read blob", err)
 		return
 	}
@@ -312,6 +358,7 @@ func serveGitBlob(w http.ResponseWriter, r *http.Request, gitRepo *gitrepo.Repo,
 		// past rather than seeked over -- and these blobs run to gigabytes, so
 		// it is discarded as it streams instead of being buffered.
 		if _, err := io.CopyN(io.Discard, rc, offset); err != nil {
+			clearResolveErrorHeaders(w)
 			internalError(w, "read blob", err)
 			return
 		}
@@ -381,10 +428,16 @@ func (s *Server) recordDownload(ctx context.Context, repoID int64) {
 func (s *Server) lfsObjectOwned(w http.ResponseWriter, r *http.Request, repo *store.Repo, oid string) bool {
 	_, err := s.ownedLFSKey(r.Context(), repo, oid)
 	if errors.Is(err, store.ErrNotFound) {
+		// Clears whatever writeResolveHeaders already set on the resolve
+		// path (handleRaw never sets them, so this is a no-op there): an
+		// unlinked oid must not leave a year-long immutable Cache-Control or
+		// a Content-Disposition sitting on this 404.
+		clearResolveErrorHeaders(w)
 		notFound(w, "object not found")
 		return false
 	}
 	if err != nil {
+		clearResolveErrorHeaders(w)
 		internalError(w, "check lfs object ownership", err)
 		return false
 	}
@@ -408,10 +461,12 @@ func (s *Server) lfsObjectOwned(w http.ResponseWriter, r *http.Request, repo *st
 func (s *Server) lfsObjectSize(w http.ResponseWriter, r *http.Request, oid string) (int64, bool) {
 	size, known, err := s.store.HasLFSObject(r.Context(), oid)
 	if err != nil {
+		clearResolveErrorHeaders(w)
 		internalError(w, "read lfs object size", err)
 		return 0, false
 	}
 	if !known {
+		clearResolveErrorHeaders(w)
 		notFound(w, "object not found")
 		return 0, false
 	}
@@ -502,6 +557,7 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 		ttl := lfs.TTLFor(s.cfg.SignedURLTTL, s.cfg.SignedURLMaxTTL, size)
 		url, err := s.storage.SignedGetURL(r.Context(), key, ttl, path.Base(entry.Path))
 		if err != nil {
+			clearResolveErrorHeaders(w)
 			internalError(w, "sign download url", err)
 			return
 		}
@@ -534,6 +590,7 @@ func (s *Server) serveLFSFile(w http.ResponseWriter, r *http.Request, repo *stor
 	}
 	rc, err := s.storage.GetRange(r.Context(), key, offset, length)
 	if err != nil {
+		clearResolveErrorHeaders(w)
 		if errors.Is(err, storage.ErrNotFound) {
 			notFound(w, "object "+oid+" is missing from storage")
 			return
@@ -634,9 +691,12 @@ func parseRange(header string, size int64) (offset, length int64, verdict rangeV
 // the caller, so a conditional retry still works.
 func writeRangeNotSatisfiable(w http.ResponseWriter, size int64) {
 	w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(size, 10))
-	// The body is this API's error shape, not a range response, so the
-	// Content-Type set for the file must not stand.
-	w.Header().Del("Content-Disposition")
+	// The body is this API's error shape, not the file the caller asked for,
+	// so neither the immutable Cache-Control nor the Content-Disposition
+	// writeResolveHeaders set for it may stand -- a cache that stored this
+	// 416 under a year-long immutable policy would keep answering it even
+	// after a client corrects its Range.
+	clearResolveErrorHeaders(w)
 	writeError(w, http.StatusRequestedRangeNotSatisfiable, "range_not_satisfiable",
 		"the requested range starts at or past the end of this "+strconv.FormatInt(size, 10)+"-byte file")
 }

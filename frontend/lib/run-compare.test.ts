@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   allTags,
   axisId,
+  axisLabel,
   axisValue,
   buildConfigDiff,
   filterRuns,
@@ -112,28 +113,48 @@ describe("scatterAxes", () => {
   });
 });
 
+describe("axisLabel", () => {
+  const prefixes = { config: "config", metric: "metric" };
+
+  it("prefixes a config axis with the translated config label", () => {
+    expect(axisLabel({ source: "config", key: "lr" }, prefixes)).toBe("config: lr");
+  });
+
+  it("prefixes a metric axis with the translated metric label", () => {
+    expect(axisLabel({ source: "metric", key: "loss" }, prefixes)).toBe("metric: loss");
+  });
+
+  it("uses whatever prefix text the caller passes in, e.g. a translated locale", () => {
+    // Regression guard for the axis labels being hardcoded English
+    // ("config: ${key}") regardless of the active locale (DESIGN.md §7):
+    // the module itself must not bake in an untranslated prefix.
+    expect(
+      axisLabel({ source: "config", key: "lr" }, { config: "設定", metric: "メトリクス" }),
+    ).toBe("設定: lr");
+    expect(
+      axisLabel({ source: "metric", key: "loss" }, { config: "設定", metric: "メトリクス" }),
+    ).toBe("メトリクス: loss");
+  });
+});
+
 describe("axisValue", () => {
   const r = run("a", { config: { lr: 0.1, name: "x" }, summary: { loss: 0.5 } });
 
   it("reads from the requested source", () => {
-    expect(axisValue(r, { id: "config:lr", label: "", source: "config", key: "lr" })).toBe(0.1);
-    expect(axisValue(r, { id: "metric:loss", label: "", source: "metric", key: "loss" })).toBe(0.5);
+    expect(axisValue(r, { id: "config:lr", source: "config", key: "lr" })).toBe(0.1);
+    expect(axisValue(r, { id: "metric:loss", source: "metric", key: "loss" })).toBe(0.5);
   });
 
   it("is null for a non-numeric or absent value, and for no axis", () => {
-    expect(
-      axisValue(r, { id: "config:name", label: "", source: "config", key: "name" }),
-    ).toBeNull();
-    expect(
-      axisValue(r, { id: "config:gone", label: "", source: "config", key: "gone" }),
-    ).toBeNull();
+    expect(axisValue(r, { id: "config:name", source: "config", key: "name" })).toBeNull();
+    expect(axisValue(r, { id: "config:gone", source: "config", key: "gone" })).toBeNull();
     expect(axisValue(r, undefined)).toBeNull();
   });
 });
 
 describe("scatterPoints", () => {
-  const x = { id: "config:lr", label: "", source: "config" as const, key: "lr" };
-  const y = { id: "metric:loss", label: "", source: "metric" as const, key: "loss" };
+  const x = { id: "config:lr", source: "config" as const, key: "lr" };
+  const y = { id: "metric:loss", source: "metric" as const, key: "loss" };
 
   it("keeps only runs that have both coordinates", () => {
     const points = scatterPoints(

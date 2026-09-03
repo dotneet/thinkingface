@@ -10,14 +10,14 @@ export const newRepo = {
   },
   // バックエンドがエラーを返した／応答しない場合は、未ログインとは別の状態
   // （DESIGN.md §9）。上のログイン案内の代わりにこちらを表示する。
-  accountLoadFailed: "作成先に指定できるネームスペースを確認できませんでした。",
+  accountLoadFailed: "作成先に指定できる名前空間を確認できませんでした。",
   accountLoadFailedHint:
     "バックエンド API に接続できない可能性があります。ページを再読み込みしてください。",
   kind: {
     dataset: "データセット",
     model: "モデル",
   },
-  namespace: "ネームスペース",
+  namespace: "名前空間",
   namespacePlaceholder: "your-username",
   kindUser: "個人",
   kindOrg: "組織",
@@ -30,7 +30,7 @@ export const newRepo = {
   create: "リポジトリを作成",
   creating: "作成中…",
   errors: {
-    namespaceRequired: "ネームスペースを入力してください。",
+    namespaceRequired: "名前空間を入力してください。",
     loginRequired:
       "リポジトリを作成するにはログインが必要です。ログインしてから再度お試しください。",
     nameRequired: "リポジトリ名を入力してください。",

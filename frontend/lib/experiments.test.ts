@@ -90,7 +90,7 @@ describe("formatMetricValue", () => {
   it("keeps a plain value at six significant digits", () => {
     expect(formatMetricValue(-86.5)).toBe("-86.5");
     expect(formatMetricValue(0)).toBe("0");
-    expect(formatMetricValue(3.14159265)).toBe("3.14159");
+    expect(formatMetricValue(2.71827182)).toBe("2.71827");
   });
 
   it("falls back to exponential rather than rounding a tiny value to zero", () => {

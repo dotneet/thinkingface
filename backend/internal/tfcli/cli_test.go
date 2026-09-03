@@ -2,6 +2,8 @@ package tfcli
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -153,6 +155,45 @@ func TestShortOID(t *testing.T) {
 	}
 	if got := shortOID("abc"); got != "abc" {
 		t.Errorf("shortOID of a short string should be unchanged, got %q", got)
+	}
+}
+
+// TestReadLinePreservesInnerAndSurroundingWhitespace is the regression test
+// for --password-stdin / --token - silently changing the value being logged
+// in with: readLine used to run the line through strings.TrimSpace, so a
+// password or token with a leading/trailing space (a legitimate character in
+// either) came out different from what was piped in, and the mismatch then
+// surfaced as an opaque authentication failure rather than here. Like
+// `docker login --password-stdin`, only the trailing newline (and a
+// preceding \r, for CRLF input) should be stripped.
+func TestReadLinePreservesInnerAndSurroundingWhitespace(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"leading and trailing spaces, LF", " hunter2 \n", " hunter2 "},
+		{"leading and trailing spaces, CRLF", " hunter2 \r\n", " hunter2 "},
+		{"internal whitespace preserved", "a b\tc\n", "a b\tc"},
+		{"no trailing newline (last line, EOF)", "hunter2", "hunter2"},
+		{"empty line", "\n", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := readLine(strings.NewReader(tc.input))
+			if err != nil {
+				t.Fatalf("readLine(%q): %v", tc.input, err)
+			}
+			if got != tc.want {
+				t.Errorf("readLine(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReadLineEmptyInputIsUnexpectedEOF(t *testing.T) {
+	if _, err := readLine(strings.NewReader("")); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("readLine(\"\") err = %v, want io.ErrUnexpectedEOF", err)
 	}
 }
 

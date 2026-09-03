@@ -20,6 +20,7 @@ export const repoList = {
     license: "ライセンス",
     task: "タスク",
     relation: "関係",
+    countUnavailable: "件数不明",
   },
   lineage: {
     title: "リネージ",

@@ -402,9 +402,15 @@ export const repo = {
     commitMessagePlaceholder: "Upload files",
     submit: "アップロード",
     uploading: "アップロード中…",
+    cancelUploading: "アップロードを中止",
     progressLabel: "アップロードの進捗",
     progressCount: "{done} / {total} 送信済み",
     tooMany: "一度にアップロードできるのは最大 {count} 件です。",
+    duplicatePath: "{path} はすでにこのアップロードに追加されています。",
+    fileTooLarge: "{file} は 1 ファイルの上限（{limit}）を超えています。",
+    inlineTotalTooLarge:
+      "選択したファイルのうち 10 MiB 未満のものを合計すると {limit} を超えています — それ以上の大きさのファイルは Git LFS に保存されるためこの上限には含まれません。ファイルを減らすか、複数回に分けてアップロードしてください。",
+    overwriteNote: "リポジトリに同名のファイルが既にある場合は置き換えられます。",
     lfsNote: "大きいファイルと既知のバイナリ形式は自動的に Git LFS に保存されます。",
   },
   // ファイル画面からの削除。破壊的な操作なので必ず ConfirmDialog を挟む。
@@ -431,6 +437,8 @@ export const repo = {
   editor: {
     conflict:
       "編集中にこのファイルが変更されました。ページを再読み込みして変更を適用し直してください — 再読み込みするまでは、今の編集内容はこの画面にそのまま残っています。",
+    conflictNewFile:
+      "作成中に、別の人が同じパスにファイルを作成しました。ページを再読み込みして相手の内容を確認したうえで、変更を適用し直してください — 再読み込みするまでは、今の編集内容はこの画面にそのまま残っています。",
     editAria: "{file} を編集",
     commitMessageLabel: "コミットメッセージ",
     // Not translated, to match the server's default commit message (English).

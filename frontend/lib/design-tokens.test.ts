@@ -125,6 +125,25 @@ describe.each(Object.keys(THEMES) as (keyof typeof THEMES)[])("%s theme", (theme
     expect(contrast(token("accent-fg"), token("accent"))).toBeGreaterThanOrEqual(AA_TEXT);
   });
 
+  // DESIGN.md §1: `text-warning` is documented as usable for "warning-coloured
+  // text on a *neutral* surface" — i.e. the base status tokens, not just
+  // `-strong`, are meant to double as body text. Nothing asserted that before:
+  // in the light theme `warning` measured 2.42:1 on `bg` and `positive` 3.79:1
+  // on `bg-hover`, both silently below AA. Covers every base status token
+  // (not `-strong`, which is already covered by the tinted-fill cases below)
+  // against every surface, in both themes, so a future lightness tweak can't
+  // quietly drop one below the floor again the way it did here.
+  it.each(["warning", "positive", "negative", "accent"] as const)(
+    "text-%s clears AA as plain text on every surface",
+    (statusToken) => {
+      for (const surface of SURFACES) {
+        expect(contrast(token(statusToken), token(surface)), surface).toBeGreaterThanOrEqual(
+          AA_TEXT,
+        );
+      }
+    },
+  );
+
   // A tinted fill darkens the surface by the same hue as the label on it, so
   // these pairs are the ones that silently collapse. `-strong` exists for them.
   it.each([

@@ -41,7 +41,17 @@ export async function SiteHeader() {
         <Suspense>
           <MobileNav />
         </Suspense>
-        <Link href="/" className="flex shrink-0 items-center gap-2 font-semibold tracking-tight">
+        <Link
+          href="/"
+          className="flex shrink-0 items-center gap-2 font-semibold tracking-tight"
+          // The wordmark below is `hidden` (not just visually collapsed)
+          // under `lg`, which removes it from the accessibility tree too —
+          // without this, every page below 1024px has a home link with no
+          // accessible name at all. The brand name is never translated
+          // (DESIGN.md §7), so it's safe to hardcode here the same way
+          // app/page-metadata.ts's SITE_NAME does.
+          aria-label="Thinking Face"
+        >
           <span className="text-xl leading-none" aria-hidden>
             🤔
           </span>
@@ -51,7 +61,9 @@ export async function SiteHeader() {
               ~95px back is what keeps the search input's placeholder from
               being clipped to a couple of characters (measured: search
               shrinks to 82px wide there without this). */}
-          <span className="hidden lg:inline">Thinking Face</span>
+          <span className="hidden lg:inline" aria-hidden>
+            Thinking Face
+          </span>
         </Link>
 
         <SiteNav />

@@ -31,12 +31,34 @@ export function OrganizationsManager() {
   const t = useT();
   const [orgs, setOrgs] = useState<Org[] | null>(null);
   const [username, setUsername] = useState("");
+  // getMe() failing is a distinct outcome from "not signed in" (that's
+  // `needsLogin`, from the *list* request below): the list can load fine
+  // while this fails, leaving `username` at its initial "" — which every
+  // Leave button's `disabled={... || !username}` reads no differently from
+  // "confirmed you have no name". Tracked separately so that silent case can
+  // say what actually happened instead (DESIGN.md §9).
+  const [usernameError, setUsernameError] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
+  // Two separate errors on purpose, the same split admin-users-manager makes.
+  // `actionError` is the page-level record of the last failed leave and
+  // outlives the dialog; `dialogError` belongs to the dialog that is open
+  // right now and is cleared both when it opens and when it closes. Sharing
+  // one state meant organisation A's `last_admin` failure was still in it when
+  // the dialog reopened for B, so B's confirmation appeared pre-failed —
+  // before anything had been confirmed at all.
   const [actionError, setActionError] = useState<string | null>(null);
+  const [dialogError, setDialogError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   // Organisation the user is about to leave, pending the ConfirmDialog.
   const [confirmTarget, setConfirmTarget] = useState<Org | null>(null);
+
+  /** Opens the leave confirmation with no failure carried over from the last one. */
+  function openConfirm(org: Org) {
+    setActionError(null);
+    setDialogError(null);
+    setConfirmTarget(org);
+  }
 
   async function refresh() {
     const result = await listMyOrgs();
@@ -53,7 +75,11 @@ export function OrganizationsManager() {
   useEffect(() => {
     (async () => {
       const me = await getMe();
-      if (me.ok) setUsername(me.data.user.username);
+      if (me.ok) {
+        setUsername(me.data.user.username);
+      } else {
+        setUsernameError(true);
+      }
       await refresh();
     })();
   }, []);
@@ -65,13 +91,21 @@ export function OrganizationsManager() {
   async function handleLeave(org: Org) {
     setBusy(org.name);
     setActionError(null);
+    setDialogError(null);
     const result = await removeMember(org.name, username);
     setBusy(null);
     if (!result.ok) {
       const key = orgErrorKey(result);
-      setActionError(key ? t(key) : errorMessage(t, result));
+      const message = key ? t(key) : errorMessage(t, result);
+      // Into both: the dialog shows it while it is still up, and the page
+      // keeps it after the user dismisses the dialog, so a refused leave is
+      // never silently lost the way a dialog-only error would be.
+      setDialogError(message);
+      setActionError(message);
       return;
     }
+    setActionError(null);
+    setDialogError(null);
     setConfirmTarget(null);
     await refresh();
   }
@@ -88,6 +122,11 @@ export function OrganizationsManager() {
         title={t("settings.errorTitle")}
         message={error ?? t("settings.organizations.loadFailed")}
         hint={t("settings.organizations.loadFailedHint")}
+        action={
+          <Button size="sm" onClick={() => refresh()}>
+            {t("ui.unexpectedError.retry")}
+          </Button>
+        }
       />
     );
   }
@@ -110,6 +149,8 @@ export function OrganizationsManager() {
 
   return (
     <div className="flex flex-col gap-4">
+      {usernameError && <Alert tone="warning">{t("settings.organizations.identityUnknown")}</Alert>}
+
       <div className="flex flex-col gap-3">
         {orgs.map((org) => (
           <div
@@ -160,7 +201,8 @@ export function OrganizationsManager() {
                 variant="danger"
                 size="sm"
                 disabled={busy === org.name || !username}
-                onClick={() => setConfirmTarget(org)}
+                title={!username ? t("settings.organizations.leaveDisabledHint") : undefined}
+                onClick={() => openConfirm(org)}
               >
                 {busy === org.name
                   ? t("settings.organizations.leaving")
@@ -190,7 +232,14 @@ export function OrganizationsManager() {
 
       <ConfirmDialog
         open={confirmTarget !== null}
-        onClose={() => setConfirmTarget(null)}
+        // Clear the dialog's failure along with the selection: this one dialog
+        // serves every organisation in the list, so a leftover message greeted
+        // the next one before it had been confirmed. Matches transfers-manager
+        // / admin-users-manager. The page-level Alert above still carries it.
+        onClose={() => {
+          setConfirmTarget(null);
+          setDialogError(null);
+        }}
         onConfirm={() => {
           if (confirmTarget) void handleLeave(confirmTarget);
         }}
@@ -203,7 +252,7 @@ export function OrganizationsManager() {
         confirmLabel={t("settings.organizations.leave")}
         confirmingLabel={t("settings.organizations.leaving")}
         confirming={busy !== null && confirmTarget !== null}
-        error={confirmTarget !== null ? actionError : null}
+        error={dialogError}
       />
     </div>
   );

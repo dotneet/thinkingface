@@ -65,6 +65,58 @@ export function uploadFiles(
   });
 }
 
+/**
+ * Mirrors maxUploadFileBytes / gitrepo.LFSInlineThreshold /
+ * maxUploadInlineTotalBytes in backend/internal/api/upload.go (and
+ * backend/internal/gitrepo/gitattributes.go for the threshold), so the dialog
+ * can reject an upload that is certain to fail before a single byte of it is
+ * sent, rather than after every byte has been streamed to the server.
+ *
+ * `MAX_UPLOAD_FILE_BYTES` is unconditional -- it bounds every file part
+ * regardless of how it is routed. The other two only bound files that are
+ * *not* routed to LFS, and that routing depends on the repository's own
+ * .gitattributes (a pattern can force or negate LFS for a path), which this
+ * module has no way to read. `LFS_INLINE_THRESHOLD_BYTES` is only a stand-in
+ * for "no matching pattern, size decides" -- the common case -- so
+ * evaluateUploadSizes is a best-effort early check, not a guarantee: the
+ * server enforces the real limits regardless of what this returns.
+ */
+export const MAX_UPLOAD_FILE_BYTES = 10 * 1024 * 1024 * 1024; // 10 GiB
+export const LFS_INLINE_THRESHOLD_BYTES = 10 * 1024 * 1024; // 10 MiB
+export const MAX_UPLOAD_INLINE_TOTAL_BYTES = 128 * 1024 * 1024; // 128 MiB
+
+export type UploadSizeIssue =
+  | { type: "fileTooLarge"; fileName: string; limit: number }
+  | { type: "inlineTotalTooLarge"; limit: number };
+
+/**
+ * Checks a picked file list against the size limits above, before any of it
+ * is sent. Returns the first problem found, or `null` when nothing here would
+ * make the server refuse the request on size alone.
+ *
+ * Only two of the three backend limits are checked (see the constants'
+ * doc comment): `maxUploadInlineBytes` (32 MiB, the per-file inline cap) is
+ * not, because it can never fire under the size-based heuristic this function
+ * uses -- LFS_INLINE_THRESHOLD_BYTES (10 MiB) is below it, so any file this
+ * function treats as "likely inline" is already under 32 MiB by definition.
+ */
+export function evaluateUploadSizes(
+  files: { name: string; size: number }[],
+): UploadSizeIssue | null {
+  for (const file of files) {
+    if (file.size > MAX_UPLOAD_FILE_BYTES) {
+      return { type: "fileTooLarge", fileName: file.name, limit: MAX_UPLOAD_FILE_BYTES };
+    }
+  }
+  const likelyInlineTotal = files
+    .filter((file) => file.size < LFS_INLINE_THRESHOLD_BYTES)
+    .reduce((sum, file) => sum + file.size, 0);
+  if (likelyInlineTotal > MAX_UPLOAD_INLINE_TOTAL_BYTES) {
+    return { type: "inlineTotalTooLarge", limit: MAX_UPLOAD_INLINE_TOTAL_BYTES };
+  }
+  return null;
+}
+
 /** Maps a finished XHR onto the same discriminated union `apiFetch` returns. */
 function parseUploadResponse(xhr: XMLHttpRequest): ApiResult<UploadFilesResponse> {
   let parsed: unknown;

@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/dotneet/thinkingface/backend/internal/repocard"
 )
 
 // CardOptions are the repository-card fields `tf up` can set from flags.
@@ -147,7 +149,7 @@ func MergeReadme(existing []byte, opts CardOptions) ([]byte, error) {
 	front, body := "", text
 	if strings.HasPrefix(text, "---\n") {
 		rest := text[len("---\n"):]
-		if end := strings.Index(rest, "\n---"); end >= 0 {
+		if end := repocard.ClosingFence(rest); end >= 0 {
 			front = rest[:end]
 			body = strings.TrimPrefix(rest[end+len("\n---"):], "\n")
 		}
@@ -165,6 +167,19 @@ func MergeReadme(existing []byte, opts CardOptions) ([]byte, error) {
 		mapping = &yaml.Node{Kind: yaml.MappingNode}
 	case len(doc.Content) == 1 && doc.Content[0].Kind == yaml.MappingNode:
 		mapping = doc.Content[0]
+	case len(doc.Content) == 1 && doc.Content[0].Kind == yaml.ScalarNode:
+		// A closing "---" was found, but what came out between the fences
+		// parsed as one bare scalar, not a mapping. Nobody writes a card's
+		// front matter as a single unlabeled value; this is the signature
+		// of a README that never had front matter at all -- a leading
+		// "---" that's actually a Markdown horizontal rule, with an
+		// unrelated "---" rule further down mistaken for the closing
+		// fence around plain body text (a YAML parser reads any "#
+		// heading" lines in between as comments and whatever's left as one
+		// scalar). Treat it the same as a README with no front matter,
+		// rather than failing on content the user never intended as YAML.
+		body = text
+		mapping = &yaml.Node{Kind: yaml.MappingNode}
 	default:
 		return nil, fmt.Errorf("local: front matter is not a YAML mapping")
 	}
@@ -205,6 +220,12 @@ func MergeReadme(existing []byte, opts CardOptions) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// The closing-fence rule lives in repocard.ClosingFence, which the server's
+// repocard.Parse uses on the same file. Sharing it is the point: a README the
+// server reads as having front matter has to be the same one `tf up --license`
+// merges into, or the CLI would rewrite a card the next sync then declines to
+// read (and vice versa).
+
 // mappingGet returns the value node for key in a YAML mapping node, or nil.
 func mappingGet(mapping *yaml.Node, key string) *yaml.Node {
 	for i := 0; i+1 < len(mapping.Content); i += 2 {
@@ -231,17 +252,23 @@ func mappingSet(mapping *yaml.Node, key, value string) {
 }
 
 // mappingAppendTags appends tags (deduplicated against what's already there)
-// to the "tags" sequence, creating it if absent or replacing it if it isn't
-// already a sequence.
+// to the "tags" sequence, creating it if absent, converting it if it's a
+// scalar (a card's `tags: nlp` is one tag, not nothing -- turn it into a
+// one-element sequence rather than discarding it), or replacing it if it's
+// neither.
 func mappingAppendTags(mapping *yaml.Node, tags []string) {
 	var seq *yaml.Node
 	for i := 0; i+1 < len(mapping.Content); i += 2 {
 		if mapping.Content[i].Value != "tags" {
 			continue
 		}
-		if mapping.Content[i+1].Kind == yaml.SequenceNode {
-			seq = mapping.Content[i+1]
-		} else {
+		switch existing := mapping.Content[i+1]; {
+		case existing.Kind == yaml.SequenceNode:
+			seq = existing
+		case existing.Kind == yaml.ScalarNode && existing.Value != "":
+			seq = &yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{existing}}
+			mapping.Content[i+1] = seq
+		default:
 			seq = &yaml.Node{Kind: yaml.SequenceNode}
 			mapping.Content[i+1] = seq
 		}

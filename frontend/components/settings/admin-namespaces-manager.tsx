@@ -185,6 +185,11 @@ export function AdminNamespacesManager() {
           title={t("settings.adminQuotas.loadFailed")}
           message={loadError ?? t("settings.adminQuotas.loadFailed")}
           hint={t("settings.adminQuotas.loadFailedHint")}
+          action={
+            <Button size="sm" onClick={() => handleReload()}>
+              {t("ui.unexpectedError.retry")}
+            </Button>
+          }
         />
       ) : rows.length === 0 ? (
         outOfRange ? (
@@ -228,7 +233,14 @@ export function AdminNamespacesManager() {
                       onChange={setDraft}
                       busy={busy === row.namespace}
                       onSave={() => void handleSave(row)}
-                      onCancel={() => setEditing(null)}
+                      onCancel={() => {
+                        setEditing(null);
+                        // Cancel closes the editor but used to leave an
+                        // invalid-input actionError (from handleSave's byte-count
+                        // check) sitting under the table with nothing left on
+                        // screen for it to be about.
+                        setActionError(null);
+                      }}
                     />
                   ) : (
                     <QuotaCell row={row} />
@@ -238,7 +250,12 @@ export function AdminNamespacesManager() {
                   <div className="flex justify-end">
                     <Button
                       size="sm"
-                      disabled={busy !== null || editing === row.namespace}
+                      // Disabled for *every* row, not just this one, while any
+                      // row is being edited: `startEdit` unconditionally
+                      // overwrites `draft`, so clicking another row's Edit used
+                      // to discard whatever was typed here with no warning at
+                      // all.
+                      disabled={busy !== null || editing !== null}
                       onClick={() => startEdit(row)}
                     >
                       <Pencil size={13} />

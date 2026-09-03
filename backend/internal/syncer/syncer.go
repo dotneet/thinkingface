@@ -239,7 +239,7 @@ func (s *Syncer) step(ctx context.Context) (bool, error) {
 	// the sweeper would hand the ref to a second worker while this one is
 	// still walking the diff -- the exact double-publish ClaimSyncJob's
 	// NOT EXISTS clause exists to prevent.
-	stopHeartbeat := s.heartbeat(ctx, job.ID, job.Attempts)
+	stopHeartbeat := s.heartbeat(ctx, job)
 	jobErr := s.process(ctx, job)
 	stopHeartbeat()
 
@@ -257,7 +257,7 @@ func (s *Syncer) step(ctx context.Context) (bool, error) {
 		finishCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 	}
-	if err := s.store.FinishSyncJob(finishCtx, job.ID, job.Attempts, jobErr); err != nil {
+	if err := s.store.FinishSyncJob(finishCtx, job, jobErr); err != nil {
 		return true, fmt.Errorf("finish sync job %d: %w", job.ID, err)
 	}
 	return true, nil
@@ -266,7 +266,7 @@ func (s *Syncer) step(ctx context.Context) (bool, error) {
 // heartbeat keeps a claimed job's lease alive until the returned function is
 // called. The returned stop is idempotent and waits for the goroutine, so the
 // caller can be sure no heartbeat lands after FinishSyncJob.
-func (s *Syncer) heartbeat(ctx context.Context, jobID int64, attempts int) func() {
+func (s *Syncer) heartbeat(ctx context.Context, job *store.SyncJob) func() {
 	done := make(chan struct{})
 	stopped := make(chan struct{})
 	go func() {
@@ -281,9 +281,9 @@ func (s *Syncer) heartbeat(ctx context.Context, jobID int64, attempts int) func(
 				return
 			case <-ticker.C:
 			}
-			if err := s.store.HeartbeatSyncJob(ctx, jobID, attempts, syncLease); err != nil {
+			if err := s.store.HeartbeatSyncJob(ctx, job, syncLease); err != nil {
 				if !errors.Is(err, context.Canceled) {
-					slog.Warn("heartbeat sync job", "job", jobID, "error", err)
+					slog.Warn("heartbeat sync job", "job", job.ID, "error", err)
 				}
 			}
 		}
@@ -373,10 +373,32 @@ func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *sto
 
 	entries, commit, err := gitRepo.Tree(job.Ref, "", true)
 	if err != nil {
-		if errors.Is(err, gitrepo.ErrEmptyRepo) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("read tree: %w", err)
+	}
+	// A zero commit is Tree saying the revision did not resolve. It folds two
+	// states into that -- a repository with no commits at all, and a ref that
+	// is not there (go-git answers plumbing.ErrReferenceNotFound for both, and
+	// gitrepo.Tree turns the resulting ErrEmptyRepo into an empty listing with
+	// a nil error). Neither has anything to index, and this is the *only* way
+	// either arrives: the `errors.Is(err, gitrepo.ErrEmptyRepo)` branch that
+	// used to stand here was unreachable, because Tree never returns that
+	// error.
+	//
+	// Which mattered, because the pipeline below then ran on an empty tree as
+	// though the ref really were empty. For a job whose ref had been deleted
+	// between the enqueue and here -- `git push --delete`, or the branch API
+	// racing a push -- and whose ref was the default branch, that meant
+	// UpdateRepoIndex(head_sha = "0000...", card = {}, description = ""),
+	// wiping the repository's whole metadata index and its lineage on the
+	// strength of a branch that no longer existed.
+	//
+	// The index rows of a deleted ref are removed by the delete paths
+	// themselves (store.DeleteRefIndex, called from api.schedulePostPush and
+	// handleHFDeleteBranch), which is where that work belongs: they know a
+	// deletion happened, whereas from here "the ref does not resolve" is
+	// indistinguishable from a repository that was never pushed to.
+	if commit.IsZero() {
+		return nil, nil
 	}
 
 	files := make([]store.RepoFile, 0, len(entries))
@@ -439,6 +461,16 @@ func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *sto
 			return nil, nil
 		}
 		return nil, fmt.Errorf("update file index: %w", err)
+	}
+
+	// After the index write, so the reference it re-checks against is this
+	// revision's. See store.RepairDeletedBlobs: it is what puts back a blob
+	// `thinkingface gc` removed while this very push was referencing it, and
+	// what stops the ListIndexedBlobSHAs shortcut above from skipping that
+	// blob for good on every push that follows. Normally one indexed SELECT
+	// that returns nothing.
+	if err := s.repairDeletedBlobs(ctx, repo, gitRepo, job.Ref); err != nil {
+		return nil, err
 	}
 
 	card, cardOK := readCard(gitRepo, repo, job.Ref, entries)
@@ -576,6 +608,46 @@ func (s *Syncer) publishBlobs(ctx context.Context, gitRepo *gitrepo.Repo, entrie
 		if _, err := gitRepo.PublishBlob(ctx, s.storage, entry.Hash); err != nil {
 			return fmt.Errorf("publish %s: %w", entry.Path, err)
 		}
+	}
+	return nil
+}
+
+// repairDeletedBlobs re-publishes any of this ref's blobs that the collector
+// has taken, and is the push side of the blobs/ layer's deletion ledger.
+//
+// The window it closes is the one no age threshold could: `thinkingface gc`
+// picks candidates from a listing and a reference snapshot, and a push can
+// start referencing an orphaned sha in between -- without rewriting the
+// object, because gitrepo.PublishBlob skips one that is already at its key,
+// so the object still looks as old as it ever was. The collector records the
+// sha in blob_deletions before it removes anything and holds that row while
+// it re-checks repo_files; this takes the same rows after ReplaceRepoFiles
+// has committed, so one of the two always sees the other.
+//
+// Loud when it fires. Repairing is the correct outcome, but a repair means
+// live content was deleted and served 404s until this ran, which is worth a
+// line in the log rather than silence.
+//
+// **What is still not covered**: this has to actually run. A job that dies
+// between ReplaceRepoFiles and here leaves the blob missing, and the failure
+// is reported so the queue retries the whole pipeline -- which re-indexes and
+// re-repairs -- but a job that exhausts its retry budget parks, and then the
+// file 404s until `thinkingface resync`. That is the same exposure every
+// other step of this pipeline has, and it is bounded: the ledger row survives
+// until a repair answers it, so any later push of the ref (or a resync) fixes
+// it. The collector cannot make it worse in the meantime, since a referenced
+// sha is one store.DeleteOrphanedBlob refuses.
+func (s *Syncer) repairDeletedBlobs(ctx context.Context, repo *store.Repo, gitRepo *gitrepo.Repo, ref string) error {
+	n, err := s.store.RepairDeletedBlobs(ctx, repo.ID, ref, func(sha string) error {
+		_, err := gitRepo.PublishBlob(ctx, s.storage, plumbing.NewHash(sha))
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("repair deleted blobs: %w", err)
+	}
+	if n > 0 {
+		slog.Warn("republished blobs the collector had removed",
+			"repo", repo.FullName(), "ref", ref, "blobs", n)
 	}
 	return nil
 }

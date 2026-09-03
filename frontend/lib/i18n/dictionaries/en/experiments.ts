@@ -253,6 +253,11 @@ export const experiments = {
     yAxis: "Y axis",
     logY: "Log Y",
     vsTitle: "{y} vs {x}",
+    /** Prefix distinguishing a config key from a metric of the same name in
+     * the axis pickers, the chart's axis titles and its title — see
+     * `axisLabel` in lib/run-compare.ts. */
+    axisConfigPrefix: "config",
+    axisMetricPrefix: "metric",
   },
   chart: {
     baselineSuffix: "{run} (baseline)",

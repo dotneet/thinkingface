@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"container/list"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -33,6 +34,16 @@ const (
 	// small file; a fraction of the object is both cheaper for small files
 	// and still a rounding error on a 10 GB one.
 	footerProbeDivisor = 8
+
+	// footerTrailerSize is the fixed trailer every parquet file ends with:
+	// a 4-byte little-endian footer length followed by the 4-byte magic.
+	footerTrailerSize = 8
+
+	// minParquetFileSize is the smallest byte count that can be a parquet
+	// file at all: the 4-byte header magic plus the trailer above. Anything
+	// shorter cannot carry a footer length, so it is rejected before the
+	// trailer is read rather than indexed past the start of the buffer.
+	minParquetFileSize = 4 + footerTrailerSize
 )
 
 // errNegativeOffset is returned by objectReader.ReadAt, which -- like every
@@ -286,6 +297,9 @@ func fetchTail(ctx context.Context, st storage.Storage, key string) (*tailEntry,
 	if info.Size <= 0 {
 		return nil, fmt.Errorf("viewer: %s is empty", key)
 	}
+	if info.Size < minParquetFileSize {
+		return nil, fmt.Errorf("viewer: %s is not a parquet file (only %d bytes)", key, info.Size)
+	}
 
 	n := footerProbeSize(info.Size)
 	off := info.Size - n
@@ -314,6 +328,31 @@ func fetchTail(ctx context.Context, st storage.Storage, key string) (*tailEntry,
 		return nil, fmt.Errorf("viewer: %s has an encrypted footer, which is not supported", key)
 	default:
 		return nil, fmt.Errorf("viewer: %s is not a parquet file (bad footer magic)", key)
+	}
+
+	// The 4 bytes in front of that magic are the footer's length, and they are
+	// the one number in a parquet file that a writer controls completely.
+	// parquet.OpenFile allocates a buffer of exactly that length *before* it
+	// reads the bytes -- and therefore before the range read can discover they
+	// are not there -- so a footer length of 0xFFFFFFFF is a 4 GiB
+	// make([]byte, n) driven by four attacker-chosen bytes. An allocation that
+	// size is a fatal runtime error rather than a panic, so no recover
+	// middleware catches it, and the syncer and the experiments indexer reach
+	// this code from background workers where there is no request to fail
+	// anyway: the process goes down. Validating the length here, against bytes
+	// already in hand, is what keeps that allocation bounded by the object's
+	// real size.
+	//
+	// Only a length past the cached tail can allocate at all -- a footer of up
+	// to len(tail)-8 bytes is sliced straight out of the buffer parquet-go
+	// already read, because openParquetFile hands it footerProbeSize as its
+	// ReadBufferSize and that is exactly len(tail) -- but the check is applied
+	// to every file, since a footer that overruns the object is malformed
+	// whichever side of the tail boundary it falls on.
+	footerSize := int64(binary.LittleEndian.Uint32(buf[len(buf)-footerTrailerSize : len(buf)-4]))
+	if footerSize+footerTrailerSize > info.Size {
+		return nil, fmt.Errorf("viewer: %s is not a parquet file (footer length %d does not fit in %d bytes)",
+			key, footerSize, info.Size)
 	}
 
 	return &tailEntry{key: key, size: info.Size, tailOffset: off, tail: buf}, nil

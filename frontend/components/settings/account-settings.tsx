@@ -79,13 +79,28 @@ export function AccountSettings() {
     const result = await changeMyPassword({ current_password: current, new_password: next });
     setSaving(false);
     if (!result.ok) {
-      // A 401 here means the current password was wrong, not that the
-      // session expired — `errors.unauthorized` would say the wrong thing.
-      setSaveError(
-        result.status === 401
-          ? t("settings.account.wrongCurrentPassword")
-          : errorMessage(t, result),
-      );
+      if (result.status === 401) {
+        // The backend answers both "current password is wrong" and "the
+        // session is missing/expired" with the same 401 + type
+        // "unauthorized" (requireWrite and refusePasswordChange in
+        // backend/internal/api/auth.go both go through unauthorized() /
+        // writeError(..., "unauthorized", ...)), so a 401 alone cannot tell
+        // the two apart. Re-check the session itself before blaming the
+        // password: if it is still valid, the password really was wrong; if
+        // it is gone, re-entering the same password can never succeed.
+        const me = await getMe();
+        if (!me.ok && isUnauthorized(me)) {
+          setNeedsLogin(true);
+          return;
+        }
+        if (!me.ok) {
+          setSaveError(errorMessage(t, me));
+          return;
+        }
+        setSaveError(t("settings.account.wrongCurrentPassword"));
+        return;
+      }
+      setSaveError(errorMessage(t, result));
       return;
     }
     setCurrent("");

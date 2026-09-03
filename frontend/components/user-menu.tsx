@@ -123,7 +123,6 @@ export function UserMenu({
         className="relative h-8 w-8 rounded-full border-transparent bg-accent-muted px-0 font-semibold text-accent-strong before:absolute before:inset-[-6px] before:content-[''] hover:bg-accent-muted"
         aria-label={t("userMenu.accountMenu", { username: user.username })}
         aria-expanded={open}
-        aria-haspopup="menu"
       >
         {user.username.slice(0, 1).toUpperCase()}
       </Button>

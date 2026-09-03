@@ -11,7 +11,22 @@ import {
 } from "@/lib/cell-value";
 import { useT } from "@/lib/i18n/client";
 
-const MAX_LEN = 80;
+/** Hard cap on how much raw text ever lands in the DOM for one cell. */
+const DISPLAY_CAP = 80;
+
+/**
+ * The threshold for offering the click-to-expand modal. This is deliberately
+ * *not* DISPLAY_CAP: the non-interactive rendering is `max-w-[320px]
+ * truncate` at `text-sm`, which fits roughly 43 Latin characters before the
+ * browser's own CSS ellipsis clips it — silently, with no `title` and (before
+ * this fix) no way to reach the rest of the value except copying the whole
+ * table as CSV. Gating the modal on a character count that matches
+ * DISPLAY_CAP left every 43-80 character value clipped with no escape hatch.
+ * Kept comfortably under the ~43-character visual capacity (rather than
+ * exactly at it) to absorb font-metric variance across browsers/OSes and CJK
+ * glyphs, which are wider per character than Latin ones.
+ */
+const INTERACTIVE_LEN = 40;
 
 export function ValueCell({ value, feature }: { value: unknown; feature?: CellFeature }) {
   const t = useT();
@@ -78,20 +93,25 @@ export function ValueCell({ value, feature }: { value: unknown; feature?: CellFe
     );
   }
 
-  const isTruncated = text.length > MAX_LEN;
-  const display = isTruncated ? `${text.slice(0, MAX_LEN)}…` : text;
+  const isTruncated = text.length > INTERACTIVE_LEN;
+  const display = text.length > DISPLAY_CAP ? `${text.slice(0, DISPLAY_CAP)}…` : text;
   // A nested value earns the modal at any length: the tree is a better reading
   // of `{"a":{"b":1}}` than the one-line JSON is, truncated or not.
   const hasTree = jsonTreeValueFor(value, feature) !== undefined;
 
-  // A scalar that fits within MAX_LEN has nothing for the modal to reveal, so
-  // it renders as plain, non-interactive text — keeping it a real <button>
-  // regardless of truncation would put a "does nothing" stop on every cell
-  // in a keyboard tab order and a screen reader's "button" announcement,
-  // which gets expensive fast in a table with hundreds of visible cells.
+  // A scalar that fits within INTERACTIVE_LEN has nothing for the modal to
+  // reveal, so it renders as plain, non-interactive text — keeping it a real
+  // <button> regardless of truncation would put a "does nothing" stop on
+  // every cell in a keyboard tab order and a screen reader's "button"
+  // announcement, which gets expensive fast in a table with hundreds of
+  // visible cells. `title` is set regardless: at exactly the threshold, font
+  // metrics can still clip a character or two that the length check alone
+  // would miss, and a hover tooltip is free insurance against that.
   if (!isTruncated && !hasTree) {
     return (
-      <span className="block max-w-[320px] truncate text-sm font-normal text-fg">{display}</span>
+      <span className="block max-w-[320px] truncate text-sm font-normal text-fg" title={text}>
+        {display}
+      </span>
     );
   }
 

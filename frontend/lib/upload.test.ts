@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { uploadFiles } from "@/lib/upload";
+import {
+  evaluateUploadSizes,
+  LFS_INLINE_THRESHOLD_BYTES,
+  MAX_UPLOAD_FILE_BYTES,
+  MAX_UPLOAD_INLINE_TOTAL_BYTES,
+  uploadFiles,
+} from "@/lib/upload";
 
 /**
  * Minimal XMLHttpRequest stand-in. `uploadFiles` uses XHR rather than fetch
@@ -201,5 +207,40 @@ describe("uploadFiles", () => {
     );
     controller.abort();
     expect(await promise).toEqual({ ok: false, status: 0, message: "Upload cancelled" });
+  });
+});
+
+describe("evaluateUploadSizes", () => {
+  it("passes an ordinary selection", () => {
+    expect(evaluateUploadSizes([{ name: "a.txt", size: 1024 }])).toBeNull();
+  });
+
+  it("rejects a file over the absolute per-file cap regardless of routing", () => {
+    expect(evaluateUploadSizes([{ name: "weights.bin", size: MAX_UPLOAD_FILE_BYTES + 1 }])).toEqual(
+      { type: "fileTooLarge", fileName: "weights.bin", limit: MAX_UPLOAD_FILE_BYTES },
+    );
+  });
+
+  it("accepts a file exactly at the per-file cap", () => {
+    expect(evaluateUploadSizes([{ name: "weights.bin", size: MAX_UPLOAD_FILE_BYTES }])).toBeNull();
+  });
+
+  it("rejects small files that together exceed the inline total cap", () => {
+    const perFile = LFS_INLINE_THRESHOLD_BYTES - 1;
+    const files = Array.from({ length: 20 }, (_, i) => ({ name: `f${i}.bin`, size: perFile }));
+    expect(evaluateUploadSizes(files)).toEqual({
+      type: "inlineTotalTooLarge",
+      limit: MAX_UPLOAD_INLINE_TOTAL_BYTES,
+    });
+  });
+
+  it("does not count a file at or above the LFS threshold toward the inline total", () => {
+    // Each file individually routes to LFS by default, so however many of
+    // them are picked, none should count against the inline-only cap.
+    const files = Array.from({ length: 10 }, (_, i) => ({
+      name: `f${i}.bin`,
+      size: LFS_INLINE_THRESHOLD_BYTES + MAX_UPLOAD_INLINE_TOTAL_BYTES,
+    }));
+    expect(evaluateUploadSizes(files)).toBeNull();
   });
 });

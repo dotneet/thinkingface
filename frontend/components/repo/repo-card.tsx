@@ -12,6 +12,10 @@ export async function RepoCard({ repo }: { repo: RepoSummary }) {
   const [t, locale] = await Promise.all([getT(), getLocale()]);
   const href = repoBase(repo.kind, repo.namespace, repo.name);
   const Icon = repo.kind === "model" ? Boxes : Database;
+  // A README card's YAML `tags:` list is copied verbatim, duplicates and all
+  // (store.stringSliceFromCard) — `tags: [nlp, nlp]` would otherwise render
+  // two chips sharing one React key.
+  const tags = Array.from(new Set(repo.tags));
   return (
     // The card is not itself a <Link>: the namespace needs its own link to
     // /{ns}, and links cannot nest. The repository link instead stretches
@@ -58,12 +62,12 @@ export async function RepoCard({ repo }: { repo: RepoSummary }) {
         <p className="line-clamp-2 text-sm text-fg-subtle">{repo.description}</p>
       )}
 
-      {repo.tags.length > 0 && (
+      {tags.length > 0 && (
         // `relative z-10`, same reason as the namespace link above: without
         // it these would sit under the repository link's full-card
         // `after:absolute after:inset-0` overlay and never receive clicks.
         <div className="relative z-10 flex flex-wrap gap-1.5">
-          {repo.tags.slice(0, 4).map((tag) => (
+          {tags.slice(0, 4).map((tag) => (
             <Link
               key={tag}
               href={`/${repo.kind}s?tag=${encodeURIComponent(tag)}`}
@@ -74,7 +78,7 @@ export async function RepoCard({ repo }: { repo: RepoSummary }) {
               {tag}
             </Link>
           ))}
-          {repo.tags.length > 4 && <Badge>+{repo.tags.length - 4}</Badge>}
+          {tags.length > 4 && <Badge>+{tags.length - 4}</Badge>}
         </div>
       )}
 

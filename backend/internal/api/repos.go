@@ -434,6 +434,30 @@ func (s *Server) handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// deleteRepo removes a repository everywhere it exists: the database rows,
+// the WAL prefix, and the bare repository on disk.
+//
+// The row goes first, and the two storage removals cannot fail the request.
+// An earlier revision of this had it the other way round, on the reasoning
+// that the on-disk repository is a cache the WAL can rebuild -- which is only
+// true when TF_WAL_MODE is `authoritative`. It defaults to `off`, and
+// docker-compose runs `shadow`; in both, Manager.wal is nil (EnableWAL is
+// called only in the authoritative case, serve.go), Open does no
+// materialisation, and the directory under GIT_ROOT is the only copy of the
+// git data there is. Removing it before the row meant a transient database
+// error deleted the repository's history and left a row pointing at nothing.
+// A capacity leak is the acceptable failure here; losing the repository is
+// not.
+//
+// What made the old order tempting is a real problem, and it is fixed the
+// other way: `git.Remove` returning an error used to fail the whole call,
+// so the retry answered 404 and the directory and WAL prefix were stranded
+// where nothing would ever find them (both `thinkingface gc` and wal
+// compaction enumerate through store.AllRepoRefs, so a repository with no row
+// is invisible to them). They are best effort now and logged instead. The
+// delete reports the truth -- the repository is gone -- and what is left
+// behind is bytes on a disk, named in a log line, rather than a repository
+// that half exists.
 func (s *Server) deleteRepo(ctx context.Context, repo *store.Repo) error {
 	if err := s.store.DeleteRepo(ctx, repo.ID); err != nil {
 		return err
@@ -450,10 +474,14 @@ func (s *Server) deleteRepo(ctx context.Context, repo *store.Repo) error {
 	s.fireWebhook(ctx, string(apitypes.WebhookEventRepoDeleted), repo.Namespace, &repo.ID, map[string]any{
 		"namespace": repo.Namespace, "name": repo.Name, "kind": repo.Kind, "full_name": repo.FullName(),
 	})
-	if err := s.git.Remove(repo.StoragePath); err != nil {
-		return err
-	}
 	s.purgeWAL(ctx, repo)
+	if err := s.git.Remove(repo.StoragePath); err != nil {
+		// Best effort, per the note above: the row is already gone, so the
+		// caller has nothing to retry and a 500 here would only describe
+		// leftover bytes as a failed delete.
+		slog.Warn("remove git directory after repo delete",
+			"repo", repo.FullName(), "error", err)
+	}
 	// Object storage is untouched, and deliberately so: lfs/ and blobs/ are
 	// content-addressed layers shared across repositories, so this delete
 	// removes references, not bytes. Another repository may hold the very same

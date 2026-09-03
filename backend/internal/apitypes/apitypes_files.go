@@ -212,8 +212,20 @@ type EditFileRequest struct {
 	Description string `json:"description,omitempty"`
 	// BaseOID is the blob SHA the edit started from. When set, the commit is
 	// refused if the path has moved on since, so a save never silently
-	// clobbers someone else's concurrent edit. Omit it when creating a file.
+	// clobbers someone else's concurrent edit. Omit it when creating a file
+	// and set MustNotExist instead.
 	BaseOID string `json:"base_oid,omitempty"`
+	// MustNotExist is the claim a caller creating a file makes: the path was
+	// absent when they opened the editor. The commit is refused if anything
+	// occupies it by the time it lands, so two people creating the same path
+	// no longer resolve to whoever saved last.
+	//
+	// It is the counterpart of BaseOID, not a variant of it -- a request
+	// carrying both is contradictory and refused. Neither one means the
+	// caller is not tracking staleness at all, which the endpoint still
+	// accepts: the browser always tracks, but a script that just wants a
+	// path to end up with certain bytes should not have to read it first.
+	MustNotExist bool `json:"must_not_exist,omitempty"`
 }
 
 // EditFileResponse reports where the edit landed.

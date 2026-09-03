@@ -1,6 +1,6 @@
 "use client";
 
-import { Ban, Database, Play, TableProperties } from "lucide-react";
+import { Ban, Database, Play, RefreshCw, Square, TableProperties } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -71,8 +71,24 @@ export function SqlConsole({
   // cannot collide the way a query string could. Feeds `scrollResetKey` below.
   const [resultRun, setResultRun] = useState(0);
   const [queryError, setQueryError] = useState<string | null>(null);
+  // Distinguishes "the user stopped this" from "this failed on its own" for
+  // the Alert below — both leave `queryError` set (see cancel()), but they
+  // are not the same claim and DESIGN.md §9 says not to conflate them. Named
+  // apart from the init effect's own local `cancelled` flag below (a
+  // same-render-cycle race guard for that effect's cleanup, unrelated to
+  // this one) to avoid shadowing it.
+  const [queryCancelled, setQueryCancelled] = useState(false);
   const [running, setRunning] = useState(false);
   const sessionRef = useRef<SqlSession | null>(null);
+  // Bumped by both run() and cancel() so a run's async continuation can tell
+  // whether it is still the one the UI is waiting on. cancel() increments
+  // this immediately so run()'s eventual resolution/rejection — DuckDB may
+  // settle it well after the user has moved on — is a no-op instead of
+  // overwriting the "cancelled" state with a stale result or error.
+  const runIdRef = useRef(0);
+  // Re-running the init effect below on demand — see the ErrorState `action`
+  // in the "error" phase render.
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     if (tooLarge) return;
@@ -100,10 +116,27 @@ export function SqlConsole({
     (async () => {
       try {
         // Straight to the API origin rather than through apiFetch: this is a
-        // binary body, not JSON. `credentials: "include"` sends tf_session so
-        // authenticated requests work (the backend echoes the Origin and allows
-        // credentials — see `cors` in backend/internal/api/server.go).
-        const res = await fetch(resolveUrl, { credentials: "include" });
+        // binary body, not JSON.
+        // `credentials: "omit"`, deliberately. In production this URL answers
+        // 302 to a GCS signed URL, and fetch carries the credentials mode
+        // across a redirect it follows -- so `include` makes the *bucket*
+        // request credentialed too, and a credentialed cross-origin response
+        // is only readable when the server answers
+        // `Access-Control-Allow-Credentials: true`. GCS never does, whatever
+        // CORS the bucket is configured with, so `include` left this fetch
+        // permanently unreadable in production while working fine against the
+        // dev emulator (which streams the bytes through the API origin
+        // instead of redirecting).
+        //
+        // Omitting them costs nothing: resolve does no permission check --
+        // there is no private-repository concept in this system
+        // (docs/dev/thinkingface-design.md §11), loadRepoForRead only looks
+        // the repository up -- and its download counter is per repository,
+        // not per user. If repository visibility is ever introduced, this
+        // fetch cannot simply go back to `include`; it needs the signed URL
+        // handed over as data and fetched in a second, uncredentialed
+        // request.
+        const res = await fetch(resolveUrl, { credentials: "omit" });
         if (!res.ok) {
           throw new Error(
             t("parquet.sql.downloadFailed", { status: `${res.status} ${res.statusText}` }),
@@ -133,26 +166,50 @@ export function SqlConsole({
       void session?.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolveUrl, filePath, tooLarge]);
+  }, [resolveUrl, filePath, tooLarge, retryKey]);
 
   const run = useCallback(async () => {
     const session = sessionRef.current;
     if (!session || running) return;
+    const runId = ++runIdRef.current;
     setRunning(true);
     setQueryError(null);
+    setQueryCancelled(false);
     try {
-      setResult(withSchemaFeatures(await session.query(sql), schemaColumns));
+      const res = await session.query(sql);
+      // A cancel() that landed while this was in flight already moved the UI
+      // on (and possibly started a newer run) — applying this result now
+      // would silently resurrect a query the user asked to stop.
+      if (runIdRef.current !== runId) return;
+      setResult(withSchemaFeatures(res, schemaColumns));
       setResultRun((n) => n + 1);
     } catch (err) {
+      if (runIdRef.current !== runId) return;
       // Drop the previous result rather than leaving it on screen: its row
       // count/timing badge and table would otherwise sit next to the new
       // failure and read as if they belonged to the query that just failed.
       setResult(null);
       setQueryError(localizeSqlError(t, err));
     } finally {
-      setRunning(false);
+      if (runIdRef.current === runId) setRunning(false);
     }
   }, [sql, running, t, schemaColumns]);
+
+  // Best-effort: interrupts the query DuckDB is currently executing (see
+  // SqlSession#cancel in lib/duckdb.ts) and, regardless of whether that
+  // interruption actually lands in time, immediately frees the UI — the
+  // reported bug was a spinner that only a page reload could stop, because
+  // nothing here ever called anything but `disabled` on the Run button.
+  const cancel = useCallback(() => {
+    const session = sessionRef.current;
+    if (!session || !running) return;
+    runIdRef.current++;
+    setRunning(false);
+    setResult(null);
+    setQueryCancelled(true);
+    setQueryError(t("parquet.sql.cancelled"));
+    void session.cancel();
+  }, [running, t]);
 
   if (tooLarge) {
     return (
@@ -186,6 +243,18 @@ export function SqlConsole({
         title={t("parquet.sql.initFailedTitle")}
         message={initError ?? t("parquet.sql.initFailedFallback")}
         hint={t("parquet.sql.initFailedHint")}
+        action={
+          // A one-off download/wasm-boot failure (a flaky network fetch of
+          // the file or the .wasm asset) used to be permanent until the tab
+          // reloaded: this component stays mounted for the SQL panel's whole
+          // life (see the file doc comment), and getDatabase() only resets
+          // its cached promise for the *next* call — nothing here ever made
+          // one. Retrying just re-runs the init effect above.
+          <Button variant="secondary" size="sm" onClick={() => setRetryKey((n) => n + 1)}>
+            <RefreshCw size={13} />
+            {t("parquet.retry")}
+          </Button>
+        }
       />
     );
   }
@@ -216,6 +285,16 @@ export function SqlConsole({
           )}
           {t("parquet.sql.run")}
         </Button>
+        {/* Reserves no space of its own (§8.3 is about layout the reader is
+            aiming at; a control that only ever appears next to a Run button
+            that is *already* disabled cannot steal a click) — shown only
+            while there is something to interrupt. */}
+        {running && (
+          <Button variant="secondary" onClick={cancel}>
+            <Square size={13} />
+            {t("parquet.sql.cancel")}
+          </Button>
+        )}
         <span className="text-xs font-medium text-fg-subtle">
           <kbd className="font-mono">⌘</kbd>/<kbd className="font-mono">Ctrl</kbd> +{" "}
           <kbd className="font-mono">Enter</kbd> {t("parquet.sql.shortcutRuns")}{" "}
@@ -247,20 +326,27 @@ export function SqlConsole({
       {/* Run button and result table stay adjacent: both messages below react
           to a run but must not land between the button and the table, or
           fixing a query and re-running would shift the table under the
-          pointer on every attempt (see DESIGN.md §8-1). */}
-      {!result ? (
+          pointer on every attempt (see DESIGN.md §8-1).
+          "No results yet" and "the query failed" are two different claims
+          (DESIGN.md §9) — showing the former on top of the failure Alert
+          below said both "nothing has run" and "something just failed" at
+          once, so it renders only when neither a result nor an error is on
+          screen. A cancelled run also has `queryError` set (see cancel()
+          above) and takes the same branch as a real failure, which is
+          correct: its result really is unknown, not empty. */}
+      {!result && !queryError ? (
         <EmptyState
           icon={Database}
           title={t("parquet.sql.noResultsTitle")}
           description={t("parquet.sql.noResultsDescription")}
         />
-      ) : result.columns.length === 0 || result.rows.length === 0 ? (
+      ) : result && (result.columns.length === 0 || result.rows.length === 0) ? (
         <EmptyState
           icon={TableProperties}
           title={t("parquet.sql.noRowsTitle")}
           description={t("parquet.sql.noRowsDescription")}
         />
-      ) : (
+      ) : result ? (
         <DataTable
           columns={result.columns}
           rows={result.rows}
@@ -273,10 +359,13 @@ export function SqlConsole({
           // no longer means anything). Same reason as the Rows tab's paging.
           scrollResetKey={resultRun}
         />
-      )}
+      ) : null}
 
       {queryError && (
-        <Alert tone="negative" title={t("parquet.sql.queryFailed")}>
+        <Alert
+          tone={queryCancelled ? "warning" : "negative"}
+          title={t(queryCancelled ? "parquet.sql.cancelledTitle" : "parquet.sql.queryFailed")}
+        >
           <pre className="scroll-x whitespace-pre-wrap break-words font-mono text-xs">
             {queryError}
           </pre>

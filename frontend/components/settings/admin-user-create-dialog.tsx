@@ -81,6 +81,7 @@ export function AdminUserCreateDialog({
     <Dialog
       open={open}
       onClose={onClose}
+      busy={submitting}
       title={t("settings.adminUsers.addTitle")}
       footer={
         <>

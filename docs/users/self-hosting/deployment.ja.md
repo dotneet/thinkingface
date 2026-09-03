@@ -149,12 +149,59 @@ Application Default Credentials、つまりマウントされたサービスア�
 （下記の Continuity 移行が有効な場合）`wal/`（git の write-ahead log）です。これらはすべて内容
 アドレス方式であり、同じファイルを生成する別々の push はストレージを共有します。
 
+### バケットに CORS 設定が必要です。さもないとブラウザの機能が 2 つ壊れます { #bucket-cors }
+
+Web UI には、通常のダウンロードリンクではなくブラウザから直接オブジェクトのバイト列を取得する
+機能が 2 つあります。データセットビューアの [SQL モード](../guides/dataset-viewer.md#query-with-sql)
+（DuckDB-WASM がローカルでクエリするために Parquet ファイル全体をダウンロードします）と、512 KB を
+超える CSV / JSON Lines ファイルに対するプレーンファイルプレビューの全文フォールバック（[Web UI を
+使う](../guides/web-ui.md#view-a-file) を参照）です。どちらも同じ resolve エンドポイントを経由し、
+`STORAGE_DRIVER=gcs` の場合、このエンドポイントはバイト列自体をストリームする代わりに
+`storage.googleapis.com` 上の短命な署名付き URL へのリダイレクトで応答します — これは Web UI と API
+のどちらとも異なるオリジンです。バケット側がそのオリジンからのクロスオリジンリクエストに対して
+CORS ヘッダーで応答するよう設定されていない限り、ブラウザはそのレスポンスの読み取りを拒否し、
+両方の機能が失敗します — 通常は CORS や GCS を名指しするものではなく、一般的な「ネットワークエラー」
+として報告されるため、原因を見落としやすくなっています。
+
+これは `STORAGE_DRIVER=gcs` に固有の問題です。（`docker compose up` が使う）`gcs-emulator` では
+API がリダイレクトの代わりにバイト列自体をストリームするため、ブラウザのリクエストは API 自身の
+オリジンから出ることがなく、バケットの CORS ポリシーはまったく関与しません — そのため、実際の
+バケットにデプロイを向けるまでこの問題に気づきにくいのです。
+
+`infra/` の Terraform でバケットをプロビジョニングする場合は、すでに対応済みです。
+[「GCP 上の本番環境」内の「バケットに CORS 設定が必要です」](#bucket-cors-terraform) を参照して
+ください。バケットを自分で（手動、または別のインフラツールで）プロビジョニングする場合は、同じ
+ポリシーを直接設定してください。例:
+
+```bash
+cat > cors.json <<'EOF'
+[
+  {
+    "origin": ["https://your-web-ui-origin.example.com"],
+    "method": ["GET", "HEAD"],
+    "responseHeader": ["Content-Type", "Content-Length", "Content-Range", "ETag"],
+    "maxAgeSeconds": 3600
+  }
+]
+EOF
+gcloud storage buckets update gs://your-bucket --cors-file=cors.json
+```
+
+ブラウザが Web UI を読み込んでいる正確なオリジン（スキーム・ホスト・ポート）を指定してください
+— バケットの CORS ポリシーにはワイルドカードサブドメインの形式はないため、実際に UI を配信して
+いるオリジンをすべて列挙する必要があります。また `"*"` は絶対に使わないでください。このバケットの
+背後にあるすべてのオブジェクトは、誰かがブラウザに署名付き URL を取得させた瞬間に到達可能になる
+ため、オリジンを明示することが、その読み取りを自分のデプロイだけに限定する手段になります。
+`GET`/`HEAD` で上記 2 つの機能はどちらもカバーされます。`STORAGE_DRIVER=gcs` であっても、Web UI が
+ブラウザから直接バケットに書き込むことはありません — アップロードは常に API を経由します。
+
 ## GCP 上の本番環境 { #production-on-gcp }
 
 `infra/` ディレクトリには GCP 本番デプロイ用の Terraform が入っています。これは次のものを
 プロビジョニングします。
 
-- `lfs/`、`blobs/`、（該当する場合）`wal/` 用の GCS バケット
+- `lfs/`、`blobs/`、（該当する場合）`wal/` 用の GCS バケット。Web UI のオリジンを許可する CORS
+  ポリシー付き（後述）
 - バックエンドとフロントエンドのイメージ用の Artifact Registry リポジトリ
 - API 用の `google_cloud_run_v2_service`（gen2、`h2c`、`min_instance_count = 1`、CPU を常時割り当て、
   データベースに到達するための Direct VPC egress）
@@ -200,6 +247,21 @@ Terraform はインフラをプロビジョニングしますが、その後の�
 Cloud Run 自体が TLS を終端し、各サービスをそれぞれの `*.run.app` の URL で提供するため、
 最初のうちはこれで十分です。ドメイン戦略を決めたら、ドメインマッピングやロードバランサを
 追加してください。
+
+### バケットに CORS 設定が必要です { #bucket-cors-terraform }
+
+これが何のためのものかは、上記の
+[「バケットに CORS 設定が必要です。さもないとブラウザの機能が 2 つ壊れます」](#bucket-cors)を
+参照してください。`infra/` のバケットリソースには、すでに正しいポリシーが設定されています。
+`TF_ALLOWED_ORIGINS` と同じ値 — `web_public_url` を設定していればその値、そうでなければ `web`
+Cloud Run サービス自身の `*.run.app` URL — から導出されるため、2 つの許可リストが食い違うこと
+はありません。`TF_ALLOWED_ORIGINS` と同様、これは最初の `apply` の時点から実際の値に解決され
+ます（`web` の `*.run.app` URL はその名前・リージョン・プロジェクトから決定的に決まるため。上記
+で説明した手動の再 apply が必要な `api_public_url` がプレースホルダーにフォールバックするのとは
+対照的です）— `web` の前にカスタムドメインを置く場合を除き、追加の手順は不要です。その場合は
+`web_public_url` を設定して再度 apply すれば、両方の許可リストがそれに追従します。ポリシーの
+キャッシュ有効期間は `var.bucket_cors_max_age_seconds`（デフォルト 1 時間。説明は
+`infra/variables.tf` を参照）です。
 
 ### GCP 上のデータベース: Cloud SQL か SQLite + Litestream か { #database-on-gcp-cloud-sql-vs-sqlite-litestream }
 

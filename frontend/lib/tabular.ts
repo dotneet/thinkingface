@@ -315,6 +315,38 @@ function csvValue(value: unknown): string {
   return String(value);
 }
 
+/**
+ * Leading characters that a spreadsheet application (Excel, LibreOffice,
+ * Google Sheets) interprets as the start of a formula rather than literal
+ * text: `=`, `+`, `-`, `@`, tab, and CR. A cell value under attacker control
+ * (an experiment run name, tag, group, or metric key — all of which end up as
+ * CSV header or body cells) can smuggle something like
+ * `=HYPERLINK("http://evil","click")` through an otherwise-valid export, and
+ * it will execute the moment the file is opened. See CWE-1236 / OWASP's "CSV
+ * Injection".
+ */
+const FORMULA_PREFIX = /^[=+\-@\t\r]/;
+
+/**
+ * A value that starts with `+` or `-` is legitimately a plain signed number
+ * (`-1.5`, `+42`) far more often than it is an attack, so those two prefixes
+ * only trigger escaping when the *whole* field is not a number — a genuine
+ * `-1.5` must round-trip unchanged. `=`, `@`, tab and CR have no legitimate
+ * numeric reading and always trigger escaping.
+ */
+const PLAIN_NUMBER = /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i;
+
+function needsFormulaEscape(value: string): boolean {
+  if (!FORMULA_PREFIX.test(value)) return false;
+  if (/^[+-]/.test(value) && PLAIN_NUMBER.test(value)) return false;
+  return true;
+}
+
 function csvField(value: string): string {
-  return /["\n\r,]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
+  // A single leading apostrophe is the standard defense: every major
+  // spreadsheet app renders it as "force this cell to text" and strips it
+  // from the displayed value, so it neutralises the formula without
+  // corrupting the data a human or a re-import sees.
+  const escaped = needsFormulaEscape(value) ? `'${value}` : value;
+  return /["\n\r,]/.test(escaped) ? `"${escaped.replaceAll('"', '""')}"` : escaped;
 }
