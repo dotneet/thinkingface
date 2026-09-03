@@ -2370,6 +2370,13 @@ Constraints and status codes:
 
   A HEAD ignores `Range` entirely and always reports the full `Content-Length`, which is what
   `hf_hub_download` reads the size from.
+- **A path that names a directory is a 404 + `X-Error-Code: EntryNotFound`**, not a 400. What
+  the caller asked for -- a file at that path -- is not there, which is the condition
+  `huggingface_hub` raises `EntryNotFoundError` for; a 400 sent it a bare `HfHubHTTPError`
+  instead, and a client cannot tell "you typed a directory" from "your request was malformed".
+  `GET /api/v1/raw/...` keeps its 400 for the same input: it is the UI's preview endpoint, not
+  a path any Hub client walks, and the browser only ever asks it for entries a listing already
+  said were files.
 - Download stats: once a request is known not to be for a directory, it counts as 1 request = 1
   count, and **the same single count advances both counters** — the running total
   `repositories.downloads` and today's row in `repo_download_stats(repo_id, date, count)`

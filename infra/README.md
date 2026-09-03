@@ -120,17 +120,17 @@ and `ETag` (what a Range/ETag-aware reader inspects); `max_age_seconds` is
 here (every object behind the bucket becomes reachable through a signed URL the moment a
 browser is made to fetch one).
 
-**This bucket CORS policy is necessary but not sufficient on its own.** Both browser fetches
-above are issued with `credentials: "include"` (so the initial, same-call hop to `api` carries
-the `tf_session` cookie for a private repository), and a plain `fetch()` with the default
-`redirect: "follow"` reuses that same credentials mode across the redirect it follows
-automatically — so the follow-up request to the signed GCS URL is credentialed too. GCS never
-answers with `Access-Control-Allow-Credentials: true` (there is no such setting to give it),
-so a browser refuses to read a credentialed cross-origin response no matter how permissive
-`origin`/`method`/`response_header` are. Making both features actually work end-to-end also
-needs a frontend change — e.g. having `api` hand back the signed URL as JSON instead of a
-`302` so the browser can issue a second, credential-less `fetch()` for the bytes — which is
-tracked separately and is not part of this Terraform.
+**This bucket CORS policy is half of the fix; the other half is in the frontend and is
+already in place.** Both browser fetches above used to be issued with
+`credentials: "include"`, and a plain `fetch()` with the default `redirect: "follow"` reuses
+that credentials mode across the redirect it follows — so the follow-up request to the signed
+GCS URL was credentialed too. GCS never answers with `Access-Control-Allow-Credentials: true`
+(there is no such setting to give it), so a browser refused to read the response no matter how
+permissive `origin`/`method`/`response_header` were here. They send `credentials: "omit"` now,
+which costs nothing because `resolve` performs no permission check — this system has no
+private-repository concept (`docs/dev/thinkingface-design.md` §11). Introducing repository
+visibility would break that assumption and require the signed URL to be handed back as data
+and fetched in a second, uncredentialed request.
 
 Deploying the bucket outside this Terraform? Reproduce the same policy by hand, e.g.:
 

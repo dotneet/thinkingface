@@ -194,12 +194,17 @@ export async function createParquetSession(
       let totalRows = 0;
       // Every batch is drained (not just up to SQL_MAX_RESULT_ROWS) so
       // `totalRows` still reports the query's true row count for the
-      // "N of M rows shown" banner — only turning batches into JS row
-      // objects stops early.
+      // "N of M rows shown" banner. Turning rows into JS objects stops at the
+      // cap, and so does walking them: `numRows` is read off the batch, so
+      // nothing past the cap has to be visited to count it, and iterating a
+      // batch materialises an Arrow proxy per row — a cost worth paying only
+      // for rows that will be displayed.
       for await (const batch of reader) {
         totalRows += batch.numRows;
+        if (rows.length >= SQL_MAX_RESULT_ROWS) continue;
         for (const row of batch) {
-          if (rows.length < SQL_MAX_RESULT_ROWS) rows.push(toPlainRow(row, columns));
+          rows.push(toPlainRow(row, columns));
+          if (rows.length >= SQL_MAX_RESULT_ROWS) break;
         }
       }
       const elapsedMs = performance.now() - started;

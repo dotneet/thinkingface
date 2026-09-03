@@ -162,16 +162,18 @@ func TestHFDeleteTag_LeavesTheIdenticallyNamedBranchesIndexAlone(t *testing.T) {
 
 // ------------------------------------------------------------ repo teardown
 
-// deleteRepo removed the database row before the bare repository and the WAL
-// prefix, which made a failure in either of those unrecoverable: the request
-// answered 500, the retry answered 404, and the bytes stayed on disk and in
-// the bucket for good -- invisible to `thinkingface gc` and to wal compaction
-// alike, since both enumerate repositories through the database.
+// The two storage removals cannot fail the delete, and neither can run
+// before the row is gone.
 //
-// The local copy goes first now, because it is the only one of the three that
-// is safe to lose: it is a cache the WAL rebuilds. So a failure there leaves a
-// repository that is still entirely deletable.
-func TestDeleteRepo_KeepsTheRowWhenTheGitDirectoryCannotBeRemoved(t *testing.T) {
+// Both halves matter and they pull in opposite directions. Failing the call
+// on a `git.Remove` error answered 500 and then 404 on the retry, stranding
+// the directory and the WAL prefix where nothing enumerating through the
+// database would ever find them. But removing the directory *first* to avoid
+// that was worse: outside TF_WAL_MODE=authoritative the WAL rebuilds nothing
+// (Manager.wal is nil, so Open just opens what is on disk), and a transient
+// database error would then have destroyed the repository's history while
+// leaving a row that claims it exists.
+func TestDeleteRepo_ReportsSuccessWhenTheGitDirectoryCannotBeRemoved(t *testing.T) {
 	f := newRefsFixture(t)
 	repo := f.repo("alice", "foo", "model")
 	ctx := context.Background()
@@ -184,15 +186,32 @@ func TestDeleteRepo_KeepsTheRowWhenTheGitDirectoryCannotBeRemoved(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
 
-	err := f.s.deleteRepo(ctx, repo)
-	if err == nil {
-		t.Skip("this filesystem allows removing entries from a read-only directory")
+	if err := f.s.deleteRepo(ctx, repo); err != nil {
+		t.Fatalf("deleteRepo = %v, want nil: leftover bytes on disk are not a failed delete", err)
 	}
+	if _, err := f.st.GetRepoByID(ctx, repo.ID); err == nil {
+		t.Fatal("the repository row survived a successful delete")
+	}
+}
 
-	// The row is what makes the retry a delete rather than a 404 -- and what
-	// keeps the storage path enumerable by gc and by wal compaction until it
-	// really is gone.
-	if _, err := f.st.GetRepoByID(ctx, repo.ID); err != nil {
-		t.Fatalf("the repository row is gone after a failed delete (%v), so nothing can find its git directory or WAL prefix again", err)
+// The mirror of the case above: when the row cannot be deleted, the git data
+// has to still be there. This is the one that stops a database blip from
+// taking the repository's history with it in the default (non-authoritative)
+// WAL mode, where nothing can rebuild it.
+func TestDeleteRepo_LeavesTheGitDirectoryWhenTheRowCannotBeDeleted(t *testing.T) {
+	f := newRefsFixture(t)
+	repo := f.repo("alice", "foo", "model")
+	ctx := context.Background()
+	dir := f.git.Dir(repo.StoragePath)
+
+	// Closing the store is the cheapest way to make every statement fail the
+	// way an unreachable database would.
+	f.st.Close()
+
+	if err := f.s.deleteRepo(ctx, repo); err == nil {
+		t.Fatal("deleteRepo succeeded against a closed store")
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("stat %s: %v -- the git data was removed even though the row delete failed, and outside authoritative WAL mode nothing rebuilds it", dir, err)
 	}
 }

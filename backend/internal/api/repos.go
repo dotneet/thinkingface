@@ -434,37 +434,31 @@ func (s *Server) handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// deleteRepo removes a repository everywhere it exists: the bare repository on
-// disk, the database rows, and the WAL prefix that is the actual source of
-// truth for its git data.
+// deleteRepo removes a repository everywhere it exists: the database rows,
+// the WAL prefix, and the bare repository on disk.
 //
-// The order is load bearing, and it is the reverse of the obvious one. Doing
-// the database row first reads naturally -- the repository stops existing,
-// then the storage behind it is cleaned up -- but every step after that row is
-// gone has no second chance: `git.Remove` failing turned into a 500 whose
-// retry answered 404, leaving the bare repository *and* its WAL prefix behind
-// with nothing that would ever find them again. Neither `thinkingface gc` nor
-// wal compaction can: both enumerate repositories through the database
-// (store.AllRepoRefs), so a repository with no row is invisible to them.
+// The row goes first, and the two storage removals cannot fail the request.
+// An earlier revision of this had it the other way round, on the reasoning
+// that the on-disk repository is a cache the WAL can rebuild -- which is only
+// true when TF_WAL_MODE is `authoritative`. It defaults to `off`, and
+// docker-compose runs `shadow`; in both, Manager.wal is nil (EnableWAL is
+// called only in the authoritative case, serve.go), Open does no
+// materialisation, and the directory under GIT_ROOT is the only copy of the
+// git data there is. Removing it before the row meant a transient database
+// error deleted the repository's history and left a row pointing at nothing.
+// A capacity leak is the acceptable failure here; losing the repository is
+// not.
 //
-// Removing the local copy first inverts that. The bare repository on disk is
-// a cache whose authority is the WAL (docs/dev/continuity-design.md §2: "an
-// instance's tmpfs disappears -> materialized on the next request"), so this
-// is the one step of the three that costs nothing to lose: if it fails, the
-// row is still there and the retry is a plain delete; if it half-succeeds --
-// os.RemoveAll empties the directory and then cannot unlink it -- the leftover
-// is not a bare repository any more, which is precisely what makes
-// wal.Materialize rebuild it from scratch rather than trust it. And if the row
-// delete then fails, the repository is whole again on the next request.
-//
-// The second Remove is for exactly that: a concurrent read between the first
-// one and the row delete can rebuild the directory. It comes after the WAL is
-// gone, so nothing can rebuild it again, and it is best effort because by then
-// the repository is deleted as far as every caller is concerned.
+// What made the old order tempting is a real problem, and it is fixed the
+// other way: `git.Remove` returning an error used to fail the whole call,
+// so the retry answered 404 and the directory and WAL prefix were stranded
+// where nothing would ever find them (both `thinkingface gc` and wal
+// compaction enumerate through store.AllRepoRefs, so a repository with no row
+// is invisible to them). They are best effort now and logged instead. The
+// delete reports the truth -- the repository is gone -- and what is left
+// behind is bytes on a disk, named in a log line, rather than a repository
+// that half exists.
 func (s *Server) deleteRepo(ctx context.Context, repo *store.Repo) error {
-	if err := s.git.Remove(repo.StoragePath); err != nil {
-		return err
-	}
 	if err := s.store.DeleteRepo(ctx, repo.ID); err != nil {
 		return err
 	}
@@ -482,6 +476,9 @@ func (s *Server) deleteRepo(ctx context.Context, repo *store.Repo) error {
 	})
 	s.purgeWAL(ctx, repo)
 	if err := s.git.Remove(repo.StoragePath); err != nil {
+		// Best effort, per the note above: the row is already gone, so the
+		// caller has nothing to retry and a 500 here would only describe
+		// leftover bytes as a failed delete.
 		slog.Warn("remove git directory after repo delete",
 			"repo", repo.FullName(), "error", err)
 	}
