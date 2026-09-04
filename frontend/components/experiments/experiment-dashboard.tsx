@@ -28,7 +28,13 @@ import { useChartOptions } from "@/hooks/use-chart-options";
 import { useRunFilters } from "@/hooks/use-run-filters";
 import { useRunSelection } from "@/hooks/use-run-selection";
 import { ApiResultError, queryErrorMessage } from "@/lib/api-error-message";
-import { deleteRun, getMetrics, listRuns, updateRunAnnotations } from "@/lib/experiments";
+import {
+  annotationClosesTagEditor,
+  deleteRun,
+  getMetrics,
+  listRuns,
+  updateRunAnnotations,
+} from "@/lib/experiments";
 import { metricsQueryKey } from "@/lib/experiments-query-keys";
 import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
@@ -147,11 +153,14 @@ export function ExperimentDashboard({
       if (!result.ok) throw new ApiResultError(result);
       return result.data;
     },
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       // Refetch rather than patching one row: marking a baseline clears the
       // flag on whichever run held it before, which only the server knows.
       void queryClient.invalidateQueries({ queryKey: runsKey });
-      setTagsFor(null);
+      // Archive / baseline share this mutation. Closing the editor for those
+      // would drop an in-progress tag draft — including one open on a
+      // different row.
+      if (annotationClosesTagEditor(variables.body)) setTagsFor(null);
     },
   });
 
