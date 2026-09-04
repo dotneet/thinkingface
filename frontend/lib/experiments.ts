@@ -138,6 +138,18 @@ export function updateRunAnnotations(
 }
 
 /**
+ * True when this PATCH is the tag editor's own save.
+ *
+ * Tags, archive and baseline share one mutation. Closing the tag dialog from
+ * every successful write would wipe an in-progress draft the moment someone
+ * starred or archived a run (including a *different* run on the dashboard).
+ * Only a body that actually sent `tags` is that editor finishing.
+ */
+export function annotationClosesTagEditor(body: ExpRunAnnotationRequest): boolean {
+  return body.tags !== undefined;
+}
+
+/**
  * Files `trackio.log_artifact` committed for one run, read from
  * `{project}/artifacts/{run}` on the repository's default branch.
  *
