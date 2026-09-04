@@ -408,10 +408,11 @@ func (s *Server) handleDecideTransfer(w http.ResponseWriter, r *http.Request, ac
 		return
 	}
 	if destRole < RoleWrite {
-		// Not a 403 naming the namespace: the transfer is fetched by numeric
-		// id before the permission check, so a distinguishable answer here
-		// lets anyone walk the ids and read off every pending destination.
-		notFound(w, "transfer not found")
+		// Deliberately the same call the miss above makes, rather than a
+		// notFound of its own: two 404s that differ in their message are
+		// still two answers, and the id is an instance-wide serial. A 403
+		// that named the destination would leak it twice over.
+		handleStoreError(w, "load transfer", store.ErrNotFound)
 		return
 	}
 
