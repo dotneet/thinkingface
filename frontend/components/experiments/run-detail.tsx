@@ -30,7 +30,13 @@ import { ErrorState } from "@/components/ui/error-state";
 import { useChartOptions } from "@/hooks/use-chart-options";
 import { ApiResultError, queryErrorMessage } from "@/lib/api-error-message";
 import { runColorIndex } from "@/lib/chart-utils";
-import { deleteRun, getMetrics, listRuns, updateRunAnnotations } from "@/lib/experiments";
+import {
+  annotationClosesTagEditor,
+  deleteRun,
+  getMetrics,
+  listRuns,
+  updateRunAnnotations,
+} from "@/lib/experiments";
 import { metricsQueryKey } from "@/lib/experiments-query-keys";
 import { useT } from "@/lib/i18n/client";
 import { splitRunConfig } from "@/lib/run-config";
@@ -107,11 +113,14 @@ export function RunDetail({
       if (!result.ok) throw new ApiResultError(result);
       return result.data;
     },
-    onSuccess: () => {
+    onSuccess: (_data, body) => {
       // Refetch rather than patching the row: setting the baseline clears the
       // flag on whichever run held it before, which only the server knows.
       void queryClient.invalidateQueries({ queryKey: runsKey });
-      setTagsOpen(false);
+      // Archive / baseline share this mutation and stay clickable while the
+      // tag dialog is open (`saving` is only true mid-request). Closing here
+      // for those writes would drop the draft.
+      if (annotationClosesTagEditor(body)) setTagsOpen(false);
     },
   });
 
