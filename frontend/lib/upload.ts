@@ -1,4 +1,6 @@
 import type { ApiResult } from "@/lib/api";
+import { isDetailErrorType } from "@/lib/api-error-message";
+import { typeForStatus } from "@/lib/error-status";
 import { publicApiBase } from "@/lib/paths";
 import type { ApiErrorBody, RepoKind, UploadFilesResponse } from "@/types/api";
 
@@ -133,38 +135,33 @@ function parseUploadResponse(xhr: XMLHttpRequest): ApiResult<UploadFilesResponse
   }
   if (xhr.status < 200 || xhr.status >= 300) {
     const body = parsed as ApiErrorBody | undefined;
-    // A backend error body carries its own `type`; a proxy/gateway failure
-    // usually carries none, so derive one from the status — otherwise
-    // `errorMessage` would have to print the raw status line (`${status}
-    // ${statusText}`) on screen.
-    const type = body?.error?.type ?? typeForUploadStatus(xhr.status);
+    if (body?.error?.type !== undefined) {
+      // A backend error body carries its own `type`, authored for the person
+      // reading it — `errorMessage` may interpolate its message where the
+      // type allows (see DETAIL_KEYS in lib/api-error-message.ts).
+      return {
+        ok: false,
+        status: xhr.status,
+        message: body.error.message ?? `${xhr.status} ${xhr.statusText}`,
+        type: body.error.type,
+      };
+    }
+    // A proxy/gateway failure usually carries no body, so derive a type from
+    // the status — otherwise `errorMessage` would have to print the raw
+    // status line (`${status} ${statusText}`) on screen. A detail-capable
+    // type is never synthesized here: its translation interpolates the
+    // message, and the only message this branch has is that same bare status
+    // line (`400 Bad Request`), which must stay off the screen (see
+    // `typeForStatus` in lib/error-status.ts). Leaving `type` undefined lets
+    // `errorMessage` fall back to the generic sentence for the status instead.
+    const type = typeForStatus(xhr.status);
+    const safeType = type !== undefined && !isDetailErrorType(type) ? type : undefined;
     return {
       ok: false,
       status: xhr.status,
-      message: body?.error?.message ?? `${xhr.status} ${xhr.statusText}`,
-      ...(type !== undefined ? { type } : {}),
+      message: `${xhr.status} ${xhr.statusText}`,
+      ...(safeType !== undefined ? { type: safeType } : {}),
     };
   }
   return { ok: true, data: parsed as UploadFilesResponse };
-}
-
-/**
- * Best-effort `error.type` for an upload failure whose body carried none
- * (a gateway/proxy status line rather than an ApiErrorBody), using the same
- * vocabulary `lib/api-error-message.ts` translates. Statuses with no useful
- * mapping stay `undefined` and degrade to the shared generic failure there.
- */
-function typeForUploadStatus(status: number): string | undefined {
-  if (status === 400) return "bad_request";
-  if (status === 401) return "unauthorized";
-  if (status === 403) return "forbidden";
-  if (status === 404) return "not_found";
-  if (status === 408 || status === 504) return "timeout";
-  if (status === 409) return "conflict";
-  if (status === 413) return "payload_too_large";
-  if (status === 415) return "unsupported_media_type";
-  if (status === 429) return "rate_limited";
-  if (status === 503) return "overloaded";
-  if (status >= 500) return "internal_error";
-  return undefined;
 }

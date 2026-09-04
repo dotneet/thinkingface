@@ -34,6 +34,7 @@ package syncer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -44,8 +45,11 @@ import (
 // EnforceNamespaceQuota switches quota enforcement on for the post-push
 // pipeline. defaultBytes is the instance-wide allowance
 // (TF_DEFAULT_STORAGE_QUOTA_BYTES) applied to namespaces carrying no override
-// of their own; zero means unlimited, so a Syncer that never calls this, and
-// one that calls it with the default unset, both behave exactly as before.
+// of their own; zero means unlimited, so a Syncer that never calls this
+// behaves exactly as before. A Syncer that calls it with the default unset
+// still enforces namespaces carrying an explicit override (zero included):
+// the override survives resolution through store.EffectiveQuota, so only a
+// namespace with no override and no default is unlimited.
 //
 // It is a separate call rather than a New argument for the same reason the
 // LFS handler's switch is: "quotas are off" has to be a state the type can be
@@ -60,12 +64,24 @@ func (s *Syncer) EnforceNamespaceQuota(defaultBytes int64) {
 // a revision naming many objects is judged as a whole rather than one file at
 // a time. Refs that do not fit are dropped with a warning, and the caller
 // links only what comes back.
+//
+// A repository deleted mid-pipeline is success with nothing to link, not a
+// failure: the pipeline's other steps (GetRepoByID, ReplaceRepoFiles) already
+// treat a vanished repository that way, and failing here would retry a job
+// whose work no longer exists. The ownership lookup below is one query per
+// ref (N+1); revisions name few objects and the gate runs once per push, so
+// batching it is not worth the complexity.
 func (s *Syncer) filterLFSByQuota(ctx context.Context, repoID int64, refs []store.LFSObjectRef) ([]store.LFSObjectRef, error) {
 	if !s.quotaEnforced || len(refs) == 0 {
 		return refs, nil
 	}
 	q, err := s.store.NamespaceQuotaForRepo(ctx, repoID, s.quotaDefault)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// Deleted between the GetRepoByID in process and now -- there
+			// is no namespace left to charge, and no link left to write.
+			return nil, nil
+		}
 		return nil, fmt.Errorf("read namespace storage quota: %w", err)
 	}
 	limit := store.EffectiveQuota(q.QuotaBytes, s.quotaDefault)

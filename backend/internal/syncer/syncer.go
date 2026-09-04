@@ -467,6 +467,15 @@ func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *sto
 		return nil, fmt.Errorf("check storage quota: %w", err)
 	}
 	if err := s.store.LinkLFSObjects(ctx, repo.ID, refs); err != nil {
+		// Deleted between the GetRepoByID in process and now: the link
+		// insert hits the repo_lfs_objects_repo_id_fkey foreign key and
+		// fails, but there is nothing left to index. Re-check the row
+		// rather than matching the constraint name so a renamed
+		// constraint cannot turn a deleted repository into a retrying
+		// job; any other failure still fails the job below.
+		if _, gerr := s.store.GetRepoByID(ctx, repo.ID); errors.Is(gerr, store.ErrNotFound) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("link lfs objects: %w", err)
 	}
 	if err := s.store.ReplaceRepoFiles(ctx, repo.ID, job.Ref, files); err != nil {

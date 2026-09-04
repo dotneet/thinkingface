@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
+	"github.com/dotneet/thinkingface/backend/internal/store"
 )
 
 // TestPush_OverQuotaPointerIsIndexedButNotLinked is the bypass this gate
@@ -116,6 +117,28 @@ func TestPush_RelinkingWhatItAlreadyHoldsCostsNothing(t *testing.T) {
 	}
 	if !owned {
 		t.Error("the link earned before the quota collapsed is gone")
+	}
+}
+
+// A repository deleted mid-pipeline is success with nothing to link, not a
+// failure: NamespaceQuotaForRepo answers ErrNotFound for it, and failing the
+// job there would retry work that no longer exists (the E2E flush failure,
+// where the retry loop re-appended points the pipeline never deleted).
+func TestFilterLFSByQuota_DeletedRepoLinksNothing(t *testing.T) {
+	f := newPushFixture(t)
+	f.syn.EnforceNamespaceQuota(0)
+
+	if err := f.st.DeleteRepo(f.ctx, f.repo.ID); err != nil {
+		t.Fatalf("delete repo: %v", err)
+	}
+	got, err := f.syn.filterLFSByQuota(f.ctx, f.repo.ID, []store.LFSObjectRef{
+		{OID: pointerOID, Size: 16},
+	})
+	if err != nil {
+		t.Fatalf("filterLFSByQuota on a deleted repo: %v, want nil", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("filterLFSByQuota on a deleted repo = %v, want no refs", got)
 	}
 }
 

@@ -15,7 +15,7 @@ import { SkeletonLines } from "@/components/ui/skeleton";
 import { Table, TBody, Td, THead, Th, Tr } from "@/components/ui/table";
 import { TimeText } from "@/components/ui/time-text";
 import { isUnauthorized } from "@/lib/api";
-import { errorMessage } from "@/lib/api-error-message";
+import { errorMessage, type FailedApiResult } from "@/lib/api-error-message";
 import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
 import { createToken, deleteToken, listTokens } from "@/lib/tokens";
@@ -51,8 +51,12 @@ export function TokensManager() {
   // said (`setError(null)` at the top of handleCreate), and a create that
   // then failed rendered its message inside the ErrorState meant for the load
   // failure — under a hint ("the backend may be unreachable, try reloading")
-  // that was diagnosing the wrong problem.
-  const [loadError, setLoadError] = useState<string | null>(null);
+  // that was diagnosing the wrong problem. It holds the raw failure (not the
+  // translated string) so a locale change re-renders the same failure in the
+  // new language at display time instead of refetching — the same choice
+  // `usePagedList` makes (its translator is deliberately not an input
+  // either). `null` means "no failure on screen".
+  const [loadFailure, setLoadFailure] = useState<FailedApiResult | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [newName, setNewName] = useState("");
   const [newScope, setNewScope] = useState<"read" | "write">("read");
@@ -68,23 +72,23 @@ export function TokensManager() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
 
-  // Stable across renders (it only closes over `t`) so the initial-load
-  // effect below can depend on it: re-running on a locale change also
-  // re-renders a stale load error in the new language.
+  // Stable across renders so the initial-load effect below runs once: it reads
+  // no locale-dependent value (the failure is translated at display time),
+  // only stable setters and module imports.
   const refresh = useCallback(async () => {
     const result = await listTokens();
     if (!result.ok) {
       // 401 here means "you're signed out", not "something broke" — say so
       // and point at the fix instead of surfacing the raw API error.
       setNeedsLogin(isUnauthorized(result));
-      setLoadError(errorMessage(t, result));
+      setLoadFailure(result);
       setTokens(null);
       return;
     }
     setNeedsLogin(false);
-    setLoadError(null);
+    setLoadFailure(null);
     setTokens(result.data.items);
-  }, [t]);
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -213,14 +217,14 @@ export function TokensManager() {
         </Alert>
       )}
 
-      {tokens === null && !loadError ? (
+      {tokens === null && !loadFailure ? (
         <SkeletonLines lines={3} />
       ) : tokens === null && needsLogin ? (
         <LoginRequiredState next="/settings/tokens" />
       ) : tokens === null ? (
         <ErrorState
           title={t("settings.errorTitle")}
-          message={loadError ?? t("settings.tokens.loadFailed")}
+          message={loadFailure ? errorMessage(t, loadFailure) : t("settings.tokens.loadFailed")}
           hint={t("settings.tokens.loadFailedHint")}
           action={
             <Button size="sm" onClick={() => refresh()}>

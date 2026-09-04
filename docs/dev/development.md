@@ -18,7 +18,7 @@ For *what* the system does and *why* it is built this way, read
 | [bun](https://bun.sh) and Node.js 20+ | Frontend (the Makefile resolves both to absolute paths via [mise](https://mise.jdx.dev); see "Toolchain notes" below) |
 | [uv](https://docs.astral.sh/uv/) | Python checks, E2E tests, and the docs site — all run in disposable environments |
 | `git` and `git-lfs` | Exercising the git transport locally |
-| [golangci-lint](https://golangci-lint.run/welcome/install/) (pinned to the version CI uses, currently v2.4.0) | `backend/`. Unlike the Terraform gate below, `check-backend` (part of `make check`) **hard-fails with `exit 1`** when the binary is missing (`Makefile:279-288`) rather than skipping it — it would otherwise be easy for a local `make check` to go green while CI's backend job still fails |
+| [golangci-lint](https://golangci-lint.run/welcome/install/) (pinned to the version CI uses, currently v2.13.2) | `backend/`. Unlike the Terraform gate below, `check-backend` (part of `make check`) **hard-fails with `exit 1`** when the binary is missing (`Makefile:279-288`) rather than skipping it — it would otherwise be easy for a local `make check` to go green while CI's backend job still fails |
 | Terraform (optional) | `infra/`. `make check` skips its Terraform gate when the binary is absent; CI always runs it |
 
 ## Repository layout
@@ -134,9 +134,10 @@ make check
 |---|---|
 | `make check-backend` | `gofmt` check, `go vet`, `golangci-lint run` (pinned to the same version CI pins if you install that version yourself — see `.github/workflows/ci.yml`'s `golangci-lint` step; the local run otherwise just uses whatever version is on `PATH` and fails loudly rather than skipping if `golangci-lint` isn't installed at all), `go test ./...` in `backend/` |
 | `make check-frontend` | `bun run typecheck`, `lint` (ESLint), `format:check` (Biome), `check:ui` (`frontend/scripts/check-ui.mjs`, the UI conventions from `frontend/DESIGN.md`), `test` (vitest) |
-| `make check-python` | `ruff check` + `ruff format --check` for `e2e/`, `clients/python/`, `scripts/`, then the `clients/python` unit tests (`uv run --locked pytest`) |
+| `make check-python` | `ruff check` + `ruff format --check` for `e2e/`, `clients/python/`, `scripts/`, `uv lock --check` for `e2e/` and `clients/python/`, then the `clients/python` unit tests (`uv run --locked pytest`) |
 | `make check-types` | Regenerates `frontend/types/api.gen.ts` from `backend/internal/apitypes` with tygo and fails on any diff |
 | `make check-terraform` | `terraform fmt -check -recursive`, then `terraform init -backend=false` + `terraform validate` in `infra/` |
+| `make check-doc-anchors` | `python3 scripts/check-doc-anchors.py` — en/ja heading-anchor parity for `docs/users/` (broken anchors are only INFO-level in mkdocs, so `--strict` cannot catch them) |
 
 What `make check` does **not** cover, so a green local run is not an absolute guarantee CI
 will also be green:
@@ -147,10 +148,6 @@ will also be green:
   `make up` first).
 - `bun run build` (the Next.js production build) is CI's separate `build` job, deliberately
   left out of `check-frontend` because it is the slowest gate — see `make build-web`.
-- `uv lock --check` (verifying `e2e/uv.lock` and `clients/python/uv.lock` haven't drifted
-  from their `pyproject.toml`) only runs as a step of CI's `python` job, not in
-  `check-python` — a lockfile edited by hand or left stale after a dependency bump will not
-  be caught locally short of running `uv lock --check` yourself in each directory.
 
 Formatting and linting on their own: `make fmt` (Go / TypeScript / Python / Terraform) and
 `make lint`.
@@ -244,9 +241,18 @@ because `ci.yml` already covers the mechanical checks above.
 | `make test` | Go unit tests + frontend unit tests + the `clients/python` unit tests | nothing |
 | `make test-clients-python` | `clients/python/tests/` — the trackio shim's resume contract, run grouping, artifact upload and system metrics (`docs/dev/thinkingface-design.md` §8) | nothing |
 | `make test-store-pg` | `backend/internal/store` integration tests against PostgreSQL (the SQLite path always runs as part of `go test`) | `make up` |
-| `make test-e2e` | `e2e/` — `huggingface_hub` / `datasets` / git / GCS compatibility against a running server | `make up`, plus a rebuilt api image (below) |
+| `make test-e2e` | `e2e/` — `huggingface_hub` / `datasets` / git / GCS compatibility against a running server | nothing (self-provisioning: copies `.env`, `compose up -d --build`, waits for `/healthz`) |
 
-The E2E suite talks to an already-running server: it logs in as the admin user from `.env`,
+The E2E suite provisions the stack itself — the same steps CI's `e2e` job runs
+(`.github/workflows/ci.yml`): it copies `.env.example` to `.env` on first run, brings the
+stack up with `docker compose up -d --build`, and waits for `/healthz` before running
+pytest. The `--build` matters: a bare `docker compose up` / `make up` reuses the image it
+already has, so without it backend changes would be tested against the previous build.
+To run the suite against another instance instead (e.g. `make dev-api` on :8081), skip
+`make test-e2e` and invoke pytest in `e2e/` directly — see
+[`e2e/README.md`](../../e2e/README.md).
+
+The suite talks to the server it just brought up: it logs in as the admin user from `.env`,
 issues a write token, and revokes it at the end of the session (`e2e/conftest.py`). It resolves
 its dependencies from `e2e/uv.lock` into `e2e/.venv` (`uv run --locked`), so they never touch
 your ambient Python setup and never float to a newer version behind your back — `uv` is
@@ -255,10 +261,11 @@ whenever you change an HF-compatible endpoint** (whoami / create_repo / preuploa
 resolve / tree / LFS batch) — compatibility with the upstream client libraries is the project's
 top priority. What the suite covers is listed in [`e2e/README.md`](../../e2e/README.md).
 
+When managing the stack by hand instead of via `make test-e2e`, remember that
 **`make up` does not rebuild the api image.** It is `docker compose up -d` with no `--build`,
 so a container that is already running keeps serving whatever was built last time — and the
 suite then reports a confident pass against code you did not change. After touching `backend/`,
-bring the image up to date first:
+bring the image up to date first (same wording as [`e2e/README.md`](../../e2e/README.md)):
 
 ```bash
 docker compose up -d --build api
@@ -309,8 +316,9 @@ cleanly when neither is installed.
   enforces the mechanical parts.
 - **Dependency pins.** After editing `docs/requirements.in`, `requirements-lint.in`,
   `e2e/pyproject.toml` or `clients/python/pyproject.toml`, run `make lock-python` and commit
-  the regenerated files (CI checks both `e2e/uv.lock` and `clients/python/uv.lock` with
-  `uv lock --check`). A Docker base image's tag and its `@sha256:` digest
+   the regenerated files (CI's `python` job checks both `e2e/uv.lock` and
+   `clients/python/uv.lock` with `uv lock --check`, and `make check-python` runs the same
+   check locally). A Docker base image's tag and its `@sha256:` digest
   move together, as do a GitHub Action's SHA and its `# vX.Y.Z` comment, and
   `backend/go.mod`'s `toolchain` line and the `golang:` image in `backend/Dockerfile`. The
   reasoning behind all of it is in [`supply-chain.md`](supply-chain.md).
@@ -327,9 +335,12 @@ cleanly when neither is installed.
   (`guides/uploading.md` → `guides/uploading.ja.md`); it is *not* added to `nav:`, and a page
   without a translation falls back to English. Nav labels are translated in the `ja` block of
   `mkdocs.yml` (`nav_translations`). Links between pages keep the plain `.md` path — the
-  plugin rewrites them per locale — and translated `##` headings repeat the English anchor
-  (`## 見出し { #english-anchor }`) so cross-page anchors keep working. `README.md` and
-  `README.ja.md` are the same pair at the repository root.
+   plugin rewrites them per locale — and translated `##` headings repeat the English anchor
+   (`## 見出し { #english-anchor }`) so cross-page anchors keep working. Broken anchors are
+   only INFO-level in mkdocs, so `--strict` cannot catch an en/ja mismatch — `make
+   check-doc-anchors` (`python3 scripts/check-doc-anchors.py`, also run in
+   `.github/workflows/docs.yml`) checks them. `README.md` and
+   `README.ja.md` are the same pair at the repository root.
 - `docs/dev/` is not published. Design documents and the API contract live here.
 - Screenshots under `docs/users/images/` are generated from a seeded throwaway instance by
   `scripts/docs-demo/` — see [`docs-screenshots.md`](docs-screenshots.md). Do not hand-edit or

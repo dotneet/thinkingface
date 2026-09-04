@@ -560,6 +560,10 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	// what the queue thinks. There is no startup reconcile for this case --
 	// RequeueExpiredSyncJobs only requeues jobs that were enqueued -- which is
 	// why the log line carries everything resync needs to be pointed at.
+	//
+	// r.Context() is deliberate: when the client has already gone away the
+	// context is done, the backoff sleep aborts immediately, and the step
+	// runs at most once instead of retrying bookkeeping nobody waits for.
 	if err := retryPostCommit(r.Context(), func(ctx context.Context) error {
 		return s.store.LinkLFSObjects(ctx, repo.ID, lfsOIDs)
 	}); err != nil {

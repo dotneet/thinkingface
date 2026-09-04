@@ -278,6 +278,12 @@ experiment repository is a dataset, and it also appears in `GET /api/datasets`. 
   append it to the table it already has without re-fetching.
 - `DELETE /api/v1/tokens/{id}` → 204. Works on an expired token the same as a live one.
 
+`scope` must be exactly `"read"` or `"write"`; anything else -- including the empty string,
+a typo such as `"wriet"`, or a different case such as `"READ"` -- is 400 `bad_request` and mints
+nothing. An unknown scope is never silently downgraded to `read`: the downgrade used to mint a
+read-only token with a 200, so the caller learned about the typo only when the first write
+failed, far from the request that caused it.
+
 `expires_in_days` omitted, `null`, or `0` means the token never expires (`expires_at` is `null`).
 Otherwise it must be a positive integer up to **365**; anything negative or over that cap is 400
 `bad_request`. The expiry is resolved to an absolute UTC instant in Go at request time

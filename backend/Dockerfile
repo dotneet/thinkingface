@@ -2,10 +2,10 @@
 
 # ---- builder -----------------------------------------------------------
 # Base images are pinned by digest as well as by tag: a tag is mutable, so
-# `golang:1.25-alpine` on its own means "whatever was pushed most recently".
+# `golang:1.26-alpine` on its own means "whatever was pushed most recently".
 # The tag stays for readability and Renovate (renovate.json) bumps the tag and
 # the digest together. See docs/dev/supply-chain.md.
-FROM golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 AS builder
+FROM golang:1.26-alpine@sha256:ce864e7223ac17b1775e6fd0b4c0db580c2eb50e7953a427916379e4b92a1628 AS builder
 
 # No apk packages needed: golang:alpine already ships ca-certificates (for
 # `go mod download` over HTTPS), and the build no longer needs a C

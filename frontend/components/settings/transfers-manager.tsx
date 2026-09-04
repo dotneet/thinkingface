@@ -12,7 +12,7 @@ import { ErrorState } from "@/components/ui/error-state";
 import { SkeletonLines } from "@/components/ui/skeleton";
 import { useFormattedTime } from "@/components/ui/time-text";
 import { isUnauthorized } from "@/lib/api";
-import { errorMessage } from "@/lib/api-error-message";
+import { errorMessage, type FailedApiResult } from "@/lib/api-error-message";
 import { useT } from "@/lib/i18n/client";
 import { acceptTransfer, cancelTransfer, listMyTransfers, rejectTransfer } from "@/lib/transfers";
 import type { RepoTransfer } from "@/types/api";
@@ -62,7 +62,11 @@ export function TransfersManager() {
   const t = useT();
   const [incoming, setIncoming] = useState<RepoTransfer[] | null>(null);
   const [outgoing, setOutgoing] = useState<RepoTransfer[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // The failure the list-load error is rendered from, so a locale change
+  // re-renders the same failure in the new language at display time instead
+  // of refetching — the same choice `usePagedList` makes (its translator is
+  // deliberately not an input either). `null` means "no failure on screen".
+  const [loadFailure, setLoadFailure] = useState<FailedApiResult | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -77,22 +81,22 @@ export function TransfersManager() {
   const [confirmReject, setConfirmReject] = useState<RepoTransfer | null>(null);
   const [rejectError, setRejectError] = useState<string | null>(null);
 
-  // Stable across renders (it only closes over `t`) so the initial-load
-  // effect below can depend on it: re-running on a locale change also
-  // re-renders a stale load error in the new language.
+  // Stable across renders so the initial-load effect below runs once: it reads
+  // no locale-dependent value (the failure is translated at display time),
+  // only stable setters and module imports.
   const refresh = useCallback(async () => {
     const result = await listMyTransfers();
     if (!result.ok) {
       setNeedsLogin(isUnauthorized(result));
-      setError(errorMessage(t, result));
+      setLoadFailure(result);
       setIncoming(null);
       setOutgoing(null);
       return;
     }
-    setError(null);
+    setLoadFailure(null);
     setIncoming(result.data.incoming);
     setOutgoing(result.data.outgoing);
-  }, [t]);
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -136,7 +140,7 @@ export function TransfersManager() {
     await refresh();
   }
 
-  if (incoming === null && !error) {
+  if (incoming === null && !loadFailure) {
     return <SkeletonLines lines={4} />;
   }
 
@@ -148,7 +152,7 @@ export function TransfersManager() {
     return (
       <ErrorState
         title={t("settings.errorTitle")}
-        message={error ?? t("settings.transfers.loadFailed")}
+        message={loadFailure ? errorMessage(t, loadFailure) : t("settings.transfers.loadFailed")}
         hint={t("settings.transfers.loadFailedHint")}
         action={
           <Button size="sm" onClick={() => refresh()}>

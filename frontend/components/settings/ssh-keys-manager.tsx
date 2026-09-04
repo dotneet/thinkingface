@@ -14,7 +14,7 @@ import { SkeletonLines } from "@/components/ui/skeleton";
 import { Table, TBody, Td, THead, Th, Tr } from "@/components/ui/table";
 import { TimeText } from "@/components/ui/time-text";
 import { isUnauthorized } from "@/lib/api";
-import { errorMessage } from "@/lib/api-error-message";
+import { errorMessage, type FailedApiResult } from "@/lib/api-error-message";
 import { useT } from "@/lib/i18n/client";
 import { createSSHKey, deleteSSHKey, listSSHKeys } from "@/lib/ssh-keys";
 import type { SSHKeyItem } from "@/types/api";
@@ -25,8 +25,12 @@ export function SSHKeysManager() {
   // Split from the add-form's own error (see handleAdd): they used to share
   // one `error` state, so a list-load failure and an add failure could each
   // stomp on the other's message, and the ErrorState meant for "the list
-  // didn't load" could end up showing the add form's error text instead.
-  const [loadError, setLoadError] = useState<string | null>(null);
+  // didn't load" could end up showing the add form's error text instead. It
+  // holds the raw failure (not the translated string) so a locale change
+  // re-renders the same failure in the new language at display time instead
+  // of refetching — the same choice `usePagedList` makes (its translator is
+  // deliberately not an input either). `null` means "no failure on screen".
+  const [loadFailure, setLoadFailure] = useState<FailedApiResult | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newKey, setNewKey] = useState("");
@@ -46,23 +50,23 @@ export function SSHKeysManager() {
   // short keeps the toggles near where the pointer already is.
   const [expandedKeyId, setExpandedKeyId] = useState<number | null>(null);
 
-  // Stable across renders (it only closes over `t`) so the initial-load
-  // effect below can depend on it: re-running on a locale change also
-  // re-renders a stale load error in the new language.
+  // Stable across renders so the initial-load effect below runs once: it reads
+  // no locale-dependent value (the failure is translated at display time),
+  // only stable setters and module imports.
   const refresh = useCallback(async () => {
     const result = await listSSHKeys();
     if (!result.ok) {
       // 401 here means "you're signed out", not "something broke" — say so
       // and point at the fix instead of surfacing the raw API error.
       setNeedsLogin(isUnauthorized(result));
-      setLoadError(errorMessage(t, result));
+      setLoadFailure(result);
       setKeys(null);
       return;
     }
     setNeedsLogin(false);
-    setLoadError(null);
+    setLoadFailure(null);
     setKeys(result.data.items);
-  }, [t]);
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -172,14 +176,14 @@ export function SSHKeysManager() {
         </Alert>
       )}
 
-      {keys === null && !loadError ? (
+      {keys === null && !loadFailure ? (
         <SkeletonLines lines={3} />
       ) : keys === null && needsLogin ? (
         <LoginRequiredState next="/settings/ssh-keys" />
       ) : keys === null ? (
         <ErrorState
           title={t("settings.errorTitle")}
-          message={loadError ?? t("settings.sshKeys.loadFailed")}
+          message={loadFailure ? errorMessage(t, loadFailure) : t("settings.sshKeys.loadFailed")}
           hint={t("settings.sshKeys.loadFailedHint")}
           action={
             <Button size="sm" onClick={() => refresh()}>

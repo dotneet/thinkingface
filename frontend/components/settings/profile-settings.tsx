@@ -41,6 +41,10 @@ export function ProfileSettings() {
     setSaveError(null);
   }
 
+  // Initial load only: this overwrites the form state below with the server
+  // values, so re-running it on a locale change would wipe unsaved edits —
+  // the same reason `usePagedList` keeps the translator out of its inputs (it
+  // never re-reads just because the language changed).
   useEffect(() => {
     (async () => {
       const me = await getMe();
@@ -64,7 +68,8 @@ export function ProfileSettings() {
       setWebsite(ns.data.namespace.website);
       setAvatarUrl(ns.data.namespace.avatar_url);
     })();
-  }, [t]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();

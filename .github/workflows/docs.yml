@@ -59,6 +59,12 @@ jobs:
       - name: Build
         run: mkdocs build --strict
 
+      # --strict cannot detect en/ja anchor parity (mkdocs reports a broken
+      # anchor only at INFO level), so check the translated heading anchors
+      # explicitly -- same as `make check-doc-anchors`.
+      - name: Check ja anchor parity
+        run: python3 scripts/check-doc-anchors.py
+
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:
           path: site

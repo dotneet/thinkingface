@@ -5,6 +5,7 @@ import {
   type FailedApiResult,
   queryErrorMessage,
 } from "@/lib/api-error-message";
+import type { MessageKey } from "@/lib/i18n";
 import { createTranslator } from "@/lib/i18n";
 
 const en = createTranslator("en");
@@ -187,12 +188,67 @@ describe("errorMessage", () => {
     expect(errorMessage(ja, result)).toBe("リクエストが不正です: name must not contain spaces");
   });
 
-  it("falls back to the generic failure for an unrecognized type, never raw English", () => {
+  it("falls back to the generic failure for an unmapped status, never raw English", () => {
     const result = failed({ status: 418, type: "teapot", message: "I'm a teapot" });
     for (const t of [en, ja]) {
       const rendered = errorMessage(t, result);
       expect(rendered).toBe(t("errors.internalError"));
       expect(rendered).not.toContain("teapot");
+    }
+  });
+
+  it("maps an unknown or missing type to the sentence for its status", () => {
+    // A proxy/gateway failure carries no backend body (`type` undefined), and
+    // a backend type this dictionary doesn't know yet arrives the same way.
+    // Either used to degrade to `errors.internalError`, so even a 404 read as
+    // a server failure. Now the status decides (via `typeForStatus` in
+    // lib/error-status.ts, the same table lib/upload.ts synthesizes from).
+    const cases: Array<[number, MessageKey]> = [
+      [400, "errors.badRequestGeneric"],
+      [401, "errors.unauthorized"],
+      [403, "errors.forbidden"],
+      [404, "errors.notFound"],
+      [408, "errors.timeout"],
+      [504, "errors.timeout"],
+      [409, "errors.conflict"],
+      [413, "errors.payloadTooLarge"],
+      [415, "errors.unsupportedMediaType"],
+      [503, "errors.overloaded"],
+      [429, "errors.rateLimited"],
+      [500, "errors.internalError"],
+      [502, "errors.internalError"],
+    ];
+    for (const [status, key] of cases) {
+      for (const type of ["mystery_type", undefined] as const) {
+        const result = failed({ status, type, message: "proxy English detail" });
+        for (const t of [en, ja]) {
+          const rendered = errorMessage(t, result);
+          expect(rendered, `${status} / ${type}`).toBe(t(key));
+          expect(rendered, `${status} / ${type}`).not.toContain("proxy English detail");
+        }
+      }
+    }
+  });
+
+  it("never interpolates a bare status line into translated copy", () => {
+    // A bodyless proxy/gateway failure has no backend reason — only the
+    // transport's status line (`400 Bad Request`). lib/upload.ts leaves `type`
+    // undefined for detail-capable statuses (see `isDetailErrorType`), and the
+    // status fallback above must render the generic sentence rather than
+    // "Invalid request: 400 Bad Request".
+    const cases: Array<[number, string, MessageKey]> = [
+      [400, "400 Bad Request", "errors.badRequestGeneric"],
+      [403, "403 Forbidden", "errors.forbidden"],
+      [404, "404 Not Found", "errors.notFound"],
+      [409, "409 Conflict", "errors.conflict"],
+    ];
+    for (const [status, message, key] of cases) {
+      const result = failed({ status, type: undefined, message });
+      for (const t of [en, ja]) {
+        const rendered = errorMessage(t, result);
+        expect(rendered, `${status}`).toBe(t(key));
+        expect(rendered, `${status}`).not.toContain(message);
+      }
     }
   });
 

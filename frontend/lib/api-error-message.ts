@@ -1,4 +1,5 @@
 import type { ApiResult } from "@/lib/api";
+import { typeForStatus } from "@/lib/error-status";
 import type { MessageKey, Translator } from "@/lib/i18n";
 
 export type FailedApiResult = Extract<ApiResult<unknown>, { ok: false }>;
@@ -111,6 +112,17 @@ const DETAIL_KEYS: Record<string, MessageKey> = {
 };
 
 /**
+ * Whether `type` is one of the {@link DETAIL_KEYS} types whose translation
+ * interpolates the backend message. `lib/upload.ts` consults this before
+ * tagging a proxy/gateway failure with a synthesized type: those translations
+ * would print the bare status line (`400 Bad Request`) — the only message a
+ * bodyless failure has — onto the screen.
+ */
+export function isDetailErrorType(type: string): boolean {
+  return DETAIL_KEYS[type] !== undefined;
+}
+
+/**
  * Turns an `apiFetch` failure into a message in the current locale instead
  * of the backend-authored English string in `result.message` ([S12]).
  *
@@ -126,11 +138,19 @@ const DETAIL_KEYS: Record<string, MessageKey> = {
  *   in {@link ERROR_TYPE_KEYS} rather than rendering a dangling "…: " — or,
  *   worse, the raw "{detail}" the template would print if it were rendered
  *   with no params.
- * - An unrecognized (or missing) `type` falls back to `errors.internalError`.
- *   This only happens for a `type` this dictionary doesn't know about yet —
- *   every type the backend currently sends is mapped above — so the screen
- *   never shows backend-authored English for it. The raw message is logged to
- *   the dev console instead, where it tells the developer which mapping to add.
+ * - An unrecognized (or missing) `type` falls back to the sentence for its
+ *   HTTP status (`typeForStatus` in lib/error-status.ts, the same table
+ *   lib/upload.ts synthesizes from): a proxy/gateway failure carries no
+ *   backend body, so a 404 reads as `errors.notFound`, a 401 as
+ *   `errors.unauthorized`, a 429 as `errors.rateLimited`, and so on, instead
+ *   of everything degrading to `errors.internalError`. A status with no
+ *   mapping (e.g. 418) still degrades to `errors.internalError`.
+ *   This path always renders the generic sentence, never the interpolated
+ *   one: the message alongside an unknown or missing type was never audited
+ *   for screen-worthiness the way DETAIL_KEYS entries were, and for a
+ *   bodyless failure it is just the bare status line (`404 Not Found`).
+ *   The raw message is logged to the dev console instead, where it tells the
+ *   developer which mapping to add.
  */
 export function errorMessage(t: Translator, result: FailedApiResult): string {
   // A known type always wins, even for a status-0 transport failure: only
@@ -144,6 +164,20 @@ export function errorMessage(t: Translator, result: FailedApiResult): string {
     return t(key);
   }
   if (result.status === 0) return t("errors.networkError");
+  const fallbackType = typeForStatus(result.status);
+  const fallbackKey = fallbackType ? ERROR_TYPE_KEYS[fallbackType] : undefined;
+  if (fallbackKey) {
+    // An unknown `type` names a mapping the dictionary is missing; a missing
+    // one is just a bodyless proxy/gateway failure with nothing to add, so
+    // only the former is worth logging.
+    if (process.env.NODE_ENV !== "production" && result.type) {
+      console.error(
+        `[errorMessage] unmapped error type ${JSON.stringify(result.type)} ` +
+          `(status ${result.status}): ${result.message}`,
+      );
+    }
+    return t(fallbackKey);
+  }
   // No mapping: never put the backend-authored English on screen. Log it for
   // the developer (who can add the mapping) and show the generic failure.
   if (process.env.NODE_ENV !== "production") {

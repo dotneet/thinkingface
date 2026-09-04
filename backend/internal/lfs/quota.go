@@ -55,23 +55,14 @@
 // reading a single row. What genuinely costs nothing, and is genuinely not
 // counted, is an object this repository is already linked to.
 //
-// Known limitation, deliberate: this reads usage and compares, without
-// reserving anything. Usage only moves when a link is written, so two
-// promotions racing each other can both read the same usage and both be
-// admitted. The promotion check narrows what that costs -- each object is now
-// measured against the usage its predecessors have already added, so a batch
-// admitted as a whole no longer lands as a whole once the namespace has
-// filled up in between -- but it does not close it: concurrent transfers
-// still overshoot by whatever is in flight at once.
-//
-// What narrows the in-process half of that race is the per-namespace stripe
-// below: the fresh quota read and the admit/refuse decision in withinQuota
-// and chargeQuota run while holding the namespace's stripe, so two decisions
-// for one namespace never rest on the same stale reading. It is deliberately
-// only that -- a mutex, not a reservation ledger. The transfer (and, on the
-// signed-URL path, the copy and the link) still happen after the lock is
-// released, and a second replica holds no part of this lock at all, so
-// concurrent uploads still overshoot by whatever is in flight at once.
+// Known limitation, deliberate: this is check-then-act without reserving
+// anything. Usage only moves when a link is written, so two pushes racing
+// each other can both read the same usage and both be admitted. The promotion
+// check narrows what that costs -- each object is measured against the usage
+// its predecessors have already added, so a batch admitted as a whole no
+// longer lands as a whole once the namespace has filled up in between -- but
+// it does not close it: concurrent transfers still overshoot by whatever is
+// in flight at once, and a second replica shares nothing in-process at all.
 // Closing it properly means a reservation ledger with expiry, since a batch
 // that is never transferred must not hold its bytes for ever; that is a larger
 // change than this file.
@@ -81,32 +72,11 @@ package lfs
 import (
 	"context"
 	"fmt"
-	"hash/fnv"
 	"math"
 	"net/http"
-	"sync"
 
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
-
-// quotaStripeCount is the number of stripes quota decisions hash onto. It is
-// a fixed array rather than one mutex per namespace so there is nothing to
-// create, count or evict: a collision only serialises two unrelated namespaces
-// for the length of two quota reads, which is not worth tracking.
-const quotaStripeCount = 32
-
-// quotaStripes serialises the read-and-decide half of quota enforcement per
-// namespace within this process (see the "Known limitation" note above).
-// Only the decision is under the lock -- never a transfer, a copy or a link,
-// which would turn one slow upload into a namespace-wide stall.
-var quotaStripes [quotaStripeCount]sync.Mutex
-
-// quotaStripe returns the stripe decisions for namespace must hold.
-func quotaStripe(namespace string) *sync.Mutex {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(namespace))
-	return &quotaStripes[h.Sum32()%quotaStripeCount]
-}
 
 // QuotaSource is the store surface the quota check needs. *store.Store
 // implements it; tests substitute a fake.
@@ -155,19 +125,6 @@ func (h *Handler) withinQuota(ctx context.Context, repoID int64, resp *BatchResp
 	}
 	q, limit, err := h.effectiveQuota(ctx, repoID)
 	if err != nil {
-		return false, err
-	}
-	if limit == nil {
-		return true, nil
-	}
-	// Re-read under the namespace's stripe so the decision below rests on the
-	// usage as it is now, not as it was when the batch started being decided.
-	// The first read only learns the namespace to hash (and the fast path for
-	// unlimited namespaces, which pays for nothing further).
-	stripe := quotaStripe(q.Namespace)
-	stripe.Lock()
-	defer stripe.Unlock()
-	if q, limit, err = h.effectiveQuota(ctx, repoID); err != nil {
 		return false, err
 	}
 	if limit == nil {
@@ -240,20 +197,6 @@ func (e *QuotaExceededError) Error() string { return e.Message }
 func (h *Handler) chargeQuota(ctx context.Context, repoID int64, oid string, size int64) error {
 	q, limit, err := h.effectiveQuota(ctx, repoID)
 	if err != nil {
-		return err
-	}
-	if limit == nil {
-		return nil
-	}
-	// Same re-read as withinQuota: the usage this decision compares against
-	// is taken while holding the namespace's stripe, so concurrent promotions
-	// for one namespace queue their decisions instead of sharing one stale
-	// reading. The link itself is written later, outside the lock, which is
-	// why this narrows the race rather than closing it.
-	stripe := quotaStripe(q.Namespace)
-	stripe.Lock()
-	defer stripe.Unlock()
-	if q, limit, err = h.effectiveQuota(ctx, repoID); err != nil {
 		return err
 	}
 	if limit == nil {

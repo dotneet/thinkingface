@@ -44,6 +44,10 @@ export function AccountSettings() {
     setSaveError(null);
   }
 
+  // Initial load only: the fetched username never changes with the language,
+  // so re-running this on a locale change would just refetch it — the same
+  // reason `usePagedList` keeps the translator out of its inputs (it
+  // re-renders its error in the new language instead of re-reading).
   useEffect(() => {
     (async () => {
       const me = await getMe();
@@ -54,7 +58,8 @@ export function AccountSettings() {
       }
       setUsername(me.data.user.username);
     })();
-  }, [t]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();

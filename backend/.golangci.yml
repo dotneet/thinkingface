@@ -9,6 +9,13 @@ linters:
     - misspell
 
   settings:
+    govet:
+      # The inline analyzer wants named constants "inlined" at their use site,
+      # which for stdlib constants (it flags any use of reflect.Ptr) means
+      # replacing a readable name with a magic number. That is never the right
+      # trade, so it stays off while the rest of govet runs.
+      disable:
+        - inline
     misspell:
       # No locale: comments here mix British and US spellings, so pinning either
       # one turns misspell into a style bot instead of a typo catcher.

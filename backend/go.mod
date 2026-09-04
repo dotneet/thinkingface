@@ -1,14 +1,14 @@
 module github.com/dotneet/thinkingface/backend
 
-go 1.25.0
+go 1.26.0
 
 // The Go toolchain the project is built with, pinned to a patch release
-// rather than left at whatever `go 1.25.0` resolves to. CI installs the
-// toolchain from this file, so without the line it built with 1.25.0 and
-// carried 27 known standard-library vulnerabilities that later 1.25.x
-// releases had already fixed (`make audit` reports them). Bump it together
-// with the golang image in backend/Dockerfile; see docs/dev/supply-chain.md.
-toolchain go1.25.14
+// rather than left at whatever `go 1.26.0` resolves to. CI installs the
+// toolchain from this file, so without the line it built with 1.26.0 and
+// carried known standard-library vulnerabilities that later 1.26.x releases
+// had already fixed (`make audit` reports them). Bump it together with the
+// golang image in backend/Dockerfile; see docs/dev/supply-chain.md.
+toolchain go1.26.8
 
 require (
 	cloud.google.com/go/storage v1.65.0
@@ -18,7 +18,7 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/parquet-go/parquet-go v0.32.0
 	github.com/sergi/go-diff v1.3.2-0.20230802210424-5b0b94c5c0d3
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/term v0.45.0
 	google.golang.org/api v0.287.1

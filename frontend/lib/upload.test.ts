@@ -177,6 +177,46 @@ describe("uploadFiles", () => {
     });
   });
 
+  it("leaves type undefined for a bodyless failure that maps to a detail type", async () => {
+    // A detail type's translation interpolates the message, and the only
+    // message a bodyless failure has is the bare status line — baking the
+    // type here would print e.g. "Invalid request: 400 Bad Request" on screen
+    // (see `isDetailErrorType`). `errorMessage` falls back to the generic
+    // sentence for the status instead.
+    for (const [status, statusText] of [
+      [400, "Bad Request"],
+      [403, "Forbidden"],
+      [409, "Conflict"],
+    ] as const) {
+      install((xhr) => {
+        xhr.status = status;
+        xhr.statusText = statusText;
+        xhr.responseText = "<html>proxy error</html>";
+      });
+      const result = await uploadFiles("model", "a", "b", "main", [
+        { path: "a.txt", file: textFile("a.txt") },
+      ]);
+      expect(result).toEqual({ ok: false, status, message: `${status} ${statusText}` });
+    }
+  });
+
+  it("still tags a bodyless 404 (a non-detail type) so it translates", async () => {
+    install((xhr) => {
+      xhr.status = 404;
+      xhr.statusText = "Not Found";
+      xhr.responseText = "<html>proxy error</html>";
+    });
+    const result = await uploadFiles("model", "a", "b", "main", [
+      { path: "a.txt", file: textFile("a.txt") },
+    ]);
+    expect(result).toEqual({
+      ok: false,
+      status: 404,
+      message: "404 Not Found",
+      type: "not_found",
+    });
+  });
+
   it("never throws on a network failure", async () => {
     vi.stubGlobal(
       "XMLHttpRequest",
