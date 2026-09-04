@@ -21,6 +21,21 @@ const ContentType = "application/vnd.git-lfs+json"
 // or download, which is a malformed request rather than a server fault.
 var ErrUnsupportedOperation = errors.New("lfs: unsupported operation")
 
+// ErrTooManyObjects reports a batch naming more objects than the server will
+// decide in one request. Like ErrUnsupportedOperation it is the caller's
+// mistake, and the API answers it with 400 rather than a server fault.
+var ErrTooManyObjects = errors.New("lfs: too many objects in batch request")
+
+// MaxBatchObjects bounds the objects one batch request may name. The body is
+// already capped (the API's maxBatchBody, 8 MiB), but that is not a bound on
+// the work: 8 MiB of minimal records is hundreds of thousands of them, and
+// each costs at least a storage Stat on the upload path. A legitimate push
+// names far fewer -- git-lfs sends one batch per push, and even a push
+// touching thousands of files stays an order of magnitude below this -- so
+// anything past it is a client that should have split the push, not one that
+// needs a larger ceiling.
+const MaxBatchObjects = 1000
+
 // oidRe matches the only object id this server accepts. Every oid reaches
 // storage.LFSKey, which splices it straight into an object key, so an
 // unchecked value from a batch request would let a client name a key outside

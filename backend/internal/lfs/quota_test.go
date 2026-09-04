@@ -116,8 +116,11 @@ func TestBatchAcceptsAnUploadThatFitsTheQuota(t *testing.T) {
 		}
 	}
 	// Exactly at the limit is inside it: 40 + 60 = 100.
-	if q.calls != 1 {
-		t.Errorf("the quota was read %d times for one batch, want 1", q.calls)
+	// Two reads for one batch whatever its size: one to learn the namespace,
+	// one under its stripe for the decision itself. What must not grow with
+	// the batch is the count, not the constant.
+	if q.calls != 2 {
+		t.Errorf("the quota was read %d times for one batch, want 2", q.calls)
 	}
 }
 
@@ -183,8 +186,8 @@ func TestBatchChargesDedupHitsTheRepositoryDoesNotHold(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Batch: %v", err)
 	}
-	if q.calls != 1 {
-		t.Fatalf("the quota was consulted %d times, want 1 -- dedup must not skip the gate", q.calls)
+	if q.calls != 2 {
+		t.Fatalf("the quota was consulted %d times, want 2 (one per decision step) -- dedup must not skip the gate", q.calls)
 	}
 	for i, obj := range resp.Objects {
 		if obj.Error == nil || obj.Error.Code != http.StatusInsufficientStorage {

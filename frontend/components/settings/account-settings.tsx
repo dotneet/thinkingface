@@ -54,7 +54,7 @@ export function AccountSettings() {
       }
       setUsername(me.data.user.username);
     })();
-  }, []);
+  }, [t]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();

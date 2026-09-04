@@ -46,6 +46,13 @@ const ERROR_TYPE_KEYS: Record<string, MessageKey> = {
   // (handlerTimeoutBody in backend/internal/api/server.go), but it is spelled
   // in the same error shape, so it arrives here like any other type.
   timeout: "errors.timeout",
+  // Client-synthesized, not backend `error.type` values: lib/upload.ts tags
+  // failures that never carried a backend body (a dead connection, a
+  // deliberate abort) so they translate instead of printing raw XHR text.
+  // `upload_cancelled` deliberately ignores `message` below — "Upload
+  // cancelled" is reporting vocabulary, not a detail worth interpolating.
+  network_error: "errors.networkError",
+  upload_cancelled: "errors.uploadCancelled",
 };
 
 /**
@@ -107,28 +114,45 @@ const DETAIL_KEYS: Record<string, MessageKey> = {
  * Turns an `apiFetch` failure into a message in the current locale instead
  * of the backend-authored English string in `result.message` ([S12]).
  *
- * - `status === 0` (backend unreachable / network failure) always gets its
- *   own copy, since `result.message` there is a raw `fetch` error, not
- *   anything the backend wrote.
+ * - `status === 0` (backend unreachable / network failure) gets
+ *   `errors.networkError`, since `result.message` there is a raw `fetch`
+ *   error, not anything the backend wrote. The one exception is a known
+ *   `type`, which always wins: lib/upload.ts tags a deliberate abort
+ *   `upload_cancelled` (and a dead connection `network_error`), and those
+ *   must not read as a broken connection / generic failure respectively.
  * - A recognized `type` is translated. The types in {@link DETAIL_KEYS} keep
  *   the backend's reason, interpolated into the translated sentence; an empty
  *   (or whitespace-only) `message` falls back to the placeholder-free wording
  *   in {@link ERROR_TYPE_KEYS} rather than rendering a dangling "…: " — or,
  *   worse, the raw "{detail}" the template would print if it were rendered
  *   with no params.
- * - An unrecognized (or missing) `type` falls back to `result.message`
- *   verbatim. This only happens for a `type` this dictionary doesn't know
- *   about yet — every type the backend currently sends is mapped above —
- *   so callers should treat it as a rare escape hatch, not the normal path.
+ * - An unrecognized (or missing) `type` falls back to `errors.internalError`.
+ *   This only happens for a `type` this dictionary doesn't know about yet —
+ *   every type the backend currently sends is mapped above — so the screen
+ *   never shows backend-authored English for it. The raw message is logged to
+ *   the dev console instead, where it tells the developer which mapping to add.
  */
 export function errorMessage(t: Translator, result: FailedApiResult): string {
-  if (result.status === 0) return t("errors.networkError");
+  // A known type always wins, even for a status-0 transport failure: only
+  // lib/upload.ts produces those, and it tags them (`upload_cancelled`,
+  // `network_error`, `timeout`) precisely so they translate.
   const key = result.type ? ERROR_TYPE_KEYS[result.type] : undefined;
-  if (!key) return result.message;
-  const detail = result.message.trim();
-  const detailKey = result.type ? DETAIL_KEYS[result.type] : undefined;
-  if (detailKey && detail) return t(detailKey, { detail });
-  return t(key);
+  if (key) {
+    const detail = result.message.trim();
+    const detailKey = result.type ? DETAIL_KEYS[result.type] : undefined;
+    if (detailKey && detail) return t(detailKey, { detail });
+    return t(key);
+  }
+  if (result.status === 0) return t("errors.networkError");
+  // No mapping: never put the backend-authored English on screen. Log it for
+  // the developer (who can add the mapping) and show the generic failure.
+  if (process.env.NODE_ENV !== "production") {
+    console.error(
+      `[errorMessage] unmapped error type ${JSON.stringify(result.type)} ` +
+        `(status ${result.status}): ${result.message}`,
+    );
+  }
+  return t("errors.internalError");
 }
 
 /**

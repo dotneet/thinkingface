@@ -181,6 +181,26 @@ func (h *Handler) promoteFrom(ctx context.Context, repoID int64, oid string, siz
 		return err
 	}
 
+	// The copy below is deliberately NOT covered by a generation precondition:
+	// storage.Copy takes no expected-generation argument, so nothing here can
+	// ask the bucket to copy "only generation N". confirmUnchanged above
+	// proves the staged object is still the inspected version at the moment it
+	// runs, but a writer that replaces the staging key between that re-stat
+	// and the copy's completion publishes bytes this promotion never checked.
+	//
+	// That residual window is accepted rather than closed here, for two
+	// reasons. First, the checks it would bypass already ran on bytes that
+	// hashed correctly once: swapping in different bytes of the same size in
+	// that instant corrupts at most this one promotion, and the window is one
+	// stat-to-copy hop, not the whole upload. Second, the paths that can
+	// choose their staging key already close it themselves by staging under a
+	// private random key (storage.LFSIncomingKey) nothing else can name -- the
+	// proxy upload and the browser upload both do this, which makes
+	// confirmUnchanged their second line of defence rather than their first.
+	// Only the signed-URL path stages under the derived
+	// storage.LFSStagingKey(repoID, oid), because the client must be able to
+	// name the key before it uploads, and a second live upload URL for the
+	// same key is the one case where two writers genuinely share it.
 	if err := h.storage.Copy(ctx, staging, storage.LFSKey(oid)); err != nil {
 		return fmt.Errorf("promote staged object: %w", err)
 	}

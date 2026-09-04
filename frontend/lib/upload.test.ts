@@ -169,7 +169,12 @@ describe("uploadFiles", () => {
     const result = await uploadFiles("model", "a", "b", "main", [
       { path: "a.txt", file: textFile("a.txt") },
     ]);
-    expect(result).toMatchObject({ ok: false, status: 502, message: "502 Bad Gateway" });
+    expect(result).toMatchObject({
+      ok: false,
+      status: 502,
+      message: "502 Bad Gateway",
+      type: "internal_error",
+    });
   });
 
   it("never throws on a network failure", async () => {
@@ -184,7 +189,12 @@ describe("uploadFiles", () => {
     const result = await uploadFiles("model", "a", "b", "main", [
       { path: "a.txt", file: textFile("a.txt") },
     ]);
-    expect(result).toEqual({ ok: false, status: 0, message: "Network error" });
+    expect(result).toEqual({
+      ok: false,
+      status: 0,
+      message: "Network error",
+      type: "network_error",
+    });
   });
 
   it("resolves rather than hanging when the caller aborts", async () => {
@@ -206,7 +216,12 @@ describe("uploadFiles", () => {
       { signal: controller.signal },
     );
     controller.abort();
-    expect(await promise).toEqual({ ok: false, status: 0, message: "Upload cancelled" });
+    expect(await promise).toEqual({
+      ok: false,
+      status: 0,
+      message: "Upload cancelled",
+      type: "upload_cancelled",
+    });
   });
 });
 

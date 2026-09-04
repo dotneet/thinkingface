@@ -13,7 +13,8 @@ This proxy forwards everything to the emulator with `Host: gcs:4443`, so
 inside the compose network. Standard library only, on purpose: it has to run
 without touching whatever Python environment happens to be active.
 
-    scripts/gcs-host-proxy.py [--port 14443] [--upstream localhost:4443]
+    scripts/gcs-host-proxy.py [--port 14443] [--host 127.0.0.1]
+                              [--upstream localhost:4443]
                               [--public-host gcs:4443]
 """
 
@@ -74,7 +75,13 @@ class _ChunkedReader:
             line = self._stream.readline().strip()
             chunk_size = int(line.split(b";")[0] or b"0", 16)
             if chunk_size == 0:
-                self._stream.readline()  # trailing CRLF
+                # Trailers: zero or more header lines terminated by an empty
+                # line (RFC 7230 section 4.1.2). Reading a single line only
+                # works when the sender sends none; drain up to the empty
+                # line so a trailing header is never mistaken for the next
+                # request's request line on this keep-alive connection.
+                while self._stream.readline().strip():
+                    pass
                 self._done = True
                 break
             self._buf += self._stream.read(chunk_size)
@@ -160,6 +167,11 @@ def main() -> int:
         "--port", type=int, default=14443, help="port to listen on (default: 14443)"
     )
     ap.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="address to listen on (default: 127.0.0.1)",
+    )
+    ap.add_argument(
         "--upstream",
         default="localhost:4443",
         help="published fake-gcs address (default: localhost:4443)",
@@ -173,9 +185,9 @@ def main() -> int:
 
     Handler.upstream = args.upstream
     Handler.public_host = args.public_host
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(
-        f"gcs-host-proxy: http://localhost:{args.port} -> {args.upstream} (Host: {args.public_host})",
+        f"gcs-host-proxy: http://{args.host}:{args.port} -> {args.upstream} (Host: {args.public_host})",
         file=sys.stderr,
     )
     try:

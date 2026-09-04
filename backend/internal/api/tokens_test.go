@@ -85,6 +85,34 @@ func TestCreateToken_ExpiresInDays_Rejected(t *testing.T) {
 	}
 }
 
+// An unknown scope is refused rather than silently downgraded to read. The
+// downgrade used to mint a read-only token with a 200, so a typo surfaced
+// only at the first write -- far from the request that caused it, and with
+// nothing pointing back at it.
+func TestCreateToken_UnknownScopeIsRejected(t *testing.T) {
+	f := newTransferFixture(t)
+	write := f.token(f.alice, "write")
+
+	for _, scope := range []string{"admin", "wriet", "READ", ""} { //nolint:misspell // intentional typo fixture
+		resp := f.do("POST", "/api/v1/tokens", write, map[string]any{
+			"name": "tok", "scope": scope,
+		})
+		if resp.status() != 400 {
+			t.Fatalf("scope=%q status = %d, want 400 (body %s)", scope, resp.status(), resp.rec.Body.String())
+		}
+	}
+
+	// Nothing was created by the rejected requests.
+	list := f.do("GET", "/api/v1/tokens", write, nil)
+	var body apitypes.TokenListResponse
+	list.json(t, &body)
+	// The one bootstrapping "write" token from f.token is the only one that
+	// should exist.
+	if len(body.Items) != 1 {
+		t.Fatalf("tokens after rejected creates = %+v, want 1 (the fixture's own token)", body.Items)
+	}
+}
+
 // createExpiredToken mints a token whose expires_at is already in the past,
 // bypassing the API (which cannot backdate a token) by calling the store
 // directly with a computed expiry -- the same path handleCreateToken takes

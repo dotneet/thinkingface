@@ -91,7 +91,6 @@ export function AdminUsersManager({ viewer }: { viewer: string }) {
   const {
     items: users,
     total,
-    offset,
     setOffset,
     loadError,
     reload: refresh,

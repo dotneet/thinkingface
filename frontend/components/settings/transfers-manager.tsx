@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowLeftRight } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { LoginRequiredState } from "@/components/settings/login-required-state";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -77,7 +77,10 @@ export function TransfersManager() {
   const [confirmReject, setConfirmReject] = useState<RepoTransfer | null>(null);
   const [rejectError, setRejectError] = useState<string | null>(null);
 
-  async function refresh() {
+  // Stable across renders (it only closes over `t`) so the initial-load
+  // effect below can depend on it: re-running on a locale change also
+  // re-renders a stale load error in the new language.
+  const refresh = useCallback(async () => {
     const result = await listMyTransfers();
     if (!result.ok) {
       setNeedsLogin(isUnauthorized(result));
@@ -89,11 +92,11 @@ export function TransfersManager() {
     setError(null);
     setIncoming(result.data.incoming);
     setOutgoing(result.data.outgoing);
-  }
+  }, [t]);
 
   useEffect(() => {
     refresh();
-  }, []);
+  }, [refresh]);
 
   async function handleAccept(transfer: RepoTransfer) {
     setBusyId(transfer.id);

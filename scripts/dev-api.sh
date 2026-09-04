@@ -33,21 +33,24 @@ mkdir -p "$DEV_DIR"/{db,git,cache,bin}
 # The emulator is only reachable with the right Host header, so bring the proxy
 # up unless something is already listening on its port (a previous run, or
 # `make gcs-proxy` in another terminal).
-proxy_pid=""
+#
+# Survival policy: the proxy is intentionally left running when this script
+# ends. The `exec` below replaces this shell with the API server, so an EXIT
+# trap set here would never fire -- and the proxy is shared anyway: the next
+# run reuses it through the check above, and `make dev-stop` stops it by port.
 if lsof -ti "tcp:${GCS_PROXY_PORT}" >/dev/null 2>&1; then
 	echo "==> gcs-host-proxy already listening on ${GCS_PROXY_PORT}"
 else
 	echo "==> starting gcs-host-proxy on ${GCS_PROXY_PORT}"
 	"$ROOT/scripts/gcs-host-proxy.py" --port "$GCS_PROXY_PORT" &
-	proxy_pid=$!
-	# Only tear down the proxy if this script is the one that started it.
-	trap 'kill "$proxy_pid" 2>/dev/null || true' EXIT
 fi
 
 echo "==> building backend/cmd/thinkingface"
 (cd backend && go build -o "$DEV_DIR/bin/thinkingface" ./cmd/thinkingface)
 
 echo "==> api on http://localhost:${API_DEV_PORT} (sqlite: ${DEV_DIR}/db/tf.db, admin/admin)"
+# Credentialed CORS from a host-side web needs the exact origin; the env var
+# is TF_ALLOWED_ORIGINS, not TF_CORS_ORIGINS.
 exec env \
 	TF_ADDR=":${API_DEV_PORT}" \
 	TF_PUBLIC_URL="http://localhost:${API_DEV_PORT}" \
@@ -64,7 +67,5 @@ exec env \
 	TF_SESSION_SECRET="${TF_SESSION_SECRET:-dev-insecure-session-secret}" \
 	TF_ALLOW_SIGNUP="${TF_ALLOW_SIGNUP:-true}" \
 	TF_SSH_ENABLED="${TF_SSH_ENABLED:-false}" \
-	`# credentialed CORS from a host-side web needs the exact origin; the env` \
-	`# var is TF_ALLOWED_ORIGINS, not TF_CORS_ORIGINS.` \
 	TF_ALLOWED_ORIGINS="${TF_ALLOWED_ORIGINS:-http://localhost:${WEB_DEV_PORT}}" \
 	"$DEV_DIR/bin/thinkingface"

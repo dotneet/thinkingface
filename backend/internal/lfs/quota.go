@@ -23,33 +23,21 @@
 // promotion check is what makes the invariant above true for all three paths
 // rather than for the polite one.
 //
-// One writer of links is still outside this package and outside this gate:
-// store.LinkLFSObjects. It has two callers, and only one of them is a hole.
+// One writer of links used to be outside this package and outside this gate:
+// store.LinkLFSObjects, as called by the syncer's post-push pipeline. It links
+// *new* oids for pointer files pushed as ordinary blobs by a client that never
+// spoke the LFS protocol, and nothing on that path consulted a quota. That
+// hole is now closed where the link is written: the syncer consults the same
+// allowance through filterLFSByQuota (syncer/quota.go) before it links, and a
+// refused object is left unlinked -- the same unresolvable state a pointer for
+// content nobody uploaded leaves, which is what already happens to a pointer
+// naming an oid nobody uploaded.
 //
-//   - The HF-compatible commit handler is harmless. Every oid it passes came
-//     through verifyCommitLFSFile (api/commitbody.go), which refuses an
-//     lfsFile op whose oid this repository is not already linked to -- so the
-//     call can only re-link what a gated path already charged for, which is
-//     what stamps committed_at. It adds no row UsageByRepo was not already
-//     summing.
-//   - The syncer's post-push pipeline is the real bypass. It links *new* oids,
-//     for pointer files pushed as ordinary blobs by a client that never spoke
-//     the LFS protocol, and nothing on that path consults a quota. An oid and
-//     a size are public -- every LFS pointer in every readable repository
-//     carries both -- so a namespace sitting at its quota can copy an
-//     oid/size pair out of any repository it can read, commit that pointer
-//     text as a plain file, push with no git-lfs filter configured, and have
-//     the syncer link it. No new bytes enter the bucket, so this inflates the
-//     namespace's accounted usage rather than stealing storage -- but the
-//     accounting is the quota, so it defeats the limit and then refuses that
-//     namespace's own later legitimate pushes.
-//
-// Deliberately left for a separate change. Closing it means a check in the
-// caller (the store layer knows nothing about quotas), and the check has to
-// decide what happens to a push that has already been accepted: refuse the
-// link and leave the file unresolvable, which is what already happens to a
-// pointer naming an oid nobody uploaded -- or link it and over-count. That is
-// a design decision with an E2E-visible answer, not a line to add here.
+// The HF-compatible commit handler's call needs no such check. Every oid it
+// passes came through verifyCommitLFSFile (api/commitbody.go), which refuses
+// an lfsFile op whose oid this repository is not already linked to -- so the
+// call can only re-link what a gated path already charged for, which is what
+// stamps committed_at. It adds no row UsageByRepo was not already summing.
 //
 // What is counted is the namespace's LFS footprint, the same number
 // GET /api/v1/usage reports, and Batch checks it against the batch as a whole:
@@ -68,13 +56,22 @@
 // counted, is an object this repository is already linked to.
 //
 // Known limitation, deliberate: this reads usage and compares, without
-// reserving anything and without locking the namespace. Usage only moves when
-// a link is written, so two promotions racing each other can both read the
-// same usage and both be admitted. The promotion check narrows what that
-// costs -- each object is now measured against the usage its predecessors have
-// already added, so a batch admitted as a whole no longer lands as a whole
-// once the namespace has filled up in between -- but it does not close it:
-// concurrent transfers still overshoot by whatever is in flight at once.
+// reserving anything. Usage only moves when a link is written, so two
+// promotions racing each other can both read the same usage and both be
+// admitted. The promotion check narrows what that costs -- each object is now
+// measured against the usage its predecessors have already added, so a batch
+// admitted as a whole no longer lands as a whole once the namespace has
+// filled up in between -- but it does not close it: concurrent transfers
+// still overshoot by whatever is in flight at once.
+//
+// What narrows the in-process half of that race is the per-namespace stripe
+// below: the fresh quota read and the admit/refuse decision in withinQuota
+// and chargeQuota run while holding the namespace's stripe, so two decisions
+// for one namespace never rest on the same stale reading. It is deliberately
+// only that -- a mutex, not a reservation ledger. The transfer (and, on the
+// signed-URL path, the copy and the link) still happen after the lock is
+// released, and a second replica holds no part of this lock at all, so
+// concurrent uploads still overshoot by whatever is in flight at once.
 // Closing it properly means a reservation ledger with expiry, since a batch
 // that is never transferred must not hold its bytes for ever; that is a larger
 // change than this file.
@@ -84,11 +81,32 @@ package lfs
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"math"
 	"net/http"
+	"sync"
 
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
+
+// quotaStripeCount is the number of stripes quota decisions hash onto. It is
+// a fixed array rather than one mutex per namespace so there is nothing to
+// create, count or evict: a collision only serialises two unrelated namespaces
+// for the length of two quota reads, which is not worth tracking.
+const quotaStripeCount = 32
+
+// quotaStripes serialises the read-and-decide half of quota enforcement per
+// namespace within this process (see the "Known limitation" note above).
+// Only the decision is under the lock -- never a transfer, a copy or a link,
+// which would turn one slow upload into a namespace-wide stall.
+var quotaStripes [quotaStripeCount]sync.Mutex
+
+// quotaStripe returns the stripe decisions for namespace must hold.
+func quotaStripe(namespace string) *sync.Mutex {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(namespace))
+	return &quotaStripes[h.Sum32()%quotaStripeCount]
+}
 
 // QuotaSource is the store surface the quota check needs. *store.Store
 // implements it; tests substitute a fake.
@@ -137,6 +155,19 @@ func (h *Handler) withinQuota(ctx context.Context, repoID int64, resp *BatchResp
 	}
 	q, limit, err := h.effectiveQuota(ctx, repoID)
 	if err != nil {
+		return false, err
+	}
+	if limit == nil {
+		return true, nil
+	}
+	// Re-read under the namespace's stripe so the decision below rests on the
+	// usage as it is now, not as it was when the batch started being decided.
+	// The first read only learns the namespace to hash (and the fast path for
+	// unlimited namespaces, which pays for nothing further).
+	stripe := quotaStripe(q.Namespace)
+	stripe.Lock()
+	defer stripe.Unlock()
+	if q, limit, err = h.effectiveQuota(ctx, repoID); err != nil {
 		return false, err
 	}
 	if limit == nil {
@@ -209,6 +240,20 @@ func (e *QuotaExceededError) Error() string { return e.Message }
 func (h *Handler) chargeQuota(ctx context.Context, repoID int64, oid string, size int64) error {
 	q, limit, err := h.effectiveQuota(ctx, repoID)
 	if err != nil {
+		return err
+	}
+	if limit == nil {
+		return nil
+	}
+	// Same re-read as withinQuota: the usage this decision compares against
+	// is taken while holding the namespace's stripe, so concurrent promotions
+	// for one namespace queue their decisions instead of sharing one stale
+	// reading. The link itself is written later, outside the lock, which is
+	// why this narrows the race rather than closing it.
+	stripe := quotaStripe(q.Namespace)
+	stripe.Lock()
+	defer stripe.Unlock()
+	if q, limit, err = h.effectiveQuota(ctx, repoID); err != nil {
 		return err
 	}
 	if limit == nil {

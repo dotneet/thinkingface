@@ -8,6 +8,10 @@
 // NOTE: the en dictionary is the source of truth for shape, so it must not be `as const`.
 export const errors = {
   networkError: "Couldn't reach the server. Check your connection and try again.",
+  // A deliberate abort of an in-flight upload (lib/upload.ts tags it
+  // `upload_cancelled`): the connection is fine, the user asked to stop, so
+  // this must not read as a broken network.
+  uploadCancelled: "The upload was cancelled.",
   // bad_request messages carry a specific, actionable detail from the
   // backend ("name must not contain spaces"), so it's appended rather than
   // discarded like the other types' raw text.

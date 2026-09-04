@@ -396,22 +396,24 @@ func writePartialContent(w http.ResponseWriter, offset, length, size int64) int6
 // one count -- governs both; counting them under different rules is what let
 // a 30-day window come out larger than the all-time total it is a window of.
 //
-// Neither write may delay the response, so both go to a goroutine detached
-// from the request context (the request may well be finished by the time this
-// runs), and neither can fail a download: IncrementDownloads and
-// RecordDownload only log.
+// Neither write may delay the response, so both go to the shared detached
+// pool (detached.go) rather than the request's goroutine, and neither can fail
+// a download: IncrementDownloads and RecordDownload only log.
 //
-// Detached does not mean unbounded: one resolve is one goroutine and two
+// Detached does not mean unbounded: one resolve is one queued function and two
 // writes, and resolve needs no authentication, so a database that stops
-// answering would otherwise pile them up without limit. detachedWrite
-// (auth.go) gives the pair a deadline of its own.
+// answering would otherwise pile them up without limit. The pool bounds how
+// many run at once and drops (with a log line and a counter) when its queue
+// is full; detachedWrite (auth.go) gives the pair a deadline of its own so a
+// queued write still ends. A dropped count undercounts the dashboard, which is
+// the accepted cost of never letting bookkeeping slow a download.
 func (s *Server) recordDownload(ctx context.Context, repoID int64) {
-	detached, cancel := detachedWrite(ctx)
-	go func() {
+	submitDetached(func() {
+		detached, cancel := detachedWrite(ctx)
 		defer cancel()
 		s.store.IncrementDownloads(detached, repoID)
 		s.store.RecordDownload(detached, repoID)
-	}()
+	})
 }
 
 // lfsObjectOwned guards every path that turns a pointer in a repository's

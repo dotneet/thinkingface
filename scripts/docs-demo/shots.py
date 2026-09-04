@@ -2,9 +2,10 @@
 
 Run `scripts/docs-demo/seed.py` first; see docs/dev/docs-screenshots.md for the
 servers both scripts expect. Pass image names to re-capture only some of them.
+(Versions pinned like every other install step -- see docs/dev/supply-chain.md.)
 
-    uv run --isolated --with playwright --with pillow scripts/docs-demo/shots.py
-    uv run --isolated --with playwright --with pillow scripts/docs-demo/shots.py home
+    uv run --isolated --with playwright==1.55.0 --with pillow==11.3.0 scripts/docs-demo/shots.py
+    uv run --isolated --with playwright==1.55.0 --with pillow==11.3.0 scripts/docs-demo/shots.py home
 """
 
 from __future__ import annotations

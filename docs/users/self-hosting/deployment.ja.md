@@ -44,6 +44,7 @@ docker compose up -d
 | `pg-data` | PostgreSQL のデータディレクトリ |
 | `gcs-data` | fake-gcs-server のバックエンドファイルシステム（LFS オブジェクト、blob） |
 | `git-data` | `GIT_ROOT`（`/data`）配下のベア git リポジトリ、および生成された SSH ホスト鍵 |
+| `sqlite-data` | SQLite のデータベースファイル（SQLite モードでのみ使用） |
 
 これらのボリュームは、コンテナの再起動や `docker compose down` をまたいでも維持されます。
 
@@ -51,13 +52,15 @@ docker compose up -d
 
 ```bash
 docker compose down    # stop and remove containers; volumes are kept
-make clean              # docker compose down -v -- also removes the named volumes
+make clean              # down -v on both stacks (default and SQLite) -- also removes the named volumes
 ```
 
 `docker compose down`（または `make down`）はデータをそのまま残すので、その後 `docker compose up -d`
 を実行すれば中断したところからそのまま再開します。データベースをまっさらにし、バケットを空にし、
 リポジトリを一切ない状態から始めたい場合は `make clean`（あるいは直接 `docker compose down -v`）を
-実行してください。これはコンテナとともに名前付きボリュームも削除します。
+実行してください。これはコンテナとともに名前付きボリュームも削除します。`make clean` は SQLite
+モードのスタック（`sqlite-data`）も対象に含みます。素の `docker compose down -v` ではあちらは
+残ります。
 
 !!! warning "他の人に公開する前にデフォルト値を変更してください"
     デフォルトのまま `docker compose up` すると、よく知られたパスワード `admin` を持つ `admin`

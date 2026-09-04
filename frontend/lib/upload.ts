@@ -56,8 +56,14 @@ export function uploadFiles(
     xhr.upload.onprogress = (event) => {
       options.onProgress?.(event.loaded, event.lengthComputable ? event.total : 0);
     };
-    xhr.onerror = () => resolve({ ok: false, status: 0, message: "Network error" });
-    xhr.onabort = () => resolve({ ok: false, status: 0, message: "Upload cancelled" });
+    // Both carry a `type` so `errorMessage` translates them: a dead
+    // connection is `network_error` (→ errors.networkError), a deliberate
+    // abort is `upload_cancelled` (→ errors.uploadCancelled) and must not
+    // read as a broken connection.
+    xhr.onerror = () =>
+      resolve({ ok: false, status: 0, message: "Network error", type: "network_error" });
+    xhr.onabort = () =>
+      resolve({ ok: false, status: 0, message: "Upload cancelled", type: "upload_cancelled" });
     xhr.onload = () => resolve(parseUploadResponse(xhr));
     options.signal?.addEventListener("abort", () => xhr.abort(), { once: true });
 
@@ -127,12 +133,38 @@ function parseUploadResponse(xhr: XMLHttpRequest): ApiResult<UploadFilesResponse
   }
   if (xhr.status < 200 || xhr.status >= 300) {
     const body = parsed as ApiErrorBody | undefined;
+    // A backend error body carries its own `type`; a proxy/gateway failure
+    // usually carries none, so derive one from the status — otherwise
+    // `errorMessage` would have to print the raw status line (`${status}
+    // ${statusText}`) on screen.
+    const type = body?.error?.type ?? typeForUploadStatus(xhr.status);
     return {
       ok: false,
       status: xhr.status,
       message: body?.error?.message ?? `${xhr.status} ${xhr.statusText}`,
-      type: body?.error?.type,
+      ...(type !== undefined ? { type } : {}),
     };
   }
   return { ok: true, data: parsed as UploadFilesResponse };
+}
+
+/**
+ * Best-effort `error.type` for an upload failure whose body carried none
+ * (a gateway/proxy status line rather than an ApiErrorBody), using the same
+ * vocabulary `lib/api-error-message.ts` translates. Statuses with no useful
+ * mapping stay `undefined` and degrade to the shared generic failure there.
+ */
+function typeForUploadStatus(status: number): string | undefined {
+  if (status === 400) return "bad_request";
+  if (status === 401) return "unauthorized";
+  if (status === 403) return "forbidden";
+  if (status === 404) return "not_found";
+  if (status === 408 || status === 504) return "timeout";
+  if (status === 409) return "conflict";
+  if (status === 413) return "payload_too_large";
+  if (status === 415) return "unsupported_media_type";
+  if (status === 429) return "rate_limited";
+  if (status === 503) return "overloaded";
+  if (status >= 500) return "internal_error";
+  return undefined;
 }

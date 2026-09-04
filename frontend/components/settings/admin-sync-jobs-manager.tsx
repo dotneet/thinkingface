@@ -53,7 +53,6 @@ export function AdminSyncJobsManager() {
   const {
     items: jobs,
     total,
-    offset,
     setOffset,
     loadError,
     reload: refresh,

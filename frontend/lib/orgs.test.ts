@@ -142,10 +142,10 @@ describe("orgErrorKey", () => {
     expect(orgErrorKey(failure(403))).toBe("org.errors.permissionDenied");
   });
 
-  it("returns null when only the server's own message can explain it", () => {
-    expect(orgErrorKey(failure(404))).toBeNull();
-    expect(orgErrorKey(failure(500))).toBeNull();
-    expect(orgErrorKey(failure(400, "something_new"))).toBeNull();
+  it("always returns a generic key instead of null when nothing more specific applies", () => {
+    expect(orgErrorKey(failure(404))).toBe("errors.notFound");
+    expect(orgErrorKey(failure(500))).toBe("errors.internalError");
+    expect(orgErrorKey(failure(400, "something_new"))).toBe("errors.internalError");
   });
 
   it("lets a call site name what its ambiguous statuses mean", () => {

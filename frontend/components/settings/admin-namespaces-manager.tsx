@@ -63,7 +63,6 @@ export function AdminNamespacesManager() {
     items: rows,
     data,
     total,
-    offset,
     setOffset,
     loadError,
     reload: refresh,

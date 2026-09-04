@@ -59,6 +59,13 @@ export const parquet = {
     resultStatsOther: "{count} rows in {ms} ms",
     copyCsv: "Copy CSV",
     queryFailed: "Query failed",
+    // The sentence above the engine's own detail: DuckDB errors name
+    // functions and files in English, so they are shown as-is inside a
+    // collapsed detail rather than as the message itself.
+    queryFailedBody:
+      "The query could not be run. The detail below is reported by the database engine, in its original language.",
+    showDetail: "Show detail",
+    copyError: "Copy error detail",
     truncated:
       "Showing the first {limit} of {total} rows. Add a LIMIT or an aggregate to narrow the result.",
     noResultsTitle: "No results yet",

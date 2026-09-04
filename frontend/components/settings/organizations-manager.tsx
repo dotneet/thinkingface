@@ -2,7 +2,7 @@
 
 import { Building2, Plus, Settings } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { NamespaceAvatar } from "@/components/namespace/namespace-avatar";
 import { OrgRoleBadge, orgRoleLabelKey } from "@/components/orgs/org-role-badge";
 import { LoginRequiredState } from "@/components/settings/login-required-state";
@@ -60,7 +60,10 @@ export function OrganizationsManager() {
     setConfirmTarget(org);
   }
 
-  async function refresh() {
+  // Stable across renders (it only closes over `t`) so the initial-load
+  // effect below can depend on it: re-running on a locale change also
+  // re-renders a stale load error in the new language.
+  const refresh = useCallback(async () => {
     const result = await listMyOrgs();
     if (!result.ok) {
       setNeedsLogin(isUnauthorized(result));
@@ -70,7 +73,7 @@ export function OrganizationsManager() {
     }
     setError(null);
     setOrgs(result.data.items);
-  }
+  }, [t]);
 
   useEffect(() => {
     (async () => {
@@ -82,7 +85,7 @@ export function OrganizationsManager() {
       }
       await refresh();
     })();
-  }, []);
+  }, [refresh]);
 
   // The dialog stays open — with its confirm button reading "Leaving…" —
   // until the request has finished, and reports its own failure. Clearing the
@@ -95,8 +98,7 @@ export function OrganizationsManager() {
     const result = await removeMember(org.name, username);
     setBusy(null);
     if (!result.ok) {
-      const key = orgErrorKey(result);
-      const message = key ? t(key) : errorMessage(t, result);
+      const message = t(orgErrorKey(result));
       // Into both: the dialog shows it while it is still up, and the page
       // keeps it after the user dismisses the dialog, so a refused leave is
       // never silently lost the way a dialog-only error would be.

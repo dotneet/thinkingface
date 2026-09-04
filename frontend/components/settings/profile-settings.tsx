@@ -64,7 +64,7 @@ export function ProfileSettings() {
       setWebsite(ns.data.namespace.website);
       setAvatarUrl(ns.data.namespace.avatar_url);
     })();
-  }, []);
+  }, [t]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -136,7 +136,7 @@ export function ProfileSettings() {
           value={website}
           onChange={(e) => edit(setWebsite, e.target.value)}
           type="url"
-          placeholder="https://example.com"
+          placeholder={t("settings.profile.websitePlaceholder")}
         />
       </Field>
 
@@ -148,7 +148,7 @@ export function ProfileSettings() {
           value={avatarUrl}
           onChange={(e) => edit(setAvatarUrl, e.target.value)}
           type="url"
-          placeholder="https://example.com/avatar.png"
+          placeholder={t("settings.profile.avatarPlaceholder")}
         />
       </Field>
 

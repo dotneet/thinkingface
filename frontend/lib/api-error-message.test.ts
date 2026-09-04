@@ -134,6 +134,8 @@ describe("errorMessage", () => {
       "overloaded",
       "range_not_satisfiable",
       "timeout",
+      "network_error",
+      "upload_cancelled",
     ];
     for (const type of types) {
       // An empty message is what forces the generic branch for the detail
@@ -185,15 +187,36 @@ describe("errorMessage", () => {
     expect(errorMessage(ja, result)).toBe("リクエストが不正です: name must not contain spaces");
   });
 
-  it("falls back to the raw backend message for an unrecognized type", () => {
+  it("falls back to the generic failure for an unrecognized type, never raw English", () => {
     const result = failed({ status: 418, type: "teapot", message: "I'm a teapot" });
-    expect(errorMessage(en, result)).toBe("I'm a teapot");
-    expect(errorMessage(ja, result)).toBe("I'm a teapot");
+    for (const t of [en, ja]) {
+      const rendered = errorMessage(t, result);
+      expect(rendered).toBe(t("errors.internalError"));
+      expect(rendered).not.toContain("teapot");
+    }
   });
 
-  it("falls back to the raw backend message when type is missing", () => {
+  it("falls back to the generic failure when type is missing, never raw English", () => {
     const result = failed({ status: 500, type: undefined, message: "boom" });
-    expect(errorMessage(en, result)).toBe("boom");
+    for (const t of [en, ja]) {
+      const rendered = errorMessage(t, result);
+      expect(rendered).toBe(t("errors.internalError"));
+      expect(rendered).not.toContain("boom");
+    }
+  });
+
+  it("translates client-synthesized upload types instead of raw XHR text", () => {
+    const cancelled = failed({ status: 0, type: "upload_cancelled", message: "Upload cancelled" });
+    expect(errorMessage(en, cancelled)).toBe(en("errors.uploadCancelled"));
+    expect(errorMessage(ja, cancelled)).toBe(ja("errors.uploadCancelled"));
+
+    const dead = failed({ status: 0, type: "network_error", message: "Network error" });
+    expect(errorMessage(en, dead)).toBe(en("errors.networkError"));
+    expect(errorMessage(ja, dead)).toBe(ja("errors.networkError"));
+
+    const timedOut = failed({ status: 0, type: "timeout", message: "timeout" });
+    expect(errorMessage(en, timedOut)).toBe(en("errors.timeout"));
+    expect(errorMessage(ja, timedOut)).toBe(ja("errors.timeout"));
   });
 });
 

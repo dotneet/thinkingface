@@ -47,6 +47,7 @@ Each stateful service writes to a named Docker volume:
 | `pg-data` | PostgreSQL's data directory |
 | `gcs-data` | The fake-gcs-server's backing filesystem (LFS objects, blobs) |
 | `git-data` | Bare git repositories under `GIT_ROOT` (`/data`), plus the generated SSH host key |
+| `sqlite-data` | The SQLite database file (only used in SQLite mode) |
 
 These volumes survive a container restart or `docker compose down`.
 
@@ -54,13 +55,15 @@ These volumes survive a container restart or `docker compose down`.
 
 ```bash
 docker compose down    # stop and remove containers; volumes are kept
-make clean              # docker compose down -v -- also removes the named volumes
+make clean              # down -v on both stacks (default and SQLite) -- also removes the named volumes
 ```
 
 `docker compose down` (or `make down`) leaves your data in place, so `docker compose up -d`
 afterwards picks up exactly where you left off. To start over from nothing — a fresh
 database, an empty bucket, no repositories — run `make clean` (or `docker compose down -v`
-directly), which deletes the named volumes along with the containers.
+directly), which deletes the named volumes along with the containers. `make clean` covers
+the SQLite-mode stack too (`sqlite-data`), which a bare `docker compose down -v` leaves
+behind.
 
 !!! warning "Change the defaults before exposing this to anyone else"
     A default `docker compose up` seeds an `admin` account with the well-known password

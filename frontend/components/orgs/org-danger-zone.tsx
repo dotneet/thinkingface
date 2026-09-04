@@ -7,7 +7,6 @@ import { useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { errorMessage } from "@/lib/api-error-message";
 import { useT } from "@/lib/i18n/client";
 import { namespaceHref } from "@/lib/namespace";
 import { deleteOrg, orgErrorKey } from "@/lib/orgs";
@@ -38,8 +37,7 @@ export function OrgDangerZone({ org }: { org: Org }) {
     const result = await deleteOrg(org.name);
     setDeleting(false);
     if (!result.ok) {
-      const key = orgErrorKey(result);
-      setError(key ? t(key) : errorMessage(t, result));
+      setError(t(orgErrorKey(result)));
       return;
     }
     router.push("/settings/organizations");

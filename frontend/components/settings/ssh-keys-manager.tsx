@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, ChevronRight, KeyRound, Trash2 } from "lucide-react";
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { LoginRequiredState } from "@/components/settings/login-required-state";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -46,7 +46,10 @@ export function SSHKeysManager() {
   // short keeps the toggles near where the pointer already is.
   const [expandedKeyId, setExpandedKeyId] = useState<number | null>(null);
 
-  async function refresh() {
+  // Stable across renders (it only closes over `t`) so the initial-load
+  // effect below can depend on it: re-running on a locale change also
+  // re-renders a stale load error in the new language.
+  const refresh = useCallback(async () => {
     const result = await listSSHKeys();
     if (!result.ok) {
       // 401 here means "you're signed out", not "something broke" — say so
@@ -59,11 +62,11 @@ export function SSHKeysManager() {
     setNeedsLogin(false);
     setLoadError(null);
     setKeys(result.data.items);
-  }
+  }, [t]);
 
   useEffect(() => {
     refresh();
-  }, []);
+  }, [refresh]);
 
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault();

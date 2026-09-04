@@ -55,7 +55,7 @@ export function OrgAuditLog({ org }: { org: string }) {
     return () => {
       cancelled = true;
     };
-  }, [org]);
+  }, [org, t]);
 
   useEffect(() => {
     mountedRef.current = true;

@@ -110,13 +110,21 @@ work unmodified against `HF_ENDPOINT=<thinkingface>` (see
 
 ## Running
 
-Requires a running stack:
+From the repo root, `make test-e2e` provisions the stack itself and then runs
+the suite -- the same steps CI runs (`.github/workflows/ci.yml`, `e2e` job):
+it copies `.env.example` to `.env` on first run, brings the stack up with
+`docker compose up -d --build`, and waits for `/healthz` before running
+pytest. The `--build` matters: a bare `docker compose up` / `make up` reuses
+the image it already has, so backend changes would be tested against the
+previous build.
+
+To manage the stack by hand instead:
 
 ```bash
 cd /path/to/thinkingface
 cp .env.example .env   # first time only
-docker compose up -d
-# or: make up
+docker compose up -d --build
+# or: make up (after backend changes, rebuild first: docker compose up -d --build api)
 ```
 
 Then, from this directory:
@@ -125,8 +133,8 @@ Then, from this directory:
 uv run --locked pytest -v
 ```
 
-[uv](https://docs.astral.sh/uv/) is required (the same as for `make lint` and
-`make docs`). It builds the environment in `.venv/` here, so `huggingface_hub`
+[uv](https://docs.astral.sh/uv/) is required (the same tool `make test-e2e`,
+`make lint`, `make lock-python` and `make docs` run through). It builds the environment in `.venv/` here, so `huggingface_hub`
 / `datasets` / `pyarrow` never land in whatever interpreter happens to be
 active. `make test-e2e` from the repo root runs exactly this.
 
@@ -149,6 +157,7 @@ Environment variables (all optional, default to the local compose setup):
 | `TF_ADMIN_PASSWORD` | `admin` | Seeded admin password |
 | `GCS_EMULATOR_URL` | `http://localhost:4443` | fake-gcs-server base URL |
 | `GCS_BUCKET` | `thinkingface` | Bucket name to inspect for content-addressed objects |
+| `GCS_PREFIX` | _(empty)_ | Key prefix the server prepends to every object (must match the server's `GCS_PREFIX`) |
 | `TF_SSH_HOST` | host part of `TF_ENDPOINT` | Host of the git-over-SSH listener |
 | `TF_SSH_PORT` | `2222` | Port of the git-over-SSH listener (`TF_SSH_ADDR` server-side) |
 
@@ -158,7 +167,7 @@ deployment may not publish the port at all.
 
 ## Status
 
-The suite passes against the current backend (37 tests). Two things worth
+The suite passes against the current backend (89 tests). Two things worth
 knowing before you read a red run:
 
 - `test_gcs_export.py` used to be **flaky** because of a server-side race, not
@@ -177,7 +186,7 @@ knowing before you read a red run:
   concurrent case; if this test ever flakes again, look there first.
 - Every test creates its repo inside a `try:` and deletes it in `finally:`, so
   a failing assertion still cleans up. A killed process (Ctrl-C, CI timeout)
-  does not; `make clean` resets the local stack.
+   does not; `make clean` resets both local stacks (default and SQLite).
 
 The bootstrap token minted in `conftest.py` is revoked in
 `pytest_sessionfinish`, so repeated runs do not accumulate write-scoped

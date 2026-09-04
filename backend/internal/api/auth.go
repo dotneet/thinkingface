@@ -249,12 +249,12 @@ func (s *Server) userForToken(ctx context.Context, token string) (*store.User, s
 	if err != nil {
 		return nil, "", ""
 	}
-	go func() {
+	submitDetached(func() {
 		// Detached from the request so a slow write never delays the response.
 		writeCtx, cancel := detachedWrite(ctx)
 		defer cancel()
 		_ = s.store.TouchToken(writeCtx, tok.ID)
-	}()
+	})
 	return user, tok.Scope, tok.Name
 }
 
@@ -275,11 +275,11 @@ const detachedWriteTimeout = 10 * time.Second
 // disconnect just broke cannot run on the context that disconnect cancelled
 // (rollbackCreateRepo).
 //
-// A bounded lifetime is all this does; it does not bound how many of these
-// goroutines exist at one instant, which stays proportional to the request
-// rate. A shared worker pool would, but it would also have to decide what to
-// do when its queue fills -- dropping download counts is a product decision,
-// not a refactor -- so that is left for when the numbers call for it.
+// A bounded lifetime is all the context does; bounding how many of these
+// writes exist at one instant is submitDetached's job (detached.go): the work
+// queues on a shared pool of fixed workers, and a full queue drops the write
+// rather than starting another goroutine. A dropped counter undercounts, which
+// is the documented cost of never letting bookkeeping delay a response.
 func detachedWrite(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), detachedWriteTimeout)
 }

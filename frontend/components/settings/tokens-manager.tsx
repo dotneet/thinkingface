@@ -1,7 +1,7 @@
 "use client";
 
 import { KeyRound, Trash2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { LoginRequiredState } from "@/components/settings/login-required-state";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -68,7 +68,10 @@ export function TokensManager() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
 
-  async function refresh() {
+  // Stable across renders (it only closes over `t`) so the initial-load
+  // effect below can depend on it: re-running on a locale change also
+  // re-renders a stale load error in the new language.
+  const refresh = useCallback(async () => {
     const result = await listTokens();
     if (!result.ok) {
       // 401 here means "you're signed out", not "something broke" — say so
@@ -81,11 +84,11 @@ export function TokensManager() {
     setNeedsLogin(false);
     setLoadError(null);
     setTokens(result.data.items);
-  }
+  }, [t]);
 
   useEffect(() => {
     refresh();
-  }, []);
+  }, [refresh]);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();

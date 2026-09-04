@@ -182,6 +182,10 @@ func (s *Server) handleLFSBatch(w http.ResponseWriter, r *http.Request, kind str
 			writeLFSError(w, http.StatusBadRequest, `operation must be "upload" or "download"`)
 			return
 		}
+		if errors.Is(err, lfs.ErrTooManyObjects) {
+			writeLFSError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		internalError(w, "lfs batch", err)
 		return
 	}
@@ -465,15 +469,39 @@ func (s *Server) handleLFSVerifyByID(w http.ResponseWriter, r *http.Request) {
 	writeRawJSON(w, http.StatusOK, map[string]any{"oid": req.OID, "size": req.Size})
 }
 
-// writeLFSVerifyError answers a failed verify. Everything lfs.Verify reports is
-// "this object is not there as you described it", which is the 404 git-lfs
-// expects -- except a namespace that has run out of room, which is a 507 and a
-// sentence the operator can act on. Answering that as a 404 would tell the
-// pusher its own upload had vanished.
+// writeLFSVerifyError answers a failed verify. Most of what lfs.Verify
+// reports is "this object is not there as you described it", which is the 404
+// git-lfs expects -- except:
+//
+//   - a namespace that has run out of room (507, with a sentence the operator
+//     can act on: answering that as a 404 would tell the pusher its own
+//     upload had vanished);
+//   - staged bytes that are not what the client declared (422: the request
+//     was well-formed but its content is wrong -- a truncated transfer, or
+//     bytes that do not hash to the oid they were uploaded under);
+//   - a staging object that moved under the promotion (409: somebody --
+//     usually the client's own retry -- replaced the bytes mid-verify, so
+//     trying again is the right answer, and 422 would tell git-lfs the upload
+//     itself is bad).
 func writeLFSVerifyError(w http.ResponseWriter, err error) {
 	var overQuota *lfs.QuotaExceededError
 	if errors.As(err, &overQuota) {
 		writeLFSError(w, http.StatusInsufficientStorage, err.Error())
+		return
+	}
+	var sizeMismatch *lfs.SizeMismatchError
+	if errors.As(err, &sizeMismatch) {
+		writeLFSError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	var digestMismatch *lfs.DigestMismatchError
+	if errors.As(err, &digestMismatch) {
+		writeLFSError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	var changed *lfs.StagedObjectChangedError
+	if errors.As(err, &changed) {
+		writeLFSError(w, http.StatusConflict, err.Error())
 		return
 	}
 	writeLFSError(w, http.StatusNotFound, err.Error())
