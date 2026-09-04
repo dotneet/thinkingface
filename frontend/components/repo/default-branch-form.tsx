@@ -48,8 +48,14 @@ export function DefaultBranchForm({
   // no way to touch `selected` state here. Left alone, the <select> would
   // fall back to rendering its first option while `selected` kept naming the
   // now-deleted branch, and Save would PATCH a default_branch the server no
-  // longer has. Same fallback refs-manager.tsx's `selectedRev` uses.
-  const selectedBranch = branches.includes(selected) ? selected : (branches[0] ?? "");
+  // longer has. Prefer the live default when it is still in the list — falling
+  // straight to branches[0] would let Save silently switch the default to
+  // whatever happens to sort first. Same class as refs-manager.tsx's selectedRev.
+  const selectedBranch = branches.includes(selected)
+    ? selected
+    : branches.includes(defaultBranch)
+      ? defaultBranch
+      : (branches[0] ?? "");
 
   async function handleSave() {
     setSaving(true);

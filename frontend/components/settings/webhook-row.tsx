@@ -125,6 +125,11 @@ export function WebhookRow({
       setError(errorMessage(t, result));
       return;
     }
+    // Enable/Disable stays clickable while the edit panel is open. Save
+    // posts these local buffers, so leaving `active` on the value from
+    // toggleEditing would undo the toggle — the half of the stale-buffer
+    // bug that reseeding on open does not cover.
+    setActive(!webhook.active);
     onChanged();
   }
 
