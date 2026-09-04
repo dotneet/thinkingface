@@ -412,7 +412,11 @@ func (s *Server) handleLFSProxyDownload(w http.ResponseWriter, r *http.Request) 
 	info, err := s.storage.Stat(r.Context(), key)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			notFound(w, "object "+oid+" not found")
+			// Same sentence as the unlinked-oid branch above: a distinct
+			// body here ("object <oid> not found") lets anyone who can
+			// name a repo id and a sha256 tell a registered-but-missing
+			// object from one this repository never linked.
+			notFound(w, "object not found")
 			return
 		}
 		internalError(w, "stat lfs object", err)
