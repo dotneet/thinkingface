@@ -1,12 +1,15 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 
@@ -330,6 +333,45 @@ func ensureBranchRev(w http.ResponseWriter, gitRepo *gitrepo.Repo, rev, what str
 	return false
 }
 
+// postCommitRetryBaseDelay is the wait before the second attempt of a
+// post-commit bookkeeping step; the third waits twice that. The steps it
+// covers (LinkLFSObjects, EnqueueSync) are both idempotent, so retrying them
+// is safe, and the waits are short because they run inside the request: this
+// absorbs a momentary database stall, not an outage.
+const postCommitRetryBaseDelay = 200 * time.Millisecond
+
+// postCommitAttempts bounds those retries. Three attempts is the same budget
+// commitThroughWAL gives the commit itself, for the same reason: enough to
+// ride out a transient failure, few enough that a real outage still surfaces
+// promptly instead of holding the request.
+const postCommitAttempts = 3
+
+// retryPostCommit runs op until it succeeds or the budget above runs out. A
+// cancelled request context stops the retries: re-running bookkeeping the
+// client already went away from is still harmless, but sleeping to do it is
+// not.
+func retryPostCommit(ctx context.Context, op func(context.Context) error) error {
+	var err error
+	delay := postCommitRetryBaseDelay
+	for i := 0; i < postCommitAttempts; i++ {
+		if err = op(ctx); err == nil {
+			return nil
+		}
+		if i+1 == postCommitAttempts {
+			break
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return err
+		case <-timer.C:
+		}
+		delay *= 2
+	}
+	return err
+}
+
 // commitLine is one NDJSON operation in the commit payload.
 type commitLine struct {
 	Key   string          `json:"key"`
@@ -504,11 +546,39 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.LinkLFSObjects(r.Context(), repo.ID, lfsOIDs); err != nil {
+	// The commit above is durable -- the WAL accepted it, or the WAL is off --
+	// while the two steps below are not part of it. Both are idempotent --
+	// LinkLFSObjects is an upsert that only (re-)stamps committed_at, and
+	// EnqueueSync collapses into the ref's pending row -- so a transient
+	// failure (a locked jobs table, a database blip) is retried instead of
+	// leaving the index stale behind a commit the client was told failed.
+	//
+	// What retries cannot fix is reported, loudly and with the SHAs attached:
+	// the branch already points at newHash, so answering 500 does not undo
+	// anything (a client retry commits again on top), and the operator's
+	// recovery is `thinkingface resync`, which finds the drift regardless of
+	// what the queue thinks. There is no startup reconcile for this case --
+	// RequeueExpiredSyncJobs only requeues jobs that were enqueued -- which is
+	// why the log line carries everything resync needs to be pointed at.
+	//
+	// r.Context() is deliberate: when the client has already gone away the
+	// context is done, the backoff sleep aborts immediately, and the step
+	// runs at most once instead of retrying bookkeeping nobody waits for.
+	if err := retryPostCommit(r.Context(), func(ctx context.Context) error {
+		return s.store.LinkLFSObjects(ctx, repo.ID, lfsOIDs)
+	}); err != nil {
+		slog.Error("commit landed but lfs links were not recorded; files may 404 until `thinkingface resync` runs",
+			"repo", repo.FullName(), "branch", rev,
+			"old_sha", oldHash.String(), "new_sha", newHash.String(), "error", err)
 		internalError(w, "link lfs objects", err)
 		return
 	}
-	if err := s.sync.Enqueue(r.Context(), repo.ID, rev, oldHash.String(), newHash.String()); err != nil {
+	if err := retryPostCommit(r.Context(), func(ctx context.Context) error {
+		return s.sync.Enqueue(ctx, repo.ID, rev, oldHash.String(), newHash.String())
+	}); err != nil {
+		slog.Error("commit landed but the sync job was not queued; the file index is stale until `thinkingface resync` runs",
+			"repo", repo.FullName(), "branch", rev,
+			"old_sha", oldHash.String(), "new_sha", newHash.String(), "error", err)
 		internalError(w, "schedule sync", err)
 		return
 	}

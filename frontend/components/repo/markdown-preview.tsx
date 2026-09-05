@@ -26,7 +26,6 @@ export function MarkdownPreview({
   source,
   truncated,
   downloadUrl,
-  fileName,
   rendered,
   highlighted,
 }: {
@@ -35,7 +34,6 @@ export function MarkdownPreview({
   /** True when the server clipped the preview at its 512KB limit. */
   truncated?: boolean;
   downloadUrl: string;
-  fileName: string;
   /** The rendered Markdown panel, built on the server. */
   rendered: React.ReactNode;
   /**

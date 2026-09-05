@@ -8,16 +8,17 @@ holds nothing but the content created here. Run this first, then
 
 Prerequisites (see docs/dev/docs-screenshots.md):
 
-    docker run -d --name tf-docs-gcs -p 4499:4443 fsouza/fake-gcs-server:1.55.1 \
+    docker run -d --name tf-docs-gcs -p 4499:4443 \
+        fsouza/fake-gcs-server:1.55.1@sha256:91afded49de804aa61b5f3eb6c7cd65205acf9e5c5e047cf0ba7d9507af806c8 \
         -scheme=http -public-host=localhost:4499 -port=4443 -filesystem-root=/data
     API_DEV_PORT=8091 GCS_PROXY_PORT=4499 DEV_DIR=.dev/docs-demo make dev-api
     make dev-web WEB_DEV_PORT=3120 NEXT_PUBLIC_API_URL=http://localhost:8091 \
         API_URL=http://localhost:8091
 
-Usage:
+Usage (versions pinned like every other install step -- see docs/dev/supply-chain.md):
 
-    uv run --isolated --with huggingface_hub --with pandas --with pyarrow \
-        --with requests --with ./clients/python scripts/docs-demo/seed.py
+    uv run --isolated --with huggingface_hub==1.28.0 --with pandas==2.3.3 --with pyarrow==25.0.1 \
+        --with requests==2.34.2 --with ./clients/python scripts/docs-demo/seed.py
 """
 
 from __future__ import annotations

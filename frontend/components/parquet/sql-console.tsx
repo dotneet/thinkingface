@@ -1,6 +1,6 @@
 "use client";
 
-import { Ban, Database, Play, RefreshCw, Square, TableProperties } from "lucide-react";
+import { Database, Play, RefreshCw, Square, TableProperties } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -211,16 +211,20 @@ export function SqlConsole({
     void session.cancel();
   }, [running, t]);
 
+  // A size refusal is not an empty result (DESIGN.md §9): the file exists and
+  // has rows, this tab just cannot run them. A warning Alert says what to do
+  // instead (the Rows tab, or a local query) rather than an EmptyState
+  // claiming there is nothing here.
   if (tooLarge) {
     return (
-      <EmptyState
-        icon={Ban}
-        title={t("parquet.sql.tooLargeTitle")}
-        description={t("parquet.sql.tooLargeDescription", {
-          size: formatBytes(size),
-          max: formatBytes(SQL_CONSOLE_MAX_BYTES),
-        })}
-      />
+      <Alert tone="warning" title={t("parquet.sql.tooLargeTitle")}>
+        <p>
+          {t("parquet.sql.tooLargeDescription", {
+            size: formatBytes(size),
+            max: formatBytes(SQL_CONSOLE_MAX_BYTES),
+          })}
+        </p>
+      </Alert>
     );
   }
 
@@ -366,9 +370,29 @@ export function SqlConsole({
           tone={queryCancelled ? "warning" : "negative"}
           title={t(queryCancelled ? "parquet.sql.cancelledTitle" : "parquet.sql.queryFailed")}
         >
-          <pre className="scroll-x whitespace-pre-wrap break-words font-mono text-xs">
-            {queryError}
-          </pre>
+          {queryCancelled ? (
+            // Our own copy, already translated — nothing to detach.
+            <p>{queryError}</p>
+          ) : (
+            <>
+              <p>{t("parquet.sql.queryFailedBody")}</p>
+              {/* The engine's own text stays available but collapsed: DuckDB
+                  errors name functions and files in English, so they are the
+                  detail, not the message (same <details>/<pre> idiom as
+                  MetadataValue in components/model/model-metadata-table.tsx).
+                  CopyButton sits outside the <details> so the text is
+                  retrievable without expanding it first. */}
+              <details>
+                <summary className="cursor-pointer text-xs font-medium text-fg-subtle hover:text-fg">
+                  {t("parquet.sql.showDetail")}
+                </summary>
+                <pre className="scroll-x mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-bg-sunken p-2 font-mono text-xs">
+                  {queryError}
+                </pre>
+              </details>
+              <CopyButton value={queryError} label={t("parquet.sql.copyError")} />
+            </>
+          )}
         </Alert>
       )}
 
@@ -409,8 +433,10 @@ function withSchemaFeatures(result: SqlResult, schemaColumns: ParquetColumn[]): 
 
 /**
  * lib/duckdb.ts throws its own known failures with an i18n key as the message
- * (framework-free code cannot call useT); translate those, and show anything
- * else (DuckDB query errors, network failures) verbatim.
+ * (framework-free code cannot call useT); translate those. Anything else
+ * (DuckDB query errors, network failures) comes back as the raw detail —
+ * callers render it inside a collapsed `<details>`, never as the message
+ * itself.
  */
 function localizeSqlError(t: Translator, err: unknown): string {
   const msg = err instanceof Error ? err.message : typeof err === "string" ? err : null;

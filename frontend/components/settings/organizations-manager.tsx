@@ -2,7 +2,7 @@
 
 import { Building2, Plus, Settings } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { NamespaceAvatar } from "@/components/namespace/namespace-avatar";
 import { OrgRoleBadge, orgRoleLabelKey } from "@/components/orgs/org-role-badge";
 import { LoginRequiredState } from "@/components/settings/login-required-state";
@@ -13,7 +13,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { SkeletonLines } from "@/components/ui/skeleton";
 import { isUnauthorized } from "@/lib/api";
-import { errorMessage } from "@/lib/api-error-message";
+import { errorMessage, type FailedApiResult } from "@/lib/api-error-message";
 import { getMe } from "@/lib/auth";
 import { formatNumber } from "@/lib/format";
 import { useT } from "@/lib/i18n/client";
@@ -38,7 +38,13 @@ export function OrganizationsManager() {
   // "confirmed you have no name". Tracked separately so that silent case can
   // say what actually happened instead (DESIGN.md §9).
   const [usernameError, setUsernameError] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // The failure the list-load error is rendered from, so a locale change
+  // re-renders the same failure in the new language at display time instead
+  // of refetching — the same choice `usePagedList` makes (its translator is
+  // deliberately not an input either). `null` means "no failure on screen".
+  // (Distinct from `usernameError` above, which tracks the getMe() call in
+  // the initial-load effect, not the list request below.)
+  const [loadFailure, setLoadFailure] = useState<FailedApiResult | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   // Two separate errors on purpose, the same split admin-users-manager makes.
   // `actionError` is the page-level record of the last failed leave and
@@ -60,17 +66,20 @@ export function OrganizationsManager() {
     setConfirmTarget(org);
   }
 
-  async function refresh() {
+  // Stable across renders so the initial-load effect below runs once: it reads
+  // no locale-dependent value (the failure is translated at display time),
+  // only stable setters and module imports.
+  const refresh = useCallback(async () => {
     const result = await listMyOrgs();
     if (!result.ok) {
       setNeedsLogin(isUnauthorized(result));
-      setError(errorMessage(t, result));
+      setLoadFailure(result);
       setOrgs(null);
       return;
     }
-    setError(null);
+    setLoadFailure(null);
     setOrgs(result.data.items);
-  }
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -82,7 +91,7 @@ export function OrganizationsManager() {
       }
       await refresh();
     })();
-  }, []);
+  }, [refresh]);
 
   // The dialog stays open — with its confirm button reading "Leaving…" —
   // until the request has finished, and reports its own failure. Clearing the
@@ -95,8 +104,7 @@ export function OrganizationsManager() {
     const result = await removeMember(org.name, username);
     setBusy(null);
     if (!result.ok) {
-      const key = orgErrorKey(result);
-      const message = key ? t(key) : errorMessage(t, result);
+      const message = t(orgErrorKey(result));
       // Into both: the dialog shows it while it is still up, and the page
       // keeps it after the user dismisses the dialog, so a refused leave is
       // never silently lost the way a dialog-only error would be.
@@ -110,7 +118,7 @@ export function OrganizationsManager() {
     await refresh();
   }
 
-  if (orgs === null && !error) return <SkeletonLines lines={4} />;
+  if (orgs === null && !loadFailure) return <SkeletonLines lines={4} />;
 
   if (needsLogin) {
     return <LoginRequiredState next="/settings/organizations" />;
@@ -120,7 +128,9 @@ export function OrganizationsManager() {
     return (
       <ErrorState
         title={t("settings.errorTitle")}
-        message={error ?? t("settings.organizations.loadFailed")}
+        message={
+          loadFailure ? errorMessage(t, loadFailure) : t("settings.organizations.loadFailed")
+        }
         hint={t("settings.organizations.loadFailedHint")}
         action={
           <Button size="sm" onClick={() => refresh()}>

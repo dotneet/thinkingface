@@ -7,7 +7,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Field, Input, Select, Textarea } from "@/components/ui/field";
 import { isUnauthorized } from "@/lib/api";
-import { errorMessage } from "@/lib/api-error-message";
 import { cn } from "@/lib/cn";
 import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
@@ -96,9 +95,8 @@ export function CreateRepoForm({
         return;
       }
       // Maps the backend's error.type (e.g. reserved_name) to localized copy;
-      // anything not in the dictionary falls back to the server's message.
-      const key = orgErrorKey(result);
-      setError(key ? t(key) : errorMessage(t, result));
+      // anything not in the dictionary degrades to the shared generic copy.
+      setError(t(orgErrorKey(result)));
       return;
     }
     router.push(`/${kind}s/${encodeURIComponent(ns)}/${encodeURIComponent(nm)}`);

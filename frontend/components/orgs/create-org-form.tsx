@@ -8,7 +8,6 @@ import { NamespaceUrlPreview } from "@/components/namespace/namespace-url-previe
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Field, Input, Textarea } from "@/components/ui/field";
-import { errorMessage } from "@/lib/api-error-message";
 import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
 import { namespaceHref } from "@/lib/namespace";
@@ -52,8 +51,7 @@ export function CreateOrgForm({ loggedIn }: { loggedIn: boolean }) {
     });
     setCreating(false);
     if (!result.ok) {
-      const key = orgErrorKey(result, { 401: "org.create.loginRequiredMessage" });
-      setError(key ? t(key) : errorMessage(t, result));
+      setError(t(orgErrorKey(result, { 401: "org.create.loginRequiredMessage" })));
       return;
     }
     router.push(namespaceHref(result.data.org.name));

@@ -248,7 +248,7 @@ export function WebhookRow({
             <Input
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://example.com/hook"
+              placeholder={t("settings.webhooks.urlPlaceholderEdit")}
             />
           </Field>
           {/* fieldset/legend rather than a <div>/<span> heading: without it a

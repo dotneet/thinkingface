@@ -74,8 +74,8 @@ endef
 # see check-terraform below.
 TERRAFORM ?= terraform
 
-.PHONY: build-web help up down up-sqlite down-sqlite logs rebuild psql check check-backend check-frontend check-python \
-        check-types check-terraform gen-types test test-backend test-frontend test-clients-python test-store-pg \
+.PHONY: build-web help up down up-sqlite down-sqlite logs logs-sqlite rebuild psql check check-backend check-frontend check-python \
+        check-types check-terraform check-doc-anchors gen-types test test-backend test-frontend test-clients-python test-store-pg \
         test-e2e fmt lint clean tf \
         dev-web dev-api gcs-proxy dev-stop docs docs-build frontend-deps lock-python audit
 
@@ -98,8 +98,11 @@ up-sqlite: ## Start in SQLite mode (no postgres; api/web/gcs only, see docker-co
 down-sqlite: ## Stop the SQLite-mode services and remove containers (volumes are kept)
 	$(COMPOSE_SQLITE) down
 
-logs: ## Tail logs from all services
+logs: ## Tail logs from all services (default stack; logs-sqlite for the SQLite-mode stack)
 	$(COMPOSE) logs -f
+
+logs-sqlite: ## Tail logs from the SQLite-mode services
+	$(COMPOSE_SQLITE) logs -f
 
 rebuild: ## Rebuild the api/web images from scratch and restart
 	$(COMPOSE) build --no-cache api web
@@ -247,7 +250,7 @@ audit: ## Scan Go / frontend / Python dependencies for known vulnerabilities
 
 # ---- quality gates ---------------------------------------------------------
 
-check: check-backend check-frontend check-python check-types check-terraform ## Run every quality gate (run this after any code change)
+check: check-backend check-frontend check-python check-types check-terraform check-doc-anchors ## Run every quality gate (run this after any code change)
 	@echo "==> all checks passed"
 
 gen-types: ## Regenerate frontend/types/api.gen.ts from backend/internal/apitypes (tygo)
@@ -297,9 +300,15 @@ check-frontend: frontend-deps ## typecheck + lint + format:check + check:ui + te
 	cd frontend && $(BUN) run check:ui
 	cd frontend && $(BUN) run test
 
-# Mirrors the CI `python` job exactly (lint *and* format), so a green
-# `make check` cannot be followed by a red CI on formatting alone.
-check-python: ## ruff check + ruff format --check for e2e/, clients/python/ and scripts/ + the clients/python unit tests
+# Mirrors the CI `python` job exactly (lockfiles, lint *and* format), so a
+# green `make check` cannot be followed by a red CI on a drifted lockfile or
+# on formatting alone.
+check-python: ## ruff check + ruff format --check for e2e/, clients/python/ and scripts/ + uv lock --check + the clients/python unit tests
+	@uv --version >/dev/null 2>&1 || { echo "uv is required: https://docs.astral.sh/uv/getting-started/installation/" >&2; exit 1; }
+	@echo "==> python: uv lock --check (e2e)"
+	cd e2e && uv lock --check
+	@echo "==> python: uv lock --check (clients/python)"
+	cd clients/python && uv lock --check
 	@echo "==> python: ruff check"
 	$(call RUFF,check e2e clients/python scripts)
 	@echo "==> python: ruff format --check"
@@ -329,6 +338,16 @@ check-terraform: ## terraform fmt -check + validate for infra/ (skipped when ter
 		echo "==> terraform: validate" && \
 		$(TERRAFORM) validate; \
 	fi
+
+# The docs site is built twice (en at the root, ja under /ja/) and every
+# translated heading keeps its English anchor explicitly
+# (`## データセットを作る { #create-a-dataset }`), so `foo.md#anchor` links
+# survive a language switch. mkdocs only reports a broken anchor at INFO
+# level, so `--strict` never catches an en-side rename that leaves a ja
+# anchor pointing at a slug that no longer exists -- this does. Stdlib only.
+check-doc-anchors: ## Verify docs/users/*.ja.md heading anchors match the en slugs
+	@echo "==> docs: ja anchor parity"
+	python3 scripts/check-doc-anchors.py
 
 test: test-backend test-frontend test-clients-python ## Run backend, frontend and Python client unit tests
 
@@ -375,8 +394,33 @@ test-store-pg: ## Run backend/internal/store integration tests against the `make
 # `make lock-python` to update them. There is no plain-pip fallback on
 # purpose: it would install an unpinned dependency tree
 # (docs/dev/supply-chain.md).
-test-e2e: ## Run the huggingface_hub compatibility E2E suite (requires `make up` first)
+#
+# This target provisions the stack itself, the same way CI's e2e job does
+# (.github/workflows/ci.yml): `.env` first (compose reads it via `env_file`
+# and variable substitution), then `up -d --build`, then a wait for
+# /healthz. The `--build` is the point: a bare `make up` reuses the image it
+# already has, so without a rebuild the suite passes against your *previous*
+# backend code. To run the suite against another instance (e.g. `make
+# dev-api` on :8081), skip this target and invoke pytest in e2e/ directly --
+# see e2e/README.md.
+test-e2e: ## Rebuild + start the stack (like CI), then run the huggingface_hub compatibility E2E suite
 	@uv --version >/dev/null 2>&1 || { echo "uv is required: https://docs.astral.sh/uv/getting-started/installation/" >&2; exit 1; }
+	@if [ ! -f .env ]; then echo "==> no .env, copying from .env.example (first run only)"; cp .env.example .env; fi
+	@echo "==> docker compose up -d --build"
+	$(COMPOSE) up -d --build
+	@echo "==> waiting for the API at http://localhost:8080/healthz"
+	@for i in $$(seq 1 60); do \
+		if curl -fsS http://localhost:8080/healthz >/dev/null 2>&1; then \
+			echo "api is healthy after $${i} attempt(s)"; break; \
+		fi; \
+		if [ "$$i" = "60" ]; then \
+			echo "api did not become healthy in time"; \
+			$(COMPOSE) ps; \
+			$(COMPOSE) logs --no-color; \
+			exit 1; \
+		fi; \
+		sleep 5; \
+	done
 	cd e2e && uv run --locked pytest -v
 
 # ---- formatting / linting --------------------------------------------------
@@ -405,7 +449,9 @@ lint: ## Lint Go, Python and Terraform sources
 		echo "  skip: golangci-lint not found"; \
 	fi
 	@echo "==> ruff check"
-	$(call RUFF,check e2e clients/python)
+	$(call RUFF,check e2e clients/python scripts)
+	@echo "==> ruff format --check"
+	$(call RUFF,format --check e2e clients/python scripts)
 	@echo "==> terraform validate"
 	@if $(TERRAFORM) version >/dev/null 2>&1; then \
 		cd infra && $(TERRAFORM) init -backend=false -input=false >/dev/null && $(TERRAFORM) validate; \
@@ -413,5 +459,6 @@ lint: ## Lint Go, Python and Terraform sources
 		echo "  skip: $(TERRAFORM) not found"; \
 	fi
 
-clean: ## Stop services and remove containers, networks and named volumes
+clean: ## Stop services and remove containers, networks and named volumes (default and SQLite stacks)
 	$(COMPOSE) down -v
+	$(COMPOSE_SQLITE) down -v

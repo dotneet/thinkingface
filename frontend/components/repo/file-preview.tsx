@@ -179,7 +179,6 @@ export async function FilePreview({
         source={content}
         truncated={raw.truncated}
         downloadUrl={downloadUrl}
-        fileName={entry.name}
         highlighted={buildCodeLines(content, detectCodeLanguage(entry.name))}
         // Rendered here rather than inside the client wrapper so react-markdown
         // and its plugin chain stay on the server; the toggle only chooses

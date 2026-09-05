@@ -6,7 +6,6 @@ import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, Input, Select, Textarea } from "@/components/ui/field";
-import { errorMessage } from "@/lib/api-error-message";
 import { useT } from "@/lib/i18n/client";
 import { orgErrorKey, updateOrg } from "@/lib/orgs";
 import type { MembersVisibility, Org } from "@/types/api";
@@ -55,8 +54,7 @@ export function OrgProfileForm({ org }: { org: Org }) {
     });
     setSaving(false);
     if (!result.ok) {
-      const key = orgErrorKey(result);
-      setError(key ? t(key) : errorMessage(t, result));
+      setError(t(orgErrorKey(result)));
       return;
     }
     setSaved(true);
@@ -95,7 +93,7 @@ export function OrgProfileForm({ org }: { org: Org }) {
             value={website}
             onChange={(e) => edit(setWebsite, e.target.value)}
             type="url"
-            placeholder="https://example.com"
+            placeholder={t("org.settings.profile.websitePlaceholder")}
           />
         </Field>
         <Field
@@ -106,7 +104,7 @@ export function OrgProfileForm({ org }: { org: Org }) {
             value={avatarUrl}
             onChange={(e) => edit(setAvatarUrl, e.target.value)}
             type="url"
-            placeholder="https://example.com/logo.png"
+            placeholder={t("org.settings.profile.avatarPlaceholder")}
           />
         </Field>
       </Card>

@@ -58,6 +58,12 @@ export const parquet = {
     resultStatsOther: "{count} 行（{ms} ms）",
     copyCsv: "CSV をコピー",
     queryFailed: "クエリが失敗しました",
+    // エンジン由来の詳細の上の一文。DuckDB のエラーは関数名やファイル名を英語で含むため、
+    // メッセージ本文ではなく折りたたみ内の詳細として原文のまま示す。
+    queryFailedBody:
+      "クエリを実行できませんでした。以下の詳細はデータベースエンジンが報告した原文のまま表示しています。",
+    showDetail: "詳細を表示",
+    copyError: "エラー詳細をコピー",
     truncated:
       "{total} 行のうち先頭 {limit} 行を表示しています。LIMIT や集約を追加して結果を絞ってください。",
     noResultsTitle: "結果はまだありません",

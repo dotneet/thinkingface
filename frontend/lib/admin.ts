@@ -161,8 +161,8 @@ export function revokeAdminUserCredentials(
 
 /**
  * The `error.type` values these endpoints answer with, mapped to translated
- * copy — the same shape as `orgErrorKey` in lib/orgs.ts. Returns null when
- * the caller should fall back to `errorMessage(t, result)`.
+ * copy. Returns null when the caller should fall back to
+ * `errorMessage(t, result)`.
  */
 const ERROR_KEYS: Record<string, MessageKey> = {
   last_admin: "settings.adminUsers.errors.lastAdmin",

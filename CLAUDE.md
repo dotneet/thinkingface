@@ -65,7 +65,7 @@ make check         # ★always run after code changes (full backend + frontend +
 make test          # backend go test + frontend unit tests + clients/python unit tests
 make test-clients-python # just the clients/python unit tests (trackio resume contract, grouping, artifacts)
 make test-store-pg # also run backend/internal/store integration tests against PostgreSQL (requires make up)
-make test-e2e      # huggingface_hub-compatible E2E (needs `make up`, and `docker compose up -d --build api` after backend changes)
+make test-e2e      # self-provisioning huggingface_hub-compatible E2E (copies .env, compose up -d --build, waits for /healthz, then pytest)
 make fmt / lint    # format / static analysis
 make gen-types     # regenerate frontend/types/api.gen.ts from Go wire types
 make audit         # scan Go / frontend / Python dependencies for known vulnerabilities
@@ -91,16 +91,19 @@ cd e2e      && uv run --locked pytest -v
 
 `make check` breaks down into `check-backend` (gofmt / go vet / golangci-lint / go test),
 `check-frontend` (typecheck / lint / format:check / check:ui / test), `check-python` (ruff
-check + ruff format --check, then the `clients/python` pytest suite via `uv run --locked`),
-`check-types` (tygo regeneration + zero-diff verification), and
+check + ruff format --check, `uv lock --check` for `e2e/` / `clients/python`, then the
+`clients/python` pytest suite via `uv run --locked`), `check-types` (tygo regeneration +
+zero-diff verification),
 `check-terraform` (terraform fmt -check + init -backend=false + validate on `infra/`; skipped
-when terraform is not installed, since it is an optional prerequisite). It is kept aligned with
-the backend / frontend / python / contract / terraform jobs in CI (`.github/workflows/ci.yml`),
+when terraform is not installed, since it is an optional prerequisite), and
+`check-doc-anchors` (`python3 scripts/check-doc-anchors.py`, en/ja anchor parity for
+`docs/users/`). It is kept aligned with
+the backend / frontend / python / contract / terraform jobs in CI (`.github/workflows/ci.yml`)
+plus the anchor step in `.github/workflows/docs.yml`,
 but it is not a perfect mirror: `go test` here only covers the SQLite path of
 `backend/internal/store`'s integration tests (`make test-store-pg` covers the PostgreSQL
-path CI also runs), and neither `bun run build` (CI's separate `build` step) nor
-`uv lock --check` for `e2e/`/`clients/python` (CI's `python` job) run as part of `make
-check`. `check-backend`'s golangci-lint step fails loudly rather than skipping when the
+path CI also runs), and `bun run build` (CI's separate `build` step) does not run as part of
+`make check`. `check-backend`'s golangci-lint step fails loudly rather than skipping when the
 binary isn't installed — install it (CI pins the version in `ci.yml`'s `golangci-lint` step)
 so a green local `make check` isn't followed by a red CI backend job on lint alone.
 Note that `terraform validate` only checks the config against the provider schemas — it never
@@ -159,7 +162,9 @@ the root and Japanese under `/ja/`, with a language switcher in the header.
 - **Translated `##` headings carry the original English anchor** via `attr_list`
   (`## データセットを作る { #create-a-dataset }`), so `foo.md#anchor` links and deep links
   survive a language switch. Broken anchors are only INFO-level in mkdocs, so `--strict` will
-  *not* catch a mistake here — keep the ids in step by hand.
+  *not* catch a mistake here — `make check-doc-anchors` (`python3
+  scripts/check-doc-anchors.py`, also run in `.github/workflows/docs.yml`) verifies the
+  en/ja anchor parity.
 - **The screenshots are shared**: `docs/users/images/` is referenced from both languages and
   the UI in them stays English. Only the alt text is translated.
 - `README.md` (English) and `README.ja.md` are a pair linked from each other's header. The
@@ -167,7 +172,8 @@ the root and Japanese under `/ja/`, with a language switcher in the header.
   same English files.
 
 `.github/workflows/docs.yml` builds with `mkdocs build --strict` on PRs (broken internal
-links fail the build) and deploys from `main`. MkDocs and `mkdocs-static-i18n` are declared in
+links fail the build) plus `scripts/check-doc-anchors.py` (en/ja anchor parity, which
+`--strict` cannot detect) and deploys from `main`. MkDocs and `mkdocs-static-i18n` are declared in
 `docs/requirements.in`; `docs/requirements.txt` is generated from it by `make lock-python` and
 pins every transitive package with a hash (CI installs it with `pip install --require-hashes`,
 `make docs` runs it in a disposable `uv` environment). Edit the `.in` file, never the `.txt`.
@@ -203,10 +209,13 @@ own compose stack: it is full of E2E leftovers, and the UI must be in English.
    / preupload / commit / resolve / tree / LFS batch), always run `make test-e2e` to confirm
    there is no regression. CI now runs the same suite on any PR whose diff can affect it (the
    `changes` job in `.github/workflows/ci.yml` holds the path list), so a regression is caught
-   before merge rather than after — but
-   the local run is still the faster loop, and it is the only one that sees your change
-   before you push. Remember `docker compose up -d --build api` first: `make up` reuses the
-   image it already has, so without a rebuild the suite passes against your *previous* code.
+    before merge rather than after — but
+    the local run is still the faster loop, and it is the only one that sees your change
+    before you push. `make test-e2e` provisions the stack itself (copies `.env.example` to
+    `.env` on first run, `docker compose up -d --build`, waits for `/healthz`), so no
+    separate `make up` / rebuild step is needed — the `--build` is what keeps the suite
+    from passing against a stale image. To run against another instance, invoke pytest in
+    `e2e/` directly (see `e2e/README.md`).
 6. **Every dependency install resolves from a lockfile, a digest, or a commit SHA.**
    `bun install --frozen-lockfile`, `uv run --locked`, `pip install --require-hashes`,
    `image:tag@sha256:...`, `uses: owner/action@<sha>`. Never add an install step that lets a

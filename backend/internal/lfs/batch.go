@@ -21,6 +21,15 @@ func (h *Handler) Batch(ctx context.Context, repoID int64, req *BatchRequest, au
 		return nil, fmt.Errorf("%w %q", ErrUnsupportedOperation, req.Operation)
 	}
 
+	// Counted before anything is decided, so an oversized batch costs one
+	// comparison rather than one storage round trip per object. The per-object
+	// 422s below stay for the entries of a batch that fits: a batch that does
+	// not fit is refused as a whole, since no prefix of it is the client's
+	// real push.
+	if len(req.Objects) > MaxBatchObjects {
+		return nil, fmt.Errorf("%w: got %d, at most %d", ErrTooManyObjects, len(req.Objects), MaxBatchObjects)
+	}
+
 	// Actions are decided here but minted below, because their lifetime
 	// depends on the size of the *whole* batch: the client transfers these
 	// objects one after another over a single connection, so the URL for the

@@ -110,6 +110,13 @@ type Syncer struct {
 	// serialises them against the metrics flush, which runs the same pipeline
 	// without taking a job. The worker waits for it, the flush skips.
 	refLocks refLocks
+
+	// quotaEnforced switches the post-push pipeline's storage-quota gate on
+	// (see quota.go), and quotaDefault is the instance-wide allowance applied
+	// to namespaces with no override of their own. Both are set by
+	// EnforceNamespaceQuota; until then the pipeline links without asking.
+	quotaEnforced bool
+	quotaDefault  int64
 }
 
 func New(st *store.Store, git *gitrepo.Manager, obj storage.Storage, v *viewer.Reader, ix *experiments.Indexer, wh WebhookFirer, workers int) *Syncer {
@@ -451,7 +458,24 @@ func (s *Syncer) runPushPipeline(ctx context.Context, repo *store.Repo, job *sto
 	if err := s.publishBlobs(ctx, gitRepo, entries, indexed); err != nil {
 		return nil, fmt.Errorf("publish blobs: %w", err)
 	}
-	if err := s.store.LinkLFSObjects(ctx, repo.ID, lfsObjectRefs(files)); err != nil {
+	// Gated before the link, never after: filterLFSByQuota drops the objects
+	// the namespace has no room left for, and what is not linked stays
+	// unresolvable (see quota.go) rather than failing -- and retrying -- the
+	// whole job.
+	refs, err := s.filterLFSByQuota(ctx, repo.ID, lfsObjectRefs(files))
+	if err != nil {
+		return nil, fmt.Errorf("check storage quota: %w", err)
+	}
+	if err := s.store.LinkLFSObjects(ctx, repo.ID, refs); err != nil {
+		// Deleted between the GetRepoByID in process and now: the link
+		// insert hits the repo_lfs_objects_repo_id_fkey foreign key and
+		// fails, but there is nothing left to index. Re-check the row
+		// rather than matching the constraint name so a renamed
+		// constraint cannot turn a deleted repository into a retrying
+		// job; any other failure still fails the job below.
+		if _, gerr := s.store.GetRepoByID(ctx, repo.ID); errors.Is(gerr, store.ErrNotFound) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("link lfs objects: %w", err)
 	}
 	if err := s.store.ReplaceRepoFiles(ctx, repo.ID, job.Ref, files); err != nil {

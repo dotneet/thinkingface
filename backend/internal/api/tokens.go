@@ -67,8 +67,16 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	if req.Name == "" {
 		req.Name = "token"
 	}
+	// Unknown scopes are refused rather than downgraded to read. The downgrade
+	// used to be silent: a typo (e.g. transposed letters in "write") minted
+	// a read-only token with a 200,
+	// and the caller learned about it only when the first write failed -- far
+	// from the request that caused it, and with nothing pointing back at it.
+	// An empty scope is the same mistake (every client of this endpoint sends
+	// one), so it is refused the same way rather than given a second meaning.
 	if req.Scope != "read" && req.Scope != "write" {
-		req.Scope = "read"
+		badRequest(w, `scope must be "read" or "write"`)
+		return
 	}
 	if req.ExpiresInDays < 0 {
 		badRequest(w, "expires_in_days must not be negative")

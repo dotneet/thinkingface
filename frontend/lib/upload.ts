@@ -1,4 +1,6 @@
 import type { ApiResult } from "@/lib/api";
+import { isDetailErrorType } from "@/lib/api-error-message";
+import { typeForStatus } from "@/lib/error-status";
 import { publicApiBase } from "@/lib/paths";
 import type { ApiErrorBody, RepoKind, UploadFilesResponse } from "@/types/api";
 
@@ -56,8 +58,14 @@ export function uploadFiles(
     xhr.upload.onprogress = (event) => {
       options.onProgress?.(event.loaded, event.lengthComputable ? event.total : 0);
     };
-    xhr.onerror = () => resolve({ ok: false, status: 0, message: "Network error" });
-    xhr.onabort = () => resolve({ ok: false, status: 0, message: "Upload cancelled" });
+    // Both carry a `type` so `errorMessage` translates them: a dead
+    // connection is `network_error` (→ errors.networkError), a deliberate
+    // abort is `upload_cancelled` (→ errors.uploadCancelled) and must not
+    // read as a broken connection.
+    xhr.onerror = () =>
+      resolve({ ok: false, status: 0, message: "Network error", type: "network_error" });
+    xhr.onabort = () =>
+      resolve({ ok: false, status: 0, message: "Upload cancelled", type: "upload_cancelled" });
     xhr.onload = () => resolve(parseUploadResponse(xhr));
     options.signal?.addEventListener("abort", () => xhr.abort(), { once: true });
 
@@ -127,11 +135,32 @@ function parseUploadResponse(xhr: XMLHttpRequest): ApiResult<UploadFilesResponse
   }
   if (xhr.status < 200 || xhr.status >= 300) {
     const body = parsed as ApiErrorBody | undefined;
+    if (body?.error?.type !== undefined) {
+      // A backend error body carries its own `type`, authored for the person
+      // reading it — `errorMessage` may interpolate its message where the
+      // type allows (see DETAIL_KEYS in lib/api-error-message.ts).
+      return {
+        ok: false,
+        status: xhr.status,
+        message: body.error.message ?? `${xhr.status} ${xhr.statusText}`,
+        type: body.error.type,
+      };
+    }
+    // A proxy/gateway failure usually carries no body, so derive a type from
+    // the status — otherwise `errorMessage` would have to print the raw
+    // status line (`${status} ${statusText}`) on screen. A detail-capable
+    // type is never synthesized here: its translation interpolates the
+    // message, and the only message this branch has is that same bare status
+    // line (`400 Bad Request`), which must stay off the screen (see
+    // `typeForStatus` in lib/error-status.ts). Leaving `type` undefined lets
+    // `errorMessage` fall back to the generic sentence for the status instead.
+    const type = typeForStatus(xhr.status);
+    const safeType = type !== undefined && !isDetailErrorType(type) ? type : undefined;
     return {
       ok: false,
       status: xhr.status,
-      message: body?.error?.message ?? `${xhr.status} ${xhr.statusText}`,
-      type: body?.error?.type,
+      message: `${xhr.status} ${xhr.statusText}`,
+      ...(safeType !== undefined ? { type: safeType } : {}),
     };
   }
   return { ok: true, data: parsed as UploadFilesResponse };

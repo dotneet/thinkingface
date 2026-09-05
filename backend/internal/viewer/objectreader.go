@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/singleflight"
 
@@ -210,6 +211,12 @@ func newTailCache(maxBytes int64) *tailCache {
 	}
 }
 
+// tailFetchTimeout bounds one cold tail fetch: a Stat plus a single ranged
+// read of at most maxFooterProbe bytes. It is far past what those two storage
+// round trips cost and short enough that a hung one still ends inside the
+// handler deadline of every route that opens a parquet file.
+const tailFetchTimeout = 30 * time.Second
+
 // load returns the cached tail of key, fetching it if necessary.
 func (c *tailCache) load(ctx context.Context, st storage.Storage, key string) (*tailEntry, error) {
 	if e := c.lookup(key); e != nil {
@@ -222,7 +229,19 @@ func (c *tailCache) load(ctx context.Context, st storage.Storage, key string) (*
 		if e := c.lookup(key); e != nil {
 			return e, nil
 		}
-		e, err := fetchTail(ctx, st, key)
+		// The fetch runs on a context of its own rather than the caller's.
+		// singleflight collapses concurrent opens of one key into whichever
+		// caller happens to execute this function, so the fetch's lifetime
+		// would otherwise belong to one request while its result serves
+		// several: that request going away (a user paging past a parquet
+		// file) would cancel the read out from under the requests still
+		// waiting on it, failing all of them at once. WithoutCancel keeps the
+		// caller's values (the request id the storage layer logs with) but
+		// not its cancellation, and the timeout above is what ends a fetch
+		// whose storage backend has stopped answering.
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tailFetchTimeout)
+		defer cancel()
+		e, err := fetchTail(fetchCtx, st, key)
 		if err != nil {
 			return nil, err
 		}

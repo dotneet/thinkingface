@@ -72,8 +72,6 @@ export function OrgMembersManager({
 
   const {
     items: members,
-    total,
-    offset,
     setOffset,
     loadError,
     reload: refresh,
@@ -97,8 +95,7 @@ export function OrgMembersManager({
     if (!result.ok) {
       // A 404 here is the *user*, not the organisation — the org resolved a
       // moment ago to render this screen.
-      const key = orgErrorKey(result, { 404: "org.errors.userNotFound" });
-      setAddError(key ? t(key) : errorMessage(t, result));
+      setAddError(t(orgErrorKey(result, { 404: "org.errors.userNotFound" })));
       return;
     }
     setUsername("");
@@ -124,8 +121,7 @@ export function OrgMembersManager({
     const result = await updateMemberRole(org, member.username, next);
     setBusy(null);
     if (!result.ok) {
-      const key = orgErrorKey(result);
-      setDialogError(key ? t(key) : errorMessage(t, result));
+      setDialogError(t(orgErrorKey(result)));
       // Re-read so the <select> snaps back to the role the server still holds.
       await refresh();
       return;
@@ -154,8 +150,7 @@ export function OrgMembersManager({
     const result = await removeMember(org, member.username);
     setBusy(null);
     if (!result.ok) {
-      const key = orgErrorKey(result);
-      setDialogError(key ? t(key) : errorMessage(t, result));
+      setDialogError(t(orgErrorKey(result)));
       return;
     }
     setConfirmTarget(null);

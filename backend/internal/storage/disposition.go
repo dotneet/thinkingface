@@ -75,7 +75,7 @@ func rfc5987Escape(s string) string {
 			strings.IndexByte(attrExtra, c) >= 0:
 			b.WriteByte(c)
 		default:
-			b.WriteString(fmt.Sprintf("%%%02X", c))
+			fmt.Fprintf(&b, "%%%02X", c)
 		}
 	}
 	return b.String()

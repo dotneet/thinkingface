@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -149,6 +150,70 @@ const serveWaitDelay = 10 * time.Second
 // goroutine a moment longer.
 const stdinDrainGrace = 2 * time.Second
 
+// serveIdleTimeout bounds how long a git RPC may go with no bytes moving in
+// either direction before the service behind it is killed. The HTTP server
+// deliberately carries no ReadTimeout or WriteTimeout -- either would cut a
+// large push or pull off mid-transfer, since both are measured from the start
+// of the request rather than from the last byte moved -- and the handler-level
+// deadline (api.handlerTimeout) exempts these routes for the same reason, so
+// without this a client that opens git-receive-pack and then sends nothing
+// pins a handler, its copy goroutine and a git process for as long as it
+// likes, repeated per connection.
+//
+// Idle, not absolute: clones and pushes stream continuously, so only a
+// connection making no progress at all trips it -- the same rule the SSH
+// transport's TF_SSH_IDLE_TIMEOUT applies, and the same ten minutes, so the
+// two transports do not disagree about how long "abandoned" is. A slow but
+// live transfer never notices it: every body read and every response write
+// moves the deadline.
+const serveIdleTimeout = 10 * time.Minute
+
+// progressReader reports the request body reads passing through it, so the
+// idle watchdog can tell a push whose bytes are still arriving from one that
+// stopped sending.
+type progressReader struct {
+	r        io.Reader
+	progress *atomic.Int64
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 {
+		p.progress.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
+// watchIdle kills the git process behind a request that has moved no bytes
+// for serveIdleTimeout. It runs on its own ticker rather than a single timer
+// so a transfer that stays busy never pays for a reset per chunk -- the loop
+// only reads the clock four times per idle budget. stop ends it; the caller
+// defers that next to cmd.Wait, so a finished request never leaves it ticking.
+// Killing the process is what ends the request: git's stdout closes, the
+// response loop below errors out, and cmd.Wait returns. (The stdin copy parked
+// on a silent client is ended separately, by the read-deadline defer below.)
+func watchIdle(stop <-chan struct{}, progress *atomic.Int64, kill func() error) {
+	watchIdleFor(stop, progress, serveIdleTimeout, kill)
+}
+
+// watchIdleFor is watchIdle with the budget spelled out, so a test can prove
+// the behaviour without waiting out the production ten minutes.
+func watchIdleFor(stop <-chan struct{}, progress *atomic.Int64, idle time.Duration, kill func() error) {
+	t := time.NewTicker(idle / 4)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case now := <-t.C:
+			if now.Sub(time.Unix(0, progress.Load())) > idle {
+				_ = kill()
+				return
+			}
+		}
+	}
+}
+
 // A gzipped request body is the one place in this transport where the client
 // picks the expansion ratio, so it is the one place a size limit belongs.
 //
@@ -181,6 +246,14 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, storagePath stri
 	if err != nil {
 		return err
 	}
+
+	// Progress both directions feed the idle watchdog below: body reads on the
+	// way in, response writes on the way out (marked in the loop itself, since
+	// wrapping the ResponseWriter would hide the Flusher and the connection
+	// ResponseController reaches through).
+	progress := &atomic.Int64{}
+	progress.Store(time.Now().UnixNano())
+	body = &progressReader{r: body, progress: progress}
 
 	// The client repeats its Git-Protocol header on the RPC itself, and it has
 	// to be honoured here too: the version framing the request body is the one
@@ -229,12 +302,17 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, storagePath stri
 	//
 	// The mirror image is still open, and is not this transport's to close.
 	// A client that opens git-receive-pack and then sends nothing leaves git
-	// waiting on stdin, so the copy never returns, cmd.Wait is never reached,
-	// and neither serveWaitDelay nor the grace below has anything to act on.
-	// Nothing here can tell that apart from a push whose first bytes are
-	// simply slow, which is why the server carries no ReadTimeout to begin
-	// with -- bounding it needs an idle watchdog ("no progress at all for N
-	// seconds"), at the server rather than in one handler.
+	// waiting on stdin, so the copy never returns and cmd.Wait is never
+	// reached. Nothing here can tell that apart from a push whose first bytes
+	// are simply slow, which is why the server carries no ReadTimeout to begin
+	// with -- bounding it needs "no progress at all for N seconds", which is
+	// what the idle watchdog below enforces by killing the service: git's
+	// stdout then closes and the response loop returns instead of waiting on
+	// a process that will never produce anything.
+	stopWatchdog := make(chan struct{})
+	defer close(stopWatchdog)
+	go watchIdle(stopWatchdog, progress, func() error { return cmd.Process.Kill() })
+
 	var stdinErr error
 	stdinDone := make(chan struct{})
 	go func() {
@@ -280,6 +358,7 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, storagePath stri
 	for {
 		n, readErr := stdout.Read(buf)
 		if n > 0 {
+			progress.Store(time.Now().UnixNano())
 			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
 				_ = cmd.Process.Kill()
 				_ = cmd.Wait()

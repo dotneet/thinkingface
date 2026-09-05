@@ -26,11 +26,16 @@ The fix is an emulator of its own whose public host is reachable from the host.
 ## Procedure
 
 ```bash
-docker run -d --name tf-docs-gcs -p 4499:4443 fsouza/fake-gcs-server:1.55.1 \
+docker run -d --name tf-docs-gcs -p 4499:4443 \
+  fsouza/fake-gcs-server:1.55.1@sha256:91afded49de804aa61b5f3eb6c7cd65205acf9e5c5e047cf0ba7d9507af806c8 \
   -scheme=http -public-host=localhost:4499 -port=4443 -filesystem-root=/data
 curl -X POST 'http://localhost:4499/storage/v1/b?project=test' \
   -H 'Content-Type: application/json' -d '{"name":"thinkingface"}'
 ```
+
+The image digest is the same one `docker-compose.yml` pins for its `gcs`
+service -- keep the two in sync when either is bumped (Renovate bumps the
+compose side; see `docs/dev/supply-chain.md`).
 
 Then the API and the web server, each on a port of its own:
 
@@ -53,11 +58,11 @@ make dev-web WEB_DEV_PORT=3120 NEXT_PUBLIC_API_URL=http://localhost:8091 API_URL
 Seed, then capture:
 
 ```bash
-uv run --isolated --with huggingface_hub --with pandas --with pyarrow --with requests --with ./clients/python scripts/docs-demo/seed.py
+uv run --isolated --with huggingface_hub==1.28.0 --with pandas==2.3.3 --with pyarrow==25.0.1 --with requests==2.34.2 --with ./clients/python scripts/docs-demo/seed.py
 ```
 
 ```bash
-uv run --isolated --with playwright --with pillow scripts/docs-demo/shots.py
+uv run --isolated --with playwright==1.55.0 --with pillow==11.3.0 scripts/docs-demo/shots.py
 ```
 
 The first capture needs `playwright install chromium` once. Pass image names to redo only

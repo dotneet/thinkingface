@@ -41,6 +41,10 @@ export function ProfileSettings() {
     setSaveError(null);
   }
 
+  // Initial load only: this overwrites the form state below with the server
+  // values, so re-running it on a locale change would wipe unsaved edits —
+  // the same reason `usePagedList` keeps the translator out of its inputs (it
+  // never re-reads just because the language changed).
   useEffect(() => {
     (async () => {
       const me = await getMe();
@@ -64,6 +68,7 @@ export function ProfileSettings() {
       setWebsite(ns.data.namespace.website);
       setAvatarUrl(ns.data.namespace.avatar_url);
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function handleSubmit(e: React.FormEvent) {
@@ -136,7 +141,7 @@ export function ProfileSettings() {
           value={website}
           onChange={(e) => edit(setWebsite, e.target.value)}
           type="url"
-          placeholder="https://example.com"
+          placeholder={t("settings.profile.websitePlaceholder")}
         />
       </Field>
 
@@ -148,7 +153,7 @@ export function ProfileSettings() {
           value={avatarUrl}
           onChange={(e) => edit(setAvatarUrl, e.target.value)}
           type="url"
-          placeholder="https://example.com/avatar.png"
+          placeholder={t("settings.profile.avatarPlaceholder")}
         />
       </Field>
 

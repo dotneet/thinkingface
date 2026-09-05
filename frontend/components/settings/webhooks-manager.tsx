@@ -231,7 +231,7 @@ export function WebhooksManager({
             <Input
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://example.com/hooks/thinkingface"
+              placeholder={t("settings.webhooks.urlPlaceholder")}
               type="url"
               required
             />

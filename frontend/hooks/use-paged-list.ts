@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ApiResult } from "@/lib/api";
 import type { FailedApiResult } from "@/lib/api-error-message";
+import { useLocale } from "@/lib/i18n/client";
 
 /** The shape every `{ items, total }` listing endpoint answers with. */
 export type PagedListResponse = { items: unknown[]; total: number };
@@ -105,9 +106,10 @@ export type UsePagedList<R extends PagedListResponse> = {
  * **The translator is deliberately not one of them.** Two of the five screens
  * used to fold `t` (or a `describe` built on it) into the dependencies, so
  * switching language refetched the whole listing; the labels re-render on
- * their own, and only `loadError` is a string frozen at fetch time. Keeping
- * `t` out is the behaviour the other three already had, and it is the cheaper
- * of the two.
+ * their own. `loadError` is still a string frozen at fetch time, so it is
+ * re-rendered from the stored failure when the locale changes instead (see
+ * the locale effect below) — no re-read, just a new sentence for the same
+ * failure.
  */
 export function usePagedList<R extends PagedListResponse>({
   pageSize,
@@ -140,6 +142,12 @@ export function usePagedList<R extends PagedListResponse>({
   const [offset, setOffset] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // The failure `loadError` was rendered from, so a locale change can
+  // re-render the same failure in the new language (see the locale effect
+  // below). `null` means "no failure on screen" — kept apart from the string
+  // so clearing it on success cannot leave a stale failure behind.
+  const lastFailureRef = useRef<FailedApiResult | null>(null);
+  const locale = useLocale();
 
   // A change to `deps` selects a different list, so the window into it starts
   // over. Adjusted during render rather than in an effect: an effect would run
@@ -196,6 +204,15 @@ export function usePagedList<R extends PagedListResponse>({
     describeRef.current = describe;
   });
 
+  // `loadError` is rendered through the translator, so it freezes in the
+  // locale that fetched it. Re-render it from the stored failure when the
+  // locale changes — `describeRef` already holds the current locale's
+  // `describe` (the sync effect above runs first), and nothing is re-read.
+  useEffect(() => {
+    const failed = lastFailureRef.current;
+    if (failed) setLoadError(describeRef.current(failed));
+  }, [locale]);
+
   const latestRequest = useRef(0);
 
   const refresh = useCallback(
@@ -204,11 +221,13 @@ export function usePagedList<R extends PagedListResponse>({
       const result = await fetchPageRef.current({ limit: pageSize, offset });
       if (isStale() || ticket !== latestRequest.current) return;
       if (!result.ok) {
+        lastFailureRef.current = result;
         setLoadError(describeRef.current(result));
         setData(null);
         setTotal(null);
         return;
       }
+      lastFailureRef.current = null;
       setLoadError(null);
       setData(result.data);
       setTotal(result.data.total);

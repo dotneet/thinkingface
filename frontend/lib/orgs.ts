@@ -163,9 +163,9 @@ export function listAuditLog(
 
 /**
  * The `error.type` values these endpoints answer with (§7.1), mapped to the
- * `org.errors.*` copy. Anything not listed here — and any failure whose body
- * carried no type at all — falls through to the server's own message, which
- * is better than a generic "something went wrong".
+ * `org.errors.*` copy. Anything not listed here falls through to the status
+ * fallbacks (and then the shared generic copy) in {@link orgErrorKey}, never
+ * to the server's own message.
  */
 const ERROR_KEYS: Record<string, MessageKey> = {
   org_creation_disabled: "org.errors.creationDisabled",
@@ -176,23 +176,27 @@ const ERROR_KEYS: Record<string, MessageKey> = {
 };
 
 /**
- * Localizable message key for a failed organisation call, or null when the
- * caller should show `result.message` instead.
+ * Localizable message key for a failed organisation call. Always returns a
+ * key — never null — so callers render `t(orgErrorKey(result))` directly
+ * instead of falling back to the server's own message (which
+ * `lib/api-error-message.ts` no longer shows on screen either).
  *
  * `fallbacks` lets a call site name what the ambiguous statuses mean in its
  * own context — a 404 from "add member" is a missing *user*, while a 404 from
- * "get org" is a missing organisation.
+ * "get org" is a missing organisation. Anything not covered here or by the
+ * call site degrades to the shared generic copy (`errors.notFound` for a
+ * missing thing, `errors.internalError` otherwise).
  */
 export function orgErrorKey(
   result: FailedApiResult,
   fallbacks: Partial<Record<401 | 403 | 404, MessageKey>> = {},
-): MessageKey | null {
+): MessageKey {
   const byType = result.type ? ERROR_KEYS[result.type] : undefined;
   if (byType) return byType;
   if (result.status === 401) return fallbacks[401] ?? "org.errors.loginRequired";
   if (result.status === 403) return fallbacks[403] ?? "org.errors.permissionDenied";
-  if (result.status === 404) return fallbacks[404] ?? null;
-  return null;
+  if (result.status === 404) return fallbacks[404] ?? "errors.notFound";
+  return "errors.internalError";
 }
 
 /**

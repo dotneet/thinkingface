@@ -5,6 +5,9 @@
 // under backend/internal/api (errors.go / redirect.go / transfers.go / git.go).
 export const errors = {
   networkError: "サーバーに接続できませんでした。接続を確認してもう一度お試しください。",
+  // アップロード中の意図的な中止（lib/upload.ts が `upload_cancelled` を付与）。
+  // 接続は正常であり、ユーザーが停止を求めたため、接続不良と読み違えないようにする。
+  uploadCancelled: "アップロードはキャンセルされました。",
   // bad_request messages carry a specific, actionable detail from the
   // backend ("name must not contain spaces"), so it's appended rather than
   // dropped, unlike the other types.

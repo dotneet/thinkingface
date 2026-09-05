@@ -7,7 +7,10 @@ by the repository it belongs to: a non-LFS git blob lands at
 `sha1("blob {len}\\0" + content)`), and an LFS object lands at
 `lfs/{oid[0:2]}/{oid[2:4]}/{oid}` (oid = the content's sha256 hex). Both are
 immutable and deduplicated across every repository -- nothing in the bucket
-is named after a namespace, repository or path. `GET
+is named after a namespace, repository or path. When the server runs with
+`GCS_PREFIX` set, every key below is additionally nested under that prefix
+(the storage layer prepends it to all reads and writes, and to the `gs://`
+URIs it hands back). `GET
 /api/v1/repos/{kind}/{ns}/{name}/gcs/{rev}` (`apitypes.RepoGCSResponse`) is
 what reconstructs that human-readable mapping, on the destination side of a
 ready-made `gcloud storage cp` script and (when the revision has any
@@ -33,6 +36,13 @@ from huggingface_hub import HfApi
 
 GCS_EMULATOR_URL = os.environ.get("GCS_EMULATOR_URL", "http://localhost:4443").rstrip("/")
 GCS_BUCKET = os.environ.get("GCS_BUCKET", "thinkingface")
+# The server prepends this to every object key it writes (and to the gs://
+# URIs it returns), so the suite must look under it too. Empty -- the compose
+# default -- means the bare `blobs/...` / `lfs/...` layout. TF_SSH_ENABLED /
+# TF_WAL_MODE need no equivalent here: SSH reachability is negotiated through
+# the advertised ssh_clone_url (conftest.py) and the WAL mode is purely
+# server-internal.
+GCS_PREFIX = os.environ.get("GCS_PREFIX", "").strip("/")
 # The sync worker normally finishes within a second of the commit; 30s is
 # slack for a loaded CI runner.
 SYNC_TIMEOUT_SECONDS = 30
@@ -55,6 +65,11 @@ def _blob_key(sha: str) -> str:
 
 def _lfs_key(oid: str) -> str:
     return f"lfs/{oid[0:2]}/{oid[2:4]}/{oid}"
+
+
+def _full_key(key: str) -> str:
+    """Nest `key` under GCS_PREFIX, mirroring the server's storage layer."""
+    return f"{GCS_PREFIX}/{key}" if GCS_PREFIX else key
 
 
 def _list_objects(prefix: str) -> list[str]:
@@ -142,8 +157,8 @@ def test_push_lands_at_content_addressed_keys_and_gcs_endpoint(
             commit_message="Add parquet data",
         )
 
-        blob_key = _blob_key(_git_blob_sha1(readme_content))
-        lfs_key = _lfs_key(_lfs_oid(parquet_content))
+        blob_key = _full_key(_blob_key(_git_blob_sha1(readme_content)))
+        lfs_key = _full_key(_lfs_key(_lfs_oid(parquet_content)))
 
         # --- 1. content-addressed objects land at their promised keys ------
         blob_bytes = _wait_for_content(blob_key, readme_content)
@@ -162,7 +177,7 @@ def test_push_lands_at_content_addressed_keys_and_gcs_endpoint(
         # --- 2. exports/ is gone: nothing lands there for this repo --------
         # Scoped to this repository's old prefix: a long-lived dev bucket may
         # still hold objects written by the retired mirror for other repos.
-        exports_prefix = f"exports/datasets/{namespace}/{unique_name}/"
+        exports_prefix = _full_key(f"exports/datasets/{namespace}/{unique_name}/")
         assert _list_objects(exports_prefix) == [], (
             f"found objects under {exports_prefix} -- the human-readable "
             "mirror was supposed to be fully removed"

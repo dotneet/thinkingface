@@ -116,6 +116,8 @@ func TestBatchAcceptsAnUploadThatFitsTheQuota(t *testing.T) {
 		}
 	}
 	// Exactly at the limit is inside it: 40 + 60 = 100.
+	// One read for one batch whatever its size. What must not grow with the
+	// batch is the count, not the constant.
 	if q.calls != 1 {
 		t.Errorf("the quota was read %d times for one batch, want 1", q.calls)
 	}

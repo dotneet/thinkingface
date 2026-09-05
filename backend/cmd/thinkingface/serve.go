@@ -86,6 +86,10 @@ func runServe(ctx context.Context, cfg *config.Config, db *store.Store) error {
 	// Named syncWorker rather than sync: the shutdown below needs the
 	// standard library's sync package in the same scope.
 	syncWorker := syncer.New(db, gitManager, obj, parquet, indexer, hooks, cfg.SyncWorkers)
+	// The same allowance the LFS upload path enforces: without it a namespace
+	// at its quota could copy an oid/size pair out of any readable repository
+	// and have the post-push pipeline link it (see syncer/quota.go).
+	syncWorker.EnforceNamespaceQuota(cfg.DefaultStorageQuotaBytes)
 	// Route B's ingest buffer is only a buffer: the source of truth stays the
 	// parquet inside the dataset repository (docs/dev/thinkingface-design.md §8),
 	// so the sync worker periodically commits the buffered points there.
