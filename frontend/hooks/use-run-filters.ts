@@ -26,6 +26,26 @@ const EMPTY: RunFilters = {
 };
 
 /**
+ * Drop a tag or metric the project no longer has.
+ *
+ * The pickers unmount when their option list is empty, and a <Select> whose
+ * value is missing from the list reads as blank while the filter still hides
+ * every run. Same class as DefaultBranchForm falling back when the selected
+ * branch is deleted: apply and display the live options, not a stale buffer.
+ */
+export function dropGoneRunFilters(
+  filters: RunFilters,
+  tags: string[],
+  metricKeys: string[],
+): RunFilters {
+  return {
+    ...filters,
+    tag: tags.includes(filters.tag) ? filters.tag : "",
+    metric: metricKeys.includes(filters.metric) ? filters.metric : "",
+  };
+}
+
+/**
  * The run filters as one value, plus the "clear everything" the table's empty
  * state offers — the fastest way back to "something is showing" when a filter
  * combination matches nothing.
