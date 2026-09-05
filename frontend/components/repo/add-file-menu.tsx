@@ -2,7 +2,7 @@
 
 import { ChevronDown, FilePlus2, Plus, Upload } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { UploadDialog } from "@/components/repo/upload-dialog";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
@@ -49,6 +49,14 @@ export function AddFileMenu({
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [newPath, setNewPath] = useState("");
+
+  // A reopen must not inherit the previous attempt's half-typed path.
+  // createFile already clears it on confirm; cancel / backdrop only closed
+  // the dialog, so the next open showed a path the user thought they had
+  // abandoned. Same reset create-branch-dialog and rename-file-button do.
+  useEffect(() => {
+    if (newFileOpen) setNewPath("");
+  }, [newFileOpen]);
 
   // What will actually be created: the typed path is relative to the
   // directory being browsed (see resolveNewFilePath), and the dialog says so
