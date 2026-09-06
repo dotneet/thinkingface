@@ -35,11 +35,14 @@ export function RunDeleteDialog({
   const [confirmText, setConfirmText] = useState("");
   const formId = useId();
 
-  // Clear the field whenever a different run is put up for deletion, so a
-  // previously typed name can never confirm the next dialog.
+  // Clear the field whenever the dialog opens — including a reopen of the
+  // same run. Keying on `run` alone left a typed name in place after cancel,
+  // so the next open arrived with Confirm already enabled. ConfirmDialog
+  // resets the same way; `run` is still in the deps so a swap of target
+  // while open cannot carry the previous name across.
   useEffect(() => {
-    setConfirmText("");
-  }, [run]);
+    if (open) setConfirmText("");
+  }, [open, run]);
 
   if (!run) return null;
 
