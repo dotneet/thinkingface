@@ -74,8 +74,14 @@ export function RefsManager({
   // something that is gone: the <select> renders blank (no matching option)
   // while still holding the old value, so the next Create tag posts a
   // revision the server no longer has and fails for a reason the screen never
-  // showed. Fall back to whatever is still there.
-  const selectedRev = revOptions.includes(tagRev) ? tagRev : (revOptions[0] ?? "");
+  // showed. Prefer the live default when it is still in the list — falling
+  // straight to revOptions[0] would silently retarget the next tag at
+  // whatever happens to sort first. Same class as DefaultBranchForm.
+  const selectedRev = revOptions.includes(tagRev)
+    ? tagRev
+    : revOptions.includes(defaultBranch)
+      ? defaultBranch
+      : (revOptions[0] ?? "");
 
   async function confirmDelete() {
     if (!pending || deleting) return;
