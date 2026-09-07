@@ -1,5 +1,6 @@
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import Link from "next/link";
+
 import { formatNumber } from "@/lib/format";
 import { getT } from "@/lib/i18n/server";
 

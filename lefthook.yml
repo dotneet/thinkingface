@@ -34,19 +34,23 @@ pre-commit:
           exit 1
         fi
 
-    # --- TypeScript / CSS / JSON: Biome format + lint check ------------------
-    frontend-biome:
+    # --- TypeScript / CSS / JSON: oxfmt format check + oxlint ----------------
+    frontend-oxc:
       root: frontend/
-      glob: "*.{ts,tsx,js,jsx,mjs,json,css}"
-      # Only the biome from node_modules, i.e. the version bun.lock pins. The
-      # old `bunx --bun @biomejs/biome` fallback fetched whatever biome the
-      # registry served at that moment and ran it on your working tree --
-      # exactly the unpinned install docs/dev/supply-chain.md rules out.
+      glob: "*.{ts,tsx,js,jsx,mjs,cjs,json,css}"
+      # Only the binaries from node_modules, i.e. the versions bun.lock pins.
+      # No `bunx` fallback: that fetches whatever the registry serves at that
+      # moment and runs it on your working tree -- exactly the unpinned
+      # install docs/dev/supply-chain.md rules out.
+      #
+      # oxfmt only *checks* here. A pre-commit hook that rewrites files is a
+      # hook that silently commits something you did not read.
       run: |
-        if [ -x node_modules/.bin/biome ]; then
-          ./node_modules/.bin/biome check {staged_files}
+        if [ -x node_modules/.bin/oxfmt ] && [ -x node_modules/.bin/oxlint ]; then
+          ./node_modules/.bin/oxfmt --check {staged_files} && \
+          ./node_modules/.bin/oxlint {staged_files}
         else
-          echo "skip: biome not found (cd frontend && bun install)"
+          echo "skip: oxfmt/oxlint not found (cd frontend && bun install)"
         fi
 
     # --- TypeScript: UI consistency check (detects off-token colors, raw <button>, etc.) ---

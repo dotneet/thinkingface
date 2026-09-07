@@ -1,5 +1,6 @@
 import { cookies, headers } from "next/headers";
 import { cache } from "react";
+
 import {
   createTranslator,
   LOCALE_COOKIE,

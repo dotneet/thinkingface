@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+
 import { titleMetadata } from "@/app/page-metadata";
 import { AdminSyncJobsManager } from "@/components/settings/admin-sync-jobs-manager";
 import { buttonClass } from "@/components/ui/button";

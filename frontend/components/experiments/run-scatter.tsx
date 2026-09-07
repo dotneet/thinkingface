@@ -2,6 +2,7 @@
 
 import { ScatterChart } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+
 import { UplotChart } from "@/components/experiments/uplot-chart";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Checkbox, Select } from "@/components/ui/field";

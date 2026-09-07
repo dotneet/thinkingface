@@ -19,7 +19,7 @@ export function MarkdownTable({ children }: { children?: React.ReactNode }) {
       className="tf-table-wrap scroll-x"
       // Keyboard users must be able to scroll the overflow; without a tab stop
       // the only way to reach the right-hand columns is a pointer.
-      // biome-ignore lint/a11y/noNoninteractiveTabindex: scrollable region needs a tab stop
+      // oxlint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- scrollable region needs a tab stop
       tabIndex={0}
       aria-label={t("ui.markdown.table")}
     >

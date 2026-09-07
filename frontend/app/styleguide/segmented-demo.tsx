@@ -2,6 +2,7 @@
 
 import { FileText, Table2 } from "lucide-react";
 import { useState } from "react";
+
 import { SegmentedControl } from "@/components/ui/segmented-control";
 
 const OPTIONS = [

@@ -1,4 +1,5 @@
 import Link from "next/link";
+
 import { FilterChip } from "@/components/ui/filter-chip";
 import { formatNumber } from "@/lib/format";
 import type { Translator } from "@/lib/i18n";

@@ -3,9 +3,9 @@
 # Regenerate frontend/types/api.gen.ts from the Go wire structs in
 # backend/internal/apitypes.
 #
-# The output is raw tygo output on purpose: frontend/biome.json excludes
-# `types/*.gen.ts` from formatting and linting, so there is no formatter to
-# agree with. tygo's output is deterministic, which keeps
+# The output is raw tygo output on purpose: frontend/.oxfmtrc.json and
+# frontend/.oxlintrc.json both exclude `types/*.gen.ts`, so there is no
+# formatter to agree with. tygo's output is deterministic, which keeps
 # `make gen-types` + `git status --porcelain` an accurate sync check.
 #
 # The destination lives in backend/tygo.yaml (`output_path`) and is read from

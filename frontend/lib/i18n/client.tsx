@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, useContext, useMemo } from "react";
+
 import {
   createTranslator,
   defaultLocale,
@@ -34,11 +35,11 @@ export function useT(): Translator {
  */
 export function setLocalePreference(pref: LocalePreference) {
   if (pref === "auto") {
-    // biome-ignore lint/suspicious/noDocumentCookie: Cookie Store API is not supported in Safari
+    // Cookie Store API is not supported in Safari.
     document.cookie = `${LOCALE_COOKIE}=; path=/; max-age=0; samesite=lax`;
   } else {
     const oneYear = 60 * 60 * 24 * 365;
-    // biome-ignore lint/suspicious/noDocumentCookie: Cookie Store API is not supported in Safari
+    // Cookie Store API is not supported in Safari.
     document.cookie = `${LOCALE_COOKIE}=${pref}; path=/; max-age=${oneYear}; samesite=lax`;
   }
 }

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+
 import { titleMetadata } from "@/app/page-metadata";
 import { LoginForm } from "@/components/auth/login-form";
 import { getT } from "@/lib/i18n/server";

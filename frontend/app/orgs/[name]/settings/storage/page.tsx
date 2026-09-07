@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+
 import { titleMetadata } from "@/app/page-metadata";
 import { StorageUsage } from "@/components/settings/storage-usage";
 import { getT } from "@/lib/i18n/server";

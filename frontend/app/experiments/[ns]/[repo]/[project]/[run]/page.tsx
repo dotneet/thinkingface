@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+
 import { titleMetadata } from "@/app/page-metadata";
 import { RunDetail } from "@/components/experiments/run-detail";
 import { ErrorState } from "@/components/ui/error-state";

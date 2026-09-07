@@ -2,6 +2,7 @@
 
 import { Database, Play, RefreshCw, Square, TableProperties } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";

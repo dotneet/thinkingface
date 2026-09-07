@@ -5,6 +5,7 @@ import { GitBranch, GitFork, GitMerge, History, Minimize2, Puzzle, Ruler } from 
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
+
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { MessageKey, Translator } from "@/lib/i18n";
@@ -131,13 +132,14 @@ function DependentBucketGroup({
                 {t("repo.lineage.fromRun", { run: d.run })}
               </span>
             )}
-            {group.bucket === "other" && d.relation && (
-              // The card wrote a relation nobody knows. Showing it is the
-              // point of keeping it: "other" alone would lose what it said.
-              <span className="ml-1.5 font-mono text-xs font-medium text-fg-subtle">
-                {d.relation}
-              </span>
-            )}
+            {group.bucket === "other" &&
+              d.relation && (
+                // The card wrote a relation nobody knows. Showing it is the
+                // point of keeping it: "other" alone would lose what it said.
+                <span className="ml-1.5 font-mono text-xs font-medium text-fg-subtle">
+                  {d.relation}
+                </span>
+              )}
           </li>
         ))}
       </ul>

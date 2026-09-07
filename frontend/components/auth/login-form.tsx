@@ -3,6 +3,7 @@
 import { Lock } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+
 import { NamespaceAvailability } from "@/components/namespace/namespace-availability";
 import { NamespaceUrlPreview } from "@/components/namespace/namespace-url-preview";
 import { Alert } from "@/components/ui/alert";

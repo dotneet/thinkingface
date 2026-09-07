@@ -2,6 +2,7 @@
 
 import { GitCompareArrows } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+
 import { RunColorDot } from "@/components/experiments/run-color-dot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -272,7 +273,7 @@ function AxisColumn({ axis, index, count }: { axis: ParallelAxis; index: number;
         const t = ticks.length <= 1 ? 0.5 : i / (ticks.length - 1);
         return (
           <text
-            // biome-ignore lint/suspicious/noArrayIndexKey: two values can round to the same displayed string (formatNumeric, lib/run-parallel.ts), so the label collides where the index cannot; ticks are recomputed whole and never reordered
+            // oxlint-disable-next-line react/no-array-index-key -- two values can round to the same displayed string (formatNumeric, lib/run-parallel.ts), so the label collides where the index cannot; ticks are recomputed whole and never reordered
             key={`${axis.id}-${i}`}
             x={x}
             y={axisY(t, HEIGHT, PAD_Y) + 4}

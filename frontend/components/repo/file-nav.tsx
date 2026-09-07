@@ -1,5 +1,6 @@
 import { GitBranch } from "lucide-react";
 import Link from "next/link";
+
 import { RefSwitcher } from "@/components/repo/ref-switcher";
 import { CopyButton } from "@/components/ui/copy-button";
 import { getT } from "@/lib/i18n/server";
@@ -82,7 +83,7 @@ export async function FileNav({
       {path.map((seg, i) => {
         const isLast = i === path.length - 1;
         return (
-          // biome-ignore lint/suspicious/noArrayIndexKey: path segments can repeat (a/b/a) but are never reordered
+          // oxlint-disable-next-line react/no-array-index-key -- path segments can repeat (a/b/a) but are never reordered
           <span key={i} className="flex items-center gap-1.5">
             <span className="text-fg-subtle">/</span>
             {isLast ? (

@@ -1,6 +1,7 @@
 "use client";
 
 import { Link2 } from "lucide-react";
+
 import { useT } from "@/lib/i18n/client";
 
 /**

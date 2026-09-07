@@ -11,6 +11,7 @@ import {
   Table2,
 } from "lucide-react";
 import Link from "next/link";
+
 import { LIVE_REFRESH_INTERVAL_MS } from "@/components/experiments/live-refresh";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";

@@ -101,7 +101,7 @@ export function DiffView({
             {lines.map((line, i) => (
               // The index is the identity here: two identical lines in a patch
               // are two different rows, and the list is never reordered.
-              // biome-ignore lint/suspicious/noArrayIndexKey: a diff row has no id but its position
+              // oxlint-disable-next-line react/no-array-index-key -- a diff row has no id but its position
               <DiffRow key={i} line={line} />
             ))}
           </div>

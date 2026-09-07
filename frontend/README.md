@@ -36,7 +36,8 @@ browser cookie jar.
 - `bun run build` — production build (`next build`)
 - `bun run start` — run the production build (`next start -p 3000`)
 - `bun run typecheck` — `tsc --noEmit`
-- `bun run lint` — ESLint
+- `bun run lint` — oxlint (`bun run lint:fix` to apply its fixes)
+- `bun run format` — oxfmt (`bun run format:check` to check only)
 - `bun run duckdb-assets` — stage the DuckDB-WASM runtime into `public/duckdb/`
 
 `dev` and `build` run `duckdb-assets` first, so the wasm module and worker the

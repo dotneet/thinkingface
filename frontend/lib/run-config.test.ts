@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+
 import { isEnvEmpty, runEnv, splitRunConfig } from "@/lib/run-config";
 
 describe("splitRunConfig", () => {

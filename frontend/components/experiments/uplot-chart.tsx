@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
+
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { chartDataEquals, planLogScale } from "@/lib/chart-scale";
@@ -13,6 +14,7 @@ import {
   readChartThemeColors,
   subscribeThemeChange,
 } from "@/lib/theme-colors";
+
 import "uplot/dist/uPlot.min.css";
 
 /**

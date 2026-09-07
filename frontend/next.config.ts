@@ -105,18 +105,36 @@ export const SECURITY_HEADERS = [
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
-  // Backend is not reachable at build time; no route in this app fetches
-  // data during static generation (everything is force-dynamic or fetched
-  // client-side), so the build never depends on API connectivity.
-  eslint: {
-    ignoreDuringBuilds: false,
-  },
   // DuckDB-WASM is browser-only (lib/duckdb.ts imports it dynamically from a
   // client effect), but the server build still resolves the specifier — and
   // the "node" export condition points at duckdb-node.cjs, whose dynamic
   // requires webpack cannot statically analyse. Marking it external keeps that
   // module out of the server bundle and off the build log.
   serverExternalPackages: ["@duckdb/duckdb-wasm"],
+  // Run the React Compiler through oxc instead of Babel. The rationale, the
+  // failure policy, and why this cannot be `reactCompiler: true` are all in
+  // scripts/oxc-react-compiler-loader.cjs.
+  //
+  // The two conditions are not tuning knobs, they are correctness:
+  //
+  // - `not: "foreign"` keeps the loader off node_modules and Next.js
+  //   internals. Pointless work, and the difference between a loader that
+  //   costs a few hundred milliseconds and one that costs seconds.
+  // - `browser` keeps it off the server graph. The compiler rewrites a
+  //   component to call `c()` from `react/compiler-runtime`, which reads
+  //   `react`'s *client* internals — a module that does not exist under the
+  //   `react-server` condition. Compile a Server Component and the build dies
+  //   prerendering it with `Cannot read properties of undefined (reading
+  //   'H')`. That is also the right split on its own terms: memoization buys
+  //   you skipped re-renders, and a Server Component renders once.
+  turbopack: {
+    rules: {
+      "*.{ts,tsx}": {
+        condition: { all: [{ not: "foreign" }, "browser"] },
+        loaders: ["./scripts/oxc-react-compiler-loader.cjs"],
+      },
+    },
+  },
   async headers() {
     return [{ source: "/:path*", headers: SECURITY_HEADERS }];
   },

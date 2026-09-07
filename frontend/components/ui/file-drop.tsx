@@ -2,6 +2,7 @@
 
 import { Upload } from "lucide-react";
 import { useRef, useState } from "react";
+
 import { cn } from "@/lib/cn";
 
 /**
@@ -44,6 +45,9 @@ export function FileDropZone({
   }
 
   return (
+    // The drag handlers are the component. The <label> wraps the real file
+    // input, which keeps the keyboard path intact.
+    // oxlint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
     <label
       onDragOver={(e) => {
         // preventDefault before the disabled check, not after: without it the

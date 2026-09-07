@@ -1,5 +1,6 @@
 import { Boxes, Database, Globe, Settings, UserPen, Users } from "lucide-react";
 import Link from "next/link";
+
 import { NamespaceAvatar } from "@/components/namespace/namespace-avatar";
 import { OrgRoleBadge, orgRoleLabelKey } from "@/components/orgs/org-role-badge";
 import { Badge } from "@/components/ui/badge";

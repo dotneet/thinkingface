@@ -1,4 +1,5 @@
 import Link from "next/link";
+
 import type { MessageKey } from "@/lib/i18n";
 import { getT } from "@/lib/i18n/server";
 import { type NamespaceTab, namespaceTabHref } from "@/lib/namespace";

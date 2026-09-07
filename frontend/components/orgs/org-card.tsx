@@ -1,4 +1,5 @@
 import Link from "next/link";
+
 import { NamespaceAvatar } from "@/components/namespace/namespace-avatar";
 import { OrgRoleBadge, orgRoleLabelKey } from "@/components/orgs/org-role-badge";
 import { formatNumber } from "@/lib/format";

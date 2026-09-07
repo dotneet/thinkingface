@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+
 import { cn } from "@/lib/cn";
 import { useT } from "@/lib/i18n/client";
 import type { TocEntry } from "@/lib/markdown-toc";

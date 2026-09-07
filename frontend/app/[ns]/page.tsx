@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { notFound, permanentRedirect } from "next/navigation";
+
 import { pageTitle } from "@/app/page-metadata";
 import { NamespaceOverview, type NamespaceSearch } from "@/components/namespace/namespace-overview";
 import { ErrorState } from "@/components/ui/error-state";

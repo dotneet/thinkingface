@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+
 import { titleMetadata } from "@/app/page-metadata";
 import { SSHKeysManager } from "@/components/settings/ssh-keys-manager";
 import { getT } from "@/lib/i18n/server";

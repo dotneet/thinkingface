@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useId, useState } from "react";
+
 import { MarkdownCodeBlock } from "@/components/ui/markdown-code-block";
 import { Skeleton } from "@/components/ui/skeleton";
 import { subscribeThemeChange } from "@/lib/theme-colors";
@@ -101,7 +102,7 @@ export function MarkdownMermaid({ code }: { code: string }) {
       // The SVG string comes straight from mermaid.render() above; see the
       // doc comment on this component for why that is safe to inject
       // directly instead of re-sanitising it here.
-      // biome-ignore lint/security/noDangerouslySetInnerHtml: mermaid's own securityLevel:"strict" output, not author HTML — see doc comment above
+      // oxlint-disable-next-line react/no-danger -- mermaid's own securityLevel:"strict" output, not author HTML — see doc comment above
       dangerouslySetInnerHTML={{ __html: state.svg }}
     />
   );

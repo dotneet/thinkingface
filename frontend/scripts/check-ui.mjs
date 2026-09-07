@@ -151,7 +151,7 @@ const TONE_TEXT_RE = /(?<![\w:-])text-(accent|positive|negative|warning)(?![\w-]
 // Only the weights *above* the default count: the rule asks for extra weight,
 // so `font-normal` (and anything lighter) satisfies nothing.
 const WEIGHT_RE = /\bfont-(?:medium|semibold|bold|extrabold|black)\b/;
-// `\b` after the tag name so `<button` at the end of a line (how Biome formats
+// `\b` after the tag name so `<button` at the end of a line (how oxfmt formats
 // any button with more than one or two props) is caught, while `<ButtonGroup`
 // and `<buttonish` are not.
 const RAW_BUTTON_RE = /<button\b/g;

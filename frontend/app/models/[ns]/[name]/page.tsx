@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+
 import { titleMetadata } from "@/app/page-metadata";
 import { RepoOverview } from "@/components/repo-pages/repo-overview";
 import { decodeRouteParams } from "@/lib/paths";

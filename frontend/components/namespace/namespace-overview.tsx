@@ -1,6 +1,7 @@
 import { Boxes, Database, FlaskConical, Plus } from "lucide-react";
 import Link from "next/link";
 import { Suspense } from "react";
+
 import { NamespaceExperimentCard } from "@/components/namespace/namespace-experiment-card";
 import { NamespaceHeader } from "@/components/namespace/namespace-header";
 import { NamespaceTabs } from "@/components/namespace/namespace-tabs";

@@ -1,6 +1,7 @@
 import type { LucideIcon } from "lucide-react";
 import { ArrowUpRight, Database, FlaskConical, Layers, Link2Off, Ruler } from "lucide-react";
 import Link from "next/link";
+
 import { LineageDependents } from "@/components/repo/lineage-dependents";
 import { Alert } from "@/components/ui/alert";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";

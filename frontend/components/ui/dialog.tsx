@@ -2,6 +2,7 @@
 
 import { X } from "lucide-react";
 import { useEffect, useRef } from "react";
+
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { dialogDismiss, isDialogBackdropClick } from "@/lib/dialog-dismiss";
@@ -87,7 +88,10 @@ export function Dialog({
   }, []);
 
   return (
-    // biome-ignore lint/a11y/useKeyWithClickEvents: Escape is handled by onCancel and the header has a focusable Close button
+    // A native <dialog> counts as non-interactive to the a11y rules, so the
+    // backdrop click handler below trips both of these. Escape is handled by
+    // onCancel and the header carries a focusable Close button.
+    // oxlint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions
     <dialog
       ref={ref}
       aria-label={title}

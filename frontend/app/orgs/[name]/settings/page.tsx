@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+
 import { titleMetadata } from "@/app/page-metadata";
 import { OrgProfileForm } from "@/components/orgs/org-profile-form";
 import { ErrorState } from "@/components/ui/error-state";

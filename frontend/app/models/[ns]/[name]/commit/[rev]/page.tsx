@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+
 import { titleMetadata } from "@/app/page-metadata";
 import { RepoCommitDiff } from "@/components/repo-pages/repo-commit-diff";
 import { getT } from "@/lib/i18n/server";

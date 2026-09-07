@@ -1,5 +1,6 @@
 import type { Element, ElementContent } from "hast";
 import { describe, expect, it } from "vitest";
+
 import {
   buildCodeLines,
   countLines,

@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import { unified } from "unified";
 import { visit } from "unist-util-visit";
+
 import { HEADING_ID_PREFIX } from "@/lib/markdown-pipeline";
 
 export interface TocEntry {

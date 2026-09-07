@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+
 import { titleMetadata } from "@/app/page-metadata";
 import { AccountSettings } from "@/components/settings/account-settings";
 import { getT } from "@/lib/i18n/server";

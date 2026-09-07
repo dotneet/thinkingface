@@ -2,6 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { Download } from "lucide-react";
+
 import { DTypeBreakdown } from "@/components/model/model-dtype-breakdown";
 import { ModelInspectorNotes } from "@/components/model/model-inspector-notes";
 import { ModelInspectorSkeleton } from "@/components/model/model-inspector-skeleton";

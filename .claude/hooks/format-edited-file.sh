@@ -3,7 +3,7 @@
 # PostToolUse hook: format the file Claude Code just wrote.
 #
 # Reads the hook payload on stdin and formats the edited file with gofmt
-# (backend Go) or Biome (frontend TypeScript). Always exits 0 -- a formatter
+# (backend Go) or oxfmt (frontend TypeScript). Always exits 0 -- a formatter
 # that is missing, or a file that does not parse yet, must never fail the
 # edit that triggered it.
 #
@@ -58,13 +58,13 @@ case "$file" in
 		fi
 		;;
 	"$project"/frontend/*.ts | "$project"/frontend/*.tsx)
-		# Only the biome from node_modules -- the version bun.lock pins. The
-		# `bunx --bun @biomejs/biome` fallback that used to sit here fetched an
-		# unpinned biome from the registry and ran it on the working tree
-		# (docs/dev/supply-chain.md). Without node_modules the file is simply
-		# left unformatted; `make check` still catches it.
-		if [ -x "$project/frontend/node_modules/.bin/biome" ]; then
-			(cd "$project/frontend" && ./node_modules/.bin/biome format --write "$file" >/dev/null 2>&1) || true
+		# Only the oxfmt from node_modules -- the version bun.lock pins. No
+		# `bunx` fallback: that fetches an unpinned formatter from the registry
+		# and runs it on the working tree (docs/dev/supply-chain.md). Without
+		# node_modules the file is simply left unformatted; `make check` still
+		# catches it.
+		if [ -x "$project/frontend/node_modules/.bin/oxfmt" ]; then
+			(cd "$project/frontend" && ./node_modules/.bin/oxfmt "$file" >/dev/null 2>&1) || true
 		fi
 		;;
 esac

@@ -7,6 +7,7 @@ import {
   FileText,
   Folder,
 } from "lucide-react";
+
 import type { TreeEntryUI } from "@/types/api";
 
 export function EntryIcon({ entry, size = 16 }: { entry: TreeEntryUI; size?: number }) {

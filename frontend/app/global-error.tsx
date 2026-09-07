@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+
 import { ThemeScript } from "@/app/theme-script";
 import { Button, buttonClass } from "@/components/ui/button";
 import { ErrorState } from "@/components/ui/error-state";
@@ -13,6 +14,7 @@ import {
   type Locale,
   matchAcceptLanguage,
 } from "@/lib/i18n";
+
 // global-error.tsx replaces the entire root layout (including its
 // `<html>`/`<body>` and its `import "./globals.css"`), so it has to bring
 // its own copy of the stylesheet — see the Next.js docs for this file.

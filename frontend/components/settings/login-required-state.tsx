@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+
 import { buttonClass } from "@/components/ui/button";
 import { ErrorState } from "@/components/ui/error-state";
 import { useT } from "@/lib/i18n/client";

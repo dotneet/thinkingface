@@ -2,6 +2,7 @@
 
 import { Terminal } from "lucide-react";
 import { useState } from "react";
+
 import { Button } from "@/components/ui/button";
 import { CodeBlock } from "@/components/ui/code-block";
 import { Dialog } from "@/components/ui/dialog";

@@ -4,6 +4,7 @@ import { Menu, Plus, X } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useRef, useState } from "react";
+
 import { navItems } from "@/components/nav-items";
 import { SearchBox } from "@/components/search-box";
 import { Button, buttonClass } from "@/components/ui/button";
