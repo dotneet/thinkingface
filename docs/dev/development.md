@@ -29,7 +29,7 @@ thinkingface/
 │   ├── cmd/thinkingface/      #   server entry point
 │   ├── cmd/tf/                #   `tf` CLI entry point (see tf-cli.md)
 │   └── internal/              #   packages (api, auth, gitrepo, gitserver, lfs, store, syncer, viewer, ...)
-├── frontend/                  # Next.js 15 (App Router) + React 19 + Tailwind v4 web UI, built with bun
+├── frontend/                  # Next.js 16 (App Router, Turbopack) + React 19 + Tailwind v4 web UI, built with bun
 ├── clients/python/            # pip package `thinkingface` (login helper + trackio-compatible shim)
 ├── e2e/                       # pytest compatibility suite driven through huggingface_hub / datasets / git
 ├── infra/                     # Terraform for GCP (Cloud Run + Cloud SQL or SQLite/Litestream + GCS)

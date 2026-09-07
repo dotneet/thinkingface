@@ -58,7 +58,7 @@ NEXT_PUBLIC_API_URL=http://localhost:8081 API_URL=http://localhost:8081 make dev
 ## Verifying in the Browser pane
 
 - **Perform actions with a real click (`computer left_click`).** `javascript_tool`'s
-  `element.click()` gets discarded by React 19 / Next 15's selective hydration and looks
+  `element.click()` gets discarded by React 19 / Next.js's selective hydration and looks
   "broken". Limit `javascript_tool` to reading state (URL, DOM, computed styles).
 - **Take one `computer screenshot` before measuring an element's position.** If the tab
   isn't in front, `innerWidth` is 0 and every `getBoundingClientRect()` value comes out
