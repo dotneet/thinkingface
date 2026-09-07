@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+
 import type { ApiResult } from "@/lib/api";
 import type { FailedApiResult } from "@/lib/api-error-message";
 import { useLocale } from "@/lib/i18n/client";

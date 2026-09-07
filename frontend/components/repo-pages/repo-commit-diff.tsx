@@ -1,5 +1,6 @@
 import { FileDiff, FileMinus, FilePen, FilePlus, GitCommitVertical } from "lucide-react";
 import Link from "next/link";
+
 import { IndexingBanner } from "@/components/repo/indexing-banner";
 import { RepoBreadcrumb } from "@/components/repo/repo-breadcrumb";
 import { RepoNotFoundOrLogin } from "@/components/repo/repo-not-found";

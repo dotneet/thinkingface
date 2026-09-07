@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, useContext } from "react";
+
 import type { RunModels } from "@/lib/lineage";
 import { metricSortColumn, type RunSortColumn } from "@/lib/run-grouping";
 import type { ExpRun } from "@/types/api";
@@ -42,9 +43,11 @@ export function runColumns(metricKeys: string[], hasModels: boolean): RunColumn[
     { id: "status" },
     { id: "tags" },
     { id: "lastStep" },
-    ...metricKeys.map(
-      (metric): RunColumn => ({ id: "metric", metric, sort: metricSortColumn(metric) }),
-    ),
+    ...metricKeys.map((metric): RunColumn => ({
+      id: "metric",
+      metric,
+      sort: metricSortColumn(metric),
+    })),
     { id: "started" },
     ...(hasModels ? [{ id: "models" } satisfies RunColumn] : []),
     { id: "actions" },

@@ -1,6 +1,7 @@
 import { FlaskConical, Search } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
+
 import { titleMetadata } from "@/app/page-metadata";
 import { buttonClass } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";

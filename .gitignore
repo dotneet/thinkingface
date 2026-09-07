@@ -28,7 +28,6 @@ frontend/next-env.d.ts
 bun.lockb
 # TypeScript incremental build info (also in frontend/.gitignore, but just in case)
 *.tsbuildinfo
-.eslintcache
 
 # ---- Python (clients/python, e2e) -------------------------------------------
 __pycache__/

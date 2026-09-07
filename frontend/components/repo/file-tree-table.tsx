@@ -1,5 +1,6 @@
 import { ChartNoAxesCombined, CornerLeftUp } from "lucide-react";
 import Link from "next/link";
+
 import { CommitBar } from "@/components/repo/commit-bar";
 import { EntryIcon } from "@/components/repo/file-icon";
 import { RenameFileButton } from "@/components/repo/rename-file-button";

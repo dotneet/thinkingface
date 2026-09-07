@@ -3,6 +3,7 @@
 import type { ElementContent } from "hast";
 import { FileText } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+
 import { EmptyState } from "@/components/ui/empty-state";
 import { cn } from "@/lib/cn";
 import {
@@ -33,7 +34,7 @@ function renderNodes(nodes: ElementContent[]): React.ReactNode {
         ? className
         : undefined;
     return (
-      // biome-ignore lint/suspicious/noArrayIndexKey: positional nodes in immutable source text
+      // oxlint-disable-next-line react/no-array-index-key -- positional nodes in immutable source text
       <span key={index} className={classes}>
         {renderNodes(node.children)}
       </span>

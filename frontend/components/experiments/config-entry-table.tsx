@@ -1,6 +1,7 @@
 "use client";
 
 import { SlidersHorizontal } from "lucide-react";
+
 import { EmptyState } from "@/components/ui/empty-state";
 import { Table, TBody, Td, THead, Th, Tr } from "@/components/ui/table";
 import { useT } from "@/lib/i18n/client";

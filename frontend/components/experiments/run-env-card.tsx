@@ -1,6 +1,7 @@
 "use client";
 
 import { Server } from "lucide-react";
+
 import { ConfigEntryTable } from "@/components/experiments/config-entry-table";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";

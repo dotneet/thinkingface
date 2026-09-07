@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+
 import type { ApiResult } from "@/lib/api";
 import { redirectIfRepoMoved } from "@/lib/repo-redirect";
 

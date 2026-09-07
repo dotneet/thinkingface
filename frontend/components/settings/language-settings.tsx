@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import type { Locale, LocalePreference } from "@/lib/i18n";
 import { setLocalePreference, useT } from "@/lib/i18n/client";

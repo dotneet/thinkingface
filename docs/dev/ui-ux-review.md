@@ -1,6 +1,6 @@
 # UI/UX Review and Improvement Proposals
 
-Target: `frontend/` (Next.js 15 App Router / Tailwind v4).
+Target: `frontend/` (Next.js 16 App Router / Tailwind v4).
 Live verification was carried out against `http://localhost:3000` with `make up` running.
 
 The design system (semantic tokens in `app/globals.css`, the primitives in

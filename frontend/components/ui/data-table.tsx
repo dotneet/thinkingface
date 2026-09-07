@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useMemo, useRef } from "react";
+
 import { ValueCell } from "@/components/ui/value-cell";
 import type { CellFeature } from "@/lib/cell-value";
 import { cn } from "@/lib/cn";

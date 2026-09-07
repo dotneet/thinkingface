@@ -1,6 +1,7 @@
 "use client";
 
 import { Inbox } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import type { PagerState } from "@/hooks/use-paged-list";

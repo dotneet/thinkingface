@@ -2,6 +2,7 @@
 
 import { NotebookPen } from "lucide-react";
 import { useState } from "react";
+
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";

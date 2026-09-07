@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import { AlertTriangle, CheckCircle2, Info, XCircle } from "lucide-react";
+
 import { cn } from "@/lib/cn";
 
 export type AlertTone = "info" | "positive" | "negative" | "warning";

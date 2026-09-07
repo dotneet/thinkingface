@@ -1,6 +1,7 @@
 import { Plus } from "lucide-react";
 import Link from "next/link";
 import { Suspense } from "react";
+
 import { MobileNav } from "@/components/mobile-nav";
 import { SearchBox } from "@/components/search-box";
 import { SiteNav } from "@/components/site-nav";

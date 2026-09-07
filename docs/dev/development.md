@@ -29,7 +29,7 @@ thinkingface/
 │   ├── cmd/thinkingface/      #   server entry point
 │   ├── cmd/tf/                #   `tf` CLI entry point (see tf-cli.md)
 │   └── internal/              #   packages (api, auth, gitrepo, gitserver, lfs, store, syncer, viewer, ...)
-├── frontend/                  # Next.js 15 (App Router) + React 19 + Tailwind v4 web UI, built with bun
+├── frontend/                  # Next.js 16 (App Router, Turbopack) + React 19 + Tailwind v4 web UI, built with bun
 ├── clients/python/            # pip package `thinkingface` (login helper + trackio-compatible shim)
 ├── e2e/                       # pytest compatibility suite driven through huggingface_hub / datasets / git
 ├── infra/                     # Terraform for GCP (Cloud Run + Cloud SQL or SQLite/Litestream + GCS)
@@ -133,7 +133,7 @@ make check
 | Target | What it runs |
 |---|---|
 | `make check-backend` | `gofmt` check, `go vet`, `golangci-lint run` (pinned to the same version CI pins if you install that version yourself — see `.github/workflows/ci.yml`'s `golangci-lint` step; the local run otherwise just uses whatever version is on `PATH` and fails loudly rather than skipping if `golangci-lint` isn't installed at all), `go test ./...` in `backend/` |
-| `make check-frontend` | `bun run typecheck`, `lint` (ESLint), `format:check` (Biome), `check:ui` (`frontend/scripts/check-ui.mjs`, the UI conventions from `frontend/DESIGN.md`), `test` (vitest) |
+| `make check-frontend` | `bun run typecheck`, `lint` (oxlint), `format:check` (oxfmt), `check:ui` (`frontend/scripts/check-ui.mjs`, the UI conventions from `frontend/DESIGN.md`), `test` (vitest) |
 | `make check-python` | `ruff check` + `ruff format --check` for `e2e/`, `clients/python/`, `scripts/`, `uv lock --check` for `e2e/` and `clients/python/`, then the `clients/python` unit tests (`uv run --locked pytest`) |
 | `make check-types` | Regenerates `frontend/types/api.gen.ts` from `backend/internal/apitypes` with tygo and fails on any diff |
 | `make check-terraform` | `terraform fmt -check -recursive`, then `terraform init -backend=false` + `terraform validate` in `infra/` |
@@ -353,13 +353,25 @@ cleanly when neither is installed.
   merge commits (no squash / rebase).
 - **Go**: `gofmt` + `golangci-lint` (`backend/.golangci.yml`); every package carries a
   `// Package xxx ...` doc comment.
-- **TypeScript**: Biome (`frontend/biome.json`) for formatting and basic lint, ESLint
-  (`frontend/eslint.config.mjs`) for the Next.js rules.
+- **TypeScript**: oxlint (`frontend/.oxlintrc.json`) for linting and oxfmt
+  (`frontend/.oxfmtrc.json`) for formatting and import sorting — the oxc toolchain, which
+  replaced Biome and ESLint. Rules that are off, and why, are documented inline in
+  `.oxlintrc.json`; single exceptions are `// oxlint-disable-next-line <rule> -- <why>`
+  at the call site.
 - **Python**: `ruff` (`e2e/pyproject.toml`, `clients/python/pyproject.toml`).
 - **Configuration** lives in `.env` (`cp .env.example .env`); never commit `.env`.
 
 ## Toolchain notes
 
+- The frontend is **Next.js 16 on Turbopack** (the default for both `next dev` and
+  `next build` since 16). There is no webpack configuration and adding one makes
+  `next build` fail on purpose.
+- The **React Compiler** is enabled, but through oxc rather than Babel:
+  `frontend/scripts/oxc-react-compiler-loader.cjs` is registered as a Turbopack loader in
+  `frontend/next.config.ts`. It runs on the browser graph only — the compiler's output
+  imports `react/compiler-runtime`, which does not exist under the `react-server` condition,
+  so compiling a Server Component breaks prerendering. Modules the compiler cannot handle
+  are passed through unoptimized with a warning rather than failing the build.
 - The Makefile resolves `bun` and `node` to absolute paths via mise. On a plain `PATH`, `node`
   may resolve to an older version and vitest / `next build` fail — go through `make`
   (`make test`, `make build-web`) rather than running `bun run test` / `bun run build` directly.

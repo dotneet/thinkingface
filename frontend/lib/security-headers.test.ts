@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+
 import nextConfig, { SECURITY_HEADERS } from "@/next.config";
 
 /**

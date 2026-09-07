@@ -1,4 +1,5 @@
 import { permanentRedirect } from "next/navigation";
+
 import { namespaceHref } from "@/lib/namespace";
 import { decodeRouteParams } from "@/lib/paths";
 

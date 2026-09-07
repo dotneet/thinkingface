@@ -11,6 +11,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+
 import { SchemaPanel } from "@/components/parquet/schema-panel";
 import { SqlConsole } from "@/components/parquet/sql-console";
 import { Button } from "@/components/ui/button";

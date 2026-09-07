@@ -1,0 +1,78 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": [
+    "import",
+    "jsx-a11y",
+    "nextjs",
+    "oxc",
+    "promise",
+    "react",
+    "react-perf",
+    "typescript"
+  ],
+  "categories": {
+    "correctness": "error"
+  },
+  "ignorePatterns": [".next", "next-env.d.ts", "public", "types/*.gen.ts"],
+  "rules": {
+    // ---------------------------------------------------------------------
+    // Rules switched off so that replacing Biome + ESLint with oxlint stays a
+    // toolchain change and not a refactor.
+    //
+    // oxlint's `correctness` category is a strict superset of what the old
+    // pair enforced. Turning it on lit up 52 sites, all of them code that has
+    // been in main for months. Four of those were genuine one-off exceptions
+    // and now carry an `oxlint-disable-next-line` where they live; three were
+    // in this branch's own loader and were rewritten away. The 43 that remain
+    // are spread across dialogs, effects and table markup, and each fix is a
+    // behaviour change that deserves its own review -- so they are named here
+    // rather than fixed in passing or left to print 43 warnings on every
+    // `bun run lint` until nobody reads the output.
+    //
+    // The a11y rules below were *already* off: frontend/biome.json disabled
+    // its whole `a11y` group by hand, and eslint-config-next only ever
+    // brought in `alt-text`. Re-enabling them is an accessibility project.
+    // ---------------------------------------------------------------------
+
+    // 20 sites. Ships with react-hooks v6, which arrived with Next.js 16 --
+    // the old eslint-config-next pinned v5, which did not have this rule.
+    // Most hits are "seed state from a prop after mount" and are real, but
+    // each fix changes render behaviour and needs its own review.
+    "react/set-state-in-effect": "off",
+
+    // 10 sites, every one a dialog or an inline editor autofocusing its first
+    // field the moment it opens -- which is the behaviour those components
+    // are supposed to have.
+    "jsx-a11y/no-autofocus": "off",
+
+    // 5 sites: bare row-selection checkboxes in the data table, the model
+    // tensor table and the webhook deliveries panel.
+    "jsx-a11y/control-has-associated-label": "off",
+
+    // 1 site, and a false positive: CardTitle in components/ui/card.tsx is an
+    // <h2> primitive whose content arrives through props, so the rule cannot
+    // see it.
+    "jsx-a11y/heading-has-content": "off",
+
+    // 4 sites: `role="img"` on chart <svg>s and `role="progressbar"` on the
+    // progress bar primitive. The native tags the rule suggests (<img>,
+    // <progress>) cannot render what those draw.
+    "jsx-a11y/prefer-tag-over-role": "off",
+
+    // 3 sites: <label>s that title a *group* of controls (the facet sidebar,
+    // the admin create-user dialog, the styleguide) rather than one input.
+    "jsx-a11y/label-has-associated-control": "off",
+
+    // ---------------------------------------------------------------------
+    // Not a defect, and on purpose not silent.
+    // ---------------------------------------------------------------------
+
+    // `useReactTable()` / `useVirtualizer()` return functions the React
+    // Compiler will not memoize, so it skips the whole component. That is
+    // information worth having now that scripts/oxc-react-compiler-loader.cjs
+    // runs the compiler on every client module -- but it is a property of
+    // TanStack's API, not something this code can fix, so it does not fail a
+    // build.
+    "react/incompatible-library": "warn"
+  }
+}

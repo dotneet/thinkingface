@@ -34,19 +34,41 @@ pre-commit:
           exit 1
         fi
 
-    # --- TypeScript / CSS / JSON: Biome format + lint check ------------------
-    frontend-biome:
+    # --- TypeScript / CSS / JSON: oxfmt format check + oxlint ----------------
+    frontend-oxc:
       root: frontend/
-      glob: "*.{ts,tsx,js,jsx,mjs,json,css}"
-      # Only the biome from node_modules, i.e. the version bun.lock pins. The
-      # old `bunx --bun @biomejs/biome` fallback fetched whatever biome the
-      # registry served at that moment and ran it on your working tree --
-      # exactly the unpinned install docs/dev/supply-chain.md rules out.
+      glob: "*.{ts,tsx,js,jsx,mjs,cjs,json,css}"
+      # Only the binaries from node_modules, i.e. the versions bun.lock pins.
+      # No `bunx` fallback: that fetches whatever the registry serves at that
+      # moment and runs it on your working tree -- exactly the unpinned
+      # install docs/dev/supply-chain.md rules out.
+      #
+      # oxfmt only *checks* here. A pre-commit hook that rewrites files is a
+      # hook that silently commits something you did not read.
+      #
+      # Neither tool is handed {staged_files}, and that is deliberate. Both
+      # exit non-zero when the list they are given contains nothing they can
+      # work on, and neither distinguishes that from a real failure:
+      #
+      #   - `oxlint frontend/app/globals.css` exits 1 with "No files found to
+      #     lint", because oxlint only reads JS/TS while this hook's glob also
+      #     matches .css and .json -- so a commit that touches only a
+      #     stylesheet would be blocked;
+      #   - `oxfmt --check frontend/types/api.gen.ts` exits 2 with "Expected at
+      #     least one target file", because .oxfmtrc.json ignores generated
+      #     types on purpose -- so a plain `make gen-types` commit would be
+      #     blocked too.
+      #
+      # `biome check` used to absorb both cases on its own. Running each tool
+      # over the whole frontend instead sidesteps the question, and costs
+      # nothing worth measuring: oxfmt ~0.1s and oxlint ~0.14s across all 409
+      # files. The glob above still decides *whether* the hook runs at all.
       run: |
-        if [ -x node_modules/.bin/biome ]; then
-          ./node_modules/.bin/biome check {staged_files}
+        if [ -x node_modules/.bin/oxfmt ] && [ -x node_modules/.bin/oxlint ]; then
+          ./node_modules/.bin/oxfmt --check . && \
+          ./node_modules/.bin/oxlint
         else
-          echo "skip: biome not found (cd frontend && bun install)"
+          echo "skip: oxfmt/oxlint not found (cd frontend && bun install)"
         fi
 
     # --- TypeScript: UI consistency check (detects off-token colors, raw <button>, etc.) ---

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+
 import { type ChartData, chartDataEquals, planLogScale } from "@/lib/chart-scale";
 
 describe("planLogScale", () => {

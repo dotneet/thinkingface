@@ -3,6 +3,7 @@
 import { FolderInput } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useId, useState } from "react";
+
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
@@ -11,7 +12,6 @@ import { errorMessage } from "@/lib/api-error-message";
 import { renameFile } from "@/lib/edit";
 import { useT } from "@/lib/i18n/client";
 import { repoBlobHref, resolveNewFilePath } from "@/lib/paths";
-
 import type { RepoKind } from "@/types/api";
 
 /**

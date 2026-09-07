@@ -24,6 +24,7 @@
  */
 
 import type { AsyncDuckDB, AsyncDuckDBConnection, DuckDBBundles } from "@duckdb/duckdb-wasm";
+
 import type { DataTableColumn, DataTableRow } from "@/components/ui/data-table";
 import {
   isDecimalHint,

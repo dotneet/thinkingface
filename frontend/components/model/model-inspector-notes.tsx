@@ -28,7 +28,7 @@ export function ModelInspectorNotes({
         <ul className="flex flex-col gap-0.5 text-xs font-medium text-fg-subtle">
           {warnings.map((w, i) => (
             <li
-              // biome-ignore lint/suspicious/noArrayIndexKey: warning strings are not unique and the list is never reordered
+              // oxlint-disable-next-line react/no-array-index-key -- warning strings are not unique and the list is never reordered
               key={i}
             >
               {w}

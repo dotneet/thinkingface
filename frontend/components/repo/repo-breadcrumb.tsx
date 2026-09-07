@@ -1,4 +1,5 @@
 import Link from "next/link";
+
 import { getT } from "@/lib/i18n/server";
 import { namespaceHref } from "@/lib/namespace";
 import { repoBase } from "@/lib/paths";
@@ -35,7 +36,7 @@ export async function RepoBreadcrumb({
       </Link>
       {trail?.map((item, i) => (
         <span
-          // biome-ignore lint/suspicious/noArrayIndexKey: path segments can repeat (a/b/a) but are never reordered
+          // oxlint-disable-next-line react/no-array-index-key -- path segments can repeat (a/b/a) but are never reordered
           key={i}
           className="flex items-center gap-1.5"
         >

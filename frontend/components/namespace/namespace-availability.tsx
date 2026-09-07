@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+
 import { Spinner } from "@/components/ui/spinner";
 import { isNotFound } from "@/lib/api";
 import type { MessageKey } from "@/lib/i18n";

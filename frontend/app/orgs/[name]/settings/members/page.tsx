@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+
 import { titleMetadata } from "@/app/page-metadata";
 import { OrgMembersManager } from "@/components/orgs/org-members-manager";
 import { getT } from "@/lib/i18n/server";

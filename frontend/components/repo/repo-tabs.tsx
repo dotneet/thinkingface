@@ -1,4 +1,5 @@
 import Link from "next/link";
+
 import { getT } from "@/lib/i18n/server";
 import { repoBase, repoTreeHref, repoViewerHref } from "@/lib/paths";
 import type { ParquetSummary, RepoDetail, RepoKind } from "@/types/api";

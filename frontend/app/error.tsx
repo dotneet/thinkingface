@@ -3,6 +3,7 @@
 import { RotateCw } from "lucide-react";
 import Link from "next/link";
 import { useEffect } from "react";
+
 import { Button, buttonClass } from "@/components/ui/button";
 import { ErrorState } from "@/components/ui/error-state";
 import { useT } from "@/lib/i18n/client";

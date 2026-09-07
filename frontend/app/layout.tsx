@@ -1,11 +1,13 @@
 import type { Metadata } from "next";
 import { Figtree, IBM_Plex_Mono } from "next/font/google";
+
 import { pageTitle } from "@/app/page-metadata";
 import { Providers } from "@/app/providers";
 import { ThemeScript } from "@/app/theme-script";
 import { SiteHeader } from "@/components/site-header";
 import { I18nProvider } from "@/lib/i18n/client";
 import { getLocale, getT } from "@/lib/i18n/server";
+
 import "./globals.css";
 
 const bodyFont = Figtree({

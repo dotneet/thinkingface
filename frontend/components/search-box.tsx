@@ -1,6 +1,7 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+
 import { SearchInput } from "@/components/ui/search-input";
 import { useT } from "@/lib/i18n/client";
 

@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import { Boxes, Database, FlaskConical } from "lucide-react";
+
 import type { MessageKey } from "@/lib/i18n";
 
 export type NavItem = { href: string; labelKey: MessageKey; icon: LucideIcon };

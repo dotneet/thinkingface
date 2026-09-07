@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+
 import { defineConfig } from "vitest/config";
 
 // Node environment on purpose: only framework-free logic in lib/ is covered
@@ -12,7 +13,7 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["lib/**/*.test.ts"],
+    include: ["lib/**/*.test.ts", "scripts/**/*.test.ts"],
     // Intl output depends on the ambient timezone; pin it so date assertions
     // are reproducible on CI and on developer machines alike.
     env: { TZ: "UTC" },

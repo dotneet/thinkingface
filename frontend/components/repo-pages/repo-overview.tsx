@@ -1,6 +1,7 @@
 import { Archive, FolderOpen } from "lucide-react";
 import Link from "next/link";
 import { Suspense } from "react";
+
 import { IndexingBanner } from "@/components/repo/indexing-banner";
 import { LineageSection } from "@/components/repo/lineage-section";
 import { NewVersionBanner } from "@/components/repo/new-version-banner";

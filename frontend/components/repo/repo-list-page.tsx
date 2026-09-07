@@ -1,6 +1,7 @@
 import { Boxes, Database } from "lucide-react";
 import Link from "next/link";
 import { Suspense } from "react";
+
 import { RepoCard } from "@/components/repo/repo-card";
 import { RepoFacetSidebar } from "@/components/repo/repo-facet-sidebar";
 import { RepoListActiveFilters } from "@/components/repo/repo-list-active-filters";

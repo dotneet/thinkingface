@@ -123,7 +123,7 @@ jobs:
             PR NUMBER: ${{ github.event.pull_request.number }}
 
             You are reviewing a pull request in thinkingface, a self-hosted
-            HuggingFace Hub clone (Go backend / Next.js 15 frontend / pytest
+            HuggingFace Hub clone (Go backend / Next.js 16 frontend / pytest
             E2E / Terraform). Read CLAUDE.md first: it states the invariants
             this codebase is built on, and the most valuable thing you can find
             is a change that breaks one of them.
@@ -181,7 +181,7 @@ jobs:
             Then post one short summary comment: what the PR does, and the
             findings ranked most serious first. If there is nothing to fix, say
             that plainly in one or two sentences and do not manufacture
-            findings to fill space. Skip style nitpicks that gofmt, Biome or
+            findings to fill space. Skip style nitpicks that gofmt, oxfmt or
             golangci-lint would have caught.
 
             Write the review in Japanese. Keep code identifiers, file paths and

@@ -292,7 +292,7 @@ check-backend: ## gofmt check + go vet + golangci-lint + go test
 	@echo "==> backend: go test"
 	cd backend && go test ./...
 
-check-frontend: frontend-deps ## typecheck + lint + format:check + check:ui + test (bun)
+check-frontend: frontend-deps ## typecheck + lint (oxlint) + format:check (oxfmt) + check:ui + test (bun)
 	@echo "==> frontend: typecheck / lint / format:check / check:ui / test"
 	cd frontend && $(BUN) run typecheck
 	cd frontend && $(BUN) run lint
@@ -428,7 +428,7 @@ test-e2e: ## Rebuild + start the stack (like CI), then run the huggingface_hub c
 fmt: ## Format Go, TypeScript, Python and Terraform sources
 	@echo "==> gofmt"
 	cd backend && gofmt -w .
-	@echo "==> biome format"
+	@echo "==> oxfmt"
 	cd frontend && $(BUN) run format
 	@echo "==> ruff format"
 	$(call RUFF,format e2e clients/python scripts)

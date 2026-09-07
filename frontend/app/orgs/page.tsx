@@ -2,6 +2,7 @@ import { Building2, Plus } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Suspense } from "react";
+
 import { titleMetadata } from "@/app/page-metadata";
 import { OrgCard } from "@/components/orgs/org-card";
 import { OrgSearch } from "@/components/orgs/org-search";

@@ -1,4 +1,5 @@
 import { permanentRedirect } from "next/navigation";
+
 import { type ApiResult, isRepoMoved } from "@/lib/api";
 import { repoBase } from "@/lib/paths";
 import type { RepoKind } from "@/types/api";

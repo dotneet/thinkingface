@@ -1,5 +1,6 @@
 import { ChartNoAxesCombined, Download, FileImage } from "lucide-react";
 import Link from "next/link";
+
 import { ModelInspector } from "@/components/model/model-inspector";
 import { MarkdownPreview } from "@/components/repo/markdown-preview";
 import { TabularPreview } from "@/components/repo/tabular-preview";

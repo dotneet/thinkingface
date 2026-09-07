@@ -3,6 +3,7 @@
 import { Building2, Plus, Settings } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+
 import { NamespaceAvatar } from "@/components/namespace/namespace-avatar";
 import { OrgRoleBadge, orgRoleLabelKey } from "@/components/orgs/org-role-badge";
 import { LoginRequiredState } from "@/components/settings/login-required-state";

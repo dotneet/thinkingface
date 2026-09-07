@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+
 import { titleMetadata } from "@/app/page-metadata";
 import { CreateOrgForm } from "@/components/orgs/create-org-form";
 import { buttonClass } from "@/components/ui/button";
