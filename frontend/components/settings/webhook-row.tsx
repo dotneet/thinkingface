@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, ChevronRight, KeyRound, Trash2, X } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { WebhookDeliveriesPanel } from "@/components/settings/webhook-deliveries-panel";
 import { WEBHOOK_EVENT_OPTIONS } from "@/components/settings/webhook-events";
@@ -14,6 +14,7 @@ import { Checkbox, Field, Input } from "@/components/ui/field";
 import { useFormattedTime } from "@/components/ui/time-text";
 import { errorMessage } from "@/lib/api-error-message";
 import { useT } from "@/lib/i18n/client";
+import { seedWebhookEditActive } from "@/lib/webhook-edit-active";
 import { deleteWebhook, updateWebhook } from "@/lib/webhooks";
 import type { Webhook, WebhookEvent } from "@/types/api";
 
@@ -33,6 +34,11 @@ export function WebhookRow({
   const [url, setUrl] = useState(webhook.url);
   const [events, setEvents] = useState<Set<WebhookEvent>>(new Set(webhook.events));
   const [active, setActive] = useState(webhook.active);
+  // Last value a successful Enable/Disable or Save wrote. `webhook.active`
+  // lags until `onChanged()`'s refetch, so toggleEditing must seed from
+  // this rather than from the prop — otherwise opening Edit right after
+  // Disable silently posts the old `active=true` and re-enables it.
+  const committedActive = useRef(webhook.active);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,17 +62,15 @@ export function WebhookRow({
   // `url` / `events` / `active` are local edit buffers, not a mirror of the
   // `webhook` prop: React only re-initializes `useState(webhook.active)` on
   // mount, and `WebhooksManager` re-renders this row with the same `key`
-  // after every refetch, so the row never remounts. Without this reset,
-  // toggling Enable/Disable (which only updates the server and the parent's
-  // list, never these local buffers) leaves `active` permanently stale, and
-  // the next unrelated Save silently carries the old value back to the
-  // server — undoing the toggle. Re-seeding the buffers from the current
-  // prop every time the panel opens keeps them honest instead.
+  // after every refetch, so the row never remounts. Opening the panel
+  // reseeds `url` / `events` from the prop, and `active` from the last
+  // committed write — not `webhook.active`, which lags until onChanged()
+  // refetches and would undo a just-clicked Enable/Disable.
   function toggleEditing() {
     if (!editing) {
       setUrl(webhook.url);
       setEvents(new Set(webhook.events));
-      setActive(webhook.active);
+      setActive(seedWebhookEditActive(committedActive.current, webhook.active));
       setError(null);
       setRotatedSecret(null);
     }
@@ -90,6 +94,7 @@ export function WebhookRow({
       setError(errorMessage(t, result));
       return;
     }
+    committedActive.current = active;
     setEditing(false);
     onChanged();
   }
@@ -126,6 +131,13 @@ export function WebhookRow({
       setError(errorMessage(t, result));
       return;
     }
+    // Enable/Disable stays clickable while the edit panel is open. Save
+    // posts these local buffers, so leaving `active` on the value from
+    // a stale `webhook.active` would undo the toggle. Record the write
+    // as committed so a later Edit (before the refetch) seeds from it.
+    const next = !webhook.active;
+    committedActive.current = next;
+    setActive(next);
     onChanged();
   }
 
