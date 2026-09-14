@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, ChevronRight, KeyRound, Trash2, X } from "lucide-react";
-import { useRef, useState } from "react";
+import { useState } from "react";
 
 import { WebhookDeliveriesPanel } from "@/components/settings/webhook-deliveries-panel";
 import { WEBHOOK_EVENT_OPTIONS } from "@/components/settings/webhook-events";
@@ -34,11 +34,13 @@ export function WebhookRow({
   const [url, setUrl] = useState(webhook.url);
   const [events, setEvents] = useState<Set<WebhookEvent>>(new Set(webhook.events));
   const [active, setActive] = useState(webhook.active);
-  // Last value a successful Enable/Disable or Save wrote. `webhook.active`
-  // lags until `onChanged()`'s refetch, so toggleEditing must seed from
-  // this rather than from the prop — otherwise opening Edit right after
-  // Disable silently posts the old `active=true` and re-enables it.
-  const committedActive = useRef(webhook.active);
+  // Last value a successful Enable/Disable or Save wrote. Held in state
+  // (not a ref) so hasUnsavedEdits can read it during render without
+  // tripping react(refs). `webhook.active` lags until `onChanged()`'s
+  // refetch, so toggleEditing and the Rotate warning must use this
+  // rather than the prop — otherwise Disable then Edit/Rotate treats
+  // the already-landed write as an unsaved change and Save can undo it.
+  const [committedActive, setCommittedActive] = useState(webhook.active);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -70,7 +72,7 @@ export function WebhookRow({
     if (!editing) {
       setUrl(webhook.url);
       setEvents(new Set(webhook.events));
-      setActive(seedWebhookEditActive(committedActive.current, webhook.active));
+      setActive(seedWebhookEditActive(committedActive, webhook.active));
       setError(null);
       setRotatedSecret(null);
     }
@@ -94,7 +96,7 @@ export function WebhookRow({
       setError(errorMessage(t, result));
       return;
     }
-    committedActive.current = active;
+    setCommittedActive(active);
     setEditing(false);
     onChanged();
   }
@@ -136,7 +138,7 @@ export function WebhookRow({
     // a stale `webhook.active` would undo the toggle. Record the write
     // as committed so a later Edit (before the refetch) seeds from it.
     const next = !webhook.active;
-    committedActive.current = next;
+    setCommittedActive(next);
     setActive(next);
     onChanged();
   }
@@ -148,7 +150,7 @@ export function WebhookRow({
   const savedEvents = new Set<WebhookEvent>(webhook.events);
   const hasUnsavedEdits =
     url !== webhook.url ||
-    webhookActiveIsUnsaved(active, committedActive.current) ||
+    webhookActiveIsUnsaved(active, committedActive) ||
     events.size !== savedEvents.size ||
     Array.from(events).some((e) => !savedEvents.has(e));
 
