@@ -14,7 +14,7 @@ import { Checkbox, Field, Input } from "@/components/ui/field";
 import { useFormattedTime } from "@/components/ui/time-text";
 import { errorMessage } from "@/lib/api-error-message";
 import { useT } from "@/lib/i18n/client";
-import { seedWebhookEditActive } from "@/lib/webhook-edit-active";
+import { seedWebhookEditActive, webhookActiveIsUnsaved } from "@/lib/webhook-edit-active";
 import { deleteWebhook, updateWebhook } from "@/lib/webhooks";
 import type { Webhook, WebhookEvent } from "@/types/api";
 
@@ -141,12 +141,14 @@ export function WebhookRow({
     onChanged();
   }
 
-  // Whether the panel's buffers have drifted from what the server holds. Only
-  // used to warn before rotating — the save itself always sends the buffers.
+  // Whether the panel's buffers have drifted from the last committed write.
+  // `active` is compared to that write, not `webhook.active`: the prop lags
+  // until onChanged() refetches, so Enable/Disable would look unsaved and
+  // the Rotate warning would invite reverting a change that already landed.
   const savedEvents = new Set<WebhookEvent>(webhook.events);
   const hasUnsavedEdits =
     url !== webhook.url ||
-    active !== webhook.active ||
+    webhookActiveIsUnsaved(active, committedActive.current) ||
     events.size !== savedEvents.size ||
     Array.from(events).some((e) => !savedEvents.has(e));
 
