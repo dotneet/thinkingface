@@ -9,3 +9,16 @@
 export function seedWebhookEditActive(committedActive: boolean, _propActive: boolean): boolean {
   return committedActive;
 }
+
+/**
+ * Whether the edit-panel Active checkbox is an unsaved change.
+ *
+ * Compare against the last committed write, not `webhook.active`: that prop
+ * lags until the parent refetch, so a just-clicked Enable/Disable looks like
+ * an unsaved edit. The Rotate confirmation then warns about a change that
+ * already landed, and "reverting" the checkbox to match the stale prop +
+ * Save re-enables (or disables) the webhook the header action just wrote.
+ */
+export function webhookActiveIsUnsaved(localActive: boolean, committedActive: boolean): boolean {
+  return localActive !== committedActive;
+}
