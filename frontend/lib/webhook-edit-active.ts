@@ -22,3 +22,50 @@ export function seedWebhookEditActive(committedActive: boolean, _propActive: boo
 export function webhookActiveIsUnsaved(localActive: boolean, committedActive: boolean): boolean {
   return localActive !== committedActive;
 }
+
+/**
+ * URL to put in the webhook edit panel when it opens.
+ *
+ * Same lag as `active`: Save writes the new URL locally, but `webhook.url`
+ * stays on the previous value until `onChanged()` refetches. Seeding from
+ * the prop would put the old endpoint back in the field; Save then undoes
+ * the write that just landed.
+ */
+export function seedWebhookEditUrl(committedUrl: string, _propUrl: string): string {
+  return committedUrl;
+}
+
+/**
+ * Whether the edit-panel URL is an unsaved change.
+ *
+ * Compare against the last committed write, not `webhook.url`. After Save
+ * the prop still names the previous endpoint, so a just-saved URL looks
+ * unsaved and Rotate warns about a change that already landed. "Reverting"
+ * the field to match the stale prop + Save restores the old URL.
+ */
+export function webhookUrlIsUnsaved(localUrl: string, committedUrl: string): boolean {
+  return localUrl !== committedUrl;
+}
+
+/**
+ * Events to put in the webhook edit panel when it opens.
+ *
+ * Same lag as the URL: Save updates the subscription locally, but
+ * `webhook.events` is the previous set until the parent refetch.
+ */
+export function seedWebhookEditEvents<T>(committedEvents: readonly T[], _propEvents: readonly T[]): T[] {
+  return [...committedEvents];
+}
+
+/**
+ * Whether the edit-panel event set is an unsaved change.
+ *
+ * Membership only — order is not part of the stored value. Compared to the
+ * last committed write, not `webhook.events`, for the same refetch-lag
+ * reason as `webhookUrlIsUnsaved`.
+ */
+export function webhookEventsAreUnsaved<T>(localEvents: ReadonlySet<T>, committedEvents: ReadonlySet<T>): boolean {
+  return (
+    localEvents.size !== committedEvents.size || Array.from(localEvents).some((e) => !committedEvents.has(e))
+  );
+}
