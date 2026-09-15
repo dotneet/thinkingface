@@ -43,29 +43,29 @@ describe("webhookActiveIsUnsaved", () => {
 
 describe("seedWebhookEditUrl", () => {
   it("keeps a just-saved URL when Edit reopens before the refetch", () => {
-    expect(
-      seedWebhookEditUrl("https://hooks.example/new", "https://hooks.example/old"),
-    ).toBe("https://hooks.example/new");
+    expect(seedWebhookEditUrl("https://hooks.example/new", "https://hooks.example/old")).toBe(
+      "https://hooks.example/new",
+    );
   });
 
   it("follows the committed value once the refetch has landed", () => {
-    expect(
-      seedWebhookEditUrl("https://hooks.example/new", "https://hooks.example/new"),
-    ).toBe("https://hooks.example/new");
+    expect(seedWebhookEditUrl("https://hooks.example/new", "https://hooks.example/new")).toBe(
+      "https://hooks.example/new",
+    );
   });
 });
 
 describe("webhookUrlIsUnsaved", () => {
   it("does not treat a just-saved URL as an unsaved edit", () => {
-    expect(
-      webhookUrlIsUnsaved("https://hooks.example/new", "https://hooks.example/new"),
-    ).toBe(false);
+    expect(webhookUrlIsUnsaved("https://hooks.example/new", "https://hooks.example/new")).toBe(
+      false,
+    );
   });
 
   it("flags a URL the user retyped after the last committed write", () => {
-    expect(
-      webhookUrlIsUnsaved("https://hooks.example/draft", "https://hooks.example/new"),
-    ).toBe(true);
+    expect(webhookUrlIsUnsaved("https://hooks.example/draft", "https://hooks.example/new")).toBe(
+      true,
+    );
   });
 });
 
@@ -84,7 +84,10 @@ describe("webhookEventsAreUnsaved", () => {
 
   it("ignores event order", () => {
     expect(
-      webhookEventsAreUnsaved(new Set(["repo.push", "run.failed"]), new Set(["run.failed", "repo.push"])),
+      webhookEventsAreUnsaved(
+        new Set(["repo.push", "run.failed"]),
+        new Set(["run.failed", "repo.push"]),
+      ),
     ).toBe(false);
   });
 
