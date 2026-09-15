@@ -53,7 +53,10 @@ export function webhookUrlIsUnsaved(localUrl: string, committedUrl: string): boo
  * Same lag as the URL: Save updates the subscription locally, but
  * `webhook.events` is the previous set until the parent refetch.
  */
-export function seedWebhookEditEvents<T>(committedEvents: readonly T[], _propEvents: readonly T[]): T[] {
+export function seedWebhookEditEvents<T>(
+  committedEvents: readonly T[],
+  _propEvents: readonly T[],
+): T[] {
   return [...committedEvents];
 }
 
@@ -64,8 +67,12 @@ export function seedWebhookEditEvents<T>(committedEvents: readonly T[], _propEve
  * last committed write, not `webhook.events`, for the same refetch-lag
  * reason as `webhookUrlIsUnsaved`.
  */
-export function webhookEventsAreUnsaved<T>(localEvents: ReadonlySet<T>, committedEvents: ReadonlySet<T>): boolean {
+export function webhookEventsAreUnsaved<T>(
+  localEvents: ReadonlySet<T>,
+  committedEvents: ReadonlySet<T>,
+): boolean {
   return (
-    localEvents.size !== committedEvents.size || Array.from(localEvents).some((e) => !committedEvents.has(e))
+    localEvents.size !== committedEvents.size ||
+    Array.from(localEvents).some((e) => !committedEvents.has(e))
   );
 }
