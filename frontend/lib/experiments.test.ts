@@ -7,6 +7,8 @@ import {
   expRunModelHref,
   formatMetricValue,
   getMetrics,
+  tagEditorTargetAfterRunRemoved,
+  tagEditorTargetAfterRunsChange,
 } from "@/lib/experiments";
 import { decodeRouteParams } from "@/lib/paths";
 import type { ExpArtifact, ExpRunModelRef, PreviewKind } from "@/types/api";
@@ -95,6 +97,34 @@ describe("annotationClosesTagEditor", () => {
     expect(annotationClosesTagEditor({ archived: true })).toBe(false);
     expect(annotationClosesTagEditor({ is_baseline: true })).toBe(false);
     expect(annotationClosesTagEditor({ note: "keep" })).toBe(false);
+  });
+});
+
+describe("tagEditorTargetAfterRunRemoved", () => {
+  it("closes the editor when the edited run is the one that was deleted", () => {
+    expect(tagEditorTargetAfterRunRemoved("foo", "foo")).toBeNull();
+  });
+
+  it("leaves the editor open when a different run was deleted", () => {
+    expect(tagEditorTargetAfterRunRemoved("foo", "bar")).toBe("foo");
+  });
+
+  it("is a no-op when the editor is already closed", () => {
+    expect(tagEditorTargetAfterRunRemoved(null, "foo")).toBeNull();
+  });
+});
+
+describe("tagEditorTargetAfterRunsChange", () => {
+  it("closes the editor when the edited run is no longer in the list", () => {
+    expect(tagEditorTargetAfterRunsChange("foo", ["bar", "baz"])).toBeNull();
+  });
+
+  it("keeps the editor on a run that is still present", () => {
+    expect(tagEditorTargetAfterRunsChange("foo", ["bar", "foo"])).toBe("foo");
+  });
+
+  it("is a no-op when the editor is already closed", () => {
+    expect(tagEditorTargetAfterRunsChange(null, ["foo"])).toBeNull();
   });
 });
 
