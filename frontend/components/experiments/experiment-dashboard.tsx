@@ -2,7 +2,7 @@
 
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FlaskConical } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { ConfigDiffTable } from "@/components/experiments/config-diff-table";
 import {
@@ -26,10 +26,18 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { useChartOptions } from "@/hooks/use-chart-options";
-import { useRunFilters } from "@/hooks/use-run-filters";
+import { dropGoneRunFilters, useRunFilters } from "@/hooks/use-run-filters";
 import { useRunSelection } from "@/hooks/use-run-selection";
 import { ApiResultError, queryErrorMessage } from "@/lib/api-error-message";
-import { deleteRun, getMetrics, listRuns, updateRunAnnotations } from "@/lib/experiments";
+import {
+  annotationClosesTagEditor,
+  deleteRun,
+  getMetrics,
+  listRuns,
+  tagEditorTargetAfterRunRemoved,
+  tagEditorTargetAfterRunsChange,
+  updateRunAnnotations,
+} from "@/lib/experiments";
 import { metricsQueryKey } from "@/lib/experiments-query-keys";
 import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
@@ -115,22 +123,37 @@ export function ExperimentDashboard({
 
   const tags = useMemo(() => allTags(runs), [runs]);
   const filterKeys = useMemo(() => metricColumns(runs, Number.POSITIVE_INFINITY), [runs]);
+  // A tag or metric the last run just dropped must not keep filtering the
+  // table: the pickers unmount when their list is empty, and a Select with a
+  // gone value looks blank while every row stays hidden.
+  const effectiveFilters = useMemo(
+    () => dropGoneRunFilters(filters, tags, filterKeys),
+    [filters, tags, filterKeys],
+  );
   const metricFilter = useMemo(
-    () => buildMetricFilter(filters.metric, filters.op, filters.value),
-    [filters.metric, filters.op, filters.value],
+    () => buildMetricFilter(effectiveFilters.metric, effectiveFilters.op, effectiveFilters.value),
+    [effectiveFilters.metric, effectiveFilters.op, effectiveFilters.value],
   );
   const visibleRuns = useMemo(
     () =>
       filterByMetric(
-        filterRuns(runs, { showArchived: filters.showArchived, tag: filters.tag || undefined }),
+        filterRuns(runs, {
+          showArchived: effectiveFilters.showArchived,
+          tag: effectiveFilters.tag || undefined,
+        }),
         metricFilter,
       ),
-    [runs, filters.showArchived, filters.tag, metricFilter],
+    [runs, effectiveFilters.showArchived, effectiveFilters.tag, metricFilter],
   );
   const visibleNames = useMemo(() => visibleRuns.map((r) => r.name), [visibleRuns]);
   // Colours are assigned from the project's full run order so a run keeps the
   // same colour when the filters change what is on screen.
   const runOrder = useMemo(() => runs.map((r) => r.name), [runs]);
+  // A run that vanished on a live refetch (deleted in another tab) must
+  // not leave the tag editor pointing at a name that is no longer here.
+  useEffect(() => {
+    setTagsFor((current) => tagEditorTargetAfterRunsChange(current, runOrder));
+  }, [runOrder]);
   const baseline = useMemo(() => runs.find((r) => r.is_baseline)?.name, [runs]);
 
   // Only runs that are both selected and visible get plotted: a run hidden by
@@ -148,11 +171,14 @@ export function ExperimentDashboard({
       if (!result.ok) throw new ApiResultError(result);
       return result.data;
     },
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       // Refetch rather than patching one row: marking a baseline clears the
       // flag on whichever run held it before, which only the server knows.
       void queryClient.invalidateQueries({ queryKey: runsKey });
-      setTagsFor(null);
+      // Archive / baseline share this mutation. Closing the editor for those
+      // would drop an in-progress tag draft — including one open on a
+      // different row.
+      if (annotationClosesTagEditor(variables.body)) setTagsFor(null);
     },
   });
 
@@ -168,6 +194,10 @@ export function ExperimentDashboard({
       // page knows it is gone until the run list comes back.
       selection.remove(run);
       setDeleteFor(null);
+      // Delete is not archive: the run is gone. Leaving tagsFor set keeps
+      // RunTagsDialog open={true} with run=null, which renders nothing and
+      // has no dismiss path (and hides the table-level annotate banner).
+      setTagsFor((current) => tagEditorTargetAfterRunRemoved(current, run));
     },
   });
 
@@ -259,7 +289,7 @@ export function ExperimentDashboard({
   return (
     <div className="flex flex-col gap-6">
       <RunFilterBar
-        filters={filters}
+        filters={effectiveFilters}
         onChange={setFilters}
         tags={tags}
         metricKeys={filterKeys}
