@@ -2,7 +2,7 @@
 
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FlaskConical } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { ConfigDiffTable } from "@/components/experiments/config-diff-table";
 import {
@@ -34,6 +34,8 @@ import {
   deleteRun,
   getMetrics,
   listRuns,
+  tagEditorTargetAfterRunRemoved,
+  tagEditorTargetAfterRunsChange,
   updateRunAnnotations,
 } from "@/lib/experiments";
 import { metricsQueryKey } from "@/lib/experiments-query-keys";
@@ -147,6 +149,11 @@ export function ExperimentDashboard({
   // Colours are assigned from the project's full run order so a run keeps the
   // same colour when the filters change what is on screen.
   const runOrder = useMemo(() => runs.map((r) => r.name), [runs]);
+  // A run that vanished on a live refetch (deleted in another tab) must
+  // not leave the tag editor pointing at a name that is no longer here.
+  useEffect(() => {
+    setTagsFor((current) => tagEditorTargetAfterRunsChange(current, runOrder));
+  }, [runOrder]);
   const baseline = useMemo(() => runs.find((r) => r.is_baseline)?.name, [runs]);
 
   // Only runs that are both selected and visible get plotted: a run hidden by
@@ -187,6 +194,10 @@ export function ExperimentDashboard({
       // page knows it is gone until the run list comes back.
       selection.remove(run);
       setDeleteFor(null);
+      // Delete is not archive: the run is gone. Leaving tagsFor set keeps
+      // RunTagsDialog open={true} with run=null, which renders nothing and
+      // has no dismiss path (and hides the table-level annotate banner).
+      setTagsFor((current) => tagEditorTargetAfterRunRemoved(current, run));
     },
   });
 
