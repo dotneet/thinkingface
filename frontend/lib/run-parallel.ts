@@ -242,6 +242,22 @@ export function axisY(t: number, height: number, pad: number): number {
   return height - pad - t * (height - 2 * pad);
 }
 
+/**
+ * Pin or hover emphasis to keep after the plotted run set changes.
+ *
+ * `selectedIds` already repair when an axis disappears. `pinned` /
+ * `highlight` did not: deselecting the pinned run left every remaining
+ * polyline dimmed, and the legend (built from the current lines) had no
+ * chip left to unpin it.
+ */
+export function repairParallelEmphasis(
+  current: string | null,
+  runNames: readonly string[],
+): string | null {
+  if (current === null || runNames.includes(current)) return current;
+  return null;
+}
+
 /** The `d` of one run's polyline, in the same units as axisX / axisY. */
 export function linePath(
   line: ParallelLine,
