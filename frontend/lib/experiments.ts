@@ -150,6 +150,38 @@ export function annotationClosesTagEditor(body: ExpRunAnnotationRequest): boolea
 }
 
 /**
+ * Tag-editor target after a run is deleted from the dashboard.
+ *
+ * Archive / baseline must not close the editor (`annotationClosesTagEditor`).
+ * Delete is different: the run is gone, `RunTagsDialog` hits `if (!run)
+ * return null`, and `open={tagsFor !== null}` stays true with no dismiss
+ * path. The table-level annotate banner is also suppressed while `tagsFor`
+ * is set.
+ */
+export function tagEditorTargetAfterRunRemoved(
+  tagsFor: string | null,
+  deletedRun: string,
+): string | null {
+  return tagsFor === deletedRun ? null : tagsFor;
+}
+
+/**
+ * Tag-editor target after the project's run list changes.
+ *
+ * Covers a run that vanished on a live refetch (deleted in another tab)
+ * rather than by this page's own Delete. Same stuck-open dialog as
+ * `tagEditorTargetAfterRunRemoved` if `tagsFor` is left pointing at a
+ * name that is no longer in the list.
+ */
+export function tagEditorTargetAfterRunsChange(
+  tagsFor: string | null,
+  runNames: readonly string[],
+): string | null {
+  if (tagsFor === null || runNames.includes(tagsFor)) return tagsFor;
+  return null;
+}
+
+/**
  * Files `trackio.log_artifact` committed for one run, read from
  * `{project}/artifacts/{run}` on the repository's default branch.
  *
