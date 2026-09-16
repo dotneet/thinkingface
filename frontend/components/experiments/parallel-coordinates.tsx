@@ -17,6 +17,7 @@ import {
   type ParallelAxis,
   parallelAxes,
   parallelLines,
+  repairParallelEmphasis,
 } from "@/lib/run-parallel";
 import type { ExpRun } from "@/types/api";
 
@@ -89,6 +90,15 @@ export function ParallelCoordinates({
   // then metrics) rather than the order they happened to be ticked in.
   const shown = useMemo(() => axes.filter((a) => selectedIds.includes(a.id)), [axes, selectedIds]);
   const lines = useMemo(() => parallelLines(runs, shown), [runs, shown]);
+  const lineNames = useMemo(() => lines.map((l) => l.run), [lines]);
+
+  // Same repair as selectedIds above: a pin or hover whose run left the
+  // plot (deselected, filtered, or no longer comparable) would otherwise
+  // dim every remaining polyline with no chip left to clear it.
+  useEffect(() => {
+    setPinned((current) => repairParallelEmphasis(current, lineNames));
+    setHighlight((current) => repairParallelEmphasis(current, lineNames));
+  }, [lineNames]);
 
   const active = highlight ?? pinned;
 
