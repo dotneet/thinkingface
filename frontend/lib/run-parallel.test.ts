@@ -9,6 +9,7 @@ import {
   MAX_AXIS_CATEGORIES,
   parallelAxes,
   parallelLines,
+  repairParallelEmphasis,
 } from "@/lib/run-parallel";
 import type { ExpRun } from "@/types/api";
 
@@ -179,6 +180,20 @@ describe("parallelLines", () => {
 
   it("leaves out a run with nothing to connect", () => {
     expect(parallelLines([run("empty")], axes)).toEqual([]);
+  });
+});
+
+describe("repairParallelEmphasis", () => {
+  it("clears a pin whose run is no longer plotted", () => {
+    expect(repairParallelEmphasis("gone", ["a", "b"])).toBeNull();
+  });
+
+  it("keeps a pin whose run is still plotted", () => {
+    expect(repairParallelEmphasis("a", ["a", "b"])).toBe("a");
+  });
+
+  it("leaves a cleared pin or hover alone", () => {
+    expect(repairParallelEmphasis(null, ["a"])).toBeNull();
   });
 });
 
