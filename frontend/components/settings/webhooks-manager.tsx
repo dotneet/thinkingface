@@ -18,6 +18,7 @@ import { errorMessage } from "@/lib/api-error-message";
 import { getMe } from "@/lib/auth";
 import { useT } from "@/lib/i18n/client";
 import { listRepos } from "@/lib/repos";
+import { webhookCreateFormAfterNamespaceSwitch } from "@/lib/webhook-create-form";
 import { createWebhook, listWebhooks } from "@/lib/webhooks";
 import type { RepoSummary, User, Webhook, WebhookEvent } from "@/types/api";
 
@@ -103,7 +104,10 @@ export function WebhooksManager({
     // A scope like `model/foo` selected under namespace A must not survive
     // a switch to B: the option list is rebuilt, but a stale value is still
     // submitted, and create then 400s for a repo that isn't in B.
-    setRepoScope("");
+    const reset = webhookCreateFormAfterNamespaceSwitch<WebhookEvent>();
+    setRepoScope(reset.repoScope);
+    setUrl(reset.url);
+    setEvents(new Set(reset.events));
     setCreateError(null);
     // The signing secret belongs to the namespace it was minted in. Left
     // behind, it kept sitting above another namespace's list — and stayed in
