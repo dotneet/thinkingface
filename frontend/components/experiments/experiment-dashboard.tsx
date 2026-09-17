@@ -152,7 +152,7 @@ export function ExperimentDashboard({
   const runOrder = useMemo(() => runs.map((r) => r.name), [runs]);
   // A run that vanished on a live refetch (deleted in another tab) must
   // not leave the tag editor or the delete dialog pointing at a name that
-  // is no longer here. Leftover 16 only repaired tagsFor.
+  // is no longer here.
   useEffect(() => {
     setTagsFor((current) => tagEditorTargetAfterRunsChange(current, runOrder));
     setDeleteFor((current) => deleteDialogTargetAfterRunsChange(current, runOrder));
