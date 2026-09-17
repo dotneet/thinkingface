@@ -177,7 +177,30 @@ export function tagEditorTargetAfterRunsChange(
   tagsFor: string | null,
   runNames: readonly string[],
 ): string | null {
-  if (tagsFor === null || runNames.includes(tagsFor)) return tagsFor;
+  return namedDialogTargetAfterRunsChange(tagsFor, runNames);
+}
+
+/**
+ * Delete-dialog target after the project's run list changes.
+ *
+ * Leftover 16 repaired `tagsFor` when a run vanished on a live refetch.
+ * `deleteFor` is the same flag (`open={deleteFor !== null}`) and the same
+ * refetch: leaving it set keeps RunDeleteDialog asking to type a name that
+ * is already gone, and Confirm then 404s. Same helper as the tag editor.
+ */
+export function deleteDialogTargetAfterRunsChange(
+  deleteFor: string | null,
+  runNames: readonly string[],
+): string | null {
+  return namedDialogTargetAfterRunsChange(deleteFor, runNames);
+}
+
+/** Shared close-if-gone rule for the dashboard's name-keyed dialogs. */
+function namedDialogTargetAfterRunsChange(
+  target: string | null,
+  runNames: readonly string[],
+): string | null {
+  if (target === null || runNames.includes(target)) return target;
   return null;
 }
 
