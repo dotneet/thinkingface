@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   annotationClosesTagEditor,
+  deleteDialogTargetAfterRunsChange,
   expArtifactHref,
   expRunHref,
   expRunModelHref,
@@ -125,6 +126,20 @@ describe("tagEditorTargetAfterRunsChange", () => {
 
   it("is a no-op when the editor is already closed", () => {
     expect(tagEditorTargetAfterRunsChange(null, ["foo"])).toBeNull();
+  });
+});
+
+describe("deleteDialogTargetAfterRunsChange", () => {
+  it("closes the dialog when the named run is no longer in the list", () => {
+    expect(deleteDialogTargetAfterRunsChange("foo", ["bar", "baz"])).toBeNull();
+  });
+
+  it("keeps the dialog on a run that is still present", () => {
+    expect(deleteDialogTargetAfterRunsChange("foo", ["bar", "foo"])).toBe("foo");
+  });
+
+  it("is a no-op when the dialog is already closed", () => {
+    expect(deleteDialogTargetAfterRunsChange(null, ["foo"])).toBeNull();
   });
 });
 

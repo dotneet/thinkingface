@@ -34,6 +34,7 @@ import {
   deleteRun,
   getMetrics,
   listRuns,
+  deleteDialogTargetAfterRunsChange,
   tagEditorTargetAfterRunRemoved,
   tagEditorTargetAfterRunsChange,
   updateRunAnnotations,
@@ -150,9 +151,11 @@ export function ExperimentDashboard({
   // same colour when the filters change what is on screen.
   const runOrder = useMemo(() => runs.map((r) => r.name), [runs]);
   // A run that vanished on a live refetch (deleted in another tab) must
-  // not leave the tag editor pointing at a name that is no longer here.
+  // not leave the tag editor or the delete dialog pointing at a name that
+  // is no longer here. Leftover 16 only repaired tagsFor.
   useEffect(() => {
     setTagsFor((current) => tagEditorTargetAfterRunsChange(current, runOrder));
+    setDeleteFor((current) => deleteDialogTargetAfterRunsChange(current, runOrder));
   }, [runOrder]);
   const baseline = useMemo(() => runs.find((r) => r.is_baseline)?.name, [runs]);
 
