@@ -183,10 +183,10 @@ export function tagEditorTargetAfterRunsChange(
 /**
  * Delete-dialog target after the project's run list changes.
  *
- * Leftover 16 repaired `tagsFor` when a run vanished on a live refetch.
- * `deleteFor` is the same flag (`open={deleteFor !== null}`) and the same
- * refetch: leaving it set keeps RunDeleteDialog asking to type a name that
- * is already gone, and Confirm then 404s. Same helper as the tag editor.
+ * The tag editor already drops `tagsFor` when a run vanishes on a live
+ * refetch. `deleteFor` is the same flag (`open={deleteFor !== null}`) and
+ * the same refetch: leaving it set keeps RunDeleteDialog asking to type a
+ * name that is already gone, and Confirm then 404s.
  */
 export function deleteDialogTargetAfterRunsChange(
   deleteFor: string | null,
