@@ -11,6 +11,7 @@ import { isUnauthorized } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
+import { createRepoFormAfterContextSwitch } from "@/lib/create-repo-form";
 import { orgErrorKey } from "@/lib/orgs";
 import { createRepo } from "@/lib/repos";
 import { type NameError, validateName } from "@/lib/validation";
@@ -109,7 +110,10 @@ export function CreateRepoForm({
         {(["dataset", "model"] as RepoKind[]).map((k) => (
           <Button
             key={k}
-            onClick={() => setKind(k)}
+            onClick={() => {
+              setKind(k);
+              setError(createRepoFormAfterContextSwitch().error);
+            }}
             // The selection is otherwise carried by colour alone, which no
             // screen reader relays.
             aria-pressed={kind === k}
@@ -127,7 +131,13 @@ export function CreateRepoForm({
       <div className="flex gap-2">
         <Field label={t("newRepo.namespace")} className="flex-1">
           {namespaces.length > 0 ? (
-            <Select value={namespace} onChange={(e) => setNamespace(e.target.value)}>
+            <Select
+              value={namespace}
+              onChange={(e) => {
+                setNamespace(e.target.value);
+                setError(createRepoFormAfterContextSwitch().error);
+              }}
+            >
               {namespaces.map((ns) => (
                 <option key={ns.name} value={ns.name}>
                   {/* An <option> can hold only text, so the kind travels as a
@@ -139,7 +149,10 @@ export function CreateRepoForm({
           ) : (
             <Input
               value={namespace}
-              onChange={(e) => setNamespace(e.target.value)}
+              onChange={(e) => {
+                setNamespace(e.target.value);
+                setError(createRepoFormAfterContextSwitch().error);
+              }}
               placeholder={t("newRepo.namespacePlaceholder")}
             />
           )}
