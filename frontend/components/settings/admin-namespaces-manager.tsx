@@ -1,7 +1,7 @@
 "use client";
 
 import { HardDrive, Pencil, RefreshCw } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +16,7 @@ import { Table, TBody, Td, THead, Th, Tr } from "@/components/ui/table";
 import { usePagedList } from "@/hooks/use-paged-list";
 import type { AdminNamespaceUsage } from "@/lib/admin";
 import { listAdminNamespaces, namespaceQuotaErrorKey, setNamespaceQuota } from "@/lib/admin";
+import { namespaceEditorTargetAfterRowsChange } from "@/lib/admin-namespace-editor";
 import type { FailedApiResult } from "@/lib/api-error-message";
 import { errorMessage } from "@/lib/api-error-message";
 import { formatBytes, formatNumber } from "@/lib/format";
@@ -75,6 +76,16 @@ export function AdminNamespacesManager() {
     fetchPage: ({ limit, offset }) => listAdminNamespaces({ search, limit, offset }),
     describe,
   });
+
+  // Search, paging and refresh stay usable while a row is being edited —
+  // the editor is inline, not a modal. A namespace that has left the
+  // page must not keep `editing` set: that flag also disables every
+  // other Edit button, so the table would lock with no editor on screen.
+  useEffect(() => {
+    if (rows === null) return;
+    const namespaces = rows.map((row) => row.namespace);
+    setEditing((current) => namespaceEditorTargetAfterRowsChange(current, namespaces));
+  }, [rows]);
 
   // `undefined` is "we have not had a successful read", which is not the same
   // as the instance having no default quota (DESIGN.md §9), so the two are
