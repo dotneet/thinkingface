@@ -18,6 +18,7 @@ import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
 import { writableNamespaces } from "@/lib/namespace";
 import { repoBase } from "@/lib/paths";
+import { transferFormAfterDestModeSwitch } from "@/lib/transfer-form";
 import { cancelTransfer, getPendingTransfer, transferRepo } from "@/lib/transfers";
 import { type NameError, validateName } from "@/lib/validation";
 import type { RepoKind, RepoTransfer } from "@/types/api";
@@ -225,7 +226,10 @@ export function TransferRepoForm({ kind, ns, name }: { kind: RepoKind; ns: strin
           <SegmentedControl<DestMode>
             label={t("repo.settings.transfer.destinationModeLabel")}
             value={mode}
-            onChange={setMode}
+            onChange={(next) => {
+              setMode(next);
+              setSubmitError(transferFormAfterDestModeSwitch().submitError);
+            }}
             options={[
               {
                 value: "mine",
