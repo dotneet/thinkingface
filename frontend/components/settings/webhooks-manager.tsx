@@ -18,7 +18,10 @@ import { errorMessage } from "@/lib/api-error-message";
 import { getMe } from "@/lib/auth";
 import { useT } from "@/lib/i18n/client";
 import { listRepos } from "@/lib/repos";
-import { webhookCreateFormAfterNamespaceSwitch } from "@/lib/webhook-create-form";
+import {
+  webhookCreateFormAfterNamespaceSwitch,
+  webhookCreateFormAfterRepoScopeChange,
+} from "@/lib/webhook-create-form";
 import { createWebhook, listWebhooks } from "@/lib/webhooks";
 import type { RepoSummary, User, Webhook, WebhookEvent } from "@/types/api";
 
@@ -228,7 +231,13 @@ export function WebhooksManager({
               reposError ? t("settings.webhooks.scopeLoadFailed") : t("settings.webhooks.scopeHint")
             }
           >
-            <Select value={repoScope} onChange={(e) => setRepoScope(e.target.value)}>
+            <Select
+              value={repoScope}
+              onChange={(e) => {
+                setRepoScope(e.target.value);
+                setCreateError(webhookCreateFormAfterRepoScopeChange().createError);
+              }}
+            >
               <option value="">{t("settings.webhooks.allRepositories", { namespace })}</option>
               {(repos ?? []).map((r) => (
                 <option key={`${r.kind}/${r.name}`} value={`${r.kind}/${r.name}`}>
