@@ -19,6 +19,7 @@ import { isUnauthorized } from "@/lib/api";
 import { errorMessage, type FailedApiResult } from "@/lib/api-error-message";
 import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
+import { tokenCreateFormAfterContextSwitch } from "@/lib/token-create-form";
 import { createToken, deleteToken, listTokens } from "@/lib/tokens";
 import type { TokenItem } from "@/types/api";
 
@@ -159,7 +160,10 @@ export function TokensManager() {
           <Field label={t("settings.tokens.scopeLabel")}>
             <Select
               value={newScope}
-              onChange={(e) => setNewScope(e.target.value as "read" | "write")}
+              onChange={(e) => {
+                setNewScope(e.target.value as "read" | "write");
+                setCreateError(tokenCreateFormAfterContextSwitch().createError);
+              }}
             >
               <option value="read">{t("settings.tokens.scopeRead")}</option>
               <option value="write">{t("settings.tokens.scopeWrite")}</option>
@@ -168,7 +172,10 @@ export function TokensManager() {
           <Field label={t("settings.tokens.expiry.label")}>
             <Select
               value={String(newExpiryDays)}
-              onChange={(e) => setNewExpiryDays(Number(e.target.value))}
+              onChange={(e) => {
+                setNewExpiryDays(Number(e.target.value));
+                setCreateError(tokenCreateFormAfterContextSwitch().createError);
+              }}
             >
               {EXPIRY_OPTIONS.map((days) => (
                 <option key={days} value={days}>
