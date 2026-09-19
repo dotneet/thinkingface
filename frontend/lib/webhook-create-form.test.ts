@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { webhookCreateFormAfterNamespaceSwitch } from "@/lib/webhook-create-form";
+import {
+  webhookCreateFormAfterNamespaceSwitch,
+  webhookCreateFormAfterRepoScopeChange,
+} from "@/lib/webhook-create-form";
 
 describe("webhookCreateFormAfterNamespaceSwitch", () => {
   it("drops the URL, events and repo scope from the previous namespace", () => {
@@ -9,5 +12,11 @@ describe("webhookCreateFormAfterNamespaceSwitch", () => {
       url: "",
       events: [],
     });
+  });
+});
+
+describe("webhookCreateFormAfterRepoScopeChange", () => {
+  it("drops the previous repository scope's create error", () => {
+    expect(webhookCreateFormAfterRepoScopeChange()).toEqual({ createError: null });
   });
 });
