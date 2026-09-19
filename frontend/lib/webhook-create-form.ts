@@ -13,3 +13,15 @@ export function webhookCreateFormAfterNamespaceSwitch<T = never>(): {
 } {
   return { repoScope: "", url: "", events: [] };
 }
+
+/**
+ * Create-form fields that must not survive a change of repository scope.
+ *
+ * URL and events stay: retargeting the same endpoint at another repo (or
+ * at every repo) is the usual reason to switch. The error does not — a
+ * 400 about the previous scope, or "select at least one event" from a
+ * submit against that scope, is a verdict about the attempt that ran.
+ */
+export function webhookCreateFormAfterRepoScopeChange(): { createError: null } {
+  return { createError: null };
+}
