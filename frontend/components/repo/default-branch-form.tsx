@@ -7,6 +7,7 @@ import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Field, Select } from "@/components/ui/field";
 import { errorMessage } from "@/lib/api-error-message";
+import { defaultBranchFormAfterSelectionChange } from "@/lib/default-branch-form";
 import { useT } from "@/lib/i18n/client";
 import { updateRepo } from "@/lib/repo-admin";
 import type { RepoKind } from "@/types/api";
@@ -97,6 +98,7 @@ export function DefaultBranchForm({
           onChange={(e) => {
             setSelected(e.target.value);
             setSaved(false);
+            setError(defaultBranchFormAfterSelectionChange().error);
           }}
         >
           {branches.map((b) => (
