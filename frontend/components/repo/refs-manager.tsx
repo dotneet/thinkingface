@@ -12,6 +12,7 @@ import { Field, Input, Select } from "@/components/ui/field";
 import { errorMessage } from "@/lib/api-error-message";
 import { useT } from "@/lib/i18n/client";
 import { createTag, deleteBranch, deleteTag } from "@/lib/refs";
+import { tagCreateFormAfterRevChange } from "@/lib/tag-create-form";
 import type { RefUI, RepoKind } from "@/types/api";
 
 /** Short form of a commit SHA, matching the 7-char OIDs shown elsewhere. */
@@ -226,7 +227,10 @@ export function RefsManager({
           <Field label={t("repo.refs.tagRevLabel")} className="min-w-48 flex-1">
             <Select
               value={selectedRev}
-              onChange={(e) => setTagRev(e.target.value)}
+              onChange={(e) => {
+                setTagRev(e.target.value);
+                setCreateError(tagCreateFormAfterRevChange().createError);
+              }}
               disabled={creating || revOptions.length === 0}
             >
               {revOptions.map((rev) => (
