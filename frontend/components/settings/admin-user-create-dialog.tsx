@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Checkbox, Field, Input } from "@/components/ui/field";
 import { createAdminUser } from "@/lib/admin";
+import { adminUserCreateFormAfterAdminToggle } from "@/lib/admin-user-create-form";
 import type { FailedApiResult } from "@/lib/api-error-message";
 import { useT } from "@/lib/i18n/client";
 
@@ -156,7 +157,10 @@ export function AdminUserCreateDialog({
         <label className="flex items-start gap-2 text-sm">
           <Checkbox
             checked={draft.isAdmin}
-            onChange={(e) => setDraft({ ...draft, isAdmin: e.target.checked })}
+            onChange={(e) => {
+              setDraft({ ...draft, isAdmin: e.target.checked });
+              setError(adminUserCreateFormAfterAdminToggle().error);
+            }}
             className="mt-1"
           />
           <span className="flex flex-col gap-0.5">
