@@ -9,3 +9,17 @@
 export function transferFormAfterDestModeSwitch(): { submitError: null } {
   return { submitError: null };
 }
+
+/**
+ * Transfer-form fields that must not survive a change of destination
+ * namespace.
+ *
+ * The optional new name stays: retargeting the same rename at another
+ * namespace is the usual reason to switch. The error does not —
+ * "namespace required" or a 404 about the previous destination is a
+ * verdict about the namespace that was selected when Submit ran. Same
+ * class as dropping the error when destination mode changes.
+ */
+export function transferFormAfterDestChange(): { submitError: null } {
+  return { submitError: null };
+}
