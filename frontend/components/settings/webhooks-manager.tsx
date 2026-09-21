@@ -19,6 +19,7 @@ import { getMe } from "@/lib/auth";
 import { useT } from "@/lib/i18n/client";
 import { listRepos } from "@/lib/repos";
 import {
+  webhookCreateFormAfterEventsChange,
   webhookCreateFormAfterNamespaceSwitch,
   webhookCreateFormAfterRepoScopeChange,
 } from "@/lib/webhook-create-form";
@@ -143,6 +144,7 @@ export function WebhooksManager({
       else next.add(e);
       return next;
     });
+    setCreateError(webhookCreateFormAfterEventsChange().createError);
   }
 
   async function handleCreate(e: React.FormEvent) {

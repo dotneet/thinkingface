@@ -25,3 +25,16 @@ export function webhookCreateFormAfterNamespaceSwitch<T = never>(): {
 export function webhookCreateFormAfterRepoScopeChange(): { createError: null } {
   return { createError: null };
 }
+
+/**
+ * Create-form fields that must not survive a change of the event set.
+ *
+ * URL and repository scope stay: adding or dropping an event on the same
+ * endpoint is the usual reason to toggle. The error does not — "select at
+ * least one event" is a verdict about the set that was selected when
+ * Create ran, and a 400 about that set is the same. Same class as
+ * dropping the error when repository scope changes.
+ */
+export function webhookCreateFormAfterEventsChange(): { createError: null } {
+  return { createError: null };
+}
