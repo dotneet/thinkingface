@@ -5,6 +5,7 @@ import {
   seedWebhookEditEvents,
   seedWebhookEditUrl,
   webhookActiveIsUnsaved,
+  webhookEditFormAfterFieldChange,
   webhookEventsAreUnsaved,
   webhookUrlIsUnsaved,
 } from "@/lib/webhook-edit-active";
@@ -95,5 +96,11 @@ describe("webhookEventsAreUnsaved", () => {
     expect(
       webhookEventsAreUnsaved(new Set(["repo.push", "run.failed"]), new Set(["repo.push"])),
     ).toBe(true);
+  });
+});
+
+describe("webhookEditFormAfterFieldChange", () => {
+  it("drops the previous URL, events or active state's edit error", () => {
+    expect(webhookEditFormAfterFieldChange()).toEqual({ error: null });
   });
 });

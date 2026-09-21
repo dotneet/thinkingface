@@ -19,6 +19,7 @@ import {
   seedWebhookEditEvents,
   seedWebhookEditUrl,
   webhookActiveIsUnsaved,
+  webhookEditFormAfterFieldChange,
   webhookEventsAreUnsaved,
   webhookUrlIsUnsaved,
 } from "@/lib/webhook-edit-active";
@@ -71,6 +72,7 @@ export function WebhookRow({
       else next.add(e);
       return next;
     });
+    setError(webhookEditFormAfterFieldChange().error);
   }
 
   // `url` / `events` / `active` are local edit buffers, not a mirror of the
@@ -277,7 +279,10 @@ export function WebhookRow({
           <Field label={t("settings.webhooks.urlLabel")}>
             <Input
               value={url}
-              onChange={(e) => setUrl(e.target.value)}
+              onChange={(e) => {
+                setUrl(e.target.value);
+                setError(webhookEditFormAfterFieldChange().error);
+              }}
               placeholder={t("settings.webhooks.urlPlaceholderEdit")}
             />
           </Field>
@@ -303,7 +308,13 @@ export function WebhookRow({
             </div>
           </fieldset>
           <label className="flex items-center gap-2 text-sm text-fg-muted">
-            <Checkbox checked={active} onChange={(e) => setActive(e.target.checked)} />
+            <Checkbox
+              checked={active}
+              onChange={(e) => {
+                setActive(e.target.checked);
+                setError(webhookEditFormAfterFieldChange().error);
+              }}
+            />
             {t("settings.webhooks.active")}
           </label>
           <div className="flex flex-wrap gap-2">

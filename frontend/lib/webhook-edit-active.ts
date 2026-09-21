@@ -76,3 +76,18 @@ export function webhookEventsAreUnsaved<T>(
     Array.from(localEvents).some((e) => !committedEvents.has(e))
   );
 }
+
+/**
+ * Edit-panel fields that must not survive a change of URL, events or
+ * active.
+ *
+ * The other buffers stay: retargeting the same subscription, adding an
+ * event, or flipping Active is the usual reason to edit. The error does
+ * not — "select at least one event" is a verdict about the set that was
+ * selected when Save ran, and a 400 about the previous URL is the same.
+ * Same class as the create form dropping its error when the event set
+ * changes.
+ */
+export function webhookEditFormAfterFieldChange(): { error: null } {
+  return { error: null };
+}
