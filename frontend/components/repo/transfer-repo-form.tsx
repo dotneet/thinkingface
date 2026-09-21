@@ -18,7 +18,7 @@ import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
 import { writableNamespaces } from "@/lib/namespace";
 import { repoBase } from "@/lib/paths";
-import { transferFormAfterDestModeSwitch } from "@/lib/transfer-form";
+import { transferFormAfterDestChange, transferFormAfterDestModeSwitch } from "@/lib/transfer-form";
 import { cancelTransfer, getPendingTransfer, transferRepo } from "@/lib/transfers";
 import { type NameError, validateName } from "@/lib/validation";
 import type { RepoKind, RepoTransfer } from "@/types/api";
@@ -244,7 +244,10 @@ export function TransferRepoForm({ kind, ns, name }: { kind: RepoKind; ns: strin
               <Select
                 aria-labelledby={destinationLabelId}
                 value={selectedNamespace}
-                onChange={(e) => setSelectedNamespace(e.target.value)}
+                onChange={(e) => {
+                  setSelectedNamespace(e.target.value);
+                  setSubmitError(transferFormAfterDestChange().submitError);
+                }}
               >
                 {namespaces.map((n) => (
                   <option key={n} value={n}>
@@ -261,7 +264,10 @@ export function TransferRepoForm({ kind, ns, name }: { kind: RepoKind; ns: strin
             <Input
               aria-labelledby={destinationLabelId}
               value={otherNamespace}
-              onChange={(e) => setOtherNamespace(e.target.value)}
+              onChange={(e) => {
+                setOtherNamespace(e.target.value);
+                setSubmitError(transferFormAfterDestChange().submitError);
+              }}
               placeholder={t("repo.settings.transfer.otherNamespacePlaceholder")}
             />
           )}
