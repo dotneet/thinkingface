@@ -9,6 +9,7 @@ import { NamespaceUrlPreview } from "@/components/namespace/namespace-url-previe
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Field, Input, Textarea } from "@/components/ui/field";
+import { createOrgFormAfterNameChange } from "@/lib/create-org-form";
 import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
 import { namespaceHref } from "@/lib/namespace";
@@ -69,7 +70,10 @@ export function CreateOrgForm({ loggedIn }: { loggedIn: boolean }) {
       >
         <Input
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => {
+            setName(e.target.value);
+            setError(createOrgFormAfterNameChange().error);
+          }}
           placeholder={t("org.create.namePlaceholder")}
           required
         />
