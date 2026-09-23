@@ -54,6 +54,19 @@ export function WebhookRow({
   const [committedEvents, setCommittedEvents] = useState<Set<WebhookEvent>>(
     () => new Set(webhook.events),
   );
+  // ...but only until the props move. A refetch that brings new values means
+  // the server's state changed — our own write landing, or someone else's
+  // edit from another tab or page. Either way the props are now the newest
+  // committed state; keeping the older local copy would seed Edit with it and
+  // let Save silently revert the other writer's change.
+  const propsKey = `${webhook.url}\n${webhook.active}\n${[...webhook.events].sort().join(",")}`;
+  const [seenPropsKey, setSeenPropsKey] = useState(propsKey);
+  if (seenPropsKey !== propsKey) {
+    setSeenPropsKey(propsKey);
+    setCommittedUrl(webhook.url);
+    setCommittedActive(webhook.active);
+    setCommittedEvents(new Set(webhook.events));
+  }
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
