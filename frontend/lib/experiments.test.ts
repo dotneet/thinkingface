@@ -1,11 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  annotationClosesTagEditor,
+  deleteDialogTargetAfterRunsChange,
   expArtifactHref,
   expRunHref,
   expRunModelHref,
   formatMetricValue,
   getMetrics,
+  tagEditorTargetAfterRunRemoved,
+  tagEditorTargetAfterRunsChange,
 } from "@/lib/experiments";
 import { decodeRouteParams } from "@/lib/paths";
 import type { ExpArtifact, ExpRunModelRef, PreviewKind } from "@/types/api";
@@ -84,6 +88,58 @@ describe("expRunModelHref", () => {
   it("refuses to link a malformed repo id", () => {
     expect(expRunModelHref(model({ repo_id: "bert-ja" }))).toBeNull();
     expect(expRunModelHref(model({ repo_id: "alice/" }))).toBeNull();
+  });
+});
+
+describe("annotationClosesTagEditor", () => {
+  it("closes only when the write actually sent tags", () => {
+    expect(annotationClosesTagEditor({ tags: ["lr-sweep"] })).toBe(true);
+    expect(annotationClosesTagEditor({ tags: [] })).toBe(true);
+    expect(annotationClosesTagEditor({ archived: true })).toBe(false);
+    expect(annotationClosesTagEditor({ is_baseline: true })).toBe(false);
+    expect(annotationClosesTagEditor({ note: "keep" })).toBe(false);
+  });
+});
+
+describe("tagEditorTargetAfterRunRemoved", () => {
+  it("closes the editor when the edited run is the one that was deleted", () => {
+    expect(tagEditorTargetAfterRunRemoved("foo", "foo")).toBeNull();
+  });
+
+  it("leaves the editor open when a different run was deleted", () => {
+    expect(tagEditorTargetAfterRunRemoved("foo", "bar")).toBe("foo");
+  });
+
+  it("is a no-op when the editor is already closed", () => {
+    expect(tagEditorTargetAfterRunRemoved(null, "foo")).toBeNull();
+  });
+});
+
+describe("tagEditorTargetAfterRunsChange", () => {
+  it("closes the editor when the edited run is no longer in the list", () => {
+    expect(tagEditorTargetAfterRunsChange("foo", ["bar", "baz"])).toBeNull();
+  });
+
+  it("keeps the editor on a run that is still present", () => {
+    expect(tagEditorTargetAfterRunsChange("foo", ["bar", "foo"])).toBe("foo");
+  });
+
+  it("is a no-op when the editor is already closed", () => {
+    expect(tagEditorTargetAfterRunsChange(null, ["foo"])).toBeNull();
+  });
+});
+
+describe("deleteDialogTargetAfterRunsChange", () => {
+  it("closes the dialog when the named run is no longer in the list", () => {
+    expect(deleteDialogTargetAfterRunsChange("foo", ["bar", "baz"])).toBeNull();
+  });
+
+  it("keeps the dialog on a run that is still present", () => {
+    expect(deleteDialogTargetAfterRunsChange("foo", ["bar", "foo"])).toBe("foo");
+  });
+
+  it("is a no-op when the dialog is already closed", () => {
+    expect(deleteDialogTargetAfterRunsChange(null, ["foo"])).toBeNull();
   });
 });
 

@@ -138,6 +138,73 @@ export function updateRunAnnotations(
 }
 
 /**
+ * True when this PATCH is the tag editor's own save.
+ *
+ * Tags, archive and baseline share one mutation. Closing the tag dialog from
+ * every successful write would wipe an in-progress draft the moment someone
+ * starred or archived a run (including a *different* run on the dashboard).
+ * Only a body that actually sent `tags` is that editor finishing.
+ */
+export function annotationClosesTagEditor(body: ExpRunAnnotationRequest): boolean {
+  return body.tags !== undefined;
+}
+
+/**
+ * Tag-editor target after a run is deleted from the dashboard.
+ *
+ * Archive / baseline must not close the editor (`annotationClosesTagEditor`).
+ * Delete is different: the run is gone, `RunTagsDialog` hits `if (!run)
+ * return null`, and `open={tagsFor !== null}` stays true with no dismiss
+ * path. The table-level annotate banner is also suppressed while `tagsFor`
+ * is set.
+ */
+export function tagEditorTargetAfterRunRemoved(
+  tagsFor: string | null,
+  deletedRun: string,
+): string | null {
+  return tagsFor === deletedRun ? null : tagsFor;
+}
+
+/**
+ * Tag-editor target after the project's run list changes.
+ *
+ * Covers a run that vanished on a live refetch (deleted in another tab)
+ * rather than by this page's own Delete. Same stuck-open dialog as
+ * `tagEditorTargetAfterRunRemoved` if `tagsFor` is left pointing at a
+ * name that is no longer in the list.
+ */
+export function tagEditorTargetAfterRunsChange(
+  tagsFor: string | null,
+  runNames: readonly string[],
+): string | null {
+  return namedDialogTargetAfterRunsChange(tagsFor, runNames);
+}
+
+/**
+ * Delete-dialog target after the project's run list changes.
+ *
+ * The tag editor already drops `tagsFor` when a run vanishes on a live
+ * refetch. `deleteFor` is the same flag (`open={deleteFor !== null}`) and
+ * the same refetch: leaving it set keeps RunDeleteDialog asking to type a
+ * name that is already gone, and Confirm then 404s.
+ */
+export function deleteDialogTargetAfterRunsChange(
+  deleteFor: string | null,
+  runNames: readonly string[],
+): string | null {
+  return namedDialogTargetAfterRunsChange(deleteFor, runNames);
+}
+
+/** Shared close-if-gone rule for the dashboard's name-keyed dialogs. */
+function namedDialogTargetAfterRunsChange(
+  target: string | null,
+  runNames: readonly string[],
+): string | null {
+  if (target === null || runNames.includes(target)) return target;
+  return null;
+}
+
+/**
  * Files `trackio.log_artifact` committed for one run, read from
  * `{project}/artifacts/{run}` on the repository's default branch.
  *

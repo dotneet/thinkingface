@@ -19,6 +19,7 @@ import { usePagedList } from "@/hooks/use-paged-list";
 import { errorMessage } from "@/lib/api-error-message";
 import { useT } from "@/lib/i18n/client";
 import { namespaceHref } from "@/lib/namespace";
+import { orgMemberAddFormAfterUsernameChange } from "@/lib/org-member-add-form";
 import {
   addMember,
   isOrgRole,
@@ -181,7 +182,10 @@ export function OrgMembersManager({
           <Field label={t("org.settings.members.usernameLabel")} className="min-w-[200px] flex-1">
             <Input
               value={username}
-              onChange={(e) => setUsername(e.target.value)}
+              onChange={(e) => {
+                setUsername(e.target.value);
+                setAddError(orgMemberAddFormAfterUsernameChange().addError);
+              }}
               placeholder={t("org.settings.members.usernamePlaceholder")}
               autoComplete="off"
               required

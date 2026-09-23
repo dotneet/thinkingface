@@ -14,6 +14,15 @@ import { Checkbox, Field, Input } from "@/components/ui/field";
 import { useFormattedTime } from "@/components/ui/time-text";
 import { errorMessage } from "@/lib/api-error-message";
 import { useT } from "@/lib/i18n/client";
+import {
+  seedWebhookEditActive,
+  seedWebhookEditEvents,
+  seedWebhookEditUrl,
+  webhookActiveIsUnsaved,
+  webhookEditFormAfterFieldChange,
+  webhookEventsAreUnsaved,
+  webhookUrlIsUnsaved,
+} from "@/lib/webhook-edit-active";
 import { deleteWebhook, updateWebhook } from "@/lib/webhooks";
 import type { Webhook, WebhookEvent } from "@/types/api";
 
@@ -33,6 +42,31 @@ export function WebhookRow({
   const [url, setUrl] = useState(webhook.url);
   const [events, setEvents] = useState<Set<WebhookEvent>>(new Set(webhook.events));
   const [active, setActive] = useState(webhook.active);
+  // Last values a successful Enable/Disable or Save wrote. Held in state
+  // (not a ref) so hasUnsavedEdits can read them during render without
+  // tripping react(refs). The matching `webhook.*` props lag until
+  // `onChanged()`'s refetch, so toggleEditing and the Rotate warning must
+  // use these rather than the props — otherwise Disable/Save then
+  // Edit/Rotate treats the already-landed write as an unsaved change and
+  // Save can undo it.
+  const [committedActive, setCommittedActive] = useState(webhook.active);
+  const [committedUrl, setCommittedUrl] = useState(webhook.url);
+  const [committedEvents, setCommittedEvents] = useState<Set<WebhookEvent>>(
+    () => new Set(webhook.events),
+  );
+  // ...but only until the props move. A refetch that brings new values means
+  // the server's state changed — our own write landing, or someone else's
+  // edit from another tab or page. Either way the props are now the newest
+  // committed state; keeping the older local copy would seed Edit with it and
+  // let Save silently revert the other writer's change.
+  const propsKey = `${webhook.url}\n${webhook.active}\n${[...webhook.events].sort().join(",")}`;
+  const [seenPropsKey, setSeenPropsKey] = useState(propsKey);
+  if (seenPropsKey !== propsKey) {
+    setSeenPropsKey(propsKey);
+    setCommittedUrl(webhook.url);
+    setCommittedActive(webhook.active);
+    setCommittedEvents(new Set(webhook.events));
+  }
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -51,22 +85,21 @@ export function WebhookRow({
       else next.add(e);
       return next;
     });
+    setError(webhookEditFormAfterFieldChange().error);
   }
 
   // `url` / `events` / `active` are local edit buffers, not a mirror of the
   // `webhook` prop: React only re-initializes `useState(webhook.active)` on
   // mount, and `WebhooksManager` re-renders this row with the same `key`
-  // after every refetch, so the row never remounts. Without this reset,
-  // toggling Enable/Disable (which only updates the server and the parent's
-  // list, never these local buffers) leaves `active` permanently stale, and
-  // the next unrelated Save silently carries the old value back to the
-  // server — undoing the toggle. Re-seeding the buffers from the current
-  // prop every time the panel opens keeps them honest instead.
+  // after every refetch, so the row never remounts. Opening the panel
+  // reseeds all three from the last committed write — not the props, which
+  // lag until onChanged() refetches and would undo a just-clicked
+  // Enable/Disable or a Save whose refetch has not landed yet.
   function toggleEditing() {
     if (!editing) {
-      setUrl(webhook.url);
-      setEvents(new Set(webhook.events));
-      setActive(webhook.active);
+      setUrl(seedWebhookEditUrl(committedUrl, webhook.url));
+      setEvents(new Set(seedWebhookEditEvents(Array.from(committedEvents), webhook.events)));
+      setActive(seedWebhookEditActive(committedActive, webhook.active));
       setError(null);
       setRotatedSecret(null);
     }
@@ -90,6 +123,9 @@ export function WebhookRow({
       setError(errorMessage(t, result));
       return;
     }
+    setCommittedActive(active);
+    setCommittedUrl(url);
+    setCommittedEvents(new Set(events));
     setEditing(false);
     onChanged();
   }
@@ -126,17 +162,25 @@ export function WebhookRow({
       setError(errorMessage(t, result));
       return;
     }
+    // Enable/Disable stays clickable while the edit panel is open. Save
+    // posts these local buffers, so leaving `active` on the value from
+    // a stale `webhook.active` would undo the toggle. Record the write
+    // as committed so a later Edit (before the refetch) seeds from it.
+    const next = !webhook.active;
+    setCommittedActive(next);
+    setActive(next);
     onChanged();
   }
 
-  // Whether the panel's buffers have drifted from what the server holds. Only
-  // used to warn before rotating — the save itself always sends the buffers.
-  const savedEvents = new Set<WebhookEvent>(webhook.events);
+  // Whether the panel's buffers have drifted from the last committed write.
+  // Compared to that write, not the `webhook.*` props: those lag until
+  // onChanged() refetches, so Enable/Disable or a just-landed Save would
+  // look unsaved and the Rotate warning would invite reverting a change
+  // that already landed.
   const hasUnsavedEdits =
-    url !== webhook.url ||
-    active !== webhook.active ||
-    events.size !== savedEvents.size ||
-    Array.from(events).some((e) => !savedEvents.has(e));
+    webhookUrlIsUnsaved(url, committedUrl) ||
+    webhookActiveIsUnsaved(active, committedActive) ||
+    webhookEventsAreUnsaved(events, committedEvents);
 
   async function handleDelete() {
     setDeleting(true);
@@ -248,7 +292,10 @@ export function WebhookRow({
           <Field label={t("settings.webhooks.urlLabel")}>
             <Input
               value={url}
-              onChange={(e) => setUrl(e.target.value)}
+              onChange={(e) => {
+                setUrl(e.target.value);
+                setError(webhookEditFormAfterFieldChange().error);
+              }}
               placeholder={t("settings.webhooks.urlPlaceholderEdit")}
             />
           </Field>
@@ -274,7 +321,13 @@ export function WebhookRow({
             </div>
           </fieldset>
           <label className="flex items-center gap-2 text-sm text-fg-muted">
-            <Checkbox checked={active} onChange={(e) => setActive(e.target.checked)} />
+            <Checkbox
+              checked={active}
+              onChange={(e) => {
+                setActive(e.target.checked);
+                setError(webhookEditFormAfterFieldChange().error);
+              }}
+            />
             {t("settings.webhooks.active")}
           </label>
           <div className="flex flex-wrap gap-2">

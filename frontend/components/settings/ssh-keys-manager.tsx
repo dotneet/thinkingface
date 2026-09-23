@@ -17,6 +17,7 @@ import { TimeText } from "@/components/ui/time-text";
 import { isUnauthorized } from "@/lib/api";
 import { errorMessage, type FailedApiResult } from "@/lib/api-error-message";
 import { useT } from "@/lib/i18n/client";
+import { sshKeyCreateFormAfterFieldChange } from "@/lib/ssh-key-create-form";
 import { createSSHKey, deleteSSHKey, listSSHKeys } from "@/lib/ssh-keys";
 import type { SSHKeyItem } from "@/types/api";
 
@@ -137,14 +138,20 @@ export function SSHKeysManager() {
           <Field label={t("settings.sshKeys.titleLabel")}>
             <Input
               value={newTitle}
-              onChange={(e) => setNewTitle(e.target.value)}
+              onChange={(e) => {
+                setNewTitle(e.target.value);
+                setAddError(sshKeyCreateFormAfterFieldChange().addError);
+              }}
               placeholder={t("settings.sshKeys.titlePlaceholder")}
             />
           </Field>
           <Field label={t("settings.sshKeys.keyLabel")} hint={t("settings.sshKeys.keyHint")}>
             <Textarea
               value={newKey}
-              onChange={(e) => setNewKey(e.target.value)}
+              onChange={(e) => {
+                setNewKey(e.target.value);
+                setAddError(sshKeyCreateFormAfterFieldChange().addError);
+              }}
               placeholder={t("settings.sshKeys.keyPlaceholder")}
               rows={4}
               spellCheck={false}
