@@ -21,7 +21,10 @@ dependencies = [
 # importing thinkingface.trackio.integrations never requires either package,
 # only instantiating the corresponding class does.
 transformers = ["transformers>=4.30"]
-lightning = ["lightning>=2.0"]
+# 2.6.6 is the floor because earlier releases execute arbitrary code from a
+# checkpoint's _instantiator hyperparameters, and anyone installing this extra
+# is training with Lightning and loading its checkpoints.
+lightning = ["lightning>=2.6.6"]
 
 [project.urls]
 Homepage = "https://github.com/dotneet/thinkingface"
