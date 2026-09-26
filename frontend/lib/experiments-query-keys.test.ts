@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { metricsQueryKey } from "@/lib/experiments-query-keys";
+import { metricsQueryKey, metricsQueryKeyXMode } from "@/lib/experiments-query-keys";
 
 describe("metricsQueryKey", () => {
   it("does not collide a run name containing a comma with the pair it looks like", () => {
@@ -35,5 +35,19 @@ describe("metricsQueryKey", () => {
     expect(metricsQueryKey("acme", "bert", "p", ["only"], "step")).toEqual(
       metricsQueryKey("acme", "bert", "p", ["only"], "step"),
     );
+  });
+});
+
+describe("metricsQueryKeyXMode", () => {
+  it("reads back the xMode segment a matching metricsQueryKey was built with", () => {
+    expect(metricsQueryKeyXMode(metricsQueryKey("acme", "bert", "p", ["a"], "step"))).toBe("step");
+    expect(metricsQueryKeyXMode(metricsQueryKey("acme", "bert", "p", ["a"], "time"))).toBe("time");
+  });
+
+  it("returns undefined for a key that isn't one of ours", () => {
+    // Guards a placeholderData callback against a malformed/foreign key
+    // rather than confidently returning the wrong segment as an xMode.
+    expect(metricsQueryKeyXMode(["exp-runs", "acme", "bert", "p"])).toBeUndefined();
+    expect(metricsQueryKeyXMode([])).toBeUndefined();
   });
 });

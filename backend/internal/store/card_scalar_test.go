@@ -69,3 +69,69 @@ func facetValues(items []RepoFacetItem) []string {
 	sort.Strings(out)
 	return out
 }
+
+// The same fault in the array-valued keys. The tag facet lists each element as
+// text, so `tags: [2024, bert]` showed "2024 (1)" -- and the filter compared
+// JSON types (`@>` on Postgres, json_each's integer against '2024' on SQLite)
+// and returned nothing for it, on both engines. task_categories had the same
+// split between its facet and its filter.
+func TestIntegrationCardArrayFiltersMatchTheFacetsTheyCameFrom(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+
+		f.repo(t, "alice", "numtag", "model", map[string]any{"tags": []any{2024, "bert"}})
+		f.repo(t, "alice", "strtag", "model", map[string]any{"tags": []any{"2024"}})
+		f.repo(t, "alice", "booltag", "model", map[string]any{"tags": []any{true, 2.5}})
+		f.repo(t, "alice", "numtask", "dataset", map[string]any{"task_categories": []any{7}})
+
+		cases := []struct {
+			name   string
+			filter RepoFilter
+			want   []string
+		}{
+			{"number and string spelling alike", RepoFilter{Tags: []string{"2024"}}, []string{"alice/numtag", "alice/strtag"}},
+			{"a number together with a string", RepoFilter{Tags: []string{"2024", "bert"}}, []string{"alice/numtag"}},
+			{"boolean", RepoFilter{Tags: []string{"true"}}, []string{"alice/booltag"}},
+			{"fractional number", RepoFilter{Tags: []string{"2.5"}}, []string{"alice/booltag"}},
+			{"string tag only", RepoFilter{Tags: []string{"bert"}}, []string{"alice/numtag"}},
+			{"numeric task category", RepoFilter{Task: "7"}, []string{"alice/numtask"}},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				got, _, _, err := s.ListRepos(ctx, c.filter)
+				if err != nil {
+					t.Fatalf("ListRepos: %v", err)
+				}
+				gotNames := names(got)
+				sort.Strings(gotNames)
+				if !equalStrings(gotNames, c.want) {
+					t.Fatalf("ListRepos(%+v) = %v, want %v", c.filter, gotNames, c.want)
+				}
+			})
+		}
+
+		// The facets spell each value the way the filter above takes it, and
+		// count the integer 2024 and the string "2024" as one tag.
+		_, _, facets, err := s.ListRepos(ctx, RepoFilter{WithFacets: true})
+		if err != nil {
+			t.Fatalf("ListRepos with facets: %v", err)
+		}
+		tagCounts := map[string]int64{}
+		for _, item := range facets.Tags {
+			tagCounts[item.Value] += item.Count
+		}
+		want := map[string]int64{"2024": 2, "bert": 1, "true": 1, "2.5": 1}
+		if len(tagCounts) != len(want) || len(facets.Tags) != len(want) {
+			t.Fatalf("tag facet = %+v, want %v", facets.Tags, want)
+		}
+		for v, n := range want {
+			if tagCounts[v] != n {
+				t.Errorf("tag facet %q = %d, want %d (facet %+v)", v, tagCounts[v], n, facets.Tags)
+			}
+		}
+		if got, want := facetValues(facets.Tasks), []string{"7"}; !equalStrings(got, want) {
+			t.Errorf("task facet = %v, want %v", got, want)
+		}
+	})
+}

@@ -535,3 +535,123 @@ func TestKnownObjects_DropsWhatTheRepositoryCannotResolve(t *testing.T) {
 		t.Errorf("knownObjects(nil) = %v, %v, want nil, nil", got, err)
 	}
 }
+
+// raceFixture is the index of the push-vs-compaction race: main=X and feat=F
+// are in the WAL, and the local copy holds both.
+type raceFixture struct {
+	*pushFixture
+	x, f string
+}
+
+func newRaceFixture(t *testing.T) *raceFixture {
+	t.Helper()
+	fx := newPushFixture(t)
+	ctx := context.Background()
+	x := commitTo(t, fx.dir, "main", "x")
+	f := commitTo(t, fx.dir, "feat", "f")
+	if err := AuthoritativePush(ctx, fx.store, fx.dir, storagePath, []RefUpdate{
+		{Ref: "refs/heads/main", Old: zeroHash, New: x},
+		{Ref: "refs/heads/feat", Old: zeroHash, New: f},
+	}); err != nil {
+		t.Fatalf("AuthoritativePush: %v", err)
+	}
+	return &raceFixture{pushFixture: fx, x: x, f: f}
+}
+
+// deleteFeatAndCompactBeforeTheCAS arranges for another instance to delete
+// feat and a compaction to fold the WAL — dropping F, which nothing references
+// any more — in the window between the push building its pack and its CAS.
+// That is the only window in which the push's exclude set can go stale, and
+// the fake store's beforePut hook is exactly that window.
+func (fx *raceFixture) deleteFeatAndCompactBeforeTheCAS(t *testing.T) {
+	t.Helper()
+	fired := false
+	fx.store.beforePut = func(int) {
+		if fired {
+			return // the competing writes below go through PutIfGeneration too
+		}
+		fired = true
+		ctx := context.Background()
+		if err := UpdateIndex(ctx, fx.store, storagePath,
+			[]RefUpdate{{Ref: "refs/heads/feat", Old: fx.f, New: zeroHash}}, ""); err != nil {
+			t.Errorf("delete feat: %v", err)
+			return
+		}
+		if err := Compact(ctx, fx.store, filepath.Join(t.TempDir(), "compact.git"), storagePath); err != nil {
+			t.Errorf("Compact: %v", err)
+		}
+	}
+}
+
+func TestAuthoritativePush_RebuildsItsPackWhenCompactionDropsAnExcludedObject(t *testing.T) {
+	fx := newRaceFixture(t)
+	ctx := context.Background()
+	gitRun(t, fx.dir, "update-ref", "refs/heads/feat2", fx.f)
+	g := commitTo(t, fx.dir, "feat2", "g") // parent F: the pack is built without it
+
+	fx.deleteFeatAndCompactBeforeTheCAS(t)
+	if err := AuthoritativePush(ctx, fx.store, fx.dir, storagePath,
+		[]RefUpdate{{Ref: "refs/heads/feat2", Old: zeroHash, New: g}}); err != nil {
+		t.Fatalf("AuthoritativePush: %v", err)
+	}
+
+	// Before the fix the CAS still landed, naming a pack whose parent commit
+	// had just been compacted away, and this rebuild failed in index-pack on
+	// every instance from then on.
+	rebuilt := fx.rebuild(t)
+	assertRefs(t, rebuilt, map[string]string{"refs/heads/main": fx.x, "refs/heads/feat2": g})
+	assertHealthy(t, rebuilt)
+	if got := gitRun(t, rebuilt, "rev-list", "--count", "refs/heads/feat2"); got != "2" {
+		t.Errorf("feat2 commit count = %s, want 2", got)
+	}
+}
+
+func TestAuthoritativePush_RefOntoACompactedAwayCommitCarriesItAfterAll(t *testing.T) {
+	fx := newRaceFixture(t)
+	ctx := context.Background()
+
+	// The API's ref creation path: a tag onto an existing commit. At T0 the
+	// target is reachable from feat, so the pack is empty and no entry would be
+	// uploaded at all.
+	fx.deleteFeatAndCompactBeforeTheCAS(t)
+	if err := AuthoritativePush(ctx, fx.store, fx.dir, storagePath,
+		[]RefUpdate{{Ref: "refs/tags/v1", Old: zeroHash, New: fx.f}}); err != nil {
+		t.Fatalf("AuthoritativePush: %v", err)
+	}
+
+	rebuilt := fx.rebuild(t)
+	assertRefs(t, rebuilt, map[string]string{"refs/heads/main": fx.x, "refs/tags/v1": fx.f})
+	assertHealthy(t, rebuilt)
+}
+
+func TestAuthoritativePush_CompactionThatKeepsTheRefsDoesNotRebuildThePack(t *testing.T) {
+	fx := newRaceFixture(t)
+	ctx := context.Background()
+	g := commitTo(t, fx.dir, "feat", "g")
+
+	// A compaction alone replaces every pack the push's basis named, but every
+	// excluded tip is still a ref, so the new base holds everything the pack
+	// left out and the one upload stays valid.
+	fired := false
+	fx.store.beforePut = func(int) {
+		if fired {
+			return
+		}
+		fired = true
+		if err := Compact(ctx, fx.store, filepath.Join(t.TempDir(), "compact.git"), storagePath); err != nil {
+			t.Errorf("Compact: %v", err)
+		}
+	}
+	before := countEntries(t, fx.store)
+	if err := AuthoritativePush(ctx, fx.store, fx.dir, storagePath,
+		[]RefUpdate{{Ref: "refs/heads/feat", Old: fx.f, New: g}}); err != nil {
+		t.Fatalf("AuthoritativePush: %v", err)
+	}
+	if got := countEntries(t, fx.store) - before; got != 1 {
+		t.Errorf("uploaded %d entries, want 1: the pack was rebuilt needlessly", got)
+	}
+
+	rebuilt := fx.rebuild(t)
+	assertRefs(t, rebuilt, map[string]string{"refs/heads/main": fx.x, "refs/heads/feat": g})
+	assertHealthy(t, rebuilt)
+}

@@ -139,7 +139,12 @@ func (s *Server) handleHFRefs(w http.ResponseWriter, r *http.Request) {
 	}
 	if names, err := gitRepo.Tags(); err == nil {
 		for _, n := range names {
-			h, _ := gitRepo.RefTarget("refs/tags/" + n)
+			// Resolve, not RefTarget: an annotated tag's ref names a tag
+			// object, and targetCommit is -- by name and by
+			// huggingface_hub's GitRefInfo docs -- the commit. Handing out
+			// the tag object's id sent a client that pinned it as a
+			// revision to an object that is not a commit.
+			h, _ := gitRepo.Resolve("refs/tags/" + n)
 			tags = append(tags, ref{Name: n, Ref: "refs/tags/" + n, TargetCommit: h.String()})
 		}
 	}
@@ -583,7 +588,9 @@ func (s *Server) handleUIRefs(w http.ResponseWriter, r *http.Request) {
 	}
 	if names, err := gitRepo.Tags(); err == nil {
 		for _, n := range names {
-			h, _ := gitRepo.RefTarget("refs/tags/" + n)
+			// Peeled for the same reason as handleHFRefs: the picker shows
+			// and links the commit, not an annotated tag's own object.
+			h, _ := gitRepo.Resolve("refs/tags/" + n)
 			resp.Tags = append(resp.Tags, apitypes.RefUI{Name: n, TargetOID: h.String()})
 		}
 	}

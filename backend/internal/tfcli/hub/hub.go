@@ -197,6 +197,14 @@ type Error struct {
 	Message string // error.message, or the raw body / status text
 	Method  string
 	URL     string
+	// Transfer is true when this answer came from PutLFSObject or
+	// VerifyLFSObject -- a signed object-storage URL or the emulator's
+	// transfer proxy -- rather than from a call to the hub API itself. A 403
+	// here means the URL was rejected (typically because it expired mid-
+	// upload), which has nothing to do with the caller's permissions on the
+	// repository; a caller turning a 403 into a human-facing message must not
+	// conflate the two (see IsTransferForbidden).
+	Transfer bool
 }
 
 func (e *Error) Error() string {
@@ -221,8 +229,24 @@ func IsConflict(err error) bool { return statusIs(err, http.StatusConflict) }
 // IsUnauthorized reports a 401.
 func IsUnauthorized(err error) bool { return statusIs(err, http.StatusUnauthorized) }
 
-// IsForbidden reports a 403.
-func IsForbidden(err error) bool { return statusIs(err, http.StatusForbidden) }
+// IsForbidden reports a 403 from the hub API. It deliberately excludes a 403
+// from a signed URL or the transfer proxy (see IsTransferForbidden): those
+// come from PutLFSObject / VerifyLFSObject, mean something different (a
+// rejected or expired transfer URL, not a repository permission problem), and
+// must not be described to the user as one.
+func IsForbidden(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Status == http.StatusForbidden && !e.Transfer
+}
+
+// IsTransferForbidden reports a 403 from PutLFSObject or VerifyLFSObject: the
+// signed URL (or the emulator's transfer proxy) rejected the request, most
+// often because it expired mid-upload. It carries no information about the
+// caller's access to the repository itself.
+func IsTransferForbidden(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Status == http.StatusForbidden && e.Transfer
+}
 
 // ---------------------------------------------------------------- transport
 
@@ -819,10 +843,20 @@ func (c *Client) putLFSOnce(ctx context.Context, action LFSAction, open func() (
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return parseError(resp, http.MethodPut, redactedURL(action.Href))
+		return parseTransferError(resp, http.MethodPut, redactedURL(action.Href))
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+// parseTransferError is parseError for a response from a signed URL or the
+// transfer proxy (PutLFSObject / VerifyLFSObject), marked so callers can tell
+// a rejected/expired transfer URL apart from a 403 the hub API itself
+// returned (see Error.Transfer).
+func parseTransferError(resp *http.Response, method, rawURL string) *Error {
+	e := parseError(resp, method, rawURL)
+	e.Transfer = true
+	return e
 }
 
 // retryablePut reports whether a failed transfer is worth one more attempt: a
@@ -895,7 +929,7 @@ func (c *Client) VerifyLFSObject(ctx context.Context, action LFSAction, obj LFSO
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return parseError(resp, http.MethodPost, redactedURL(action.Href))
+		return parseTransferError(resp, http.MethodPost, redactedURL(action.Href))
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil

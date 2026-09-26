@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -342,8 +343,9 @@ type lfsGroup struct {
 	size  int64
 	paths []string
 
-	batch    LFSBatchResult
-	uploaded bool
+	batch     LFSBatchResult
+	fetchedAt time.Time // when batch was minted, for actionExpired
+	uploaded  bool
 }
 
 // preuploadModes asks the server how each path travels. An empty plan makes no
@@ -367,26 +369,66 @@ func preuploadModes(ctx context.Context, c *Client, plan Plan, rev string) (map[
 	return modes, nil
 }
 
-// transferLFS runs the batch call and the PUT/verify transfers it asks for.
+// lfsRequestBatch bounds how many objects' actions are requested -- and
+// transferred -- as one unit. The server sizes a batch's signed-URL TTL from
+// that batch's own total bytes (lfs.TTLFor: a base padding plus the bytes at
+// an assumed 1 MiB/s, capped), which only holds if the batch starts
+// transferring right after its actions are minted. Requesting actions for the
+// whole upload up front and only then transferring batch by batch broke that
+// assumption for anything past the first chunk: a run of 5000 10 MB files at
+// 5 MiB/s took long enough that batches near the end had expired before their
+// turn came, and tf had nothing to fall back on -- retryablePut does not
+// retry a 4xx, and the upload aborted with nothing committed. Fetching one
+// lfsRequestBatch-sized chunk of actions immediately before transferring it
+// keeps every URL's clock starting when it is actually about to be used.
+const lfsRequestBatch = lfsBatchSize
+
+// transferLFS runs the batch call and the PUT/verify transfers it asks for,
+// lfsRequestBatch objects at a time (see its doc comment for why).
 func transferLFS(ctx context.Context, c *Client, plan Plan, groups []*lfsGroup, res *Result, emit func(Event)) error {
 	if len(groups) == 0 {
 		return nil
 	}
-	objs := make([]LFSObject, 0, len(groups))
-	for _, g := range groups {
+
+	workers := plan.Workers
+	if workers <= 0 {
+		workers = defaultWorkers
+	}
+	byPath := make(map[string]func() (io.ReadCloser, error), len(plan.Files))
+	for _, f := range plan.Files {
+		byPath[f.RepoPath] = f.Open
+	}
+
+	for start := 0; start < len(groups); start += lfsRequestBatch {
+		end := min(start+lfsRequestBatch, len(groups))
+		if err := transferLFSChunk(ctx, c, plan.Ref, groups[start:end], byPath, workers, res, emit); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// transferLFSChunk requests the LFS batch actions for one chunk of groups and
+// runs the resulting transfers immediately, so each action's TTL is spent on
+// the transfer it was minted for rather than idling behind earlier chunks.
+func transferLFSChunk(ctx context.Context, c *Client, ref Ref, chunk []*lfsGroup, byPath map[string]func() (io.ReadCloser, error), workers int, res *Result, emit func(Event)) error {
+	objs := make([]LFSObject, 0, len(chunk))
+	for _, g := range chunk {
 		objs = append(objs, LFSObject{OID: g.oid, Size: g.size})
 	}
-	batch, err := c.LFSBatchUpload(ctx, plan.Ref, objs)
+	batch, err := c.LFSBatchUpload(ctx, ref, objs)
 	if err != nil {
 		return fmt.Errorf("lfs batch: %w", err)
 	}
-	if len(batch) != len(groups) {
-		return fmt.Errorf("lfs batch: server answered for %d of %d objects", len(batch), len(groups))
+	if len(batch) != len(chunk) {
+		return fmt.Errorf("lfs batch: server answered for %d of %d objects", len(batch), len(chunk))
 	}
 
+	fetchedAt := time.Now()
 	var pending []*lfsGroup
-	for i, g := range groups {
+	for i, g := range chunk {
 		g.batch = batch[i]
+		g.fetchedAt = fetchedAt
 		switch {
 		case g.batch.Err != nil:
 			return fmt.Errorf("lfs batch for %s: %w", g.paths[0], g.batch.Err)
@@ -403,15 +445,6 @@ func transferLFS(ctx context.Context, c *Client, plan Plan, groups []*lfsGroup, 
 		return nil
 	}
 
-	workers := plan.Workers
-	if workers <= 0 {
-		workers = defaultWorkers
-	}
-	byPath := make(map[string]func() (io.ReadCloser, error), len(plan.Files))
-	for _, f := range plan.Files {
-		byPath[f.RepoPath] = f.Open
-	}
-
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(workers)
 	for _, group := range pending {
@@ -422,16 +455,11 @@ func transferLFS(ctx context.Context, c *Client, plan Plan, groups []*lfsGroup, 
 				return fmt.Errorf("internal: no reader for %s", path)
 			}
 			emit(Event{Kind: EventUploadStart, Path: path, Size: group.size, Mode: ModeLFS})
-			if err := c.PutLFSObject(gctx, *group.batch.Upload, open, group.size); err != nil {
+			done, err := transferOne(gctx, c, ref, group, open)
+			if err != nil {
 				return fmt.Errorf("upload %s: %w", path, err)
 			}
-			if group.batch.Verify != nil {
-				obj := LFSObject{OID: group.oid, Size: group.size}
-				if err := c.VerifyLFSObject(gctx, *group.batch.Verify, obj); err != nil {
-					return fmt.Errorf("verify %s: %w", path, err)
-				}
-			}
-			group.uploaded = true
+			group.uploaded = done
 			emit(Event{Kind: EventUploadDone, Path: path, Size: group.size, Mode: ModeLFS})
 			return nil
 		})
@@ -442,12 +470,106 @@ func transferLFS(ctx context.Context, c *Client, plan Plan, groups []*lfsGroup, 
 
 	// Reported in plan order rather than completion order, so two runs of the
 	// same upload print the same thing.
-	for _, group := range groups {
+	for _, group := range chunk {
 		if !group.uploaded {
 			continue
 		}
 		res.LFSUploaded = append(res.LFSUploaded, group.paths...)
 		res.UploadedBytes += group.size
+	}
+	return nil
+}
+
+// transferActionSafety is subtracted from an action's advertised lifetime
+// before actionExpired treats it as still good: a check that passes with one
+// second to spare and then loses a race with the real deadline is as useless
+// as no check at all.
+const transferActionSafety = 5 * time.Second
+
+// actionExpired reports whether group's upload action has (or is about to)
+// outlive the time it was minted at, which is the case worth checking before
+// even attempting the PUT -- a queue behind a busy worker pool, or a slow
+// `open`, can eat into the TTL before the request is sent at all.
+// ExpiresIn <= 0 means the server did not advertise a lifetime (the emulator
+// proxy signs its own bounded URLs but does not always report one), so
+// nothing is checked proactively; a rejected transfer still triggers a
+// refresh reactively in transferOne.
+func actionExpired(group *lfsGroup) bool {
+	if group.batch.Upload == nil || group.batch.Upload.ExpiresIn <= 0 {
+		return false
+	}
+	deadline := group.fetchedAt.Add(time.Duration(group.batch.Upload.ExpiresIn) * time.Second)
+	return time.Now().Add(transferActionSafety).After(deadline)
+}
+
+// refreshAction re-requests the batch action for group's single object, e.g.
+// because it is about to (or already did) expire. On success group.batch and
+// group.fetchedAt are updated in place; group.batch.Upload == nil afterwards
+// means someone else uploaded the same content in the meantime and there is
+// nothing left to transfer.
+func refreshAction(ctx context.Context, c *Client, ref Ref, group *lfsGroup) error {
+	fresh, err := c.LFSBatchUpload(ctx, ref, []LFSObject{{OID: group.oid, Size: group.size}})
+	if err != nil {
+		return fmt.Errorf("re-request lfs action for %s: %w", group.paths[0], err)
+	}
+	if len(fresh) != 1 {
+		return fmt.Errorf("re-request lfs action for %s: server answered for %d objects", group.paths[0], len(fresh))
+	}
+	if fresh[0].Err != nil {
+		return fmt.Errorf("re-request lfs action for %s: %w", group.paths[0], fresh[0].Err)
+	}
+	group.batch = fresh[0]
+	group.fetchedAt = time.Now()
+	return nil
+}
+
+// transferOne PUTs and verifies one object, refreshing its action once --
+// proactively when it looks stale, or reactively on a 403 from the URL
+// itself -- before giving up. done reports whether bytes actually had to be
+// transferred (false when a refresh discovers the object was deduplicated
+// out from under it).
+func transferOne(ctx context.Context, c *Client, ref Ref, group *lfsGroup, open func() (io.ReadCloser, error)) (done bool, err error) {
+	if actionExpired(group) {
+		if err := refreshAction(ctx, c, ref, group); err != nil {
+			return false, err
+		}
+		if group.batch.Upload == nil {
+			return false, nil
+		}
+	}
+
+	if err := putAndVerify(ctx, c, group, open); err != nil {
+		if !IsTransferForbidden(err) {
+			return false, err
+		}
+		// One retry: the signed URL was rejected, almost certainly because it
+		// expired mid-transfer despite the proactive check above (a slow
+		// upload can still lose the race). A partial PUT under a now-invalid
+		// URL is not resumable, so this starts the object over from the top.
+		if rerr := refreshAction(ctx, c, ref, group); rerr != nil {
+			return false, err // the original error says more than a failed re-request would
+		}
+		if group.batch.Upload == nil {
+			return false, nil
+		}
+		if err := putAndVerify(ctx, c, group, open); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// putAndVerify runs the PUT and (if the batch asked for one) the verify call
+// for group's current action.
+func putAndVerify(ctx context.Context, c *Client, group *lfsGroup, open func() (io.ReadCloser, error)) error {
+	if err := c.PutLFSObject(ctx, *group.batch.Upload, open, group.size); err != nil {
+		return err
+	}
+	if group.batch.Verify != nil {
+		obj := LFSObject{OID: group.oid, Size: group.size}
+		if err := c.VerifyLFSObject(ctx, *group.batch.Verify, obj); err != nil {
+			return err
+		}
 	}
 	return nil
 }

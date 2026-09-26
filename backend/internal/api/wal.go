@@ -88,7 +88,7 @@ func (s *Server) commitThroughWAL(ctx context.Context, repo *store.Repo, req git
 
 			// The WAL refused or was unreachable: the local ref advance must
 			// not outlive this attempt (see the function comment).
-			if rerr := gitRepo.ResetBranch(req.Branch, oldHash); rerr != nil {
+			if rerr := gitRepo.ResetBranch(req.Branch, newHash, oldHash); rerr != nil {
 				slog.Error("roll back local ref after failed WAL write",
 					"repo", repo.FullName(), "branch", req.Branch, "error", rerr)
 			}

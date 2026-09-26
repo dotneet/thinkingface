@@ -143,19 +143,19 @@ func TestMergeReadmeCRLF(t *testing.T) {
 }
 
 // A "---\n---\n" block (no blank line between the fences, as BuildReadme
-// emits for a title-only card) is not recognised as front matter by
-// repocard.Parse's delimiter rule (it requires a "\n---" not immediately
-// following the opening fence). MergeReadme uses the identical rule for
-// consistency, so this input is treated as having no front matter at all:
-// a fresh block is prepended and the original bytes become body text.
-func TestMergeReadmeEmptyFrontMatterIsNotRecognised(t *testing.T) {
+// emits for a title-only card) is HuggingFace's representation of an
+// explicitly empty front-matter block: repocard.Parse recognises it as a card
+// with zero fields rather than as no card at all, and MergeReadme -- sharing
+// repocard.SplitFrontMatter -- merges into it in place, the same as it would
+// for a block that had a blank line between the fences.
+func TestMergeReadmeEmptyFrontMatterIsRecognised(t *testing.T) {
 	existing := "---\n---\n\nBody\n"
 	out, err := MergeReadme([]byte(existing), CardOptions{License: "mit", Tags: []string{"nlp"}})
 	if err != nil {
 		t.Fatalf("MergeReadme: %v", err)
 	}
 	got := string(out)
-	want := "---\nlicense: mit\ntags:\n  - nlp\n---\n\n---\n---\n\nBody\n"
+	want := "---\nlicense: mit\ntags:\n  - nlp\n---\n\nBody\n"
 	if got != want {
 		t.Errorf("MergeReadme() =\n%q\nwant\n%q", got, want)
 	}
@@ -173,6 +173,54 @@ func TestMergeReadmeEmptyFrontMatterWithBlankLine(t *testing.T) {
 	want := "---\nlicense: mit\ntags:\n  - nlp\n---\n\nBody\n"
 	if got != want {
 		t.Errorf("MergeReadme() =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// A leading UTF-8 BOM before the opening fence used to make MergeReadme's own
+// plain `strings.HasPrefix(text, "---\n")` check miss the front matter
+// entirely, while the server's repocard.Parse (which tolerates a BOM, matching
+// huggingface_hub's own `^\s*---` card-loading regex) read the same file
+// fine. The mismatch meant `tf up --license` prepended a second front-matter
+// block above the original instead of updating it in place, silently
+// dropping every field -- here, the original tag -- that the flags didn't
+// also set.
+func TestMergeReadmeLeadingBOMIsRecognised(t *testing.T) {
+	existing := "\uFEFF---\nlicense: apache-2.0\ntags:\n  - a\n---\n# T\n"
+	out, err := MergeReadme([]byte(existing), CardOptions{License: "mit"})
+	if err != nil {
+		t.Fatalf("MergeReadme: %v", err)
+	}
+	got := string(out)
+	want := "---\nlicense: mit\ntags:\n  - a\n---\n\n# T\n"
+	if got != want {
+		t.Errorf("MergeReadme() =\n%q\nwant\n%q", got, want)
+	}
+
+	// The server has to read the result as one merged card, not a stray
+	// second block sitting on top of the first.
+	card := repocard.Parse(out)
+	if card.Data["license"] != "mit" {
+		t.Errorf("repocard.Parse read license = %v from the CLI's output, want mit", card.Data["license"])
+	}
+	if tags := card.Tags(); len(tags) != 1 || tags[0] != "a" {
+		t.Errorf("repocard.Parse read tags = %v, want [a] (the original tag was lost)", tags)
+	}
+}
+
+// A leading blank line before the opening fence is tolerated the same way,
+// and by the same shared rule (repocard.SplitFrontMatter).
+func TestMergeReadmeLeadingBlankLineIsRecognised(t *testing.T) {
+	existing := "\n---\nlicense: apache-2.0\ntags:\n  - a\n---\n# T\n"
+	out, err := MergeReadme([]byte(existing), CardOptions{License: "mit"})
+	if err != nil {
+		t.Fatalf("MergeReadme: %v", err)
+	}
+	card := repocard.Parse(out)
+	if card.Data["license"] != "mit" {
+		t.Errorf("repocard.Parse read license = %v from the CLI's output, want mit", card.Data["license"])
+	}
+	if tags := card.Tags(); len(tags) != 1 || tags[0] != "a" {
+		t.Errorf("repocard.Parse read tags = %v, want [a] (the original tag was lost)", tags)
 	}
 }
 

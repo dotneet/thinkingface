@@ -1,6 +1,6 @@
 "use client";
 
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LineChart } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
@@ -38,7 +38,7 @@ import {
   listRuns,
   updateRunAnnotations,
 } from "@/lib/experiments";
-import { metricsQueryKey } from "@/lib/experiments-query-keys";
+import { metricsQueryKey, metricsQueryKeyXMode } from "@/lib/experiments-query-keys";
 import { useT } from "@/lib/i18n/client";
 import { splitRunConfig } from "@/lib/run-config";
 import type { ExpRun, ExpRunAnnotationRequest } from "@/types/api";
@@ -158,13 +158,24 @@ export function RunDetail({
     // itself, everything else is a static page.
     refetchInterval: isLiveRun(run) ? LIVE_REFRESH_INTERVAL_MS : false,
     refetchIntervalInBackground: false,
-    // Keep the previous x mode's series on screen while the new one loads,
-    // rather than unmounting every chart down to MetricsChartsSkeleton on a
-    // step/time toggle — the same reasoning as the dashboard's identical
-    // query (experiment-dashboard.tsx), and DESIGN.md §4 (Skeleton is for
-    // first paint; the toolbar's `fetching={metrics.isFetching}` spinner
-    // below already covers an in-place refresh).
-    placeholderData: keepPreviousData,
+    // Keep the previous response on screen while the new one loads, rather
+    // than unmounting every chart down to MetricsChartsSkeleton on a live
+    // refetch — the same reasoning as the dashboard's identical query
+    // (experiment-dashboard.tsx), and DESIGN.md §4 (Skeleton is for first
+    // paint; the toolbar's `fetching={metrics.isFetching}` spinner below
+    // already covers an in-place refresh).
+    //
+    // Restricted to a placeholder fetched under the *same* x-mode: `xIsTime`
+    // below switches immediately with `options.xMode` on a step/time toggle,
+    // so a plain `keepPreviousData` would plot the other mode's series —
+    // step numbers on a time axis, or vice versa — until the new response
+    // for the new mode lands.
+    placeholderData: (previousData, previousQuery) => {
+      if (!previousQuery) return previousData;
+      return metricsQueryKeyXMode(previousQuery.queryKey) === options.xMode
+        ? previousData
+        : undefined;
+    },
   });
 
   const config = useMemo(() => splitRunConfig(run?.config), [run]);

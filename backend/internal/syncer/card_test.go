@@ -111,6 +111,41 @@ func TestPush_UnreadableReadmeKeepsTheExistingCard(t *testing.T) {
 	}
 }
 
+// A README bigger than the read limit whose front matter is HuggingFace's
+// explicitly-empty block ("---\n---") used to be treated as unclosed:
+// frontMatterUnclosed re-implemented the closing-line search instead of
+// calling repocard.ClosingFence, and its ad hoc `strings.Contains(rest,
+// "\n---")` missed a fence that starts on the very first line of rest, which
+// has no leading "\n" of its own inside rest. The stale-card fallback then
+// kept the previous push's card instead of the empty one this README actually
+// declares.
+func TestPush_LargeReadmeWithEmptyFrontMatterClosesImmediately(t *testing.T) {
+	f := newPushFixture(t)
+
+	f.push("main", addOp("README.md", cardFrontMatter+"# small\n"))
+	before := f.repoRow(t)
+	if before.Card["license"] != "mit" {
+		t.Fatalf("card = %#v, want the front matter indexed", before.Card)
+	}
+
+	body := strings.Repeat("| bench | 0.9 |\n", 30000)
+	if len(body) < maxReadmeBytes {
+		t.Fatalf("test body is %d bytes, which does not exceed the %d byte limit", len(body), maxReadmeBytes)
+	}
+	f.push("main", addOp("README.md", "---\n---\n"+body))
+
+	after := f.repoRow(t)
+	if len(after.Card) != 0 {
+		t.Errorf("card = %#v, want it emptied by the explicitly-empty front matter, not kept stale", after.Card)
+	}
+	if raws := f.lineageRaws(t); len(raws) != 0 {
+		t.Errorf("lineage = %v, want the base_model edge dropped along with the rest of the card", raws)
+	}
+	if after.HeadSHA == before.HeadSHA {
+		t.Error("head_sha did not advance; the push itself must still be recorded")
+	}
+}
+
 // The fallback must not become "the card can never be cleared": a README that
 // really was deleted, or really did lose its front matter, still empties the
 // index.
@@ -141,6 +176,17 @@ func TestFrontMatterUnclosed(t *testing.T) {
 		{"open", "---\nlicense: mit\n", true},
 		{"empty", "", false},
 		{"delimiter only", "---\n", true},
+		// HuggingFace's explicitly-empty front matter: the closing fence is
+		// the very first line after the opening one, with no blank line of
+		// its own before it. repocard.ClosingFence finds this; a bare
+		// strings.Contains(rest, "\n---") search never could.
+		{"empty block closes immediately", "---\n---\nbody\n", false},
+		{"empty block with no trailing newline still closes", "---\n---", false},
+		// SplitFrontMatter's own tolerance: a leading BOM or blank lines
+		// before the opening fence still count as opening one.
+		{"leading blank lines before closed", "\n\n---\nlicense: mit\n---\nbody\n", false},
+		{"leading blank lines before unclosed", "\n\n---\nlicense: mit\n", true},
+		{"leading BOM before closed", "\uFEFF---\nlicense: mit\n---\nbody\n", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

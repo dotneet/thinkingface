@@ -35,8 +35,12 @@ var reservedNamespaceNames = map[string]bool{
 	"raw": true, "resolve": true, "lfs": true, "info": true, "git": true,
 	"webhooks": true, "transfers": true, "me": true, "whoami-v2": true,
 	// Frontend-only assets and routes (docs/dev/namespace-design.md §9).
+	// icon.svg is a Next.js file convention (frontend/app/icon.svg) that
+	// serves /icon.svg the same way favicon.ico above serves /favicon.ico --
+	// kept in step with frontend/lib/validation.ts's RESERVED_NAMESPACE_NAMES.
 	"favicon.ico": true, "robots.txt": true, "sitemap.xml": true, "duckdb": true,
-	"public": true, "users": true, "namespaces": true, "profile": true, "search": true,
+	"icon.svg": true,
+	"public":   true, "users": true, "namespaces": true, "profile": true, "search": true,
 }
 
 // validateNamespaceName is validateName plus the reserved list. It guards the

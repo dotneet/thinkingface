@@ -4,6 +4,7 @@ import (
 	"bytes"
 
 	"github.com/parquet-go/parquet-go"
+	"github.com/parquet-go/parquet-go/format"
 )
 
 // Predicate restricts one top-level column so Scan can skip whole row groups
@@ -48,8 +49,23 @@ type resolvedPredicate struct {
 	chunkIndex int
 	kind       parquet.Kind
 	typ        parquet.Type
+	unsigned   bool     // INT(32,false)/INT(64,false), incl. legacy UINT_8/16/32/64
 	anyOf      [][]byte // sorted-irrelevant; compared against [min,max]
 	min, max   *int64
+}
+
+// isUnsignedInt reports whether typ carries the INT logical type with
+// IsSigned false -- what parquet-go maps both a genuine INT(n,false)
+// annotation and the legacy UINT_8/16/32/64 converted types onto (see
+// intType.LogicalType in parquet-go). Everything else, including a plain
+// INT32/INT64 with no annotation, is treated as signed.
+func isUnsignedInt(typ parquet.Type) bool {
+	lt := typ.LogicalType()
+	if lt == nil {
+		return false
+	}
+	it, ok := lt.Value.(*format.IntType)
+	return ok && !it.IsSigned
 }
 
 // resolvePredicates binds preds to pf's schema, dropping the ones that cannot
@@ -86,6 +102,7 @@ func resolvePredicates(pf *parquet.File, preds []Predicate) []resolvedPredicate 
 				continue
 			}
 			rp.min, rp.max = p.Min, p.Max
+			rp.unsigned = isUnsignedInt(typ)
 		default:
 			continue
 		}
@@ -166,12 +183,36 @@ func (p resolvedPredicate) overlaps(lo, hi parquet.Value) bool {
 		}
 		return false
 	case parquet.Int32:
+		if p.unsigned {
+			return uintRangeOverlaps(uint64(uint32(lo.Int32())), uint64(uint32(hi.Int32())), p.min, p.max)
+		}
 		return intRangeOverlaps(int64(lo.Int32()), int64(hi.Int32()), p.min, p.max)
 	case parquet.Int64:
+		if p.unsigned {
+			return uintRangeOverlaps(uint64(lo.Int64()), uint64(hi.Int64()), p.min, p.max)
+		}
 		return intRangeOverlaps(lo.Int64(), hi.Int64(), p.min, p.max)
 	default:
 		return true
 	}
+}
+
+// uintRangeOverlaps is intRangeOverlaps for a column whose logical type is
+// unsigned. lo/hi come from the row group's statistics reinterpreted as
+// unsigned (see the overlaps cases above); min/max are the predicate's bounds,
+// still *int64 as the Predicate type declares them. A negative bound can never
+// match an unsigned column: Max<0 rejects every row, Min<0 restricts nothing
+// (every unsigned value already satisfies "at least a negative number").
+func uintRangeOverlaps(lo, hi uint64, min, max *int64) bool {
+	if max != nil {
+		if *max < 0 || lo > uint64(*max) {
+			return false
+		}
+	}
+	if min != nil && *min > 0 && hi < uint64(*min) {
+		return false
+	}
+	return true
 }
 
 func intRangeOverlaps(lo, hi int64, min, max *int64) bool {

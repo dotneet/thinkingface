@@ -3,6 +3,9 @@ package wal
 import (
 	"bufio"
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/dotneet/thinkingface/backend/internal/storage"
 )
@@ -65,11 +68,35 @@ func AuthoritativePush(ctx context.Context, st storage.Storage, gitDir, storageP
 // index. The order is invariant 2 of §5 — the pack is fully durable before the
 // index names it — and it is enforced structurally here by UploadEntry
 // returning before UpdateIndex is called.
+//
+// The pack is a delta against the index read at the start (its refs are the
+// exclude set), so the CAS may only land on an index that still holds
+// everything that exclusion left out. UpdateIndex's retry loop re-checks the
+// refs being updated, but a concurrent ref deletion followed by a compaction
+// can drop an excluded object without touching any of them; packStillValid is
+// the extra precondition that catches it, and a failed one sends us back to
+// the top to re-plan and re-pack against the newer index. That is rare — it
+// needs a compaction inside one push's window — so rebuilding is simpler than
+// anything cleverer, and the orphaned first pack is collected by GC on age.
 func pushToIndex(ctx context.Context, st storage.Storage, gitDir, storagePath string, updates []RefUpdate, policy refPolicy) error {
 	if len(updates) == 0 {
 		return nil
 	}
 
+	for round := 0; round < maxCASAttempts; round++ {
+		err := pushOnce(ctx, st, gitDir, storagePath, updates, policy)
+		if !errors.Is(err, errBasisGone) {
+			return err
+		}
+	}
+	// Retryable, not stale: the update itself is still valid, the repository
+	// was merely compacting under every attempt.
+	return fmt.Errorf("%w: the index kept being compacted under the push (%d rounds)",
+		ErrRetryExhausted, maxCASAttempts)
+}
+
+// pushOnce is one round of pushToIndex against the index as read right now.
+func pushOnce(ctx context.Context, st storage.Storage, gitDir, storagePath string, updates []RefUpdate, policy refPolicy) error {
 	ix, _, err := ReadIndex(ctx, st, storagePath)
 	if err != nil {
 		return err
@@ -94,7 +121,61 @@ func pushToIndex(ctx context.Context, st storage.Storage, gitDir, storagePath st
 			return err
 		}
 	}
-	return UpdateIndex(ctx, st, storagePath, effective, entry)
+
+	var holds func(*Index) bool
+	if len(want) > 0 && len(exclude) > 0 {
+		// Only then did the WAL's existing contents stand in for any object:
+		// a pure deletion needs none, and an empty exclude set means the pack
+		// is self-contained. Note that an *empty* pack is the extreme case,
+		// not an exception — a ref moved onto an existing commit relies on the
+		// index for every object it names.
+		holds = packStillValid(ix, exclude)
+	}
+	return updateIndex(ctx, st, storagePath, effective, entry, holds)
+}
+
+// packStillValid reports whether an index still contains everything reachable
+// from exclude — what a pack built against basis left out. Either of two
+// conditions proves it, both resting on the rule that every published index
+// holds the full closure of its own refs:
+//
+//   - basis's base and entries are all still named (nothing compacted or
+//     re-seeded since; entries are only ever appended), so every object basis
+//     held is still there, whether or not its ref survived;
+//   - every excluded tip is still a ref value, so its closure is in the index
+//     by that rule even if the packs were rewritten — the common case of a
+//     compaction that leaves the refs alone, which must not cost a re-pack.
+//
+// Anything else (a compaction after a ref was deleted or moved away from an
+// excluded tip) may have dropped objects, and the pack has to be rebuilt.
+func packStillValid(basis *Index, exclude []string) func(*Index) bool {
+	return func(cur *Index) bool {
+		if cur.Base == basis.Base && hasPrefix(cur.Entries, basis.Entries) {
+			return true
+		}
+		tips := make(map[string]bool, len(cur.Refs))
+		for _, hash := range cur.Refs {
+			tips[strings.ToLower(hash)] = true
+		}
+		for _, hash := range exclude {
+			if !tips[strings.ToLower(hash)] {
+				return false
+			}
+		}
+		return true
+	}
+}
+
+func hasPrefix(entries, prefix []string) bool {
+	if len(prefix) > len(entries) {
+		return false
+	}
+	for i, e := range prefix {
+		if entries[i] != e {
+			return false
+		}
+	}
+	return true
 }
 
 // plannedUpdates rewrites the incoming updates according to policy and collects

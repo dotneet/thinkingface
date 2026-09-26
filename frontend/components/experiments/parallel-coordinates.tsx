@@ -198,7 +198,7 @@ export function ParallelCoordinates({
                   // no keyboard can reach, and the legend gives every run a
                   // focusable chip that highlights and pins the same way.
                   className="transition-[stroke-width] hover:[stroke-width:3.5]"
-                  d={linePath(line, shown.length, WIDTH, HEIGHT, PAD_X)}
+                  d={linePath(line, shown.length, WIDTH, HEIGHT, PAD_X, PAD_Y)}
                   fill="none"
                   stroke={colorForRun(colorIndex.get(line.run) ?? -1)}
                   strokeWidth={active === line.run ? 3.5 : line.run === baseline ? 2.5 : 1.75}

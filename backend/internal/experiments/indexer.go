@@ -82,7 +82,7 @@ func (ix *Indexer) indexProject(ctx context.Context, repo *store.Repo, gitRepo *
 	// sees -- and layout.MetricsFiles is what guarantees it is chronological.
 	for _, metricsPath := range layout.MetricsFiles() {
 		err := ix.scanMetricRows(ctx, repo, gitRepo, repo.DefaultBranch, metricsPath, viewer.ScanRequest{},
-			func(run string, row map[string]any, cols map[string]bool) error {
+			func(run string, row map[string]any) error {
 				agg, ok := aggregates[run]
 				if !ok {
 					agg = &runAggregate{lastValues: map[string]float64{}, keys: map[string]bool{}}
@@ -90,16 +90,12 @@ func (ix *Indexer) indexProject(ctx context.Context, repo *store.Repo, gitRepo *
 				}
 				agg.numPoints++
 
-				if stepCol := stepColumn(cols); stepCol != "" {
-					if step, ok := toInt(row[stepCol]); ok && step > agg.lastStep {
-						agg.lastStep = step
-					}
+				if step, ok := rowStep(row); ok && step > agg.lastStep {
+					agg.lastStep = step
 				}
-				if tsCol := timeColumn(cols); tsCol != "" {
-					if ts, ok := toTime(row[tsCol]); ok {
-						if agg.firstTS.IsZero() || ts.Before(agg.firstTS) {
-							agg.firstTS = ts
-						}
+				if ts, ok := rowTime(row); ok {
+					if agg.firstTS.IsZero() || ts.Before(agg.firstTS) {
+						agg.firstTS = ts
 					}
 				}
 				forEachMetricValue(row, "", func(name string, v float64) {
@@ -195,7 +191,7 @@ func (ix *Indexer) indexSystemMetrics(ctx context.Context, gitRepo *gitrepo.Repo
 		return
 	}
 	err := ix.scanMetricRows(ctx, repo, gitRepo, repo.DefaultBranch, layout.SystemMetricsPath, viewer.ScanRequest{},
-		func(run string, row map[string]any, _ map[string]bool) error {
+		func(run string, row map[string]any) error {
 			agg, ok := aggregates[run]
 			if !ok {
 				return nil
@@ -214,9 +210,9 @@ func (ix *Indexer) indexSystemMetrics(ctx context.Context, gitRepo *gitrepo.Repo
 
 // scanMetricRows resolves one metrics-shaped parquet inside the repository and
 // calls fn once per row that names a run. Both the indexer and the series
-// reader start from exactly this -- resolve the blob, scan it, find the run
-// column, skip rows that have none -- and differ only in what they do with the
-// row afterwards.
+// reader start from exactly this -- resolve the blob, scan it, find the row's
+// run (rowRun), skip rows that have none -- and differ only in what they do
+// with the row afterwards.
 //
 // scan narrows what has to be decoded: its Columns keep a single-metric chart
 // from paying for every other metric's column (Series sets them from
@@ -225,23 +221,18 @@ func (ix *Indexer) indexSystemMetrics(ctx context.Context, gitRepo *gitrepo.Repo
 // would reject still reach fn, and IndexRepo passes the zero value because it
 // aggregates every run and every metric a project has.
 func (ix *Indexer) scanMetricRows(ctx context.Context, repo *store.Repo, gitRepo *gitrepo.Repo, rev, filePath string,
-	scan viewer.ScanRequest, fn func(run string, row map[string]any, cols map[string]bool) error) error {
+	scan viewer.ScanRequest, fn func(run string, row map[string]any) error) error {
 
 	key, err := ix.objectKey(ctx, repo, gitRepo, rev, filePath)
 	if err != nil {
 		return fmt.Errorf("locate %s: %w", filePath, err)
 	}
 	err = ix.viewer.Scan(ctx, key, scan, func(row map[string]any) error {
-		cols := columnSet(row)
-		runCol := runColumn(cols)
-		if runCol == "" {
-			return nil
-		}
-		run := toString(row[runCol])
+		run := rowRun(row)
 		if run == "" {
 			return nil
 		}
-		return fn(run, row, cols)
+		return fn(run, row)
 	})
 	if err != nil {
 		return fmt.Errorf("scan %s: %w", filePath, err)
@@ -275,11 +266,7 @@ func (ix *Indexer) readConfigs(ctx context.Context, repo *store.Repo, gitRepo *g
 		return out
 	}
 	err = ix.viewer.Scan(ctx, key, viewer.ScanRequest{}, func(row map[string]any) error {
-		runCol := runColumn(columnSet(row))
-		if runCol == "" {
-			return nil
-		}
-		run := toString(row[runCol])
+		run := rowRun(row)
 		if run == "" {
 			return nil
 		}
@@ -340,14 +327,6 @@ func objectKeyFor(ctx context.Context, db lfsOwnership, obj storage.Storage, rep
 
 // ------------------------------------------------------------ value coercion
 
-func columnSet(row map[string]any) map[string]bool {
-	cols := make(map[string]bool, len(row))
-	for k := range row {
-		cols[k] = true
-	}
-	return cols
-}
-
 func toString(v any) string {
 	switch t := v.(type) {
 	case string:
@@ -365,6 +344,18 @@ func toInt(v any) (int64, bool) {
 		return t, true
 	case int:
 		return int64(t), true
+	case uint64:
+		// The viewer returns every cell of an INT(64,false) column as a Go
+		// uint64 (viewer/convert.go's unsignedIntValue and normalizeGeneric
+		// both widen to this one type, never uint32/uint -- see their
+		// comments), since a uint64 can exceed math.MaxInt64. Anything within
+		// int64's range converts losslessly; anything past it is rejected
+		// rather than silently wrapping negative, the same as every other
+		// unconvertible value below.
+		if t > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(t), true
 	case float64:
 		if math.IsNaN(t) || math.IsInf(t, 0) {
 			return 0, false
@@ -373,6 +364,36 @@ func toInt(v any) (int64, bool) {
 	case string:
 		n, err := strconv.ParseInt(t, 10, 64)
 		return n, err == nil
+	default:
+		return 0, false
+	}
+}
+
+// toUint64 accepts the value shapes a UINT64 metrics-parquet column can hold:
+// the viewer's own uint64 for a cell read back out of the file, or the
+// int64/int/float64 a new point supplies before it is written. Nothing in
+// this package produces a negative value for such a column on purpose, so one
+// found here is rejected rather than reinterpreted; the caller (flushColumn.
+// encode) turns that into a null cell like every other unconvertible value.
+func toUint64(v any) (uint64, bool) {
+	switch t := v.(type) {
+	case uint64:
+		return t, true
+	case int64:
+		if t < 0 {
+			return 0, false
+		}
+		return uint64(t), true
+	case int:
+		if t < 0 {
+			return 0, false
+		}
+		return uint64(t), true
+	case float64:
+		if math.IsNaN(t) || math.IsInf(t, 0) || t < 0 || t > math.MaxUint64 {
+			return 0, false
+		}
+		return uint64(t), true
 	default:
 		return 0, false
 	}
@@ -392,6 +413,12 @@ func toFloat(v any) (float64, bool) {
 	case int64:
 		return float64(t), true
 	case int:
+		return float64(t), true
+	case uint64:
+		// Mirrors the int64 case above: float64 cannot represent every value
+		// past 2^53 exactly, which is the same precision limit an int64 this
+		// large already has here. See toInt for why uint64 is the only
+		// unsigned Go type this package ever sees.
 		return float64(t), true
 	case bool:
 		if t {

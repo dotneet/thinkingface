@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { apiFetch, isRepoMoved } from "@/lib/api";
+import { apiFetch, isRepoMoved, isRevisionNotFound } from "@/lib/api";
 
 // buildUrl is not exported, so it is exercised indirectly through apiFetch,
 // with global fetch mocked to capture the URL it was actually called with.
@@ -16,14 +16,18 @@ function mockFetchOnce(): { calls: string[] } {
   return { calls };
 }
 
-function mockFetchResponse(status: number, body: unknown): void {
+function mockFetchResponse(
+  status: number,
+  body: unknown,
+  extraHeaders: Record<string, string> = {},
+): void {
   vi.stubGlobal(
     "fetch",
     vi.fn(
       async () =>
         new Response(JSON.stringify(body), {
           status,
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...extraHeaders },
         }),
     ),
   );
@@ -159,5 +163,48 @@ describe("apiFetch error type handling", () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected a failure result");
     expect(result.type).toBeUndefined();
+  });
+});
+
+// The UI-facing tree/commits endpoints answer an unresolvable revision with a
+// plain 404 `{"error":{"type":"not_found"}}` -- the same body a missing path
+// at a *resolvable* revision gets -- and rely on the `X-Error-Code:
+// RevisionNotFound` header (backend/internal/api/refs.go) to tell the two
+// apart. RepoTree / RepoBlob / RepoCommits route on isRevisionNotFound()
+// rather than a plain isNotFound() so a deleted branch reaches its own error
+// state instead of a bare Next.js 404.
+describe("apiFetch RevisionNotFound handling", () => {
+  it("surfaces the X-Error-Code header as result.code", async () => {
+    mockFetchResponse(
+      404,
+      { error: { type: "not_found", message: "revision deleted-branch not found in acme/bert" } },
+      { "X-Error-Code": "RevisionNotFound" },
+    );
+    const result = await apiFetch("/api/v1/repos/model/acme/bert/tree/deleted-branch");
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a failure result");
+    expect(result.code).toBe("RevisionNotFound");
+    expect(isRevisionNotFound(result)).toBe(true);
+  });
+
+  it("leaves code undefined, and isRevisionNotFound false, for an ordinary 404", async () => {
+    mockFetchResponse(404, { error: { type: "not_found", message: "path not found" } });
+    const result = await apiFetch("/api/v1/repos/model/acme/bert/tree/main/no-such-dir");
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a failure result");
+    expect(result.code).toBeUndefined();
+    expect(isRevisionNotFound(result)).toBe(false);
+  });
+
+  it("does not flag a non-404 error even if it somehow carries the header", async () => {
+    mockFetchResponse(
+      409,
+      { error: { type: "conflict", message: "nope" } },
+      { "X-Error-Code": "RevisionNotFound" },
+    );
+    const result = await apiFetch("/api/v1/repos/model/acme/bert/refs/branches/main");
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a failure result");
+    expect(isRevisionNotFound(result)).toBe(false);
   });
 });

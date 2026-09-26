@@ -76,6 +76,15 @@ temporarily unreachable server does not abort a training run. The one
 exception is ``resume="must"``, which cannot be honoured without reaching
 the server and so raises rather than silently starting from zero.
 
+``finish()`` is the exception to "next flush attempt": there is no next one,
+since the background timer is being cancelled for good. It retries its own
+final flush a few times with a short backoff before giving up, and only then
+warns (loudly, with a count) that undelivered points are being dropped --
+never leaving them to sit silently in a buffer nothing will ever flush again.
+It also never posts ``/finish`` while a ``/log`` for the same run could still
+be in flight, so a finished run's status can't be flipped back to running by
+a stray late point.
+
 .. _trackio: https://github.com/gradio-app/trackio
 """
 
@@ -130,6 +139,14 @@ _MAX_GROUPING_BYTES = 256
 # the identical exception forever. A malformed URL (MissingSchema / InvalidURL,
 # both ValueError subclasses) is in the same category.
 _ENCODE_ERRORS = (requests.exceptions.InvalidJSONError, TypeError, ValueError)
+# finish() cannot rely on "the next flush" the way the timer-driven path can --
+# it is about to cancel the timer for good -- so a retryable failure (5xx /
+# network) on its own flush() gets a few more tries of its own, each a little
+# further apart, before the run's final batch is given up on. Kept small: a
+# training script calling finish() is waiting on this to return.
+_FINISH_FLUSH_ATTEMPTS = 4
+_FINISH_FLUSH_BACKOFF_SECONDS = 0.5
+_FINISH_FLUSH_MAX_BACKOFF_SECONDS = 2.0
 
 __all__ = ["init", "log", "log_artifact", "log_model", "finish"]
 
@@ -250,6 +267,15 @@ class _Run:
 
         self._buffer: list[dict[str, Any]] = []
         self._lock = threading.Lock()
+        # Serializes the actual network calls (flush()'s POST /log and
+        # finish()'s POST /finish) across threads -- the background timer and
+        # a caller's finish() can otherwise both be mid-request at once. Kept
+        # separate from _lock (which only ever guards in-memory buffer state
+        # and is held very briefly) so a send in flight never makes an
+        # ordinary log() wait; only a log() that fills the buffer and flushes
+        # inline queues behind it. Lock order is always _send_lock -> _lock.
+        # See flush() and finish() for why the ordering this buys matters.
+        self._send_lock = threading.Lock()
         self._finished = False
         # Every distinct metric name this run has logged. The server keeps a
         # run's keys forever and refuses a batch once there are more than
@@ -445,16 +471,32 @@ class _Run:
         return True
 
     def flush(self) -> None:
-        with self._lock:
-            if not self._buffer:
-                return
-            # Settle the config before the buffer is drained: _config_to_send
-            # reads values the caller owns, and anything raised after the drain
-            # would strand points that are no longer in _buffer and not yet
-            # requeued.
-            config = self._config_to_send()
-            points, self._buffer = self._buffer, []
-        self._send(points, config)
+        # _send_lock serializes this against any other flush() (the timer
+        # thread's and finish()'s own) and against finish()'s POST /finish, so
+        # only one HTTP request for this run is ever in flight at a time. That
+        # is what stops a slow /log POST the timer already started from
+        # landing at the server *after* finish()'s /finish -- which would
+        # flip a finished run's status back to "running", since the ingest
+        # upsert applies "status": "running" from every /log unconditionally.
+        #
+        # It is taken *before* the buffer is drained, not just around the
+        # send. Draining first left a window where the buffer was empty while
+        # its points were still on the wire: finish() saw nothing to flush,
+        # and if that send then failed, _requeue() put the points back after
+        # finish() had already given up on them. Holding _send_lock across
+        # the drain means an empty buffer really does mean "nothing unsent".
+        # Lock order is always _send_lock -> _lock.
+        with self._send_lock:
+            with self._lock:
+                if not self._buffer:
+                    return
+                # Settle the config before the buffer is drained:
+                # _config_to_send reads values the caller owns, and anything
+                # raised after the drain would strand points that are no longer
+                # in _buffer and not yet requeued.
+                config = self._config_to_send()
+                points, self._buffer = self._buffer, []
+            self._send(points, config)
 
     def _send(self, points: list[dict[str, Any]], config: dict[str, Any] | None) -> None:
         """POST ``points`` in batches the server will accept.
@@ -739,10 +781,62 @@ class _Run:
                 f"model(s) for run {self.name!r} ({exc!r})."
             )
 
+    def _has_buffered_points(self) -> bool:
+        with self._lock:
+            return bool(self._buffer)
+
+    def _give_up_and_drop_buffer(self) -> int:
+        """Clear the buffer and report how many points were left in it.
+
+        Called only once finish()'s retry budget (_drain_for_finish) is
+        exhausted. Clearing rather than leaving the points in place keeps the
+        warning below honest: without this, a stray timer tick racing in
+        after finish() has already given up (see the module-level race note
+        on _on_timer) could still find them and send them late, making
+        "dropped" a lie for whichever points that tick happened to catch.
+        """
+        with self._lock:
+            dropped = len(self._buffer)
+            self._buffer = []
+        return dropped
+
+    def _drain_for_finish(self) -> None:
+        """Flush the buffer for the last time, retrying if it does not empty.
+
+        flush() never raises and never tells its caller "sent" from "queued
+        for later": a retryable failure (5xx / network) requeues the points
+        and warns "will retry on next flush" -- true only while a timer is
+        still scheduled to call it again. finish() is about to cancel that
+        timer for good, so a single flush() call here is not enough: without
+        retrying, a transient failure at exactly this moment would silently
+        strand the run's final batch in memory, already having told the user
+        (via that same warning) that it would be retried.
+
+        Bounded to a handful of attempts a little further apart each time
+        (_FINISH_FLUSH_ATTEMPTS), not an unbounded loop: finish() is a call a
+        training script is blocked on and must still return.
+        """
+        self.flush()
+        attempt = 1
+        backoff = _FINISH_FLUSH_BACKOFF_SECONDS
+        while self._has_buffered_points() and attempt < _FINISH_FLUSH_ATTEMPTS:
+            time.sleep(backoff)
+            backoff = min(backoff * 2, _FINISH_FLUSH_MAX_BACKOFF_SECONDS)
+            self.flush()
+            attempt += 1
+        if self._has_buffered_points():
+            dropped = self._give_up_and_drop_buffer()
+            warnings.warn(
+                f"thinkingface.trackio: giving up after {attempt} attempt(s) to "
+                f"flush run {self.name!r}: {dropped} point(s) were never "
+                "delivered to the server and are being dropped now that the run "
+                "is finishing."
+            )
+
     def finish(self, status: str = "finished") -> None:
         if self._finished:
             return
-        self.flush()
+        self._drain_for_finish()
         self._finished = True
         if self._timer is not None:
             self._timer.cancel()
@@ -754,18 +848,24 @@ class _Run:
             finish_payload["group"] = self.group
         if self.job_type:
             finish_payload["job_type"] = self.job_type
-        try:
-            resp = requests.post(
-                self._finish_url,
-                json=finish_payload,
-                headers=self._headers(),
-                timeout=_REQUEST_TIMEOUT_SECONDS,
-            )
-            resp.raise_for_status()
-        except Exception as exc:  # network failures must never raise
-            warnings.warn(
-                f"thinkingface.trackio: failed to mark run {self.name!r} as {status!r} ({exc!r})."
-            )
+        # _send_lock: see flush() for why /finish must never be in flight at
+        # the same time as a /log POST for this run -- it waits here for a
+        # flush _drain_for_finish already triggered (or one the timer started
+        # independently) to land before this run's status is set for the
+        # last time.
+        with self._send_lock:
+            try:
+                resp = requests.post(
+                    self._finish_url,
+                    json=finish_payload,
+                    headers=self._headers(),
+                    timeout=_REQUEST_TIMEOUT_SECONDS,
+                )
+                resp.raise_for_status()
+            except Exception as exc:  # network failures must never raise
+                warnings.warn(
+                    f"thinkingface.trackio: failed to mark run {self.name!r} as {status!r} ({exc!r})."
+                )
         # After the finish call: that is what guarantees the run row exists,
         # since a run that logged no points at all is created there.
         self._sync_models()

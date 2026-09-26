@@ -117,13 +117,15 @@ func TestBuildRepoWhereSQLiteDialect(t *testing.T) {
 	for _, want := range []string{
 		`r.id IN (SELECT rowid FROM repositories_fts WHERE repositories_fts MATCH $1)`,
 		`json_type(r.card, '$.tags') = 'array'`,
-		`EXISTS (SELECT 1 FROM json_each(r.card, '$.tags') WHERE value = $2)`,
-		`EXISTS (SELECT 1 FROM json_each(r.card, '$.tags') WHERE value = $3)`,
+		// Array elements compare as text too (jsonEachText), the same text
+		// the tag and task facets group by.
+		`EXISTS (SELECT 1 FROM json_each(r.card, '$.tags') e WHERE ` + jsonEachText("e") + ` = $2)`,
+		`EXISTS (SELECT 1 FROM json_each(r.card, '$.tags') e WHERE ` + jsonEachText("e") + ` = $3)`,
 		// The scalar comparisons go through jsonScalarText, so a card whose
 		// license or pipeline_tag decoded to a number or a boolean is still
 		// compared as the text Postgres would have produced.
 		`CAST(r.card->>'license' AS TEXT) END) = $4`,
-		`CAST(r.card->>'pipeline_tag' AS TEXT) END) = $5 OR EXISTS (SELECT 1 FROM json_each(r.card, '$.task_categories') WHERE value = $5)`,
+		`CAST(r.card->>'pipeline_tag' AS TEXT) END) = $5 OR EXISTS (SELECT 1 FROM json_each(r.card, '$.task_categories') e WHERE ` + jsonEachText("e") + ` = $5)`,
 	} {
 		if !strings.Contains(clause, want) {
 			t.Errorf("clause %q does not contain %q", clause, want)

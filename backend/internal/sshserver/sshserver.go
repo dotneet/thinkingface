@@ -114,7 +114,19 @@ const (
 	// ctxKeyConnSlot carries the connection's gate slot so authentication can
 	// hand it back the moment the peer stops being unauthenticated.
 	ctxKeyConnSlot contextKey = "thinkingface.conn_slot"
+	// ctxKeyCandidate carries what authenticate resolved for the key it last
+	// accepted, from the moment the key is looked up to the moment the client
+	// proves it holds the private half (see verified).
+	ctxKeyCandidate contextKey = "thinkingface.auth_candidate"
 )
+
+// authCandidate is a key authenticate accepted but that nobody has yet proved
+// possession of.
+type authCandidate struct {
+	key   gossh.PublicKey
+	user  *store.User
+	keyID int64
+}
 
 func New(opts Options, keys Keys, git Git) (*Server, error) {
 	hostKey, err := LoadOrCreateHostKey(opts.HostKeyPath)
@@ -141,6 +153,19 @@ func New(opts Options, keys Keys, git Git) (*Server, error) {
 		ConnCallback: s.admit,
 
 		PublicKeyHandler: s.authenticate,
+		// authenticate answers "would this key do?", which x/crypto also asks
+		// for signature-less probes; verified runs only once a signature over
+		// the session has checked out. Everything that must wait for a real
+		// authentication hangs off the second hook, not the first.
+		ServerConfigCallback: func(ctx gssh.Context) *gossh.ServerConfig {
+			return &gossh.ServerConfig{
+				VerifiedPublicKeyCallback: func(_ gossh.ConnMetadata, key gossh.PublicKey,
+					perms *gossh.Permissions, _ string,
+				) (*gossh.Permissions, error) {
+					return perms, s.verified(ctx, key)
+				},
+			}
+		},
 		// No PasswordHandler and no KeyboardInteractiveHandler: with
 		// PublicKeyHandler set, gliderlabs offers publickey alone.
 
@@ -201,7 +226,17 @@ func (s *Server) admit(ctx gssh.Context, conn net.Conn) net.Conn {
 // ErrServerClosed is returned by ListenAndServe after Shutdown.
 var ErrServerClosed = gssh.ErrServerClosed
 
-// authenticate resolves the offered key to a user.
+// authenticate resolves the offered key to a user. It decides whether a key
+// is acceptable; it does not mean the peer is authenticated.
+//
+// x/crypto calls this for public key *queries* too — the signature-less "would
+// you accept this key?" probe a client sends before signing — so a true here
+// only says the key is registered. Public keys are public (anybody can read
+// github.com/<user>.keys), so nothing that belongs to an authenticated peer may
+// happen here: releasing the connection's gate slot or forgiving the address's
+// failures on a probe would let anybody holding a copy of a registered public
+// key walk straight past MaxUnauthenticatedConns and the auth budget. Those,
+// and the identity the session handler trusts, are applied in verified.
 //
 // The fingerprint is only an index: the stored key material is re-parsed and
 // compared byte for byte, so authentication never rests on a digest alone.
@@ -245,17 +280,41 @@ func (s *Server) authenticate(ctx gssh.Context, offered gssh.PublicKey) bool {
 		return false
 	}
 
+	// Acceptable, not yet authenticated: remember who this key belongs to
+	// so verified can act on it once the client signs with it.
+	ctx.SetValue(ctxKeyCandidate, &authCandidate{key: offered, user: user, keyID: key.ID})
+	return true
+}
+
+// verified runs once x/crypto has checked the client's signature with a key
+// authenticate accepted — the point where the peer has actually proved who it
+// is, and the only point where it stops being unauthenticated.
+//
+// The candidate is matched against the key that signed rather than assumed to
+// be it: a client may probe several keys before signing with one, and the
+// identity handed to the session must be the signing key's.
+func (s *Server) verified(ctx gssh.Context, signed gossh.PublicKey) error {
+	candidate, _ := ctx.Value(ctxKeyCandidate).(*authCandidate)
+	if candidate == nil || !gssh.KeysEqual(candidate.key, signed) {
+		// Unreachable with x/crypto's current one-entry key cache, which
+		// re-runs authenticate for whichever key signs; fail closed if that
+		// ever changes rather than trust a stale candidate.
+		slog.Error("ssh: signature verified for a key authenticate did not accept last",
+			"fingerprint", auth.SSHKeyFingerprint(signed))
+		return errors.New("ssh: authentication state mismatch")
+	}
+
 	// Authenticated: forget the address's failures (an agent that walked
 	// through three keys first must leave no mark) and hand back the
 	// unauthenticated-connection slot, so a long clone never occupies one.
-	s.budget.reset(addr)
+	s.budget.reset(addrKey(ctx.RemoteAddr()))
 	if slot, ok := ctx.Value(ctxKeyConnSlot).(*connSlot); ok {
 		slot.release()
 	}
 
-	ctx.SetValue(ctxKeyUser, user)
-	ctx.SetValue(ctxKeyKeyID, key.ID)
-	return true
+	ctx.SetValue(ctxKeyUser, candidate.user)
+	ctx.SetValue(ctxKeyKeyID, candidate.keyID)
+	return nil
 }
 
 // recordKeyUse stamps a key's last-used time without making the client wait.

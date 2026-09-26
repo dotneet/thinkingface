@@ -351,3 +351,114 @@ func TestIntegrationTransferListingIsCapped(t *testing.T) {
 		}
 	})
 }
+
+// A pending request carries the requester's authority over the source
+// namespace for up to a week, and the accept path used to check only the
+// accepter's side. So an organisation admin could file acme/x -> an outsider,
+// be removed from acme (or suspended), and have the outsider accept it
+// afterwards. Accept re-reads the requester's standing under the move's own
+// locks: a requester who could no longer file the request voids it, and an
+// archive made since refuses it without voiding.
+func TestIntegrationAcceptRechecksTheRequestersAuthority(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+		bobNS := f.ns(t, "bob")
+
+		// acme has two admins so one can be removed (ErrLastAdmin otherwise).
+		acme, err := s.CreateOrg(ctx, "acme", f.admin.ID, OrgUpdate{})
+		if err != nil {
+			t.Fatalf("CreateOrg: %v", err)
+		}
+		if _, err := s.AddOrgMember(ctx, acme.ID, f.alice.ID, "admin", f.admin.ID); err != nil {
+			t.Fatalf("AddOrgMember: %v", err)
+		}
+
+		file := func(ns, name string, requester *User) (*Repo, *RepoTransfer) {
+			t.Helper()
+			r := f.repo(t, ns, name, "model", nil)
+			tr, err := s.CreateRepoTransfer(ctx, TransferSpec{RepoID: r.ID, ToNamespaceID: bobNS.ID, ActorID: requester.ID}, time.Hour)
+			if err != nil {
+				t.Fatalf("CreateRepoTransfer(%s): %v", name, err)
+			}
+			return r, tr
+		}
+		assertVoided := func(r *Repo, tr *RepoTransfer) {
+			t.Helper()
+			if _, err := s.AcceptRepoTransfer(ctx, tr.ID, f.bob.ID); !errors.Is(err, ErrTransferNotPending) {
+				t.Fatalf("AcceptRepoTransfer = %v, want ErrTransferNotPending", err)
+			}
+			got, err := s.GetRepoTransfer(ctx, tr.ID)
+			if err != nil {
+				t.Fatalf("GetRepoTransfer: %v", err)
+			}
+			if got.Status != "cancelled" {
+				t.Errorf("status = %q, want cancelled", got.Status)
+			}
+			if back, err := s.GetRepoByID(ctx, r.ID); err != nil || back.Namespace != r.Namespace {
+				t.Fatalf("repository = %+v, %v; want it still in acme", back, err)
+			}
+		}
+
+		// Removed from the source organisation.
+		r1, t1 := file("acme", "crown-jewels", f.alice)
+		if err := s.RemoveOrgMember(ctx, acme.ID, f.alice.ID); err != nil {
+			t.Fatalf("RemoveOrgMember: %v", err)
+		}
+		assertVoided(r1, t1)
+
+		// Demoted to write: still a member, no longer allowed to transfer out.
+		if _, err := s.AddOrgMember(ctx, acme.ID, f.alice.ID, "admin", f.admin.ID); err != nil {
+			t.Fatalf("re-add alice: %v", err)
+		}
+		r2, t2 := file("acme", "demoted", f.alice)
+		if _, err := s.UpdateOrgMemberRole(ctx, acme.ID, f.alice.ID, "write"); err != nil {
+			t.Fatalf("UpdateOrgMemberRole: %v", err)
+		}
+		assertVoided(r2, t2)
+
+		// Suspended while still an admin.
+		if _, err := s.UpdateOrgMemberRole(ctx, acme.ID, f.alice.ID, "admin"); err != nil {
+			t.Fatalf("restore admin: %v", err)
+		}
+		r3, t3 := file("acme", "suspended", f.alice)
+		if err := s.SetUserDisabled(ctx, "alice", true, f.admin.ID); err != nil {
+			t.Fatalf("SetUserDisabled: %v", err)
+		}
+		assertVoided(r3, t3)
+
+		// Archived since: refused, but the request survives the archive. The
+		// requester is a site administrator holding no role in globex at all:
+		// api.roleIn makes them admin everywhere, and the accept path must
+		// agree with it.
+		carol, err := s.CreateUser(ctx, "carol", "carol@example.com", "hash", false)
+		if err != nil {
+			t.Fatalf("create carol: %v", err)
+		}
+		if _, err := s.CreateOrg(ctx, "globex", carol.ID, OrgUpdate{}); err != nil {
+			t.Fatalf("CreateOrg(globex): %v", err)
+		}
+		r4, t4 := file("globex", "archived", f.admin)
+		if _, err := s.SetRepoArchived(ctx, r4.ID, true, f.admin.ID); err != nil {
+			t.Fatalf("SetRepoArchived: %v", err)
+		}
+		if _, err := s.AcceptRepoTransfer(ctx, t4.ID, f.bob.ID); !errors.Is(err, ErrTransferRepoArchived) {
+			t.Fatalf("AcceptRepoTransfer on an archive = %v, want ErrTransferRepoArchived", err)
+		}
+		if got, err := s.GetRepoTransfer(ctx, t4.ID); err != nil || got.Status != "pending" {
+			t.Fatalf("transfer after a refused accept on an archive = %+v, %v; want still pending", got, err)
+		}
+
+		// ...and completes once the repository is unarchived.
+		if _, err := s.SetRepoArchived(ctx, r4.ID, false, f.admin.ID); err != nil {
+			t.Fatalf("unarchive: %v", err)
+		}
+		moved, err := s.AcceptRepoTransfer(ctx, t4.ID, f.bob.ID)
+		if err != nil {
+			t.Fatalf("AcceptRepoTransfer after unarchive: %v", err)
+		}
+		if moved.Namespace != "bob" {
+			t.Fatalf("moved to %q, want bob", moved.Namespace)
+		}
+	})
+}

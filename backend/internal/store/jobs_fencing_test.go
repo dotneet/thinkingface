@@ -176,3 +176,64 @@ func TestIntegrationSyncJobHeartbeatFencedByPush(t *testing.T) {
 		}
 	})
 }
+
+// The claim charges an attempt, but only FinishSyncJob ever turned a spent
+// budget into a verdict. A job whose worker never got that far -- it crashed
+// on the job, or the database refused to record the outcome -- came back from
+// every sweep as 'pending' and was handed out again without end, invisible to
+// ListFailedSyncJobs. The sweep now parks it once the budget is gone.
+func TestIntegrationRequeueExpiredSyncJobsParksASpentBudget(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+		r := f.repo(t, "alice", "crashy", "dataset", nil)
+		if err := s.EnqueueSync(ctx, r.ID, "main", "", "s1"); err != nil {
+			t.Fatal(err)
+		}
+
+		var last *SyncJob
+		for attempt := 1; attempt <= SyncMaxAttempts; attempt++ {
+			// A lease already in the past stands in for a worker that died.
+			j, err := s.ClaimSyncJob(ctx, -testLease)
+			if err != nil || j == nil || j.Attempts != attempt {
+				t.Fatalf("claim %d = %+v, %v", attempt, j, err)
+			}
+			if attempt == 1 {
+				// One recorded failure, so the parked row can show it.
+				if err := s.FinishSyncJob(ctx, j, errors.New("boom")); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.db.Exec(ctx, `UPDATE sync_jobs SET next_attempt_at = NULL WHERE id = $1`, j.ID); err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			if n, err := s.RequeueExpiredSyncJobs(ctx); err != nil || n != 1 {
+				t.Fatalf("sweep %d = %d, %v", attempt, n, err)
+			}
+			last = j
+			want := "pending"
+			if attempt == SyncMaxAttempts {
+				want = "failed"
+			}
+			if got := readSyncJob(t, s, j.ID); got.status != want {
+				t.Fatalf("after sweep %d: status %q, want %q", attempt, got.status, want)
+			}
+		}
+
+		if j, err := s.ClaimSyncJob(ctx, testLease); err != nil || j != nil {
+			t.Fatalf("a parked job was claimable: %+v, %v", j, err)
+		}
+		failed, total, err := s.ListFailedSyncJobs(ctx, 0, 0)
+		if err != nil || total != 1 || len(failed) != 1 || failed[0].ID != last.ID {
+			t.Fatalf("ListFailedSyncJobs = %+v, total %d, %v", failed, total, err)
+		}
+		if want := syncLeaseExpiredError + "; last reported error: boom"; failed[0].LastError != want {
+			t.Errorf("last_error = %q, want %q", failed[0].LastError, want)
+		}
+		// And the operator's retry still hands back a fresh budget.
+		if ok, err := s.RetrySyncJob(ctx, last.ID); err != nil || !ok {
+			t.Fatalf("RetrySyncJob = %v, %v", ok, err)
+		}
+	})
+}

@@ -626,11 +626,16 @@ func (s *Store) AppendOrgAudit(ctx context.Context, id int64, e AuditEntry) erro
 	if len(details) == 0 {
 		details = json.RawMessage(`{}`)
 	}
+	// target_name and details quote what the action named -- a webhook URL,
+	// a repository -- and a NUL or a stray byte in one would cost this line
+	// of the log on PostgreSQL (see text.go), silently, since callers
+	// ignore the error.
+	details = sanitizeJSONRaw(details)
 	_, err := s.db.Exec(ctx,
 		`INSERT INTO org_audit_log
 		     (namespace_id, actor_user_id, actor_name, action, target_user_id, target_name, details)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		id, e.ActorUserID, e.ActorName, e.Action, e.TargetUserID, e.TargetName, []byte(details))
+		id, e.ActorUserID, e.ActorName, e.Action, e.TargetUserID, sanitizeText(e.TargetName), []byte(details))
 	return err
 }
 

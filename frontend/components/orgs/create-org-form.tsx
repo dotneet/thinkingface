@@ -13,7 +13,7 @@ import { createOrgFormAfterNameChange } from "@/lib/create-org-form";
 import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
 import { namespaceHref } from "@/lib/namespace";
-import { createOrg, orgErrorKey } from "@/lib/orgs";
+import { createOrg, orgErrorMessage } from "@/lib/orgs";
 import { type NamespaceNameError, validateNamespaceName } from "@/lib/validation";
 
 /** Maps validateNamespaceName error codes to org-domain message keys. */
@@ -53,7 +53,7 @@ export function CreateOrgForm({ loggedIn }: { loggedIn: boolean }) {
     });
     setCreating(false);
     if (!result.ok) {
-      setError(t(orgErrorKey(result, { 401: "org.create.loginRequiredMessage" })));
+      setError(orgErrorMessage(t, result, { 401: "org.create.loginRequiredMessage" }));
       return;
     }
     router.push(namespaceHref(result.data.org.name));

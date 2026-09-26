@@ -16,38 +16,31 @@ import { errorMessage, type FailedApiResult } from "@/lib/api-error-message";
 import { formatBytes, formatNumber } from "@/lib/format";
 import { useT } from "@/lib/i18n/client";
 import { repoBase } from "@/lib/paths";
-import { getUsage } from "@/lib/usage";
+import { getUsage, isNamespaceUsageUnavailable, narrowToNamespace } from "@/lib/usage";
 import type { UsageResponse } from "@/types/api";
-
-/**
- * Keeps only the rows belonging to `namespace`. `/api/v1/usage` answers with
- * every namespace the viewer can see, so an organisation's own storage screen
- * narrows it here rather than asking the API for a slice it does not offer.
- *
- * The comparison is case-insensitive, like every other namespace lookup in
- * this system (`canCreateInNamespace` in lib/namespace.ts, the backend's
- * `LOWER(name)` matching, and the `/[ns]` route's redirect to the canonical
- * spelling). An exact match sent /orgs/ACME/settings/storage — a URL that
- * renders perfectly well — through the filter with nothing left, and the
- * screen then claimed the organisation had stored nothing (DESIGN.md §9).
- */
-function narrowToNamespace(usage: UsageResponse, namespace: string): UsageResponse {
-  const target = namespace.toLowerCase();
-  return {
-    namespaces: usage.namespaces.filter((ns) => ns.namespace.toLowerCase() === target),
-    repos: usage.repos.filter((repo) => repo.namespace.toLowerCase() === target),
-  };
-}
 
 export function StorageUsage({
   /** Show only this namespace. Omitted on /settings/storage, which shows all. */
   namespace,
+  /**
+   * The namespace's total repository count (`Org.num_repos`, which -- unlike
+   * `/api/v1/usage` -- "There is no repository visibility, so every caller
+   * sees the same number" (backend/internal/store/orgs.go's orgRepoCount)).
+   * Used only to tell "this namespace genuinely owns nothing" apart from
+   * "the caller isn't a member, so /api/v1/usage left it out" when `usage`
+   * comes back without a row for `namespace` -- see the comment above
+   * `narrowToNamespace`. Omitted entirely on /settings/storage (no
+   * `namespace` there either), where the caller's own namespaces are always
+   * ones they are a member of by definition.
+   */
+  namespaceRepoCount,
   /** Where to send an unauthenticated visitor back to after logging in. */
   loginNext = "/settings/storage",
   emptyTitle,
   emptyDescription,
 }: {
   namespace?: string;
+  namespaceRepoCount?: number;
   loginNext?: string;
   emptyTitle?: string;
   emptyDescription?: string;
@@ -106,6 +99,23 @@ export function StorageUsage({
             {t("ui.unexpectedError.retry")}
           </Button>
         }
+      />
+    );
+  }
+
+  if (isNamespaceUsageUnavailable(usage, namespace, namespaceRepoCount)) {
+    // The namespace demonstrably owns repositories (a count every caller sees
+    // the same way), yet /api/v1/usage answered with no row for it -- that
+    // endpoint only reports namespaces the caller is a member of, so this is
+    // a visibility gap, not an empty namespace. Rendering the ordinary empty
+    // state here is exactly the "0 stands in for a failure we didn't check
+    // for" DESIGN.md §9 forbids: a 50 GB organisation would read as storing
+    // nothing.
+    return (
+      <EmptyState
+        icon={HardDrive}
+        title={t("settings.storage.notAvailableTitle")}
+        description={t("settings.storage.notAvailableDescription")}
       />
     );
   }

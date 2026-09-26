@@ -68,3 +68,24 @@ type Storage interface {
 	// PublicURI returns the gs:// URI shown in the UI for gcloud commands.
 	PublicURI(key string) string
 }
+
+// Versioned is implemented by drivers that can address one generation of an
+// object rather than whatever is stored under its key right now. It is what
+// lets a caller act on exactly the version it inspected: Stat reports a
+// generation, and these read or copy that generation and no other, so a writer
+// that replaces the key in between cannot slip different bytes under a check
+// that has already passed.
+//
+// It is an optional extension rather than part of Storage because the test
+// doubles scattered across other packages implement Storage by hand and have no
+// notion of a generation; a caller type-asserts for it and says what it does
+// without. GCS (real and emulator) implements it.
+type Versioned interface {
+	// GetGeneration reads generation of key. ErrNotFound when that generation
+	// is no longer stored -- replaced or deleted since it was observed.
+	GetGeneration(ctx context.Context, key string, generation int64) (io.ReadCloser, error)
+	// CopyGeneration is Copy pinned to one source generation: it publishes
+	// that version's bytes or nothing. ErrNotFound when that generation is no
+	// longer stored.
+	CopyGeneration(ctx context.Context, srcKey string, generation int64, dstKey string) error
+}

@@ -208,6 +208,15 @@ func (s *Store) UpsertExpRunWith(ctx context.Context, projectID int64, u ExpRunU
 			return 0, err
 		}
 	}
+	// All three are JSONB, and all three are whatever a training script
+	// logged -- config keys, summary values, metric names -- read back out of
+	// its parquet export or its ingest calls. encoding/json writes a NUL in
+	// any of them as \u0000, which PostgreSQL refuses (see text.go), and one
+	// such key failed the run's upsert every time it was written.
+	// nil stays nil, still meaning "leave the stored value alone".
+	configRaw = sanitizeJSONRaw(configRaw)
+	summaryRaw = sanitizeJSONRaw(summaryRaw)
+	keysRaw = sanitizeJSONRaw(keysRaw)
 
 	// The statement is per engine (jsonb casts and GREATEST on Postgres,
 	// MAX() on SQLite); see dialectQueries.upsertExpRun for the placeholders.
@@ -448,6 +457,9 @@ func (s *Store) InsertPoints(ctx context.Context, runID int64, points []MetricPo
 		if err != nil {
 			return err
 		}
+		// Metric names come straight from the client; a NUL in one is
+		// refused by JSONB (see UpsertExpRunWith).
+		raw = sanitizeJSONRaw(raw)
 		ts := p.TS
 		if ts.IsZero() {
 			ts = time.Now()

@@ -317,6 +317,31 @@ func TestRepoGCS_EmptyRepositoryIsNotAMissingRevision(t *testing.T) {
 	}
 }
 
+// A repository whose only history lives on a non-default branch: the default
+// branch itself ("main") is unborn, but the repository is not empty. IsEmpty
+// now means "no branches or tags at all" (revisionOrEmpty's contract in
+// refs.go), so revKnownToGit must ask namesDefaultBranch too -- otherwise this
+// panel 404s on exactly the ref the HF endpoints answer 200 empty for.
+func TestRepoGCS_DefaultBranchUnbornButRepoNotEmptyIsNotAMissingRevision(t *testing.T) {
+	f := newGCSFixture(t)
+	repo := f.repo("only-on-dev", "dataset")
+	g, err := f.git.Open(repo.StoragePath)
+	if err != nil {
+		t.Fatalf("open git: %v", err)
+	}
+	if _, _, err := g.Commit(gitrepo.CommitRequest{
+		Branch: "dev", Message: "commit",
+		Author: gitrepo.Signature{Name: "alice", Email: "alice@example.com", When: time.Now()},
+		Ops:    []gitrepo.Op{{Kind: gitrepo.OpAdd, Path: "README.md", Data: []byte("hi\n")}},
+	}); err != nil {
+		t.Fatalf("commit to dev: %v", err)
+	}
+
+	if status, body := f.get("/api/v1/repos/dataset/alice/only-on-dev/gcs/main"); status != 200 {
+		t.Fatalf("status = %d, body = %s, want 200 (main is unborn, not unknown -- history lives on dev)", status, body)
+	}
+}
+
 func TestRepoGCS_UnknownRevisionIs404(t *testing.T) {
 	f := newGCSFixture(t)
 	repo := f.repo("imdb-ja", "dataset")

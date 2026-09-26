@@ -212,6 +212,23 @@ describe("geometry", () => {
   it("builds a move-then-line path", () => {
     const [line] = parallelLines(sweep, parallelAxes(sweep));
     if (!line) throw new Error("no line");
-    expect(linePath(line, 3, 100, 100, 10)).toMatch(/^M10\.00 90\.00 L50\.00 /);
+    expect(linePath(line, 3, 100, 100, 10, 10)).toMatch(/^M10\.00 90\.00 L50\.00 /);
+  });
+
+  it("applies padX and padY independently, matching axisX / axisY with the same pads", () => {
+    const [line] = parallelLines(sweep, parallelAxes(sweep));
+    if (!line) throw new Error("no line");
+    // Non-square pads (as used by ParallelCoordinates: PAD_X=76, PAD_Y=46):
+    // the path's x must come from padX and its y from padY, not one pad
+    // shared between them, or a plotted line no longer meets its own axis
+    // ticks (drawn via axisX/axisY with the matching pad each).
+    const d = linePath(line, 3, 100, 100, 20, 5);
+    const expectedFirst = line.points[0];
+    if (!expectedFirst) throw new Error("no points");
+    const expectedX = axisX(expectedFirst.axis, 3, 100, 20);
+    const expectedY = axisY(expectedFirst.t, 100, 5);
+    expect(d).toMatch(new RegExp(`^M${expectedX.toFixed(2)} ${expectedY.toFixed(2)} L`));
+    // Sanity check the two pads are not interchangeable for this point.
+    expect(axisY(expectedFirst.t, 100, 20)).not.toBe(expectedY);
   });
 });

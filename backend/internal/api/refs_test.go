@@ -435,7 +435,7 @@ func TestHFDeleteBranch_RefusesTheDefaultBranch(t *testing.T) {
 
 func TestHFCreateTag_LightweightAndAnnotated(t *testing.T) {
 	f := newRefsFixture(t)
-	f.repo("alice", "foo", "dataset")
+	repo := f.repo("alice", "foo", "dataset")
 	tok := f.token(f.alice, "write")
 
 	branches, _ := f.refs("dataset", "alice", "foo")
@@ -454,9 +454,18 @@ func TestHFCreateTag_LightweightAndAnnotated(t *testing.T) {
 	if tags["v1.0"] != head {
 		t.Fatalf("v1.0 = %s, want the commit %s", tags["v1.0"], head)
 	}
-	// An annotated tag's ref names the tag object, exactly as git does.
-	if tags["v1.1"] == "" || tags["v1.1"] == head {
-		t.Fatalf("v1.1 = %s, want a tag object distinct from the commit", tags["v1.1"])
+	// An annotated tag's ref names a tag object, but targetCommit is the
+	// commit: it is what huggingface_hub's GitRefInfo documents, and a client
+	// pinning it as a revision has to land on a commit.
+	if tags["v1.1"] != head {
+		t.Fatalf("v1.1 = %s, want the tagged commit %s (peeled, not the tag object)", tags["v1.1"], head)
+	}
+	gitRepo, err := f.git.Open(repo.StoragePath)
+	if err != nil {
+		t.Fatalf("open git repo: %v", err)
+	}
+	if obj, _ := gitRepo.RefTarget(gitrepo.TagRef("v1.1")); obj.String() == head {
+		t.Fatal("refs/tags/v1.1 points at the commit; no annotated tag object was written")
 	}
 	// ...but it still resolves to the tagged commit everywhere a revision is
 	// accepted.

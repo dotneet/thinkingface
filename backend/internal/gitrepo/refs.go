@@ -94,10 +94,12 @@ func (r *Repo) refExists(name plumbing.ReferenceName) (plumbing.Hash, bool, erro
 
 // HasBranch and HasTag report whether the exact ref exists, without resolving
 // anything. They are the question every write path has to ask before it
-// commits: Resolve answers "does this revision name something", and by go-git's
-// RefRevParseRules a tag answers it before a branch of the same name does, so
-// it cannot tell "refs/heads/v1" apart from "refs/tags/v1". A commit is only
-// ever written to a branch, so the branch has to be looked up by its full name.
+// commits: Resolve answers "does this revision name something", and although
+// it prefers a branch over a tag of the same name, a tag (or an abbreviated
+// commit id) with no such branch resolves just as well -- so a successful
+// Resolve cannot tell "refs/heads/v1" apart from "refs/tags/v1". A commit is
+// only ever written to a branch, so the branch has to be looked up by its full
+// name.
 func (r *Repo) HasBranch(short string) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

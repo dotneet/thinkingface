@@ -135,6 +135,9 @@ export const settings = {
     emptyTitle: "ストレージ使用量はまだありません",
     emptyDescription:
       "自分の名前空間のリポジトリにファイルをアップロードすると、LFS ストレージがここに表示されます。",
+    notAvailableTitle: "使用量を表示できません",
+    notAvailableDescription:
+      "この名前空間のメンバーではないため、ストレージ使用量をここに表示できません。",
     quota: "上限",
     quotaUnlimited: "無制限",
     quotaExceeded: "上限超過 — 新しい大容量ファイルのアップロードは拒否されます",

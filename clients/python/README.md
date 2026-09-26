@@ -20,9 +20,10 @@ your server is enough — no code changes beyond that.
 
 ```python
 import thinkingface
-from huggingface_hub import HfApi, upload_file, hf_hub_download
 
 thinkingface.login("http://localhost:8080", token="tf_xxxxxxxxxxxx")
+
+from huggingface_hub import HfApi, upload_file, hf_hub_download
 
 api = HfApi()
 api.create_repo("me/my-dataset", repo_type="dataset", exist_ok=True)
@@ -39,7 +40,13 @@ print(open(path).read())
 ```
 
 `thinkingface.login()` just sets `HF_ENDPOINT`/`HF_TOKEN` (and calls
-`huggingface_hub.login()` for you); you can do the same by hand:
+`huggingface_hub.login()` for you); you can do the same by hand. Call it
+**before** importing anything from `huggingface_hub`, as above:
+`huggingface_hub` resolves its default endpoint once, at import time, so
+calling `login()` afterwards can leave it still talking to huggingface.co. If
+`huggingface_hub` was already imported, `login()` does its best to retarget
+it and raises rather than risk sending your token to the wrong server if it
+can't.
 
 ```python
 import os

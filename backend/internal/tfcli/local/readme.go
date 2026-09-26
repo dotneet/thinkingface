@@ -39,8 +39,10 @@ func (o CardOptions) Empty() bool {
 //	Description
 //
 // Keys that were not given are omitted from the front matter, and the front
-// matter itself is omitted when no card field was given (an empty "---\n---"
-// block is not recognised by the card parser). The description goes into the
+// matter itself is omitted entirely when no card field was given -- an empty
+// "---\n---" block round-trips fine (repocard.Parse reads it as a card with
+// no fields, same as huggingface_hub does), but it would just be noise with
+// nothing in it to justify writing at all. The description goes into the
 // front matter -- the same `description` key MergeReadme maintains, so card
 // consumers see it on a generated and a merged README alike -- and is
 // repeated as the first paragraph of the body so the page reads naturally.
@@ -48,8 +50,7 @@ func (o CardOptions) Empty() bool {
 func BuildReadme(opts CardOptions) []byte {
 	var b strings.Builder
 	// Only emit front matter when there is something to put in it: an empty
-	// "---\n---" block is not recognised as a card by repocard.Parse (it wants
-	// the closing fence on a later line) and would just be noise in the body.
+	// block would parse fine but adds nothing over leaving it out.
 	if !opts.Empty() {
 		b.WriteString("---\n")
 		if opts.License != "" {
@@ -146,14 +147,15 @@ func yamlSetScalar(node *yaml.Node, value string) {
 func MergeReadme(existing []byte, opts CardOptions) ([]byte, error) {
 	text := strings.ReplaceAll(string(existing), "\r\n", "\n")
 
-	front, body := "", text
-	if strings.HasPrefix(text, "---\n") {
-		rest := text[len("---\n"):]
-		if end := repocard.ClosingFence(rest); end >= 0 {
-			front = rest[:end]
-			body = strings.TrimPrefix(rest[end+len("\n---"):], "\n")
-		}
-	}
+	// repocard.SplitFrontMatter is the one place this rule lives (leading
+	// BOM/blank-line tolerance, ClosingFence's fence rule), so this and
+	// repocard.Parse agree on what counts as front matter. A README with a
+	// leading BOM (or blank line) before its "---" used to fail this
+	// package's own plain `strings.HasPrefix(text, "---\n")` check while
+	// Parse read it fine, so a merge here would prepend a second front-matter
+	// block above the original instead of updating it -- silently dropping
+	// every field the original card set that opts didn't also set.
+	front, body, _ := repocard.SplitFrontMatter(text)
 
 	var doc yaml.Node
 	if err := yaml.Unmarshal([]byte(front), &doc); err != nil {
@@ -220,11 +222,11 @@ func MergeReadme(existing []byte, opts CardOptions) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// The closing-fence rule lives in repocard.ClosingFence, which the server's
-// repocard.Parse uses on the same file. Sharing it is the point: a README the
-// server reads as having front matter has to be the same one `tf up --license`
-// merges into, or the CLI would rewrite a card the next sync then declines to
-// read (and vice versa).
+// The front-matter detection rule lives in repocard.SplitFrontMatter, which
+// the server's repocard.Parse uses on the same file. Sharing it is the point:
+// a README the server reads as having front matter has to be the same one
+// `tf up --license` merges into, or the CLI would rewrite a card the next
+// sync then declines to read (and vice versa).
 
 // mappingGet returns the value node for key in a YAML mapping node, or nil.
 func mappingGet(mapping *yaml.Node, key string) *yaml.Node {

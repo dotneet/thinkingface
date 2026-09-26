@@ -23,9 +23,10 @@ import (
 //
 // Two independent controls, because they answer different threats:
 //
-//   - failure buckets (per client address, per username) stop guessing. Only
-//     *failed* attempts consume a token, so a busy CI run or the e2e suite --
-//     many successful logins from one address -- never trips them.
+//   - failure buckets stop guessing (see passwordKeys for the three a password
+//     attempt is metered against). Only *failed* attempts consume a token, so
+//     a busy CI run or the e2e suite -- many successful logins from one
+//     address -- never trips them.
 //   - a bcrypt semaphore caps how much CPU unauthenticated callers can force
 //     the process to spend. Guessing many usernames from many addresses slips
 //     past the buckets, but bcrypt(cost 10) at unbounded concurrency is a
@@ -44,6 +45,15 @@ const (
 	// is turned away. Long enough to absorb a burst, short enough that the
 	// queue cannot itself become the resource being exhausted.
 	bcryptWait = 2 * time.Second
+	// userCeilingFactor multiplies the per-minute rate to get the global,
+	// all-addresses failure ceiling for one username. It is deliberately far
+	// above the per-(username, address) rate (perMinute/2): at 10x that rate,
+	// emptying the ceiling takes failures from at least ten distinct addresses,
+	// each already spending its own full budget on this one account. One
+	// address therefore can never lock anybody else out, while a distributed
+	// guessing run against a single account is still capped at a fixed number
+	// of attempts per minute. See passwordKeys.
+	userCeilingFactor = 5.0
 	// authBucketIdle is how long an untouched bucket is kept before the
 	// sweeper drops it, bounding the map under a spray of distinct keys.
 	authBucketIdle = 10 * time.Minute
@@ -58,9 +68,8 @@ type tokenBucket struct {
 type authGuard struct {
 	mu      sync.Mutex
 	buckets map[string]*tokenBucket
-	// perMinute is the refill rate for an address bucket; a username bucket
-	// refills at half that, since a single account has no legitimate reason
-	// to fail as often as a shared NAT egress does.
+	// perMinute is the refill rate for an address bucket; the rates of the
+	// two username buckets are derived from it in rateFor.
 	perMinute float64
 	lastSweep time.Time
 
@@ -87,8 +96,13 @@ func newAuthGuard(perMinute int) *authGuard {
 func (g *authGuard) enabled() bool { return g != nil && g.perMinute > 0 }
 
 func (g *authGuard) rateFor(key string) float64 {
-	if strings.HasPrefix(key, "user:") {
+	switch {
+	case strings.HasPrefix(key, userAddrKeyPrefix):
+		// Half the address rate: a single account has no legitimate reason
+		// to fail as often, from one place, as a shared NAT egress does.
 		return g.perMinute / 2
+	case strings.HasPrefix(key, userKeyPrefix):
+		return g.perMinute * userCeilingFactor
 	}
 	return g.perMinute
 }
@@ -332,8 +346,47 @@ func (s *Server) clientAddrKey(r *http.Request) string {
 	return "addr:" + s.clientIP(r)
 }
 
+const (
+	userKeyPrefix     = "user:"
+	userAddrKeyPrefix = "useraddr:"
+)
+
+// usernameKey is the global failure ceiling for one account, shared by every
+// address. It is never the only username bucket consulted -- see passwordKeys.
 func usernameKey(username string) string {
-	return "user:" + strings.ToLower(strings.TrimSpace(username))
+	return userKeyPrefix + normalizeUsernameKey(username)
+}
+
+// userAddrKey is the failure bucket for one account *from one address*.
+func userAddrKey(addrKey, username string) string {
+	return userAddrKeyPrefix + normalizeUsernameKey(username) + "|" + addrKey
+}
+
+func normalizeUsernameKey(username string) string {
+	return strings.ToLower(strings.TrimSpace(username))
+}
+
+// passwordKeys is every failure bucket one password attempt for username from
+// addrKey (s.clientAddrKey) is read and charged against:
+//
+//   - the address bucket, which stops one address guessing across many
+//     usernames;
+//   - the (username, address) bucket, which is the tight per-account limit
+//     (perMinute/2);
+//   - the username ceiling, shared by every address but userCeilingFactor
+//     times the address rate.
+//
+// The per-account limit used to be the shared username bucket alone, at
+// perMinute/2. That made it a lockout switch: HTTP Basic is accepted on every
+// route, so five `Authorization: Basic alice:wrong` requests a minute to
+// /healthz from one address kept alice -- site administrators included --
+// from signing in anywhere, while that address's own bucket was never close to
+// empty. Scoping the tight limit to the address means an attacker only ever
+// spends their own budget; the ceiling keeps what a distributed run can try
+// against one account bounded, and emptying it takes many addresses, each
+// already throttled on its own (see userCeilingFactor).
+func passwordKeys(addrKey, username string) []string {
+	return []string{addrKey, userAddrKey(addrKey, username), usernameKey(username)}
 }
 
 // tooManyAttempts answers a rate-limited authentication attempt. The message

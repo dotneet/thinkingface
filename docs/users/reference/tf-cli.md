@@ -153,7 +153,7 @@ tf up PATH [--to NS/NAME|NAME] [--kind dataset|model] [--rev BRANCH]
 | `--license` | (unset) | The repository card's `license` |
 | `--tag` | (unset) | The repository card's `tags`. Repeatable; a single occurrence may also carry comma-separated values (`--tag a,b --tag c` → `a`, `b`, `c`) |
 | `--desc` | (unset) | The repository card's `description`, also used as the opening paragraph of a generated README |
-| `--include` | include everything | Only include files matching this glob (repeatable). Not a shell glob run through the shell — `tf` matches it itself, with `**` matching any number of path segments (`data/**`, `**/*.parquet`) and, for a pattern with no `/` at all, also tried against just the file's base name (`*.parquet` matches `data/train.parquet` too) |
+| `--include` | include everything | Only include files matching this glob (repeatable). Not a shell glob run through the shell — `tf` matches it itself, with `**` matching any number of path segments (`data/**`, `**/*.parquet`), `[...]` matching one character out of a set (`[ab].csv`, `[a-z]*`, `[!0-9]*` negated), and, for a pattern with no `/` at all, also tried against just the file's base name (`*.parquet` matches `data/train.parquet` too) |
 | `--exclude` | (none) | Exclude files matching this glob (repeatable). Same matching rules as `--include` |
 | `--hidden` | off | Also upload dot-files and dot-directories found under PATH. They are skipped by default (see below); `.gitattributes` and `.gitignore` are always uploaded either way |
 | `--delete` | off | Delete remote files that are not present anywhere on disk under PATH, regardless of `--include`/`--exclude` — a file those flags kept out of this run's upload but that still exists on disk is never deleted |

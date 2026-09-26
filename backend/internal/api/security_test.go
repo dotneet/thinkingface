@@ -450,7 +450,7 @@ func TestBasicAuth_StopsHashingOnceThrottled(t *testing.T) {
 			t.Fatalf("attempt %d: status = %d, want 401", i+1, rec.Code)
 		}
 	}
-	// Throttled now: the username bucket is empty, so checkPassword must
+	// Throttled now: alice's bucket for this address is empty, so checkPassword must
 	// return before touching bcrypt. Measure it -- a bcrypt round is tens of
 	// milliseconds, a short-circuit is microseconds.
 	start := time.Now()
@@ -472,6 +472,109 @@ func TestBasicAuth_StopsHashingOnceThrottled(t *testing.T) {
 	f.s.Handler().ServeHTTP(rec, r)
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("throttled correct password: status = %d, want 401 (anonymous)", rec.Code)
+	}
+}
+
+// The per-account limit is scoped to the address the failures came from. It
+// used to be one bucket per username shared by every address, and HTTP Basic
+// is read on every route -- so a trickle of `Basic alice:wrong` against
+// /healthz from one address kept alice out of /auth/login everywhere, while
+// that address's own budget was never close to running out.
+func TestBasicAuth_OneAddressCannotLockOutAnother(t *testing.T) {
+	f := newSecFixture(t)
+	f.user("alice", "correct horse battery")
+
+	const attacker = "203.0.113.66:4444"
+	for i := 0; i < 20; i++ {
+		r := httptest.NewRequest("GET", "/healthz", bytes.NewReader(nil))
+		r.RemoteAddr = attacker
+		r.SetBasicAuth("alice", "wrong")
+		f.s.Handler().ServeHTTP(httptest.NewRecorder(), r)
+	}
+	// The attacker's own attempts on alice are throttled...
+	throttled := f.do(secRequest{
+		method: "POST", path: "/api/v1/auth/login",
+		body:       map[string]string{"username": "alice", "password": "correct horse battery"},
+		remoteAddr: attacker,
+	})
+	if throttled.Code != http.StatusTooManyRequests {
+		t.Fatalf("attacker's own login: status = %d, want 429", throttled.Code)
+	}
+	// ...but alice, signing in from anywhere else, is not.
+	ok := f.do(secRequest{
+		method: "POST", path: "/api/v1/auth/login",
+		body:       map[string]string{"username": "alice", "password": "correct horse battery"},
+		remoteAddr: "10.0.0.1:1234",
+	})
+	if ok.Code != http.StatusOK {
+		t.Fatalf("alice from another address: status = %d, want 200; body = %s", ok.Code, ok.Body.String())
+	}
+	// The same through Basic itself, which is what git and the HF clients use.
+	r := httptest.NewRequest("GET", "/api/whoami-v2", bytes.NewReader(nil))
+	r.RemoteAddr = "10.0.0.1:1234"
+	r.SetBasicAuth("alice", "correct horse battery")
+	rec := httptest.NewRecorder()
+	f.s.Handler().ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("alice via Basic from another address: status = %d, want 200", rec.Code)
+	}
+}
+
+// Scoping the per-account limit to the address must not leave distributed
+// guessing unbounded: the global username ceiling still runs out, but only
+// once many distinct addresses have each spent their own budget on the account.
+func TestLogin_DistributedGuessingHitsTheUsernameCeiling(t *testing.T) {
+	f := newSecFixture(t)
+	f.user("alice", "correct horse battery")
+
+	// Freeze the clock: fifty bcrypt rounds take long enough for the ceiling
+	// (which refills at 50/min) to earn back a token or two mid-test.
+	frozen := time.Now()
+	f.s.authGuard.now = func() time.Time { return frozen }
+
+	// The fixture's rate is 10/min: 5 failures per (alice, address) and a
+	// ceiling of 50, so ten addresses are needed to empty it.
+	fail := func(addr string) int {
+		return f.do(secRequest{
+			method: "POST", path: "/api/v1/auth/login",
+			body:       map[string]string{"username": "alice", "password": "wrong"},
+			remoteAddr: addr,
+		}).Code
+	}
+	for a := 0; a < 9; a++ {
+		addr := fmt.Sprintf("198.51.100.%d:1000", a+1)
+		for i := 0; i < 5; i++ {
+			if code := fail(addr); code != http.StatusUnauthorized {
+				t.Fatalf("address %d attempt %d: status = %d, want 401", a+1, i+1, code)
+			}
+		}
+	}
+	// Nine addresses in: the ceiling has 5 tokens left, so a fresh address
+	// still gets a real answer.
+	if code := fail("198.51.100.10:1000"); code != http.StatusUnauthorized {
+		t.Fatalf("tenth address: status = %d, want 401", code)
+	}
+	for i := 0; i < 4; i++ {
+		fail("198.51.100.10:1000")
+	}
+	// Ceiling spent: an address that has never failed is refused too.
+	rec := f.do(secRequest{
+		method: "POST", path: "/api/v1/auth/login",
+		body:       map[string]string{"username": "alice", "password": "correct horse battery"},
+		remoteAddr: "10.0.0.1:1234",
+	})
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("login after the ceiling is spent: status = %d, want 429", rec.Code)
+	}
+	// Other accounts are unaffected.
+	f.user("bob", "correct horse battery")
+	bob := f.do(secRequest{
+		method: "POST", path: "/api/v1/auth/login",
+		body:       map[string]string{"username": "bob", "password": "correct horse battery"},
+		remoteAddr: "10.0.0.1:1234",
+	})
+	if bob.Code != http.StatusOK {
+		t.Fatalf("bob: status = %d, want 200", bob.Code)
 	}
 }
 

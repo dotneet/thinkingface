@@ -158,10 +158,10 @@ func writeRefError(w http.ResponseWriter, what, name string, err error) {
 // "this revision does not exist" and writing the 404 itself for both.
 //
 // The distinction has to be made here because gitrepo.Resolve reports both as
-// ErrEmptyRepo: go-git answers plumbing.ErrReferenceNotFound for an unborn
-// HEAD and for an unknown name alike, and Resolve folds the two together.
-// gitRepo.IsEmpty is the tie-breaker -- a repository whose HEAD resolves is
-// not empty, so the failure was the revision's.
+// ErrEmptyRepo. gitRepo.IsEmpty is the tie-breaker -- a repository with any
+// branch or tag is not empty, so the failure was the revision's. (It used to
+// ask whether HEAD resolved, which read a repository whose only branch was not
+// the default one as empty.)
 func (s *Server) resolveRev(w http.ResponseWriter, repo *store.Repo, rev string) (*gitrepo.Repo, plumbing.Hash, bool) {
 	gitRepo, ok := s.openGit(w, repo)
 	if !ok {
@@ -182,19 +182,21 @@ func (s *Server) resolveRev(w http.ResponseWriter, repo *store.Repo, rev string)
 // revisionOrEmpty is resolveRev's read-only sibling, for the HF endpoints that
 // answer with a listing rather than performing a write.
 //
-// empty=true means the repository has no commits at all. That is a legitimate
-// 200 with nothing in it -- `create_repo` followed by `repo_info` is an
-// ordinary huggingface_hub flow and must not 404 -- so the caller answers with
-// an empty listing rather than an error. When the repository *does* have
-// commits but rev is not one of them, this writes 404 +
-// `X-Error-Code: RevisionNotFound` itself and reports ok=false. Without the
-// distinction every unknown revision read as "empty", which is how
-// `revision_exists(repo_id, "typo")` came back True and
+// empty=true means there is legitimately nothing to list: the repository has
+// no commits at all, or rev is its default branch and that branch is unborn.
+// That is a 200 with nothing in it -- `create_repo` followed by `repo_info` is
+// an ordinary huggingface_hub flow and must not 404, and huggingface_hub fills
+// in the default branch as the revision itself. When rev is anything else that
+// does not resolve, this writes 404 + `X-Error-Code: RevisionNotFound` itself
+// and reports ok=false. Without the distinction every unknown revision read as
+// "empty", which is how `revision_exists(repo_id, "typo")` came back True and
 // `snapshot_download(revision="typo")` quietly produced a zero-file snapshot.
 //
-// The tie-breaker is the same as resolveRev's, and for the same reason:
-// gitrepo.Resolve reports an unborn HEAD and an unknown name alike as
-// ErrEmptyRepo, because go-git answers plumbing.ErrReferenceNotFound for both.
+// The unborn-default-branch case is separate from IsEmpty on purpose. A
+// repository whose only history is on "dev" (an upload with revision="dev",
+// or `git push origin master` when the default is main) is not empty, so a
+// typo'd revision there is a 404 -- but its default branch still has nothing
+// on it, exactly as in a fresh repository.
 //
 // The returned hash is meant to be handed straight to gitRepo.Tree / Stat, so
 // the revision is resolved exactly once per request and a concurrent push
@@ -204,11 +206,22 @@ func (s *Server) revisionOrEmpty(w http.ResponseWriter, gitRepo *gitrepo.Repo, r
 	if err == nil {
 		return target, false, true
 	}
-	if errors.Is(err, gitrepo.ErrEmptyRepo) && gitRepo.IsEmpty() {
+	if errors.Is(err, gitrepo.ErrEmptyRepo) && (namesDefaultBranch(repo, rev) || gitRepo.IsEmpty()) {
 		return plumbing.ZeroHash, true, true
 	}
 	revisionNotFound(w, "revision "+rev+" not found in "+repo.FullName())
 	return plumbing.ZeroHash, false, false
+}
+
+// namesDefaultBranch reports whether rev is one of the spellings that mean
+// the repository's default branch. Only meaningful once Resolve has failed:
+// then the branch it names is unborn.
+func namesDefaultBranch(repo *store.Repo, rev string) bool {
+	switch rev {
+	case "", "HEAD", repo.DefaultBranch, gitrepo.BranchRef(repo.DefaultBranch):
+		return true
+	}
+	return false
 }
 
 // fireRefDeleted announces a branch or tag that is no longer there.

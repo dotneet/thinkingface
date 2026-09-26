@@ -255,3 +255,76 @@ func TestScan_PredicateWithColumnProjection(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// unsignedPruneRow pairs a run name with a UINT32 value, so a row group's
+// statistics can straddle math.MaxInt32 -- the point where reading them back
+// as signed flips negative.
+type unsignedPruneRow struct {
+	RunName string `parquet:"run_name"`
+	ValU32  uint32 `parquet:"val_u32"`
+}
+
+// buildUnsignedRunGroupedParquet writes one row group per run, exactly like
+// buildRunGroupedParquet, but with a UINT32 column instead of a signed one.
+func buildUnsignedRunGroupedParquet(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := parquet.NewGenericWriter[unsignedPruneRow](&buf)
+	groups := []struct {
+		run  string
+		vals []uint32
+	}{
+		{"run-low", []uint32{0, 1, 2}},
+		// These values set bit 31: their physical INT32 representation is
+		// negative, which is exactly what used to fool the predicate.
+		{"run-high", []uint32{3_000_000_000, 3_000_000_005, 3_000_000_010}},
+	}
+	for _, g := range groups {
+		batch := make([]unsignedPruneRow, len(g.vals))
+		for i, v := range g.vals {
+			batch[i] = unsignedPruneRow{RunName: g.run, ValU32: v}
+		}
+		if _, err := w.Write(batch); err != nil {
+			t.Fatalf("write %s: %v", g.run, err)
+		}
+		if err := w.Flush(); err != nil {
+			t.Fatalf("flush %s: %v", g.run, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// A range predicate over an unsigned column used to compare the row group's
+// min/max statistics as signed int32/int64, so a group whose real values are
+// all above math.MaxInt32 (or math.MaxInt64 for a UINT64 column) looked like
+// it held large-magnitude negative numbers and was wrongly pruned out from
+// under a predicate its rows actually satisfy -- silent data loss, not just a
+// missed optimization.
+func TestScan_UnsignedIntPredicateDoesNotWronglyPruneHighValueGroup(t *testing.T) {
+	data := buildUnsignedRunGroupedParquet(t)
+	st := newMemStorage()
+	const key = "lfs/pr/un/unsigned.parquet"
+	putParquet(t, st, key, data)
+	r := newTestReader(t, st)
+
+	seen := map[string]int{}
+	err := r.Scan(context.Background(), key, ScanRequest{
+		Predicates: []Predicate{{Column: "val_u32", Min: ptr(int64(2_900_000_000)), Max: ptr(int64(3_100_000_000))}},
+	}, func(row map[string]any) error {
+		run, _ := row["run_name"].(string)
+		seen[run]++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if seen["run-high"] != 3 {
+		t.Fatalf("run-high rows = %d, want 3 (the row group was wrongly pruned)", seen["run-high"])
+	}
+	if seen["run-low"] != 0 {
+		t.Fatalf("run-low rows = %d, want 0 (out of the predicate's range)", seen["run-low"])
+	}
+}

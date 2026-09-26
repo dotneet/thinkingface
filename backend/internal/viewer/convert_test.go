@@ -8,6 +8,8 @@ package viewer
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,5 +131,105 @@ func TestUUIDToString_WrongWidthFallsBackToBase64(t *testing.T) {
 		if len(got) == 36 && got[8] == '-' {
 			t.Errorf("uuidToString(%d bytes) = %q, want the base64 fallback", len(b), got)
 		}
+	}
+}
+
+// unsignedRow is a flat schema with UINT32/UINT64 columns (Go uint32/uint64
+// fields map onto parquet's INT(32,false)/INT(64,false) logical type -- see
+// schema.go's reflect.Uint32/Uint64 cases in parquet-go), read through the
+// "fast" leaf path (rowPlan.convertRow -> convertLeafValue).
+type unsignedRow struct {
+	U32 uint32 `parquet:"u32"`
+	U64 uint64 `parquet:"u64"`
+}
+
+// A uint32 at or above 1<<31 and a uint64 at or above 1<<63 both set the sign
+// bit of their physical INT32/INT64 storage. Reading them back as signed
+// (int64(v.Int32()) / v.Int64()) used to hand back a negative number for a
+// column that is never negative.
+func TestRows_UnsignedIntsAreNotNegative(t *testing.T) {
+	var buf bytes.Buffer
+	w := parquet.NewGenericWriter[unsignedRow](&buf)
+	rows := []unsignedRow{
+		{U32: 3_000_000_000, U64: 18_000_000_000_000_000_000}, // both > the signed max of their physical width
+		{U32: 0, U64: 0},
+	}
+	if _, err := w.Write(rows); err != nil {
+		t.Fatalf("write rows: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	st := newMemStorage()
+	const key = "lfs/un/si/unsigned.parquet"
+	putParquet(t, st, key, buf.Bytes())
+
+	res, err := newTestReader(t, st).Rows(context.Background(), key, 0, 2, nil)
+	if err != nil {
+		t.Fatalf("Rows: %v", err)
+	}
+	if len(res.Rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(res.Rows))
+	}
+
+	row := res.Rows[0]
+	if got, want := row["u32"], int64(3_000_000_000); got != want {
+		t.Errorf("u32 = %#v (%T), want %#v", got, got, want)
+	}
+	if got, want := row["u64"], uint64(18_000_000_000_000_000_000); got != want {
+		t.Errorf("u64 = %#v (%T), want %#v", got, got, want)
+	}
+
+	// encoding/json must round-trip both as positive numerals, not silently
+	// truncate or reject them.
+	encoded, err := json.Marshal(row)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(encoded), "-") {
+		t.Errorf("json encoding of an unsigned row went negative: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), "3000000000") || !strings.Contains(string(encoded), "18000000000000000000") {
+		t.Errorf("json encoding lost precision: %s", encoded)
+	}
+}
+
+// unsignedIntValue backs the logical-type branch of convertLeafValue. The
+// inputs are built through a variable (not a constant expression) so the
+// uint32/uint64 -> int32/int64 conversion reinterprets bits, the same way
+// v.Int32()/v.Int64() hands back whatever bit pattern is physically stored,
+// rather than the compiler rejecting an out-of-range constant conversion.
+func TestUnsignedIntValue(t *testing.T) {
+	u32 := uint32(3_000_000_000)
+	if got, want := unsignedIntValue(parquet.Int32, parquet.Int32Value(int32(u32))), int64(3_000_000_000); got != want {
+		t.Errorf("Int32 unsigned = %#v, want %#v", got, want)
+	}
+	u64 := uint64(18_000_000_000_000_000_000)
+	if got, want := unsignedIntValue(parquet.Int64, parquet.Int64Value(int64(u64))), uint64(18_000_000_000_000_000_000); got != want {
+		t.Errorf("Int64 unsigned = %#v, want %#v", got, want)
+	}
+}
+
+// normalizeGeneric hits the same reflect.Uint* branch for unsigned columns
+// nested under a LIST/MAP/struct, where parquet-go's generic reconstruction
+// hands back native Go uint8/16/32/64 values.
+func TestNormalizeGeneric_UnsignedIntsAreNotNegative(t *testing.T) {
+	cases := []struct {
+		name string
+		in   any
+		want any
+	}{
+		{"uint8", uint8(200), uint64(200)},
+		{"uint16", uint16(60_000), uint64(60_000)},
+		{"uint32 above int32 max", uint32(3_000_000_000), uint64(3_000_000_000)},
+		{"uint64 above int64 max", uint64(18_000_000_000_000_000_000), uint64(18_000_000_000_000_000_000)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeGeneric(tc.in); got != tc.want {
+				t.Errorf("normalizeGeneric(%#v) = %#v (%T), want %#v", tc.in, got, got, tc.want)
+			}
+		})
 	}
 }

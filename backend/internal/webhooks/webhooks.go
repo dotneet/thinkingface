@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
@@ -243,9 +244,35 @@ func (d *Dispatcher) deliver(ctx context.Context, job *store.WebhookDeliveryJob)
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
+	body = trimPartialRune(body, maxResponseBodyBytes)
 	status := resp.StatusCode
 	if status < 200 || status >= 300 {
 		return &status, string(body), fmt.Errorf("endpoint returned %d", status)
 	}
 	return &status, string(body), nil
+}
+
+// trimPartialRune drops the incomplete UTF-8 sequence a byte cap can leave at
+// the end of body. The cap lands wherever the 4 KiB boundary falls, so any
+// endpoint answering in Japanese, emoji or accented text is cut mid-character
+// a good share of the time, and the stored response then ended in a fragment
+// PostgreSQL refuses as text (the store sanitises it too, but it would show
+// as a stray U+FFFD at the end of every such body). Only a body that reached
+// limit can have been cut, so anything shorter is returned as it came; and
+// only a trailing lead byte short of its continuation bytes is dropped --
+// any other invalid byte is left for the store to deal with.
+func trimPartialRune(body []byte, limit int) []byte {
+	if len(body) < limit {
+		return body
+	}
+	// The last rune starts at most utf8.UTFMax-1 bytes before the end.
+	for i := len(body) - 1; i >= 0 && i >= len(body)-utf8.UTFMax; i-- {
+		if utf8.RuneStart(body[i]) {
+			if !utf8.FullRune(body[i:]) {
+				return body[:i]
+			}
+			return body
+		}
+	}
+	return body
 }

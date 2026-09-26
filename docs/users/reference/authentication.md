@@ -266,9 +266,10 @@ minting a token. Each fingerprint can only be registered to one account instance
   what keeps a repository unread. See
   [Compatibility](compatibility.md#known-incompatibilities-and-limitations).
 - **Rate limiting**: failed password attempts (both the web UI's login form and HTTP Basic
-  auth, which every route accepts) are throttled per client address and, at half that rate,
-  per username — so a shared address failing many times doesn't lock out one account faster
-  than the account's own bucket allows. Only failures count; successful logins never consume
+  auth, which every route accepts) are throttled per client address, at half that rate per
+  username from that address, and at five times it per username across all addresses — so
+  failures from one address can never lock an account out for someone signing in from
+  another, while guessing spread over many addresses is still capped. Only failures count; successful logins never consume
   the budget. A throttled request gets `429` with a `Retry-After` header. The instance
   operator controls the base rate via `TF_AUTH_RATE_LIMIT_PER_MIN` (10 per minute by
   default; `0` disables the limiter entirely).

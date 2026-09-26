@@ -1,4 +1,5 @@
 import { type ApiResult, apiFetch } from "@/lib/api";
+import { parseOffset } from "@/lib/pagination";
 import type {
   CommitDiffResponse,
   CommitListResponse,
@@ -8,6 +9,7 @@ import type {
   RepoGCSResponse,
   RepoKind,
   RepoListResponse,
+  RepoSummary,
   TreeResponseUI,
 } from "@/types/api";
 
@@ -197,7 +199,7 @@ export function repoListHref(
   }
   if (sp.sort && sp.sort !== "updated") params.set("sort", sp.sort);
   if (sp.tab) params.set("tab", sp.tab);
-  const offset = omit !== undefined ? 0 : (overrides.offset ?? (Number(sp.offset ?? 0) || 0));
+  const offset = omit !== undefined ? 0 : (overrides.offset ?? parseOffset(sp.offset));
   if (offset > 0) params.set("offset", String(offset));
   const qs = params.toString();
   return qs ? `${basePath}?${qs}` : basePath;
@@ -229,6 +231,48 @@ export function listRepos(
   return apiFetch<RepoListResponse>("/api/v1/repos", { query: params, headers: opts?.headers });
 }
 
+/** One page's worth, and the server's own ceiling on it (repolist.go's `pageParams(q, 30, 100)`). */
+const LIST_ALL_REPOS_PAGE_SIZE = 100;
+
+/**
+ * Pages through every repository matching `params`, past the single
+ * request's page-size ceiling. For a picker that needs to offer *every*
+ * repository in a namespace rather than one page of it (the webhook
+ * repo-scope selector) — `listRepos({ limit: 100 })` alone silently drops
+ * anything past the 100th, which a namespace with more than that many
+ * repositories has no way to reach.
+ *
+ * Bounded at `maxItems` (default 1000, ten requests at the server's page
+ * size) so an unusually large namespace cannot turn one picker into an
+ * unbounded number of round trips; the promise still resolves with whatever
+ * was fetched before the cap, rather than failing outright.
+ */
+export async function listAllRepos(
+  params: Omit<RepoListParams, "limit" | "offset">,
+  opts?: FetchOpts,
+  maxItems = 1000,
+): Promise<ApiResult<RepoSummary[]>> {
+  const items: RepoSummary[] = [];
+  // Offset paging over a list sorted by last update: a push between two pages
+  // moves a repository to the front, so the next page can repeat one. Keyed
+  // by id so a repeat is dropped rather than listed (and keyed) twice.
+  const seen = new Set<number>();
+  let offset = 0;
+  for (;;) {
+    const result = await listRepos({ ...params, limit: LIST_ALL_REPOS_PAGE_SIZE, offset }, opts);
+    if (!result.ok) return result;
+    for (const repo of result.data.items) {
+      if (seen.has(repo.id)) continue;
+      seen.add(repo.id);
+      items.push(repo);
+    }
+    offset += result.data.items.length;
+    if (result.data.items.length === 0 || offset >= result.data.total || offset >= maxItems) {
+      return { ok: true, data: items };
+    }
+  }
+}
+
 export function getRepo(
   kind: RepoKind,
   ns: string,
@@ -251,6 +295,37 @@ export function getTree(
     repoApiPath(kind, ns, name, `/tree/${encodeURIComponent(rev)}${suffix}`),
     { headers: opts?.headers },
   );
+}
+
+/**
+ * The closest ancestor of `path` (inclusive) that still exists in the tree,
+ * walking up one segment at a time and stopping at the repository root.
+ *
+ * Deleting the last file in a directory drops that directory too — trees
+ * never contain empty trees (backend/internal/gitrepo/treebuild.go) — and the
+ * removal can cascade: if that directory was itself the only entry of its
+ * parent, the parent disappears as well. A caller that lands on a page after
+ * such a delete (DeleteFileButton) can no longer assume `path.slice(0, -1)`
+ * is still there, so it resolves the real destination through this instead of
+ * guessing one level up. The root (`[]`) is never checked — `getTree` for it
+ * only 404s when the revision itself is gone, which the caller already knows
+ * is not the case — so this always resolves to *something*, never leaves the
+ * caller without a destination.
+ */
+export async function nearestExistingDir(
+  kind: RepoKind,
+  ns: string,
+  name: string,
+  rev: string,
+  path: string[],
+  opts?: FetchOpts,
+): Promise<string[]> {
+  for (let len = path.length; len > 0; len--) {
+    const candidate = path.slice(0, len);
+    const result = await getTree(kind, ns, name, rev, candidate, opts);
+    if (result.ok) return candidate;
+  }
+  return [];
 }
 
 export function getRefs(

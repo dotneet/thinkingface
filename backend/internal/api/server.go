@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -329,20 +330,34 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	// ------------------------------------------------------------- transfers
-	// Datasets carry a /datasets prefix; models sit at the root, matching the
-	// URL shapes huggingface_hub builds.
-	r.Route("/datasets/{ns}/{name}", func(r chi.Router) {
-		s.mountRepoTransport(r, "dataset")
-	})
-	r.Route("/models/{ns}/{name}", func(r chi.Router) {
-		s.mountRepoTransport(r, "model")
-	})
-	r.Route("/{ns}/{name}", func(r chi.Router) {
-		s.mountRepoTransport(r, "model")
-	})
+	// From repoTransportMounts, which streamingPattern reads too.
+	for _, m := range repoTransportMounts {
+		r.Route(m.prefix, func(r chi.Router) {
+			s.mountRepoTransport(r, m.kind)
+		})
+	}
 
 	return r
 }
+
+// defaultRoutes is Handler()'s routing table built once on a zero Server, for
+// boundHandlerTime when it runs outside a chi router. Registration only takes
+// method values, so nothing on the Server is dereferenced; and no route in
+// Handler() depends on configuration, so this is the table every Server has.
+func defaultRoutes() chi.Routes {
+	// A sync.Once rather than sync.OnceValue in a package var: the latter's
+	// initializer would refer to Handler, which refers back here through
+	// boundHandlerTime -- an initialization cycle.
+	defaultRoutesOnce.Do(func() {
+		defaultRoutesTable = (&Server{}).Handler().(chi.Routes)
+	})
+	return defaultRoutesTable
+}
+
+var (
+	defaultRoutesOnce  sync.Once
+	defaultRoutesTable chi.Routes
+)
 
 // handlerTimeout bounds how long one metadata request may hold a goroutine,
 // a database connection and (for anything CPU-bound) a core.
@@ -374,9 +389,9 @@ const handlerTimeout = 60 * time.Second
 // response body still finds a message in it.
 const handlerTimeoutBody = `{"error":{"message":"the server took too long to answer this request","type":"timeout"}}`
 
-// streamingRoute reports whether a path belongs to a route that must never be
-// wrapped in a handler deadline. Two properties disqualify a route, and these
-// have both:
+// streamingRoute reports whether a request belongs to a route that must never
+// be wrapped in a handler deadline. Two properties disqualify a route, and
+// these have both:
 //
 //   - the response is streamed. http.TimeoutHandler buffers the entire body in
 //     memory before writing a byte of it, which for a clone or an LFS download
@@ -388,33 +403,73 @@ const handlerTimeoutBody = `{"error":{"message":"the server took too long to ans
 //
 // Everything else -- the JSON API, the HF metadata endpoints, the viewer, the
 // UI's reads -- carries a bounded body in both directions and is timed.
-func streamingRoute(p string) bool {
+//
+// The decision is made on the *route pattern* the router will dispatch the
+// request to (streamingPattern), never on the request path. It used to be
+// substring tests on the decoded path -- Contains "/resolve/", "/commit/",
+// "/info/lfs/", HasSuffix "/log" -- and every one of those strings is also a
+// legal file name, directory, revision, organisation or run name. So
+// GET /api/v1/model-meta/model/ns/n/main/resolve/x.safetensors (the
+// checkpoint-header parse this deadline exists to bound), a parquet read of
+// .../main/commit/x.parquet, a tree listing under a directory called
+// "resolve" or an experiment run named "x/log" all ran untimed. A pattern is
+// written in this file, not by the caller, so there is nothing to smuggle.
+//
+// routes is the router the request is being served by. The lookup runs
+// before dispatch (boundHandlerTime is middleware), so it has to ask the
+// router itself which route would answer; a second, hand-kept matcher would
+// disagree with chi's precedence somewhere -- /api/models/resolve/main/tree/x
+// looks like a repository-transport resolve to anything that does not know
+// "/api/" is a static prefix that wins.
+func streamingRoute(routes chi.Routes, r *http.Request) bool {
+	if routes == nil {
+		return false
+	}
+	// The path chi itself routes on: the escaped form when the request has
+	// one (a %2F in a revision or run name), the decoded one otherwise.
+	path := r.URL.RawPath
+	if path == "" {
+		path = r.URL.Path
+	}
+	return streamingPattern(routes.Find(chi.NewRouteContext(), r.Method, path))
+}
+
+// repoTransportMounts are the URL prefixes mountRepoTransport is registered
+// under. Handler() mounts from this list, so the set streamingPattern exempts
+// cannot drift from the set that exists.
+var repoTransportMounts = []struct{ prefix, kind string }{
+	// Datasets carry a /datasets prefix; models sit at the root, matching the
+	// URL shapes huggingface_hub builds.
+	{"/datasets/{ns}/{name}", "dataset"},
+	{"/models/{ns}/{name}", "model"},
+	{"/{ns}/{name}", "model"},
+}
+
+// streamingPattern is streamingRoute's decision for one chi route pattern
+// ("" for a request no route matches, which is timed like anything else).
+func streamingPattern(pattern string) bool {
+	for _, m := range repoTransportMounts {
+		if strings.HasPrefix(pattern, m.prefix+"/") {
+			// Everything mountRepoTransport registers: file downloads (git
+			// blobs and LFS alike, plus the 302 to a signed URL), git smart
+			// HTTP -- a clone is one long streamed response, a push one long
+			// streamed request -- and the LFS batch protocol, whose verify step
+			// can wait on a large staged object being hashed.
+			return true
+		}
+	}
 	switch {
-	case strings.Contains(p, "/resolve/"):
-		// File downloads, git blobs and LFS alike; also the 302 to a signed
-		// URL, whose object is fetched from storage directly.
-		return true
-	case strings.HasSuffix(p, "/info/refs"),
-		strings.HasSuffix(p, "/git-upload-pack"),
-		strings.HasSuffix(p, "/git-receive-pack"):
-		// git smart HTTP: a clone is one long streamed response, a push one
-		// long streamed request.
-		return true
-	case strings.Contains(p, "/info/lfs/"):
-		// The LFS batch protocol, whose verify step can wait on a large
-		// staged object being hashed.
-		return true
-	case strings.HasPrefix(p, "/api/v1/lfs/"):
-		// The emulator transfer proxy: whole objects, in both directions.
-		return true
-	case strings.HasPrefix(p, "/api/v1/upload/"):
-		// Multipart file upload from the browser.
-		return true
-	case strings.Contains(p, "/commit/"):
+	case pattern == "/api/{repoType:models|datasets}/{ns}/{name}/commit/{rev}":
 		// The NDJSON commit endpoint, whose body may carry up to maxCommitBody
 		// of inline file content.
 		return true
-	case strings.HasPrefix(p, "/api/v1/experiments/") && strings.HasSuffix(p, "/log"):
+	case strings.HasPrefix(pattern, "/api/v1/lfs/"):
+		// The emulator transfer proxy: whole objects, in both directions.
+		return true
+	case pattern == "/api/v1/upload/{kind}/{ns}/{name}/{rev}":
+		// Multipart file upload from the browser.
+		return true
+	case pattern == "/api/v1/experiments/{ns}/{repo}/{project}/log":
 		// Live metric ingest, bounded only by maxIngestBody.
 		return true
 	}
@@ -478,10 +533,22 @@ func cascadeDeleteRoute(r *http.Request) bool {
 
 // boundHandlerTime applies handlerTimeout to every route streamingRoute and
 // cascadeDeleteRoute do not exempt.
+//
+// The router streamingRoute consults is the one serving the request, which chi
+// records in the route context before running any middleware. A handler
+// wrapped outside a chi router (a unit test) has none, and falls back to this
+// package's own routing table: the same Handler() registrations, so the same
+// answer.
 func boundHandlerTime(next http.Handler) http.Handler {
 	timed := http.TimeoutHandler(next, handlerTimeout, handlerTimeoutBody)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if streamingRoute(r.URL.Path) || cascadeDeleteRoute(r) {
+		var routes chi.Routes
+		if rctx := chi.RouteContext(r.Context()); rctx != nil && rctx.Routes != nil {
+			routes = rctx.Routes
+		} else {
+			routes = defaultRoutes()
+		}
+		if streamingRoute(routes, r) || cascadeDeleteRoute(r) {
 			next.ServeHTTP(w, r)
 			return
 		}

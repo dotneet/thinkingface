@@ -141,6 +141,18 @@ export const settings = {
     emptyTitle: "No storage usage yet",
     emptyDescription:
       "Upload files to a repository in one of your namespaces to see LFS storage here.",
+    // /api/v1/usage only reports namespaces the caller is a member of
+    // (backend/internal/api/usage.go), but a site admin can still open this
+    // page for an organisation they never joined (OrgSettingsLayout's admin
+    // check passes for them too, see backend/internal/api/authz.go's
+    // roleIn). Without this the missing row read as "this org has stored
+    // nothing" even when it holds real usage — DESIGN.md §9's
+    // empty-vs-failure conflation. Shown instead whenever the namespace has
+    // repositories (org.num_repos > 0, which counts every repo regardless of
+    // visibility) but no row in the response.
+    notAvailableTitle: "Usage not available",
+    notAvailableDescription:
+      "You aren't a member of this namespace, so its storage usage can't be shown here.",
     quota: "Quota",
     quotaUnlimited: "Unlimited",
     quotaExceeded: "Over quota — new large-file uploads are refused",

@@ -13,6 +13,7 @@ import { Pagination } from "@/components/ui/pagination";
 import { errorMessage } from "@/lib/api-error-message";
 import type { MessageKey } from "@/lib/i18n";
 import { getT } from "@/lib/i18n/server";
+import { parseOffset } from "@/lib/pagination";
 import {
   listFlagOn,
   listRepos,
@@ -88,7 +89,7 @@ export async function RepoListPage({
   experiment?: boolean;
 }) {
   const [sp, t] = await Promise.all([searchParams, getT()]);
-  const offset = Number(sp.offset ?? 0) || 0;
+  const offset = parseOffset(sp.offset);
   const sort: Sort = (sp.sort as Sort | undefined) ?? "updated";
   const search = sp.search ?? sp.q ?? "";
   const tags = listSearchTags(sp);

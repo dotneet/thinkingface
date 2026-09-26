@@ -260,7 +260,11 @@ export function TokensManager() {
             {tokens.map((token) => (
               <Tr key={token.id}>
                 <Td className="font-medium">{token.name}</Td>
-                <Td className="capitalize text-fg-muted">{token.scope}</Td>
+                <Td className="text-fg-muted">
+                  {token.scope === "write"
+                    ? t("settings.tokens.scopeWrite")
+                    : t("settings.tokens.scopeRead")}
+                </Td>
                 <Td className="text-fg-subtle">
                   <TimeText iso={token.created_at} style="dateTime" />
                 </Td>

@@ -33,6 +33,7 @@ const (
 	colString colKind = iota
 	colInt32
 	colInt64
+	colUint64
 	colFloat
 	colDouble
 	colBool
@@ -81,10 +82,20 @@ func columnFromSchema(c viewer.Column) (flushColumn, error) {
 		unit := timeUnitFromLogical(logical)
 		out.kind, out.unit, out.node = colTimestamp, unit, parquet.Timestamp(unit)
 		return out, nil
+	case logical == "INT(64,false)" && c.Type == "INT64":
+		// UINT64 gets its own kind rather than folding into colInt64: a value
+		// past math.MaxInt64 is legitimate here (toUint64 accepts the full
+		// range) and Int64Value(int64(n)) below just reinterprets its bit
+		// pattern, the same bits parquet-go itself decodes back as unsigned.
+		// Losing the annotation on a rewrite would silently turn such a value
+		// negative for every subsequent reader.
+		out.kind, out.node = colUint64, parquet.Uint(64)
+		return out, nil
 	case strings.HasPrefix(logical, "INT("):
 		// INT(8|16|32,…) still lives in an INT32 column; only the annotation
 		// differs, and reproducing the annotation verbatim is not worth a
 		// case per width. The physical type below decides the storage.
+		// (INT(64,false) is handled above, since it needs a different node.)
 	case logical != "":
 		return out, &unsupportedColumnError{c.Name, "logical type " + logical + " is not supported"}
 	}
@@ -173,6 +184,13 @@ func (c flushColumn) encode(v any) (parquet.Value, bool) {
 	case colInt64:
 		if n, ok := toInt(v); ok {
 			return parquet.Int64Value(n), true
+		}
+	case colUint64:
+		// toUint64, not toInt: a value already in this column can exceed
+		// math.MaxInt64, and toInt's range check would turn it into a null
+		// here, the exact rewrite-time data loss this kind exists to avoid.
+		if n, ok := toUint64(v); ok {
+			return parquet.Int64Value(int64(n)), true
 		}
 	case colFloat:
 		if f, ok := toFloat(v); ok {
@@ -266,19 +284,17 @@ func writeMetricsParquetLaidOut(columns []flushColumn, rows []map[string]any, la
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].name < ordered[j].name })
 
 	group := parquet.Group{}
-	names := make(map[string]bool, len(ordered))
 	for _, c := range ordered {
 		node := c.node
 		if c.optional {
 			node = parquet.Optional(node)
 		}
 		group[c.name] = node
-		names[c.name] = true
 	}
 
 	cuts := make([]bool, len(rows))
 	if layout.groupByRun {
-		rows, cuts = groupRowsByRun(runColumn(names), rows)
+		rows, cuts = groupRowsByRun(rows)
 	}
 	if layout.maxRows <= 0 {
 		layout.maxRows = len(rows) + 1
@@ -340,8 +356,11 @@ func writeMetricsParquetLaidOut(columns []flushColumn, rows []map[string]any, la
 
 // groupRowsByRun reorders rows so that every run's rows are contiguous, and
 // reports which positions start a new run. Runs come out in name order; a row
-// whose run cannot be read (no run column, a null, a non-string) is treated as
-// one more run named "" and lands first.
+// whose run cannot be read (no run column, or nothing but nulls and "" in the
+// ones it has) is treated as one more run named "" and lands first. A row's run
+// is resolved the way every reader resolves it (rowRun), so a file whose older
+// rows name their run in another column than the newer ones keeps each run's
+// rows together, and in order.
 //
 // **The relative order of one run's rows is preserved exactly.** That is not a
 // nicety, it is the correctness condition for three readers, all of which are
@@ -358,20 +377,16 @@ func writeMetricsParquetLaidOut(columns []flushColumn, rows []map[string]any, la
 // (a resumed run's summary would jump from "last logged" to "highest step"),
 // so it is deliberately not done: run grouping alone is what the row-group
 // pruning needs.
-func groupRowsByRun(runCol string, rows []map[string]any) ([]map[string]any, []bool) {
+func groupRowsByRun(rows []map[string]any) ([]map[string]any, []bool) {
 	cuts := make([]bool, len(rows))
 	if len(rows) == 0 {
-		return rows, cuts
-	}
-	if runCol == "" {
-		cuts[0] = true
 		return rows, cuts
 	}
 
 	buckets := map[string][]map[string]any{}
 	names := make([]string, 0, 16)
 	for _, row := range rows {
-		name := toString(row[runCol])
+		name := rowRun(row)
 		if _, ok := buckets[name]; !ok {
 			names = append(names, name)
 		}
@@ -403,7 +418,7 @@ func zeroValue(c flushColumn) parquet.Value {
 		return parquet.FloatValue(0)
 	case colDouble:
 		return parquet.DoubleValue(0)
-	default: // colInt64, colTimestamp
+	default: // colInt64, colUint64, colTimestamp
 		return parquet.Int64Value(0)
 	}
 }

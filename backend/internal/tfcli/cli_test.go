@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/dotneet/thinkingface/backend/internal/tfcli/hub"
 )
 
 func runMain(t *testing.T, args []string, stdin string) (code int, stdout, stderr string) {
@@ -207,5 +210,23 @@ func TestMaskToken(t *testing.T) {
 		if got := maskToken(in); got != want {
 			t.Errorf("maskToken(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestDescribeHubErrorDistinguishesTransferForbidden is the regression test
+// for a 403 from a signed LFS upload URL (an expired or otherwise rejected
+// transfer, hub.Error.Transfer) being worded as "you do not have write
+// access to <ns>" -- a hub-API 403 is exactly that, but a transfer 403 has
+// nothing to do with the caller's repository permissions and must read
+// differently.
+func TestDescribeHubErrorDistinguishesTransferForbidden(t *testing.T) {
+	transferErr := &hub.Error{Status: http.StatusForbidden, Transfer: true}
+	if got := describeHubError(transferErr, "https://tf.example.com", "alice"); strings.Contains(got, "write access") {
+		t.Errorf("describeHubError(transfer 403) = %q, must not be worded as a repository permission problem", got)
+	}
+
+	apiErr := &hub.Error{Status: http.StatusForbidden}
+	if got := describeHubError(apiErr, "https://tf.example.com", "alice"); !strings.Contains(got, "you do not have write access to alice") {
+		t.Errorf("describeHubError(hub API 403) = %q, want it to name the namespace", got)
 	}
 }

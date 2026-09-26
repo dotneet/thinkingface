@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApiResult } from "@/lib/api";
+import { createTranslator } from "@/lib/i18n";
 import {
   addMember,
   canAdminOrg,
@@ -10,11 +11,14 @@ import {
   listOrgs,
   ORG_ROLES,
   orgErrorKey,
+  orgErrorMessage,
   orgHref,
   removeMember,
   updateMemberRole,
 } from "@/lib/orgs";
 import type { Org } from "@/types/api";
+
+const en = createTranslator("en");
 
 type Call = { url: string; method: string; body?: string };
 
@@ -159,6 +163,34 @@ describe("orgErrorKey", () => {
     expect(
       orgErrorKey(failure(403, "org_creation_disabled"), { 403: "org.errors.lastAdmin" }),
     ).toBe("org.errors.creationDisabled");
+  });
+});
+
+describe("orgErrorMessage", () => {
+  it("shows the server's detail for a 409 name-taken race (async availability check losing to submit)", () => {
+    const result = failure(409, "conflict");
+    result.message = "the name acme is already taken";
+    expect(orgErrorMessage(en, result)).toBe(
+      en("errors.conflictDetail", { detail: result.message }),
+    );
+    expect(orgErrorMessage(en, result)).not.toBe(en("errors.internalError"));
+  });
+
+  it("shows the server's detail for a 400 field validation failure (e.g. an invalid website URL)", () => {
+    const result = failure(400, "bad_request");
+    result.message = "website must be a valid http(s) URL";
+    expect(orgErrorMessage(en, result)).toBe(en("errors.badRequest", { detail: result.message }));
+    expect(orgErrorMessage(en, result)).not.toBe(en("errors.internalError"));
+  });
+
+  it("still prefers an org-specific type over the generic conflict/bad_request handling", () => {
+    expect(orgErrorMessage(en, failure(400, "reserved_name"))).toBe(en("org.errors.nameReserved"));
+    expect(orgErrorMessage(en, failure(409, "last_admin"))).toBe(en("org.errors.lastAdmin"));
+  });
+
+  it("degrades to the generic key for anything else, same as orgErrorKey", () => {
+    expect(orgErrorMessage(en, failure(500))).toBe(en("errors.internalError"));
+    expect(orgErrorMessage(en, failure(401))).toBe(en("org.errors.loginRequired"));
   });
 });
 

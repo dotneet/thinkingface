@@ -178,6 +178,39 @@ func TestMaterialize_PropagatesRefDeletionsAndAdditions(t *testing.T) {
 	assertHealthy(t, fx.dst)
 }
 
+// A ref and a ref nested under it cannot coexist, and git also refuses to swap
+// one for the other inside a single update-ref transaction. An incremental
+// Materialize that batched both used to fail on every call from then on,
+// wedging this instance's copy of the repository.
+func TestMaterialize_RefReplacedByARefNestedUnderIt(t *testing.T) {
+	for _, tc := range []struct{ name, from, to string }{
+		{"a to a/b", "refs/heads/a", "refs/heads/a/b"},
+		{"a/b to a", "refs/heads/a/b", "refs/heads/a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newMaterializeFixture(t)
+			main := commitTo(t, fx.src, "main", "one")
+			pushToWAL(t, fx.store, fx.src, "main", "", main)
+			if err := UpdateIndex(context.Background(), fx.store, storagePath,
+				[]RefUpdate{{Ref: tc.from, Old: "", New: main}}, ""); err != nil {
+				t.Fatalf("UpdateIndex: %v", err)
+			}
+			fx.mustMaterialize(t)
+			assertRefs(t, fx.dst, map[string]string{"refs/heads/main": main, tc.from: main})
+
+			if err := UpdateIndex(context.Background(), fx.store, storagePath, []RefUpdate{
+				{Ref: tc.from, Old: main, New: zeroHash},
+				{Ref: tc.to, Old: "", New: main},
+			}, ""); err != nil {
+				t.Fatalf("UpdateIndex: %v", err)
+			}
+			fx.mustMaterialize(t)
+			assertRefs(t, fx.dst, map[string]string{"refs/heads/main": main, tc.to: main})
+			assertHealthy(t, fx.dst)
+		})
+	}
+}
+
 func TestMaterialize_RecoversFromACrashBetweenObjectsAndRefs(t *testing.T) {
 	fx := newMaterializeFixture(t)
 	first := commitTo(t, fx.src, "main", "one")

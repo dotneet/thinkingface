@@ -496,6 +496,12 @@ export const repo = {
   },
   viewer: {
     errorHint: "Make sure this path points to a Parquet file that exists at this revision.",
+    // Shown above the file-switcher chips when browsing anything other than
+    // the default branch: repo.parquet_files is always indexed off the
+    // default branch (apitypes.RepoDetail.ParquetFiles), so the chips link
+    // there rather than at the revision on screen, which a reader has no way
+    // to guess on their own.
+    otherFilesNote: "Parquet files on the default branch ({branch})",
   },
   settings: {
     noPermissionTitle: "No access",

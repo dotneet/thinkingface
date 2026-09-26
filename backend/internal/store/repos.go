@@ -632,10 +632,15 @@ func (s *Store) repoFacets(ctx context.Context, f RepoFilter) (RepoFacets, error
 func (s *Store) tagFacet(ctx context.Context, f RepoFilter) ([]RepoFacetItem, error) {
 	clause, args := buildRepoWhere(s.d, f, tagFacetScope)
 	from, elem := s.d.jsonArrayElements("r.card", "tags")
+	// GROUP BY names the expression rather than the `value` alias. SQLite
+	// resolves a GROUP BY identifier against the FROM clause before the
+	// select list, and json_each has a column called value of its own -- the
+	// raw element -- so `GROUP BY value` grouped the integer 2024 and the
+	// string "2024" apart and listed "2024" twice.
 	query := `SELECT ` + elem + ` AS value, count(DISTINCT r.id) AS repos FROM repositories r
 		JOIN namespaces n ON n.id = r.namespace_id
 		` + from + clause + `
-		GROUP BY value ORDER BY repos DESC, value ASC LIMIT ` + strconv.Itoa(facetLimit)
+		GROUP BY ` + elem + ` ORDER BY repos DESC, value ASC LIMIT ` + strconv.Itoa(facetLimit)
 	return s.queryFacet(ctx, query, args)
 }
 

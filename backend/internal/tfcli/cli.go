@@ -282,6 +282,13 @@ func describeHubError(err error, endpoint, ns string) string {
 		case http.StatusUnauthorized:
 			return fmt.Sprintf("authentication failed; run `tf login %s`", endpoint)
 		case http.StatusForbidden:
+			// A signed URL (or the emulator's transfer proxy) rejecting a PUT
+			// -- almost always because it expired mid-upload -- says nothing
+			// about the caller's access to the repository, so it must not be
+			// worded as one (see hub.Error.Transfer).
+			if herr.Transfer {
+				return "upload rejected by storage, likely because the transfer took long enough for the signed URL to expire; run `tf up` again"
+			}
 			if ns != "" {
 				return fmt.Sprintf("you do not have write access to %s", ns)
 			}

@@ -36,7 +36,13 @@
 //      with `[` or `(`) is on lib/validation.ts's RESERVED_NAMESPACE_NAMES —
 //      otherwise a new route silently shadows `/[ns]` for whoever holds that
 //      name as a namespace, or worse, sits unreachable behind it
-//      (docs/dev/namespace-design.md §9);
+//      (docs/dev/namespace-design.md §9). The same check covers a top-level
+//      *file* that is a Next.js route-producing convention (icon.svg,
+//      favicon.ico, robots.txt, sitemap.xml, manifest.json, apple-icon.*,
+//      opengraph-image.*, twitter-image.*, and their dynamic .ts/.tsx
+//      generator forms) — app/icon.svg shipped without "icon.svg" on either
+//      reserved list for exactly this reason: the original version of this
+//      rule only ever looked at directories;
 //   9. lib/validation.ts's RESERVED_NAMESPACE_NAMES and
 //      backend/internal/api/names.go's reservedNamespaceNames name the exact
 //      same set — the frontend list only saves a round trip, the Go one is
@@ -382,6 +388,50 @@ function readBackendReservedNames() {
 }
 
 /**
+ * Next.js file conventions that turn a top-level file directly under app/
+ * into its own served route (docs: File Conventions > Metadata Files),
+ * beyond the directory-based routes rule 8 already covered. Each pattern
+ * matches a file's basename (case-insensitive) and says what reserved name
+ * that file demands:
+ *
+ * - `self`: the static form is served byte-for-byte at its own path
+ *   (app/icon.svg → /icon.svg, same as app/favicon.ico → /favicon.ico), so
+ *   the reserved name is the file's own name;
+ * - `base`: the dynamic generator form (a .js/.jsx/.ts/.tsx module exporting
+ *   a function) computes its served extension from what the function
+ *   returns, which this script cannot know without evaluating it. The
+ *   basename alone (e.g. "icon" for icon.tsx) is reserved instead — that is
+ *   deliberately broader than the one path Next.js actually serves, because
+ *   a namespace named "icon" would be a confusing choice regardless of
+ *   which extension the generator happens to answer with today.
+ */
+const APP_ROUTE_FILE_CONVENTIONS = [
+  { re: /^icon\.(ico|jpe?g|png|svg)$/i, kind: "self" },
+  { re: /^icon\.(jsx?|tsx?)$/i, kind: "base", base: "icon" },
+  { re: /^apple-icon\.(ico|jpe?g|png)$/i, kind: "self" },
+  { re: /^apple-icon\.(jsx?|tsx?)$/i, kind: "base", base: "apple-icon" },
+  { re: /^opengraph-image\.(jpe?g|png|gif)$/i, kind: "self" },
+  { re: /^opengraph-image\.(jsx?|tsx?)$/i, kind: "base", base: "opengraph-image" },
+  { re: /^twitter-image\.(jpe?g|png|gif)$/i, kind: "self" },
+  { re: /^twitter-image\.(jsx?|tsx?)$/i, kind: "base", base: "twitter-image" },
+  { re: /^manifest\.(json|webmanifest)$/i, kind: "self" },
+  { re: /^manifest\.(jsx?|tsx?)$/i, kind: "base", base: "manifest" },
+  { re: /^robots\.txt$/i, kind: "self" },
+  { re: /^robots\.(jsx?|tsx?)$/i, kind: "base", base: "robots" },
+  { re: /^sitemap\.xml$/i, kind: "self" },
+  { re: /^sitemap\.(jsx?|tsx?)$/i, kind: "base", base: "sitemap" },
+];
+
+/** The reserved name an app/ top-level file demands, or null if it names no route. */
+function reservedNameForAppFile(fileName) {
+  for (const conv of APP_ROUTE_FILE_CONVENTIONS) {
+    if (!conv.re.test(fileName)) continue;
+    return conv.kind === "self" ? fileName.toLowerCase() : conv.base;
+  }
+  return null;
+}
+
+/**
  * Rule 8 + 9 (see the file banner): every static top-level app/ route is
  * reserved, and the frontend/backend reserved-name lists name the same set.
  * Neither check is per-file, so both run once here rather than inside the
@@ -423,18 +473,31 @@ function checkReservedNamespaceNames() {
     process.exit(2);
   }
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    // `[ns]` is the dynamic namespace route itself; `(group)` route groups
-    // contribute no URL segment of their own — neither can collide with a
-    // reserved name.
-    if (entry.name.startsWith("[") || entry.name.startsWith("(")) continue;
-    if (!frontendSet.has(entry.name.toLowerCase())) {
+    if (entry.isDirectory()) {
+      // `[ns]` is the dynamic namespace route itself; `(group)` route groups
+      // contribute no URL segment of their own — neither can collide with a
+      // reserved name.
+      if (entry.name.startsWith("[") || entry.name.startsWith("(")) continue;
+      if (!frontendSet.has(entry.name.toLowerCase())) {
+        report(
+          join("app", entry.name),
+          1,
+          "reserved-name-sync",
+          `app/${entry.name} is a static top-level route but "${entry.name}" is not in ` +
+            `RESERVED_NAMESPACE_NAMES (${frontend.relPath}) — add it there and to ` +
+            `reservedNamespaceNames in ${backend.relPath}`,
+        );
+      }
+      continue;
+    }
+    const reserved = reservedNameForAppFile(entry.name);
+    if (reserved && !frontendSet.has(reserved)) {
       report(
         join("app", entry.name),
         1,
         "reserved-name-sync",
-        `app/${entry.name} is a static top-level route but "${entry.name}" is not in ` +
-          `RESERVED_NAMESPACE_NAMES (${frontend.relPath}) — add it there and to ` +
+        `app/${entry.name} is a Next.js route-producing file convention but "${reserved}" is ` +
+          `not in RESERVED_NAMESPACE_NAMES (${frontend.relPath}) — add it there and to ` +
           `reservedNamespaceNames in ${backend.relPath}`,
       );
     }

@@ -66,7 +66,9 @@ The confirmed specification between the backend (Go) and frontend (Next.js), and
   **transfer routes are deliberately exempt**, since a deadline there would either buffer a whole
   clone in memory or cut off a slow upload — `resolve`, the git smart-HTTP endpoints, the LFS batch
   and proxy routes, `POST .../commit/{rev}`, `POST /api/v1/upload/...` and the experiment ingest
-  `.../log`. So are the two **cascading deletes**, `DELETE /api/v1/repos/{kind}/{ns}/{name}`
+  `.../log`. The exemption is decided by the route pattern the router actually dispatches to, never
+  by a substring of the path, so a file, directory, org or run that happens to be *named*
+  `resolve` or `log` does not escape the deadline. So are the two **cascading deletes**, `DELETE /api/v1/repos/{kind}/{ns}/{name}`
   (with its HF spelling `DELETE /api/repos/delete`) and
   `DELETE /api/v1/experiments/{ns}/{repo}/{project}/runs/{run}`: their cost is the amount of data
   stored — a repository's file index, LFS links and every experiment point under it — not anything
@@ -113,8 +115,12 @@ res 200: `{"user": User}` + `Set-Cookie: tf_session=...`
   time are used even when the user doesn't exist — a dummy bcrypt pass runs for nonexistent users
   too, so accounts can't be enumerated)
 - **429 `rate_limited`** + `Retry-After`: on repeated failures. By default `TF_AUTH_RATE_LIMIT_PER_MIN`
-  (default 10) attempts/minute from the same IP, and half that rate per minute for the same username.
-  **Only failures are counted**; a success resets the counter.
+  (default 10) attempts/minute from the same IP, half that rate per minute for the same username
+  *from the same IP*, and a per-username ceiling of five times the IP rate across all addresses.
+  The per-(username, IP) bucket is what keeps one address from locking an account out for
+  everyone else; the ceiling still bounds guessing spread over many addresses.
+  **Only failures are counted**; a success resets that address's counters for the account (not
+  the cross-address ceiling).
   The counter is process-local (per replica when there are multiple; SQLite mode is single-process
   by design anyway). The same limit also applies to **HTTP Basic password authentication, accepted
   on every route**. Once the threshold is exceeded, bcrypt is not run and the request is simply
@@ -1364,7 +1370,12 @@ POST   /api/v1/transfers/{id}/accept               → 200 RepoTransferResponse 
 POST   /api/v1/transfers/{id}/reject               → 200 RepoTransferResponse
 ```
 Accept/reject require write permission on the destination namespace; cancel requires write
-permission on the source. A site admin has write permission everywhere and may therefore decide
+permission on the source. Accept also re-checks the *request* at decision time, inside the same
+transaction that moves the repository: if the requester is no longer an admin of the source
+namespace (removed, demoted, suspended or pending approval) the transfer is voided and accept
+answers **409 `transfer_not_pending`**; if the repository has been archived since it was filed,
+accept answers **403 `repository_archived`** and the transfer stays pending (unarchiving makes it
+acceptable again). A site admin has write permission everywhere and may therefore decide
 **any** transfer by ID — that is what unsticks a request whose destination has gone unresponsive.
 
 `GET /api/v1/me/transfers` deliberately does **not** follow that rule. It is an inbox, not a list
@@ -1561,9 +1572,18 @@ Errors — **the status codes are a compatibility contract, not a style choice**
   someone with at least `write` in the namespace, and **403 `repository_archived`** on an
   archived repository.
 
-`message` on a tag produces a real annotated tag object (what `git tag -m` makes), so
-`refs` reports the *tag object* as `targetCommit` for it while every revision lookup peels it to
-the tagged commit. Without a message the tag is lightweight.
+`message` on a tag produces a real annotated tag object (what `git tag -m` makes). `refs`
+peels it and reports the *tagged commit* as `targetCommit`, the same commit every revision
+lookup resolves it to (only the create-tag response body still names the tag object). Without a
+message the tag is lightweight.
+
+Revisions resolve in git's order, never go-git's `ResolveRevision`: `HEAD`, an exact `refs/...`
+name, `refs/heads/<rev>`, `refs/tags/<rev>` (a branch wins over a tag of the same name), a full
+40-hex commit id, and only after every ref lookup failed an abbreviated id of at least 7 hex
+digits that matches exactly one commit. Revision expressions (`main~1`, `v1^`) are not
+supported. A repository whose history lives only on a non-default branch is not empty: an
+unknown revision there is 404 `RevisionNotFound`, while naming the still-unborn default branch
+answers as an empty repository.
 
 The tag object and the ref that names it are written against **one** repository handle
 (`createTagRefThroughWAL`). A fresh tag object is loose, local, and not yet in the WAL, so it

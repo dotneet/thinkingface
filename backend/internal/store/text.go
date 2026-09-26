@@ -1,6 +1,8 @@
 package store
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"unicode/utf8"
 )
@@ -27,6 +29,14 @@ import (
 // reads git rather than this index. What lives in the database is a
 // searchable, displayable *description* of the revision, and a replacement
 // character in it is a better answer than a repository that stops indexing.
+//
+// Not being reversible also means not being injective: `Gr\xf6\xdfe.csv` and
+// `Gr\xfc\xdfe.csv` are two files to git and one name here, since a whole run
+// of invalid bytes becomes a single U+FFFD. Anything keyed on a folded value
+// has to expect that (ReplaceRepoFiles keeps the first and skips the rest).
+// A reversible escape would not remove the need: whatever it produced is a
+// valid name some other file may already have, so collisions would only get
+// rarer, and every stored path would stop being what a person reads in git.
 
 // sanitizeText makes s storable on both engines: NUL is dropped and every
 // byte that is not part of a valid UTF-8 sequence becomes U+FFFD. A string
@@ -89,5 +99,38 @@ func sanitizeJSONMap(m map[string]any) map[string]any {
 		return nil
 	}
 	out, _ := sanitizeJSONValue(m).(map[string]any)
+	return out
+}
+
+// sanitizeJSONRaw is sanitizeJSONValue for a document that arrives already
+// encoded -- a parquet schema, a webhook payload, an audit entry's details.
+// encoding/json replaces invalid UTF-8 as it marshals, but it writes NUL as
+// the escape \u0000, which SQLite stores and PostgreSQL's JSONB rejects
+// (SQLSTATE 22P05): one column named "a\u0000b" in a parquet file was enough
+// to fail UpsertParquetFile on every sync of that repository. So a document
+// that could carry either is decoded, walked, and encoded again.
+//
+// The fast path is the common one and returns raw untouched: valid UTF-8 with
+// no \u0000 escape anywhere cannot hold a NUL. (A literal backslash followed
+// by "u0000" also trips the check and takes the slow path, which round-trips
+// it unchanged.) Numbers are decoded as json.Number so the round trip cannot
+// reshape them. A document that does not parse is returned as it came: that
+// is a caller's bug for the database to report, not one to mask here. nil
+// comes back as nil, which the writers that use it to mean "leave the stored
+// value alone" rely on.
+func sanitizeJSONRaw(raw []byte) []byte {
+	if utf8.Valid(raw) && !bytes.Contains(raw, []byte(`\u0000`)) {
+		return raw
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return raw
+	}
+	out, err := json.Marshal(sanitizeJSONValue(v))
+	if err != nil {
+		return raw
+	}
 	return out
 }

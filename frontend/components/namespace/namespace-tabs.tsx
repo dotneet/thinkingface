@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { formatNumber } from "@/lib/format";
 import type { MessageKey } from "@/lib/i18n";
 import { getT } from "@/lib/i18n/server";
 import { type NamespaceTab, namespaceTabHref } from "@/lib/namespace";
@@ -46,7 +47,9 @@ export async function NamespaceTabs({
           }`}
         >
           {t(LABEL_KEYS[tab])}
-          <span className="tabular-nums text-xs font-medium text-fg-subtle">{counts[tab]}</span>
+          <span className="tabular-nums text-xs font-medium text-fg-subtle">
+            {formatNumber(counts[tab])}
+          </span>
         </Link>
       ))}
     </div>

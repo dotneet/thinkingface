@@ -169,8 +169,8 @@ const (
 	// passwordWrong is a genuine credential failure: no such user, or the
 	// hash did not match. Only this outcome deserves a penalty.
 	passwordWrong
-	// passwordThrottled means this attempt's failure budget -- the caller's
-	// address, or the username, whichever ran out first -- is already spent;
+	// passwordThrottled means this attempt's failure budget -- one of the
+	// buckets in passwordKeys, whichever ran out first -- is already spent;
 	// the caller should be told to come back later.
 	passwordThrottled
 	// passwordOverloaded means no bcrypt slot came free in time. It says
@@ -193,8 +193,8 @@ const (
 )
 
 // checkPassword takes addrKey, the caller's address bucket (s.clientAddrKey),
-// alongside the credentials. Both buckets are consulted and both are charged
-// here, which is what makes the HTTP Basic
+// alongside the credentials. Every bucket in passwordKeys is consulted and
+// charged here, which is what makes the HTTP Basic
 // branch of resolveCredential cost an attacker something: it is accepted on
 // every route, so it used to be the way to guess passwords -- one attempt per
 // username, from one address, forever -- without ever touching the address
@@ -206,8 +206,8 @@ const (
 // same failure; they only reset it on success, which this cannot do for them
 // because they alone know the attempt is finished.
 func (s *Server) checkPassword(ctx context.Context, addrKey, username, password string) (*store.User, passwordOutcome) {
-	userKey := usernameKey(username)
-	if s.authGuard.retryAfter(addrKey, userKey) > 0 {
+	keys := passwordKeys(addrKey, username)
+	if s.authGuard.retryAfter(keys...) > 0 {
 		return nil, passwordThrottled
 	}
 	if !s.authGuard.acquireBcrypt() {
@@ -218,14 +218,18 @@ func (s *Server) checkPassword(ctx context.Context, addrKey, username, password 
 	user, err := s.store.GetUserByUsername(ctx, username)
 	if err != nil {
 		_ = auth.CheckPasswordMiss(password)
-		s.authGuard.penalize(addrKey, userKey)
+		s.authGuard.penalize(keys...)
 		return nil, passwordWrong
 	}
 	if auth.CheckPassword(user.PasswordHash, password) != nil {
-		s.authGuard.penalize(addrKey, userKey)
+		s.authGuard.penalize(keys...)
 		return nil, passwordWrong
 	}
-	s.authGuard.reset(userKey)
+	// Only this address's bucket for the account is forgiven. The global
+	// ceiling is left to refill on its own: resetting it here would let a
+	// distributed guessing run ride every sign-in the real owner makes to get
+	// a fresh ceiling, and the owner's own few typos barely dent it.
+	s.authGuard.reset(userAddrKey(addrKey, username))
 	// The two account gates sit *after* the comparison rather than before it,
 	// so a barred account takes exactly as long to answer as an active one
 	// and they are not distinguishable by timing.
@@ -414,9 +418,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, maxAuthBody, &req, "request body must be JSON with username and password") {
 		return
 	}
-	addrKey, userKey := s.clientAddrKey(r), usernameKey(req.Username)
+	// The same buckets checkPassword meters (passwordKeys), read up front so a
+	// throttled sign-in is answered without touching the store or bcrypt.
+	addrKey := s.clientAddrKey(r)
+	keys := passwordKeys(addrKey, req.Username)
 	clientIP := s.clientIP(r)
-	if wait := s.authGuard.retryAfter(addrKey, userKey); wait > 0 {
+	if wait := s.authGuard.retryAfter(keys...); wait > 0 {
 		// Logged, because a rate-limited sign-in is the only externally
 		// visible sign that the brute-force defence is doing anything. The
 		// username is the string the caller supplied; it is not evidence that
@@ -428,11 +435,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	user, outcome := s.checkPassword(r.Context(), addrKey, req.Username, req.Password)
 	switch outcome {
 	case passwordThrottled:
-		// The username bucket is spent even though the address bucket was
-		// not (checkPassword reads both, and the address one was still open a
-		// moment ago). Do not penalize the address for it.
+		// A bucket ran out between the check above and checkPassword's own
+		// (a concurrent failure). Do not penalize anything for it.
 		slog.Warn("login rate limited", "username", req.Username, "client_ip", clientIP)
-		tooManyAttempts(w, s.authGuard.retryAfter(addrKey, userKey))
+		tooManyAttempts(w, s.authGuard.retryAfter(keys...))
 		return
 	case passwordOverloaded:
 		// The password was never compared, so this is the server's problem,
@@ -672,7 +678,7 @@ func (s *Server) refusePasswordChange(w http.ResponseWriter, r *http.Request, ad
 	case passwordOK:
 		return false
 	case passwordThrottled:
-		tooManyAttempts(w, s.authGuard.retryAfter(addrKey, usernameKey(user.Username)))
+		tooManyAttempts(w, s.authGuard.retryAfter(passwordKeys(addrKey, user.Username)...))
 	case passwordOverloaded:
 		serviceOverloaded(w, bcryptWait)
 	case passwordWrong:

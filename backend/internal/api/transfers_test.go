@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -654,4 +655,84 @@ func (f *transferFixture) mustRepo(kind, ns, name string) *store.Repo {
 		f.t.Fatalf("get repo %s/%s: %v", ns, name, err)
 	}
 	return r
+}
+
+// A pending request must not outlive its requester's authority over the
+// source. Mallory, an acme admin, files acme/crown-jewels -> bob and is then
+// removed from acme; bob accepting afterwards used to move the repository out
+// of an organisation Mallory no longer belonged to.
+func TestAcceptTransfer_VoidedOnceTheRequesterIsNoLongerSourceAdmin(t *testing.T) {
+	f := newTransferFixture(t)
+	acme := f.org("acme", f.admin)
+	mallory := f.mustUser(context.Background(), "mallory", false)
+	f.addOrgMember(acme.ID, mallory.ID, "admin")
+	f.repo("acme", "crown-jewels", "model")
+
+	resp := f.do("POST", "/api/v1/repos/model/acme/crown-jewels/transfer", f.token(mallory, "write"),
+		apitypes.RepoTransferRequest{Namespace: "bob"})
+	if resp.status() != 202 {
+		t.Fatalf("start transfer = %d, body = %s, want 202", resp.status(), resp.rec.Body.String())
+	}
+	var started apitypes.RepoTransferResponse
+	resp.json(t, &started)
+
+	if err := f.st.RemoveOrgMember(context.Background(), acme.ID, mallory.ID); err != nil {
+		t.Fatalf("remove mallory: %v", err)
+	}
+
+	accept := f.do("POST", fmt.Sprintf("/api/v1/transfers/%d/accept", started.Transfer.ID), f.token(f.bob, "write"), nil)
+	if accept.status() != http.StatusConflict {
+		t.Fatalf("accept = %d, body = %s, want 409", accept.status(), accept.rec.Body.String())
+	}
+	var body apitypes.ApiErrorBody
+	accept.json(t, &body)
+	if body.Error.Type != "transfer_not_pending" {
+		t.Errorf("error type = %q, want transfer_not_pending", body.Error.Type)
+	}
+	if got := f.mustRepo("model", "acme", "crown-jewels"); got.Namespace != "acme" {
+		t.Fatalf("repository moved to %s", got.Namespace)
+	}
+	// Voided, not merely refused: it no longer shows as pending anywhere.
+	if _, err := f.st.PendingRepoTransfer(context.Background(), f.mustRepo("model", "acme", "crown-jewels").ID); err == nil {
+		t.Fatal("the stale request is still pending")
+	}
+}
+
+// Archiving stops transfers (loadRepoForWrite refuses to file one), so a
+// request filed before the archive must not complete through accept either.
+func TestAcceptTransfer_RefusedOnAnArchivedRepository(t *testing.T) {
+	f := newTransferFixture(t)
+	f.repo("alice", "foo", "model")
+	aliceTok := f.token(f.alice, "write")
+
+	resp := f.do("POST", "/api/v1/repos/model/alice/foo/transfer", aliceTok,
+		apitypes.RepoTransferRequest{Namespace: "bob"})
+	if resp.status() != 202 {
+		t.Fatalf("start transfer = %d, body = %s, want 202", resp.status(), resp.rec.Body.String())
+	}
+	var started apitypes.RepoTransferResponse
+	resp.json(t, &started)
+
+	repo := f.mustRepo("model", "alice", "foo")
+	if _, err := f.st.SetRepoArchived(context.Background(), repo.ID, true, f.alice.ID); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+
+	accept := f.do("POST", fmt.Sprintf("/api/v1/transfers/%d/accept", started.Transfer.ID), f.token(f.bob, "write"), nil)
+	if accept.status() != http.StatusForbidden {
+		t.Fatalf("accept on an archive = %d, body = %s, want 403", accept.status(), accept.rec.Body.String())
+	}
+	var body apitypes.ApiErrorBody
+	accept.json(t, &body)
+	if body.Error.Type != "repository_archived" {
+		t.Errorf("error type = %q, want repository_archived", body.Error.Type)
+	}
+	if got := f.mustRepo("model", "alice", "foo"); got.Namespace != "alice" {
+		t.Fatalf("repository moved to %s", got.Namespace)
+	}
+	// Still pending: the archive is reversible, and the request stays visible
+	// and cancellable on the settings page meanwhile.
+	if _, err := f.st.PendingRepoTransfer(context.Background(), repo.ID); err != nil {
+		t.Fatalf("the request should survive the archive: %v", err)
+	}
 }

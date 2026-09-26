@@ -14,6 +14,7 @@ import { errorMessage } from "@/lib/api-error-message";
 import { listExperiments } from "@/lib/experiments";
 import { formatNumber } from "@/lib/format";
 import { getT } from "@/lib/i18n/server";
+import { parseOffset } from "@/lib/pagination";
 import { authHeaders } from "@/lib/server-auth";
 
 export const dynamic = "force-dynamic";
@@ -34,7 +35,7 @@ export default async function ExperimentsPage({
 }) {
   const [sp, t] = await Promise.all([searchParams, getT()]);
   const search = sp.search ?? "";
-  const offset = Number(sp.offset ?? 0) || 0;
+  const offset = parseOffset(sp.offset);
 
   // Forward the tf_session cookie so the experiment repos the viewer
   // can see resolve instead of 404ing (see lib/server-auth.ts). The backend
