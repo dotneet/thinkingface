@@ -305,3 +305,34 @@ func TestLayout_MetricsFilesIsBaseThenShards(t *testing.T) {
 		t.Errorf("MetricsFiles() of a project with no metrics = %v, want nil", got)
 	}
 }
+
+// A batch export's run_name column is plain parquet TEXT with none of the
+// ingest API's validation behind it. A NUL or other control byte in it must
+// not reach the store: Postgres rejects such a value outright (22021), which
+// used to abort indexProject's whole upsert loop rather than just this run.
+func TestRowRun_RejectsControlCharacters(t *testing.T) {
+	tests := []struct {
+		name string
+		row  map[string]any
+		want string
+	}{
+		{"clean name", map[string]any{"run_name": "run-1"}, "run-1"},
+		{"NUL byte", map[string]any{"run_name": "a\x00b"}, ""},
+		{"newline", map[string]any{"run_name": "a\nb"}, ""},
+		{"DEL byte", map[string]any{"run_name": "a\x7fb"}, ""},
+		{"invalid UTF-8", map[string]any{"run_name": "a\xffb"}, ""},
+		{
+			"bad run_name falls through to the next candidate column",
+			map[string]any{"run_name": "a\x00b", "run": "fallback"},
+			"fallback",
+		},
+		{"no run column", map[string]any{"step": 1}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rowRun(tt.row); got != tt.want {
+				t.Errorf("rowRun(%v) = %q, want %q", tt.row, got, tt.want)
+			}
+		})
+	}
+}

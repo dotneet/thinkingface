@@ -1389,6 +1389,12 @@ func TestIntegrationWebhooks(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s *Store) {
 		f := newFixture(t, s)
 		ctx := f.ctx
+		// Well above every attempts count this test reaches (2, at d1 and
+		// d5, before each finishes successfully) so ClaimWebhookDelivery's
+		// own budget sweep never parks a delivery this test still expects
+		// to be claimable; TestIntegrationClaimWebhookDeliveryParksExhaustedDeliveries
+		// covers that sweep directly.
+		const claimMaxAttempts = 3
 		r := f.repo(t, "alice", "m", "model", nil)
 		ns := f.ns(t, "alice")
 
@@ -1444,7 +1450,7 @@ func TestIntegrationWebhooks(t *testing.T) {
 		}
 
 		// Deliveries: claim, lease, finish, retry, park.
-		if j, err := s.ClaimWebhookDelivery(ctx, time.Minute); err != nil || j != nil {
+		if j, err := s.ClaimWebhookDelivery(ctx, time.Minute, claimMaxAttempts); err != nil || j != nil {
 			t.Fatalf("claim empty = %+v, %v", j, err)
 		}
 		d1, err := s.CreateWebhookDelivery(ctx, wide.ID, "repo.pushed", []byte(`{"a":1}`))
@@ -1455,13 +1461,13 @@ func TestIntegrationWebhooks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		j, err := s.ClaimWebhookDelivery(ctx, time.Minute)
+		j, err := s.ClaimWebhookDelivery(ctx, time.Minute, claimMaxAttempts)
 		if err != nil || j == nil || j.DeliveryID != d1 || j.WebhookID != wide.ID || j.URL != "https://example.com/a" ||
 			j.Secret != "s1" || !j.WebhookActive || !jsonEqual(j.Payload, `{"a":1}`) || j.Attempts != 1 || j.Event != "repo.pushed" {
 			t.Fatalf("ClaimWebhookDelivery = %+v, %v", j, err)
 		}
 		// Leased: not claimable again; the inactive webhook's delivery never is.
-		if j2, err := s.ClaimWebhookDelivery(ctx, time.Minute); err != nil || j2 != nil {
+		if j2, err := s.ClaimWebhookDelivery(ctx, time.Minute, claimMaxAttempts); err != nil || j2 != nil {
 			t.Fatalf("claim during lease = %+v, %v", j2, err)
 		}
 		// Failure under maxAttempts: retried after backoff (0 here).
@@ -1472,7 +1478,7 @@ func TestIntegrationWebhooks(t *testing.T) {
 		if err != nil || d.Status != "pending" || d.ResponseStatus == nil || *d.ResponseStatus != 500 || d.ResponseBody != "oops" || d.LastAttemptAt == nil || d.Attempts != 1 {
 			t.Fatalf("delivery after failure = %+v, %v", d, err)
 		}
-		j, err = s.ClaimWebhookDelivery(ctx, time.Minute)
+		j, err = s.ClaimWebhookDelivery(ctx, time.Minute, claimMaxAttempts)
 		if err != nil || j == nil || j.DeliveryID != d1 || j.Attempts != 2 {
 			t.Fatalf("re-claim = %+v, %v", j, err)
 		}
@@ -1486,7 +1492,7 @@ func TestIntegrationWebhooks(t *testing.T) {
 		// as well as the retry budget, so it has to be the count the claim
 		// actually returned; maxAttempts is what makes this the last one.
 		d2, _ := s.CreateWebhookDelivery(ctx, wide.ID, "repo.created", []byte(`{}`))
-		j2, _ := s.ClaimWebhookDelivery(ctx, time.Minute)
+		j2, _ := s.ClaimWebhookDelivery(ctx, time.Minute, claimMaxAttempts)
 		if j2 == nil || j2.DeliveryID != d2 {
 			t.Fatalf("claim d2 = %+v", j2)
 		}
@@ -1498,13 +1504,13 @@ func TestIntegrationWebhooks(t *testing.T) {
 		}
 		// Backoff in the future keeps it out of the queue.
 		d3, _ := s.CreateWebhookDelivery(ctx, wide.ID, "repo.created", []byte(`{}`))
-		if j, _ := s.ClaimWebhookDelivery(ctx, time.Minute); j == nil || j.DeliveryID != d3 {
+		if j, _ := s.ClaimWebhookDelivery(ctx, time.Minute, claimMaxAttempts); j == nil || j.DeliveryID != d3 {
 			t.Fatalf("claim d3 = %+v", j)
 		}
 		if err := s.FinishWebhookDelivery(ctx, d3, false, 1, 3, nil, "", time.Hour); err != nil {
 			t.Fatal(err)
 		}
-		if j, err := s.ClaimWebhookDelivery(ctx, time.Minute); err != nil || j != nil {
+		if j, err := s.ClaimWebhookDelivery(ctx, time.Minute, claimMaxAttempts); err != nil || j != nil {
 			t.Fatalf("claimed backed-off delivery = %+v, %v", j, err)
 		}
 		// Redelivery clones the payload into a fresh pending row.
@@ -1512,7 +1518,7 @@ func TestIntegrationWebhooks(t *testing.T) {
 		if err != nil || d4 == d1 {
 			t.Fatalf("Redeliver = %d, %v", d4, err)
 		}
-		if j, _ := s.ClaimWebhookDelivery(ctx, time.Minute); j == nil || j.DeliveryID != d4 || !jsonEqual(j.Payload, `{"a":1}`) {
+		if j, _ := s.ClaimWebhookDelivery(ctx, time.Minute, claimMaxAttempts); j == nil || j.DeliveryID != d4 || !jsonEqual(j.Payload, `{"a":1}`) {
 			t.Fatalf("claim redelivery = %+v", j)
 		}
 		page, total, err := s.ListWebhookDeliveries(ctx, wide.ID, 2, 0)
@@ -1524,7 +1530,7 @@ func TestIntegrationWebhooks(t *testing.T) {
 		if _, err := s.UpdateWebhook(ctx, inactive.ID, WebhookUpdate{Active: ptr(true)}); err != nil {
 			t.Fatal(err)
 		}
-		if j, _ := s.ClaimWebhookDelivery(ctx, time.Minute); j == nil || j.DeliveryID != dInactive {
+		if j, _ := s.ClaimWebhookDelivery(ctx, time.Minute, claimMaxAttempts); j == nil || j.DeliveryID != dInactive {
 			t.Fatalf("claim reactivated = %+v", j)
 		}
 
@@ -1532,11 +1538,11 @@ func TestIntegrationWebhooks(t *testing.T) {
 		// of a delivery somebody else has since reclaimed: attempts is the
 		// fencing token (FinishWebhookDelivery).
 		d5, _ := s.CreateWebhookDelivery(ctx, wide.ID, "repo.pushed", []byte(`{}`))
-		stale, err := s.ClaimWebhookDelivery(ctx, 0) // lease expires immediately
+		stale, err := s.ClaimWebhookDelivery(ctx, 0, claimMaxAttempts) // lease expires immediately
 		if err != nil || stale == nil || stale.DeliveryID != d5 || stale.Attempts != 1 {
 			t.Fatalf("claim d5 = %+v, %v", stale, err)
 		}
-		held, err := s.ClaimWebhookDelivery(ctx, time.Minute) // a second worker takes it
+		held, err := s.ClaimWebhookDelivery(ctx, time.Minute, claimMaxAttempts) // a second worker takes it
 		if err != nil || held == nil || held.DeliveryID != d5 || held.Attempts != 2 {
 			t.Fatalf("re-claim d5 = %+v, %v", held, err)
 		}
@@ -1563,6 +1569,60 @@ func TestIntegrationWebhooks(t *testing.T) {
 		}
 		if _, total, _ := s.ListWebhookDeliveries(ctx, wide.ID, 10, 0); total != 0 {
 			t.Fatalf("deliveries survived webhook delete: %d", total)
+		}
+	})
+}
+
+// TestIntegrationClaimWebhookDeliveryParksExhaustedDeliveries pins the fix for
+// a delivery whose FinishWebhookDelivery call never lands -- the worker that
+// claimed it crashed before calling it, or the finishing write itself failed.
+// Before ClaimWebhookDelivery took maxAttempts and swept over-budget rows
+// itself, nothing else ever compared attempts to the budget except
+// FinishWebhookDelivery: the row stayed 'pending' forever, reclaimed and
+// re-POSTed to the target on every lease period without end. A lease of 0
+// makes each claim immediately due again, standing in for that many workers
+// crashing in a row.
+func TestIntegrationClaimWebhookDeliveryParksExhaustedDeliveries(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+		ns := f.ns(t, "alice")
+		hook, err := s.CreateWebhook(ctx, ns.ID, nil, "https://example.com/h", "s", []string{"repo.push"}, true)
+		if err != nil {
+			t.Fatalf("CreateWebhook: %v", err)
+		}
+		id, err := s.CreateWebhookDelivery(ctx, hook.ID, "repo.push", []byte(`{}`))
+		if err != nil {
+			t.Fatalf("CreateWebhookDelivery: %v", err)
+		}
+
+		const maxAttempts = 3
+		for i := 1; i <= maxAttempts; i++ {
+			j, err := s.ClaimWebhookDelivery(ctx, 0, maxAttempts)
+			if err != nil || j == nil || j.DeliveryID != id || j.Attempts != i {
+				t.Fatalf("claim %d = %+v, %v", i, j, err)
+			}
+		}
+
+		// The budget is spent with no outcome ever recorded. The next claim
+		// call must sweep it into 'failed' instead of handing it out again.
+		if j, err := s.ClaimWebhookDelivery(ctx, time.Minute, maxAttempts); err != nil || j != nil {
+			t.Fatalf("claim once the budget is spent = %+v, %v", j, err)
+		}
+		d, err := s.GetWebhookDelivery(ctx, id)
+		if err != nil {
+			t.Fatalf("GetWebhookDelivery: %v", err)
+		}
+		if d.Status != "failed" {
+			t.Fatalf("status = %q, want failed once the budget is spent with no outcome recorded", d.Status)
+		}
+		if d.ResponseBody != webhookAttemptsExhaustedError {
+			t.Fatalf("response body = %q, want the parked-without-an-outcome explanation", d.ResponseBody)
+		}
+
+		// Stays parked -- never handed out again.
+		if j, err := s.ClaimWebhookDelivery(ctx, time.Minute, maxAttempts); err != nil || j != nil {
+			t.Fatalf("claim after park = %+v, %v", j, err)
 		}
 	})
 }

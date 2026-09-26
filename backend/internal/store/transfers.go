@@ -579,15 +579,26 @@ func (s *Store) AcceptRepoTransfer(ctx context.Context, id, actorID int64) (*Rep
 // namespace's only admin is its owner, and an organisation's admins are its
 // org_members with role 'admin'.
 //
-// The source namespace row is locked, which is the lock every org membership
-// change takes (lockOrgForMembershipChange), and so is the requester's user
-// row, which suspension updates. A removal or suspension racing an accept is
-// therefore ordered strictly before it (and seen here) or strictly after it
-// (and the transfer really did complete while the requester held the role).
+// The source namespace row is share-locked, which conflicts with the FOR
+// UPDATE every org membership change takes (lockOrgForMembershipChange) and
+// with an organisation's deletion, and so is the requester's user row, which
+// suspension, approval and SetUserAdmin UPDATE. A removal, demotion or
+// suspension racing an accept is therefore ordered strictly before it (and
+// seen here) or strictly after it (and the transfer really did complete while
+// the requester held the role).
+//
+// Shared, not FOR UPDATE, because two accepts may cross: X moves a repository
+// N -> M while Y moves one M -> N. transferMove's UPDATE of
+// repositories.namespace_id makes Postgres take FOR KEY SHARE on the
+// destination namespace for the foreign-key check -- which is the other
+// transaction's *source* row. Against FOR UPDATE that is a lock cycle (40P01,
+// surfacing as a 500 on one side); against FOR SHARE the two are compatible.
+// Nothing later in the accept writes either row, so there is no upgrade from
+// the shared lock to deadlock on instead.
 func requesterMayStillTransfer(ctx context.Context, ex executor, d dialect, requesterID, fromNamespaceID int64) (bool, error) {
 	var ownerID *int64
 	if err := ex.QueryRow(ctx,
-		`SELECT owner_user_id FROM namespaces WHERE id = $1`+d.forUpdate(""), fromNamespaceID,
+		`SELECT owner_user_id FROM namespaces WHERE id = $1`+d.forShare(), fromNamespaceID,
 	).Scan(&ownerID); err != nil {
 		return false, norm(err)
 	}
@@ -595,7 +606,7 @@ func requesterMayStillTransfer(ctx context.Context, ex executor, d dialect, requ
 	var isAdmin bool
 	var disabledAt, pendingAt *time.Time
 	err := ex.QueryRow(ctx,
-		`SELECT is_admin, disabled_at, approval_pending_at FROM users WHERE id = $1`+d.forUpdate(""), requesterID,
+		`SELECT is_admin, disabled_at, approval_pending_at FROM users WHERE id = $1`+d.forShare(), requesterID,
 	).Scan(&isAdmin, &disabledAt, &pendingAt)
 	if isNoRows(err) {
 		return false, nil

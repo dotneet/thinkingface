@@ -1,11 +1,16 @@
 package gitrepo
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/go-git/go-git/v5/plumbing"
+
+	"github.com/dotneet/thinkingface/backend/internal/wal"
 )
 
 // resolveFixture is a repository with some history on main and one unrelated
@@ -92,6 +97,69 @@ func TestResolve_BranchBeatsTagOfTheSameName(t *testing.T) {
 	}
 }
 
+// A full commit id is the one revision that cannot be ambiguous, so it beats
+// a branch or tag that is named after it -- as it does in git. Otherwise
+// anyone who can create a branch could redirect every read pinned to a commit
+// (snapshot_download(revision=<sha>), a trust_remote_code pin) to a tree of
+// their choosing.
+func TestResolve_FullCommitIDBeatsRefOfTheSameName(t *testing.T) {
+	f := newResolveFixture(t)
+	full := f.prefixSource.String()
+	if err := f.repo.CreateRef(BranchRef(full), f.other); err != nil {
+		t.Fatalf("CreateRef branch: %v", err)
+	}
+	if err := f.repo.CreateRef(TagRef(strings.ToUpper(full)), f.other); err != nil {
+		t.Fatalf("CreateRef tag: %v", err)
+	}
+	for _, rev := range []string{full, strings.ToUpper(full)} {
+		got, err := f.repo.Resolve(rev)
+		if err != nil {
+			t.Fatalf("Resolve(%q): %v", rev, err)
+		}
+		if got != f.prefixSource {
+			t.Errorf("Resolve(%q) = %s, want the commit %s, not the ref's %s", rev, got, f.prefixSource, f.other)
+		}
+	}
+	// The ref is still reachable by its full name.
+	if got, _ := f.repo.Resolve(BranchRef(full)); got != f.other {
+		t.Errorf("Resolve(refs/heads/<id>) = %s, want %s", got, f.other)
+	}
+
+	// A 40-hex name that is not a commit here -- no such object, or a tree --
+	// has no other meaning, so the ref of that name answers.
+	commit, err := f.repo.CommitObject(f.prefixSource)
+	if err != nil {
+		t.Fatalf("CommitObject: %v", err)
+	}
+	for _, name := range []string{strings.Repeat("e", 40), commit.TreeHash.String()} {
+		if err := f.repo.CreateRef(BranchRef(name), f.other); err != nil {
+			t.Fatalf("CreateRef(%s): %v", name, err)
+		}
+		if got, err := f.repo.Resolve(name); err != nil || got != f.other {
+			t.Errorf("Resolve(%q) = %s, %v; want the branch tip %s", name, got, err, f.other)
+		}
+	}
+}
+
+// git accepts a ref component starting with "-" (refs/heads/-dash is what
+// `git push origin HEAD:refs/heads/-dash` creates); go-git's Validate does
+// not. Resolve must only refuse names that could escape refs/, not every name
+// go-git would not have created itself.
+func TestResolve_RefNamesGitAcceptsButGoGitRejects(t *testing.T) {
+	f := newResolveFixture(t)
+	runGit(t, f.repo.Dir(), "update-ref", "refs/heads/-dash", f.other.String())
+	runGit(t, f.repo.Dir(), "update-ref", "refs/tags/-t", f.other.String())
+	for _, rev := range []string{"-dash", "refs/heads/-dash", "-t", "refs/tags/-t"} {
+		got, err := f.repo.Resolve(rev)
+		if err != nil {
+			t.Fatalf("Resolve(%q): %v", rev, err)
+		}
+		if got != f.other {
+			t.Errorf("Resolve(%q) = %s, want %s", rev, got, f.other)
+		}
+	}
+}
+
 // Commit ids: a full id resolves in either case, an abbreviation needs at
 // least seven digits, and a short one is not even looked up -- a one-digit
 // "prefix" used to walk every pack index for an unauthenticated GET.
@@ -130,6 +198,10 @@ func TestResolve_RejectsNonCommits(t *testing.T) {
 		"main^",
 		"../../HEAD",
 		"refs/heads/../../config",
+		"refs/heads/./main",
+		"refs//heads/main",
+		"/refs/heads/main",
+		"main\x00",
 		"no-such-branch",
 	} {
 		if _, err := f.repo.Resolve(rev); !errors.Is(err, ErrEmptyRepo) {
@@ -172,16 +244,36 @@ func TestIsEmpty_TagOnly(t *testing.T) {
 	}
 }
 
-// Two local commits on one branch can interleave with their WAL writes. The
-// rollback of the first must not move the branch out from under the second:
-// it only undoes its own commit, i.e. only when the ref still points at it.
-func TestResetBranch_OnlyRollsBackItsOwnCommit(t *testing.T) {
+// writeWALState stamps repo's directory with a WAL state file recording refs,
+// the way a materialisation (or AdoptLocal after a successful write) leaves
+// it. ResetBranch reads nothing else from the WAL.
+func writeWALState(t *testing.T, repo *Repo, refs map[string]string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"generation": 42, "base": "", "applied": []string{}, "refs": refs, "seq": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo.Dir(), wal.StateFileName), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Two local commits on one branch can interleave with their WAL writes: A
+// advances main X->A, B advances A->B, A's write fails for a non-stale reason
+// (a GCS 5xx), and B's write is then stale because the index still says X.
+//
+// A's rollback must leave main alone -- B has moved it on. B's rollback must
+// land on X, the value the WAL holds, not on A, B's parent: A is a commit no
+// index contains, and with the index generation unchanged no materialisation
+// would ever move main off it again, so every later commit on the branch
+// would be rejected as stale.
+func TestResetBranch_ChainedCommitsRollBackToTheWALValue(t *testing.T) {
 	_, repo := newTestRepo(t)
 	x := mustCommit(t, repo, "main", "x", addOp("a.txt", "x\n"))
+	writeWALState(t, repo, map[string]string{"refs/heads/main": x.String()})
 	a := mustCommit(t, repo, "main", "a", addOp("a.txt", "a\n"))
 	b := mustCommit(t, repo, "main", "b", addOp("a.txt", "b\n"))
 
-	// A's WAL write failed, but B has already moved main past A.
 	if err := repo.ResetBranch("main", a, x); err != nil {
 		t.Fatalf("ResetBranch(expect=a): %v", err)
 	}
@@ -189,12 +281,45 @@ func TestResetBranch_OnlyRollsBackItsOwnCommit(t *testing.T) {
 		t.Fatalf("main = %s, want B's commit %s left alone", got, b)
 	}
 
-	// B's own rollback does apply.
 	if err := repo.ResetBranch("main", b, a); err != nil {
 		t.Fatalf("ResetBranch(expect=b): %v", err)
 	}
+	if got, _ := repo.Resolve("main"); got != x {
+		t.Fatalf("main = %s, want the WAL's %s (A, %s, was never accepted)", got, x, a)
+	}
+}
+
+// A WAL-managed copy with no state file is one EnsureLocal found no index for,
+// so the WAL's value for every ref is "absent". Rolling a chained pair of first
+// commits back to the parent would leave a ref no index has, and the next
+// EnsureLocal would refuse the whole copy as ErrIndexMissing.
+func TestResetBranch_WALManagedWithoutIndexDeletes(t *testing.T) {
+	_, repo := newTestRepo(t)
+	repo.walManaged = true
+	a := mustCommit(t, repo, "main", "a", addOp("a.txt", "a\n"))
+	b := mustCommit(t, repo, "main", "b", addOp("a.txt", "b\n"))
+
+	if err := repo.ResetBranch("main", b, a); err != nil {
+		t.Fatalf("ResetBranch: %v", err)
+	}
+	if ok, _ := repo.HasBranch("main"); ok {
+		t.Fatal("main survived although the WAL has never held it")
+	}
+}
+
+// A repository the WAL does not manage has no recorded value to prefer, and
+// rolls back to the caller's parent.
+func TestResetBranch_UnmanagedFallsBackToParent(t *testing.T) {
+	_, repo := newTestRepo(t)
+	mustCommit(t, repo, "main", "x", addOp("a.txt", "x\n"))
+	a := mustCommit(t, repo, "main", "a", addOp("a.txt", "a\n"))
+	b := mustCommit(t, repo, "main", "b", addOp("a.txt", "b\n"))
+
+	if err := repo.ResetBranch("main", b, a); err != nil {
+		t.Fatalf("ResetBranch: %v", err)
+	}
 	if got, _ := repo.Resolve("main"); got != a {
-		t.Fatalf("main = %s, want %s", got, a)
+		t.Fatalf("main = %s, want the parent %s", got, a)
 	}
 }
 

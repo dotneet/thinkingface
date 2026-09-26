@@ -44,8 +44,9 @@ func ClosingFence(rest string) int {
 // card-loading regex is `^\s*---`) and ClosingFence's rule for the closing
 // line. ok reports whether an opening and a matching closing fence were both
 // found. front is the block's raw YAML text; body is everything after the
-// closing fence's line, with at most one leading newline (the fence line's
-// own terminator) trimmed. When ok is false, front is "" and body is text
+// closing fence's line -- the "---" itself, any trailing spaces/tabs
+// ClosingFence tolerates on it, and its terminating newline are all excluded,
+// not just the "---". When ok is false, front is "" and body is text
 // unchanged, so a caller with no card to read can fall back to treating the
 // whole input as body.
 //
@@ -66,7 +67,18 @@ func SplitFrontMatter(text string) (front, body string, ok bool) {
 		return "", text, false
 	}
 	front = rest[:end]
-	body = strings.TrimPrefix(rest[end+len("---"):], "\n")
+	// Skip the whole closing fence line, not just its "---" marker. A fence
+	// with trailing whitespace ("---  \n") left that whitespace in front of
+	// body ("  \n# Title" instead of "# Title"), which MergeReadme then
+	// carried straight into the rewritten README as a stray line above the
+	// heading it was supposed to sit next to. Finding the line's own "\n"
+	// (or ending body at "" when the fence is the file's last line) is what
+	// makes this agree with ClosingFence's own rule for what counts as the
+	// fence line, whatever trails the "---" on it.
+	afterFence := rest[end:]
+	if nl := strings.IndexByte(afterFence, '\n'); nl >= 0 {
+		body = afterFence[nl+1:]
+	}
 	return front, body, true
 }
 

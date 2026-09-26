@@ -136,6 +136,8 @@ func (sqliteDialect) searchPredicate(bind func(any) string, text string) string 
 
 func (sqliteDialect) forUpdate(string) string { return "" }
 
+func (sqliteDialect) forShare() string { return "" }
+
 func (sqliteDialect) advisoryXactLock(context.Context, executor, string, int64) error { return nil }
 
 func (sqliteDialect) nowPlusSeconds(placeholder string) string {

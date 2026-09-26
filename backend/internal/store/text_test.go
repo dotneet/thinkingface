@@ -342,7 +342,7 @@ func TestIntegrationWebhookDeliverySurvivesAnUnstorableResponse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateWebhookDelivery with a NUL in the payload: %v", err)
 		}
-		job, err := s.ClaimWebhookDelivery(ctx, time.Minute)
+		job, err := s.ClaimWebhookDelivery(ctx, time.Minute, 1)
 		if err != nil || job == nil || job.DeliveryID != id {
 			t.Fatalf("ClaimWebhookDelivery = %+v, %v", job, err)
 		}

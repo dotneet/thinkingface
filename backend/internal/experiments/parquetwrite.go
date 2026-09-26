@@ -33,6 +33,7 @@ const (
 	colString colKind = iota
 	colInt32
 	colInt64
+	colUint32
 	colUint64
 	colFloat
 	colDouble
@@ -91,11 +92,24 @@ func columnFromSchema(c viewer.Column) (flushColumn, error) {
 		// negative for every subsequent reader.
 		out.kind, out.node = colUint64, parquet.Uint(64)
 		return out, nil
+	case logical == "INT(32,false)" && c.Type == "INT32":
+		// Also its own kind, and for the same reason as INT(64,false) above:
+		// unlike INT(8,false)/INT(16,false) -- whose whole range (0..65535)
+		// fits inside a signed INT32 anyway -- an unsigned 32-bit value can
+		// exceed math.MaxInt32 (any of the ~53% of the uint32 range at or
+		// above 2^31). Folding it into colInt32's signed
+		// parquet.Leaf(parquet.Int32Type) would encode such a value as
+		// negative and drop the unsigned annotation on the rewrite, turning
+		// every later reader's answer negative too.
+		out.kind, out.node = colUint32, parquet.Uint(32)
+		return out, nil
 	case strings.HasPrefix(logical, "INT("):
-		// INT(8|16|32,…) still lives in an INT32 column; only the annotation
-		// differs, and reproducing the annotation verbatim is not worth a
-		// case per width. The physical type below decides the storage.
-		// (INT(64,false) is handled above, since it needs a different node.)
+		// INT(8|16,…) (signed or not) and signed INT(32,64,…) still live in
+		// an INT32/INT64 column; only the annotation differs, and
+		// reproducing it verbatim is not worth a case per width. The
+		// physical type below decides the storage. (INT(64,false) and
+		// INT(32,false) are handled above, since they need a different,
+		// unsigned node.)
 	case logical != "":
 		return out, &unsupportedColumnError{c.Name, "logical type " + logical + " is not supported"}
 	}
@@ -184,6 +198,14 @@ func (c flushColumn) encode(v any) (parquet.Value, bool) {
 	case colInt64:
 		if n, ok := toInt(v); ok {
 			return parquet.Int64Value(n), true
+		}
+	case colUint32:
+		// toUint64, not toInt: mirrors colUint64 below, just bounded to
+		// 32 bits. int32(uint32(n)) reinterprets the low 32 bits verbatim,
+		// the same bit pattern parquet-go itself decodes back as unsigned
+		// (unsignedIntValue in viewer/convert.go).
+		if n, ok := toUint64(v); ok && n <= math.MaxUint32 {
+			return parquet.Int32Value(int32(uint32(n))), true
 		}
 	case colUint64:
 		// toUint64, not toInt: a value already in this column can exceed
@@ -412,7 +434,7 @@ func zeroValue(c flushColumn) parquet.Value {
 		return parquet.ByteArrayValue(nil)
 	case colBool:
 		return parquet.BooleanValue(false)
-	case colInt32:
+	case colInt32, colUint32:
 		return parquet.Int32Value(0)
 	case colFloat:
 		return parquet.FloatValue(0)

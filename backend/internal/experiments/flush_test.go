@@ -1487,3 +1487,128 @@ func TestFlush_PreservesAUint64Column(t *testing.T) {
 		t.Errorf("run-2's epoch after the rewrite = %v (present=%v), want 2 (step 20 logged into the shared UINT64 step column)", v, ok)
 	}
 }
+
+// TestMergePoints_WidensAnInt32ColumnPastMaxInt32 is the regression test for
+// widenFor's own bug: colInt32 used to share colInt64's bound check, so a
+// value like 3e9 -- past math.MaxInt32 but comfortably inside int64's range
+// -- read as "fits" and never widened. encode() would then have written it
+// as int32(3_000_000_000), which wraps negative, into a column re-annotated
+// as plain signed INT32. Bounding the check to int32 for this kind is what
+// makes such a value widen the column to DOUBLE instead.
+func TestMergePoints_WidensAnInt32ColumnPastMaxInt32(t *testing.T) {
+	existing := &existingTable{
+		columns: []flushColumn{
+			stringColumn("run_name", false),
+			int64Column("step"),
+			{name: "tokens", kind: colInt32, node: parquet.Leaf(parquet.Int32Type), optional: true},
+		},
+		rows:      []map[string]any{{"run_name": "run-1", "step": int64(1), "tokens": int64(10)}},
+		ingestIDs: map[int64]bool{},
+	}
+	points := []store.PendingPoint{{
+		ID: 7, RunName: "run-1", Step: 2, TS: time.Now(),
+		Metrics: map[string]float64{"tokens": 3_000_000_000},
+	}}
+
+	columns, _, appended := mergePoints(existing, points)
+	if appended != 1 {
+		t.Fatalf("appended = %d, want 1", appended)
+	}
+	byName := map[string]flushColumn{}
+	for _, c := range columns {
+		byName[c.name] = c
+	}
+	if got := byName["tokens"].kind; got != colDouble {
+		t.Errorf("tokens column kind = %v, want colDouble: 3e9 does not fit a signed INT32 column", got)
+	}
+}
+
+// TestFlush_PreservesAUint32ColumnAndWidensAnOverflowingInt32 is the
+// parquetwrite.go half of the same bug, end to end through a real flush:
+//   - An existing INT(32,false) column must round-trip a value past
+//     math.MaxInt32 without going negative -- columnFromSchema used to fold
+//     it into the same signed colInt32 kind as INT(8/16/32,true), so encode
+//     wrote such a value as a negative int32 and dropped the unsigned
+//     annotation on the rewrite.
+//   - A plain signed INT32 column handed a new value of 3e9 must widen to
+//     DOUBLE rather than silently wrap (see
+//     TestMergePoints_WidensAnInt32ColumnPastMaxInt32 for the unit-level
+//     version of this half).
+func TestFlush_PreservesAUint32ColumnAndWidensAnOverflowingInt32(t *testing.T) {
+	h := newExpHarness(t)
+	// Past math.MaxInt32 (2^31-1) but well within uint32's range, so a
+	// wraparound to negative is unambiguous in the assertions below.
+	const bigMetric = uint32(1) << 31
+	h.commitParquet("demo.parquet",
+		[]flushColumn{
+			stringColumn("run_name", false),
+			int64Column("step"),
+			stringColumn("timestamp", true),
+			{name: "tokens", kind: colUint32, node: parquet.Uint(32), optional: true},
+			{name: "signed32", kind: colInt32, node: parquet.Leaf(parquet.Int32Type), optional: true},
+		},
+		[]map[string]any{
+			{"run_name": "run-1", "step": int64(1), "timestamp": "2026-08-22T00:00:00Z",
+				// int64, not uint32: this mirrors what a real cell value looks
+				// like by the time it reaches encode() -- viewer/convert.go's
+				// unsignedIntValue always widens an INT(32,false) cell to
+				// int64 (never a Go uint32), so that is the shape encode's
+				// colUint32 case (toUint64) must accept.
+				"tokens": int64(bigMetric), "signed32": int64(10)},
+		})
+
+	got := h.series("demo")
+	byKey := map[string]float64{}
+	for _, s := range got {
+		if s.Run == "run-1" && len(s.Points) > 0 {
+			byKey[s.Key] = s.Points[len(s.Points)-1][1]
+		}
+	}
+	if v := byKey["tokens"]; v != float64(bigMetric) {
+		t.Fatalf("tokens before any flush = %v, want %v (a UINT32 cell must not read back negative)", v, float64(bigMetric))
+	}
+
+	// Force a rewrite of the same file by buffering a new point for run-1
+	// whose signed32 value does not fit a signed INT32.
+	projectID, err := h.st.UpsertExpProject(h.ctx, h.repo.ID, "demo")
+	if err != nil {
+		t.Fatalf("upsert project: %v", err)
+	}
+	runID, err := h.st.UpsertExpRun(h.ctx, projectID, "run-1", "running", nil, nil,
+		[]string{"tokens", "signed32"}, 2, 0, nil)
+	if err != nil {
+		t.Fatalf("upsert run: %v", err)
+	}
+	if err := h.st.InsertPoints(h.ctx, runID, []store.MetricPoint{
+		{Step: 2, TS: time.Now(), Metrics: map[string]float64{"signed32": 3_000_000_000}},
+	}); err != nil {
+		t.Fatalf("insert point: %v", err)
+	}
+	result := h.flush(projectID, "demo")
+	if result.Path != "demo.parquet" {
+		t.Fatalf("flush wrote %q, want the file route A created", result.Path)
+	}
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, result.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	last := map[string]map[string]float64{}
+	for _, s := range h.series("demo") {
+		if len(s.Points) == 0 {
+			continue
+		}
+		if last[s.Run] == nil {
+			last[s.Run] = map[string]float64{}
+		}
+		last[s.Run][s.Key] = s.Points[len(s.Points)-1][1]
+	}
+	if v, ok := last["run-1"]["tokens"]; !ok || v != float64(bigMetric) {
+		t.Errorf("run-1's tokens after the rewrite = %v (present=%v), want %v unchanged -- "+
+			"a UINT32 cell must not turn negative or null when the file is rewritten", v, ok, float64(bigMetric))
+	}
+	if v, ok := last["run-1"]["signed32"]; !ok || v != 3_000_000_000 {
+		t.Errorf("run-1's signed32 after the rewrite = %v (present=%v), want 3e9 -- "+
+			"the column must widen to DOUBLE instead of wrapping negative", v, ok)
+	}
+}

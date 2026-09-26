@@ -239,6 +239,9 @@ func TestLoginRevokesPreviousMintedToken(t *testing.T) {
 	if revokedID != "7" {
 		t.Error("the previous login's minted token (id 7) was never revoked")
 	}
+	if !strings.Contains(errOut, "revoked the token saved by the previous tf login (id 7)") {
+		t.Errorf("stderr = %q, want a note that the previous token (id 7) was revoked", errOut)
+	}
 
 	f, err := config.Load()
 	if err != nil {

@@ -303,8 +303,12 @@ func ensureBranchRev(w http.ResponseWriter, gitRepo *gitrepo.Repo, rev, what str
 	// (docs/dev/api-contract.md §"{rev} is a branch name") is the 409 below --
 	// the same one a tag gets, for the same reason: the request is
 	// well-formed and only this repository's state refuses it.
+	//
+	// ValidateNewRefName rather than ValidateRefName because a write here can
+	// create the branch: a 40-hex name (looksLikeSHA only catches the
+	// lowercase spelling) would make a branch Resolve reads as a commit id.
 	if rev != "HEAD" {
-		if err := gitrepo.ValidateRefName(rev); err != nil {
+		if err := gitrepo.ValidateNewRefName(rev); err != nil {
 			badRequest(w, what+" must target a branch: "+strconv.Quote(rev)+" "+err.Error())
 			return false
 		}

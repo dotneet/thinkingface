@@ -139,12 +139,12 @@ func (s *Server) handleHFRefs(w http.ResponseWriter, r *http.Request) {
 	}
 	if names, err := gitRepo.Tags(); err == nil {
 		for _, n := range names {
-			// Resolve, not RefTarget: an annotated tag's ref names a tag
+			// Peeled, not RefTarget: an annotated tag's ref names a tag
 			// object, and targetCommit is -- by name and by
 			// huggingface_hub's GitRefInfo docs -- the commit. Handing out
 			// the tag object's id sent a client that pinned it as a
 			// revision to an object that is not a commit.
-			h, _ := gitRepo.Resolve("refs/tags/" + n)
+			h := tagTarget(gitRepo, n)
 			tags = append(tags, ref{Name: n, Ref: "refs/tags/" + n, TargetCommit: h.String()})
 		}
 	}
@@ -157,6 +157,20 @@ func (s *Server) handleHFRefs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"branches": branches, "tags": tags, "converts": []any{}, "pullRequests": []any{},
 	})
+}
+
+// tagTarget is the object a tag listing reports for refs/tags/<name>: the
+// commit it peels to, or -- for a tag that does not end at a commit (git
+// allows tagging a tree or a blob, and a push can carry one) -- the raw
+// object the ref names. Resolve refuses those, and dropping its error used to
+// list them with an all-zero id, which is not an object at all.
+func tagTarget(gitRepo *gitrepo.Repo, name string) plumbing.Hash {
+	ref := gitrepo.TagRef(name)
+	if h, err := gitRepo.Resolve(ref); err == nil {
+		return h
+	}
+	h, _ := gitRepo.RefTarget(ref)
+	return h
 }
 
 type hfTreeEntry struct {
@@ -590,7 +604,7 @@ func (s *Server) handleUIRefs(w http.ResponseWriter, r *http.Request) {
 		for _, n := range names {
 			// Peeled for the same reason as handleHFRefs: the picker shows
 			// and links the commit, not an annotated tag's own object.
-			h, _ := gitRepo.Resolve("refs/tags/" + n)
+			h := tagTarget(gitRepo, n)
 			resp.Tags = append(resp.Tags, apitypes.RefUI{Name: n, TargetOID: h.String()})
 		}
 	}

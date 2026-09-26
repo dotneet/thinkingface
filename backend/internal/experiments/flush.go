@@ -641,17 +641,41 @@ func mergePoints(existing *existingTable, points []store.PendingPoint) ([]flushC
 			return
 		}
 		switch c.kind {
-		case colInt32, colInt64:
+		case colInt32:
 			// NaN and +-Inf are left alone: encode() cannot represent them in
 			// an integer column *or* a double one and writes a null either
-			// way, and converting one to an int64 to compare is undefined in
+			// way, and converting one to an int32 to compare is undefined in
 			// Go rather than merely lossy.
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				return
+			}
+			// Bounded to int32, not int64: this column's node is a signed
+			// INT32 leaf (parquetwrite.go's columnFromSchema), so a value
+			// like 3e9 -- well inside int64's range but past math.MaxInt32
+			// -- would otherwise pass this check and then have encode()
+			// wrap it negative via int32(n). That used to be the bug: only
+			// values genuinely outside int64 widened, everything from
+			// 2^31 to 2^63 silently became a negative int32 cell instead.
+			if value >= math.MinInt32 && value <= math.MaxInt32 && float64(int32(value)) == value {
+				return
+			}
+		case colInt64:
 			if math.IsNaN(value) || math.IsInf(value, 0) {
 				return
 			}
 			// Outside the int64 range the round-trip below is undefined too,
 			// and the value certainly does not fit: widen.
 			if value >= math.MinInt64 && value <= math.MaxInt64 && float64(int64(value)) == value {
+				return
+			}
+		case colUint32:
+			// Mirrors colInt32 above, just unsigned and bounded to 32 bits
+			// (this column's node is parquet.Uint(32) -- see colUint32 in
+			// parquetwrite.go).
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				return
+			}
+			if value >= 0 && value <= math.MaxUint32 && float64(uint32(value)) == value {
 				return
 			}
 		case colUint64:

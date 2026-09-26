@@ -369,22 +369,32 @@ func preuploadModes(ctx context.Context, c *Client, plan Plan, rev string) (map[
 	return modes, nil
 }
 
-// lfsRequestBatch bounds how many objects' actions are requested -- and
-// transferred -- as one unit. The server sizes a batch's signed-URL TTL from
-// that batch's own total bytes (lfs.TTLFor: a base padding plus the bytes at
-// an assumed 1 MiB/s, capped), which only holds if the batch starts
-// transferring right after its actions are minted. Requesting actions for the
-// whole upload up front and only then transferring batch by batch broke that
-// assumption for anything past the first chunk: a run of 5000 10 MB files at
-// 5 MiB/s took long enough that batches near the end had expired before their
-// turn came, and tf had nothing to fall back on -- retryablePut does not
-// retry a 4xx, and the upload aborted with nothing committed. Fetching one
-// lfsRequestBatch-sized chunk of actions immediately before transferring it
-// keeps every URL's clock starting when it is actually about to be used.
+// lfsRequestBatch bounds how many objects' actions are requested as one unit.
+// The server sizes a batch's signed-URL TTL from that batch's own total bytes
+// (lfs.TTLFor: a base padding plus the bytes at an assumed 1 MiB/s, capped),
+// which only holds if the batch starts transferring soon after its actions
+// are minted. Requesting actions for the whole upload up front and only then
+// transferring batch by batch broke that assumption for anything past the
+// first chunk: a run of 5000 10 MB files at 5 MiB/s took long enough that
+// batches near the end had expired before their turn came, and tf had
+// nothing to fall back on -- retryablePut does not retry a 4xx, and the
+// upload aborted with nothing committed. Requesting one lfsRequestBatch-sized
+// chunk of actions at a time, handed to the shared worker pool as soon as
+// they are minted (see transferLFS), keeps every URL's clock starting close
+// to when it is actually used; actionExpired's proactive refresh and
+// transferOne's reactive 403 retry are the safety net for whatever gap
+// remains once a busy pool is the one deciding exactly when.
 const lfsRequestBatch = lfsBatchSize
 
-// transferLFS runs the batch call and the PUT/verify transfers it asks for,
-// lfsRequestBatch objects at a time (see its doc comment for why).
+// transferLFS runs the batch calls and the PUT/verify transfers they ask for.
+// A single pool of plan.Workers goroutines serves the whole upload, not just
+// one chunk at a time: a producer goroutine requests each lfsRequestBatch-
+// sized chunk's actions and hands its objects to the pool, then immediately
+// moves on to request the next chunk rather than waiting for those objects to
+// finish transferring. Without that, one worker stuck on a chunk's one huge
+// shard left every other worker idle -- the pool had nothing else to do until
+// the whole chunk finished and the next batch was even requested. See
+// enqueueLFSChunk for the producer side.
 func transferLFS(ctx context.Context, c *Client, plan Plan, groups []*lfsGroup, res *Result, emit func(Event)) error {
 	if len(groups) == 0 {
 		return nil
@@ -399,19 +409,68 @@ func transferLFS(ctx context.Context, c *Client, plan Plan, groups []*lfsGroup, 
 		byPath[f.RepoPath] = f.Open
 	}
 
-	for start := 0; start < len(groups); start += lfsRequestBatch {
-		end := min(start+lfsRequestBatch, len(groups))
-		if err := transferLFSChunk(ctx, c, plan.Ref, groups[start:end], byPath, workers, res, emit); err != nil {
-			return err
+	g, gctx := errgroup.WithContext(ctx)
+	jobs := make(chan *lfsGroup)
+
+	// Each job channel value is sent to exactly one worker and never touched
+	// again by anything else afterward, so a group's mutable fields (batch,
+	// fetchedAt, uploaded) need no locking: the channel send/receive that
+	// hands it off is itself a happens-before edge.
+	for range workers {
+		g.Go(func() error {
+			for group := range jobs {
+				path := group.paths[0]
+				open := byPath[path]
+				if open == nil {
+					return fmt.Errorf("internal: no reader for %s", path)
+				}
+				emit(Event{Kind: EventUploadStart, Path: path, Size: group.size, Mode: ModeLFS})
+				done, err := transferOne(gctx, c, plan.Ref, group, open)
+				if err != nil {
+					return fmt.Errorf("upload %s: %w", path, err)
+				}
+				group.uploaded = done
+				emit(Event{Kind: EventUploadDone, Path: path, Size: group.size, Mode: ModeLFS})
+			}
+			return nil
+		})
+	}
+
+	g.Go(func() error {
+		defer close(jobs)
+		for start := 0; start < len(groups); start += lfsRequestBatch {
+			end := min(start+lfsRequestBatch, len(groups))
+			if err := enqueueLFSChunk(gctx, c, plan.Ref, groups[start:end], jobs, emit); err != nil {
+				return err
+			}
 		}
+		return nil
+	})
+
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	// Reported in plan order rather than completion order, so two runs of the
+	// same upload print the same thing.
+	for _, group := range groups {
+		if !group.uploaded {
+			continue
+		}
+		res.LFSUploaded = append(res.LFSUploaded, group.paths...)
+		res.UploadedBytes += group.size
 	}
 	return nil
 }
 
-// transferLFSChunk requests the LFS batch actions for one chunk of groups and
-// runs the resulting transfers immediately, so each action's TTL is spent on
-// the transfer it was minted for rather than idling behind earlier chunks.
-func transferLFSChunk(ctx context.Context, c *Client, ref Ref, chunk []*lfsGroup, byPath map[string]func() (io.ReadCloser, error), workers int, res *Result, emit func(Event)) error {
+// enqueueLFSChunk requests the LFS batch actions for one chunk of groups and
+// hands every group that actually needs a transfer to jobs for the shared
+// worker pool, reporting the rest as deduplicated. It returns as soon as the
+// whole chunk has been handed off (or reported), without waiting for any
+// transfer to complete -- that hand-off, not completion, is what lets
+// transferLFS's producer move on to request the next chunk's actions while
+// this one is still in flight.
+func enqueueLFSChunk(ctx context.Context, c *Client, ref Ref, chunk []*lfsGroup, jobs chan<- *lfsGroup, emit func(Event)) error {
 	objs := make([]LFSObject, 0, len(chunk))
 	for _, g := range chunk {
 		objs = append(objs, LFSObject{OID: g.oid, Size: g.size})
@@ -425,7 +484,6 @@ func transferLFSChunk(ctx context.Context, c *Client, ref Ref, chunk []*lfsGroup
 	}
 
 	fetchedAt := time.Now()
-	var pending []*lfsGroup
 	for i, g := range chunk {
 		g.batch = batch[i]
 		g.fetchedAt = fetchedAt
@@ -438,44 +496,18 @@ func transferLFSChunk(ctx context.Context, c *Client, ref Ref, chunk []*lfsGroup
 				emit(Event{Kind: EventDeduplicated, Path: p, Size: g.size, Mode: ModeLFS})
 			}
 		default:
-			pending = append(pending, g)
-		}
-	}
-	if len(pending) == 0 {
-		return nil
-	}
-
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(workers)
-	for _, group := range pending {
-		g.Go(func() error {
-			path := group.paths[0]
-			open := byPath[path]
-			if open == nil {
-				return fmt.Errorf("internal: no reader for %s", path)
+			// A blocking send, not a buffered enqueue: with a bounded pool
+			// this is what keeps at most `workers` transfers in flight
+			// across the whole upload, chunk boundaries aside. Guarded by
+			// ctx so a worker's earlier error (which cancels gctx) unblocks
+			// this rather than deadlocking against a pool that has already
+			// stopped receiving.
+			select {
+			case jobs <- g:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
-			emit(Event{Kind: EventUploadStart, Path: path, Size: group.size, Mode: ModeLFS})
-			done, err := transferOne(gctx, c, ref, group, open)
-			if err != nil {
-				return fmt.Errorf("upload %s: %w", path, err)
-			}
-			group.uploaded = done
-			emit(Event{Kind: EventUploadDone, Path: path, Size: group.size, Mode: ModeLFS})
-			return nil
-		})
-	}
-	if err := g.Wait(); err != nil {
-		return err
-	}
-
-	// Reported in plan order rather than completion order, so two runs of the
-	// same upload print the same thing.
-	for _, group := range chunk {
-		if !group.uploaded {
-			continue
 		}
-		res.LFSUploaded = append(res.LFSUploaded, group.paths...)
-		res.UploadedBytes += group.size
 	}
 	return nil
 }

@@ -115,12 +115,20 @@ res 200: `{"user": User}` + `Set-Cookie: tf_session=...`
   time are used even when the user doesn't exist — a dummy bcrypt pass runs for nonexistent users
   too, so accounts can't be enumerated)
 - **429 `rate_limited`** + `Retry-After`: on repeated failures. By default `TF_AUTH_RATE_LIMIT_PER_MIN`
-  (default 10) attempts/minute from the same IP, half that rate per minute for the same username
-  *from the same IP*, and a per-username ceiling of five times the IP rate across all addresses.
-  The per-(username, IP) bucket is what keeps one address from locking an account out for
-  everyone else; the ceiling still bounds guessing spread over many addresses.
-  **Only failures are counted**; a success resets that address's counters for the account (not
-  the cross-address ceiling).
+  (default 10) attempts/minute from the same client address, half that rate per minute for the
+  same username *from the same address*, and a per-username ceiling of five times the address rate
+  across all addresses. A "client address" is an IPv4 address or an IPv6 **/64** — rotating
+  through one IPv6 block buys no fresh budget. The per-(username, address) bucket is what keeps a
+  single host or network from locking an account out for everyone else; the ceiling still bounds
+  guessing spread over many addresses, which also means an attacker distributed over at least
+  ten addresses (each spending its own full budget) can empty it and keep the account throttled
+  for as long as they keep going — the deliberate trade-off against unbounded distributed
+  guessing. A username longer than any account can have (over 96 bytes) is charged to the
+  address bucket alone and never hashed.
+  **Only failures are counted.** A success resets the (username, address) bucket; a successful
+  `POST /auth/login` (and the current-password check of `PATCH /me/password`) additionally resets
+  the address bucket, while a successful HTTP Basic request does not. The cross-address ceiling is
+  never reset, only refilled.
   The counter is process-local (per replica when there are multiple; SQLite mode is single-process
   by design anyway). The same limit also applies to **HTTP Basic password authentication, accepted
   on every route**. Once the threshold is exceeded, bcrypt is not run and the request is simply
@@ -1574,14 +1582,20 @@ Errors — **the status codes are a compatibility contract, not a style choice**
 
 `message` on a tag produces a real annotated tag object (what `git tag -m` makes). `refs`
 peels it and reports the *tagged commit* as `targetCommit`, the same commit every revision
-lookup resolves it to (only the create-tag response body still names the tag object). Without a
+lookup resolves it to (only the create-tag response body still names the tag object). A tag that
+does not peel to a commit at all (a tag of a tree or blob, which only a `git push` can create) is
+listed with the raw object id it names. Without a
 message the tag is lightweight.
 
-Revisions resolve in git's order, never go-git's `ResolveRevision`: `HEAD`, an exact `refs/...`
-name, `refs/heads/<rev>`, `refs/tags/<rev>` (a branch wins over a tag of the same name), a full
-40-hex commit id, and only after every ref lookup failed an abbreviated id of at least 7 hex
-digits that matches exactly one commit. Revision expressions (`main~1`, `v1^`) are not
-supported. A repository whose history lives only on a non-default branch is not empty: an
+Revisions resolve in this hub's own order, never go-git's `ResolveRevision`: `HEAD`; a full
+40-hex commit id (either case) when that object is in the repository and peels to a commit --
+ahead of every ref, as in git, so a branch or tag named after a commit cannot redirect a read
+pinned to it; an exact `refs/...` name; `refs/heads/<rev>`; `refs/tags/<rev>`; and only after
+every ref lookup failed an abbreviated id of at least 7 hex digits that matches exactly one
+commit. A branch wins over a tag of the same name, which is where this differs from git (git
+prefers the tag): every write targets a branch, so reading anything else back under that name
+would contradict it. Creating a branch or tag whose name is 40 hex digits is 400: it could never
+be read by that name. Revision expressions (`main~1`, `v1^`) are not supported. A repository whose history lives only on a non-default branch is not empty: an
 unknown revision there is 404 `RevisionNotFound`, while naming the still-unborn default branch
 answers as an empty repository.
 

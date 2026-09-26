@@ -216,6 +216,27 @@ func LocalGeneration(gitDir string) int64 {
 	return local.Generation
 }
 
+// LocalRefs reports the refs the index held at the generation the local copy
+// last reflected, as recorded in the state file; ok is false when there is no
+// usable state file.
+//
+// It is what a write that failed to reach the WAL rolls its local ref back to
+// (gitrepo.Repo.ResetBranch). Not the caller's own parent: two local commits
+// can chain on a branch before either reaches the index, and the parent of
+// the second is then a commit the WAL never accepted. The recorded value is
+// always one the WAL did accept, and if the index has moved on since, the
+// generation no longer matches and the next Materialize re-projects every ref
+// anyway -- so a copy rolled back to it can never be left disagreeing with an
+// index at the same generation, which is the state no cache-hit
+// materialisation would ever repair.
+func LocalRefs(gitDir string) (map[string]string, bool) {
+	local, ok := readLocalState(gitDir)
+	if !ok {
+		return nil, false
+	}
+	return local.Refs, true
+}
+
 func statePath(gitDir string) string { return filepath.Join(gitDir, StateFileName) }
 
 // readLocalState returns ok=false for a missing *or* unparsable file: both mean

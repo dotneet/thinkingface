@@ -250,6 +250,8 @@ func runLogin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		revokeClient := hub.New(endpoint, prevCred.Token, hub.WithUserAgent(userAgent()))
 		if err := revokeClient.RevokeToken(ctx, prevCred.TokenID); err != nil {
 			fmt.Fprintf(stderr, "tf: warning: could not revoke previous token: %s\n", err)
+		} else {
+			fmt.Fprintf(stderr, "tf: revoked the token saved by the previous tf login (id %d)\n", prevCred.TokenID)
 		}
 	}
 

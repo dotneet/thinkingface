@@ -22,6 +22,7 @@ import (
 	"github.com/go-git/go-git/v5/storage"
 
 	"github.com/dotneet/thinkingface/backend/internal/gitexec"
+	"github.com/dotneet/thinkingface/backend/internal/wal"
 )
 
 var (
@@ -134,7 +135,7 @@ func (m *Manager) Open(storagePath string) (*Repo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", dir, err)
 	}
-	return &Repo{repo: r, dir: dir, mu: m.lockFor(dir)}, nil
+	return &Repo{repo: r, dir: dir, mu: m.lockFor(dir), walManaged: m.wal != nil}, nil
 }
 
 // Repo is a handle on one bare repository.
@@ -142,6 +143,11 @@ type Repo struct {
 	repo *git.Repository
 	dir  string
 	mu   *sync.Mutex
+	// walManaged is true when the WAL is authoritative for this copy (the
+	// manager has EnableWAL). ResetBranch needs it to read a missing state
+	// file correctly: under the WAL it means "no index yet", otherwise it
+	// means nothing at all.
+	walManaged bool
 }
 
 func (r *Repo) Dir() string { return r.dir }
@@ -152,8 +158,8 @@ func (r *Repo) storer() storer.EncodedObjectStorer { return r.repo.Storer }
 // abbreviated commit id. Git's own default abbreviation is 7, which is what
 // every short SHA a person copies out of a log looks like; anything shorter is
 // either a ref name or nothing. Below it a prefix is not an identifier at all:
-// "c" matches a sixteenth of the object store, and looking it up means walking
-// every pack index for an unauthenticated GET.
+// "c" matches a sixteenth of the object store. The floor bounds how many
+// candidates come back, not how much is read to find them -- see expandAbbrev.
 const minAbbrevLen = 7
 
 // maxTagChain bounds how many annotated tags Resolve peels through. Real
@@ -172,12 +178,19 @@ const maxTagChain = 16
 // name. And it expands refs/tags/X before refs/heads/X. Here the order is:
 //
 //  1. HEAD
-//  2. rev as a full ref name, when it starts with "refs/"
-//  3. refs/heads/<rev> -- a branch beats a tag of the same name, which is
+//  2. a full 40-hex commit id, when that object is in the repository and
+//     peels to a commit. This comes before every ref, as it does in git: a
+//     full id is the one revision that cannot be ambiguous, and every caller
+//     that pins one (snapshot_download(revision=<sha>), a trust_remote_code
+//     pin, the server's own Tree(commit.String())) is relying on exactly
+//     that. Letting refs/heads/<40 hex> win would let anyone with write
+//     access create a branch named after a commit and redirect every read
+//     pinned to it.
+//  3. rev as a full ref name, when it starts with "refs/"
+//  4. refs/heads/<rev> -- a branch beats a tag of the same name, which is
 //     what huggingface_hub users expect, since every write targets a branch
-//     (see HasBranch)
-//  4. refs/tags/<rev>
-//  5. a full 40-hex commit id
+//     (see HasBranch). git itself prefers the tag; this is the hub's order.
+//  5. refs/tags/<rev>
 //  6. an abbreviated commit id of at least minAbbrevLen hex digits, only when
 //     exactly one commit (or tag of one) has that prefix
 //
@@ -216,16 +229,27 @@ func (r *Repo) resolveName(rev string) (plumbing.Hash, error) {
 		}
 	}
 
+	fullID := len(rev) == 2*len(plumbing.ZeroHash) && isHex(rev)
+	if fullID {
+		h := plumbing.NewHash(strings.ToLower(rev))
+		_, err := r.peelToCommit(rev, h)
+		switch {
+		case err == nil:
+			return h, nil
+		case !errors.Is(err, ErrEmptyRepo):
+			return plumbing.ZeroHash, err
+		}
+		// Not a commit here (absent, or a tree/blob id): a ref of that name,
+		// if one exists, is the only thing left it could mean.
+	}
+
 	candidates := make([]plumbing.ReferenceName, 0, 3)
 	if strings.HasPrefix(rev, "refs/") {
 		candidates = append(candidates, plumbing.ReferenceName(rev))
 	}
 	candidates = append(candidates, plumbing.NewBranchReferenceName(rev), plumbing.NewTagReferenceName(rev))
 	for _, name := range candidates {
-		// Validated before the storer sees it: the filesystem storer turns a
-		// ref name into a path under the repository, so a rev like
-		// "../../x" must never reach it.
-		if name.Validate() != nil {
+		if !safeRefPath(name.String()) {
 			continue
 		}
 		ref, err := r.repo.Reference(name, true)
@@ -237,29 +261,65 @@ func (r *Repo) resolveName(rev string) (plumbing.Hash, error) {
 		}
 	}
 
+	if fullID {
+		// Hand back the id itself so peelToCommit words the failure ("names
+		// a tree, not a commit") rather than a bare miss.
+		return plumbing.NewHash(strings.ToLower(rev)), nil
+	}
 	if len(rev) < minAbbrevLen || len(rev) > 2*len(plumbing.ZeroHash) || !isHex(rev) {
 		return plumbing.ZeroHash, ErrEmptyRepo
 	}
-	rev = strings.ToLower(rev)
-	if len(rev) == 2*len(plumbing.ZeroHash) {
-		return plumbing.NewHash(rev), nil
+	return r.expandAbbrev(strings.ToLower(rev))
+}
+
+// safeRefPath reports whether a ref name is safe to hand to the storer for a
+// read. The filesystem storer turns a ref name into a path under the
+// repository, so a rev like "../../x" must never reach it; that -- no empty,
+// "." or ".." component, no NUL or other control character -- is the whole
+// check.
+//
+// It is deliberately not go-git's ReferenceName.Validate, which is stricter
+// than git: it rejects, among others, a component starting with "-", so a
+// refs/heads/-dash that `git push` created happily was unreadable here. A
+// name git would never create simply is not found; only a name that could
+// escape refs/ needs refusing.
+func safeRefPath(name string) bool {
+	for i := 0; i < len(name); i++ {
+		if c := name[i]; c < 0x20 || c == 0x7f {
+			return false
+		}
 	}
-	return r.expandAbbrev(rev)
+	for _, component := range strings.Split(name, "/") {
+		switch component {
+		case "", ".", "..":
+			return false
+		}
+	}
+	return true
 }
 
 // expandAbbrev resolves an abbreviated commit id. Only commit-ish objects
 // count, the way `git rev-parse <prefix>^{commit}` disambiguates: a tree or
 // blob sharing the prefix is not what anyone meant by a revision. More than
 // one match is refused rather than guessed at.
+//
+// The lookup is not indexed. go-git's HashesWithPrefix lists every loose
+// object (the repository is not opened with ExclusiveAccess, so there is no
+// sorted object list to search) and then walks every entry of every pack
+// index, so its cost grows with the object count, not with the number of
+// matches. That is acceptable for the repositories this
+// hub holds -- LFS keeps them to commits, trees and small blobs -- and it is
+// only reached after every ref lookup has missed.
 func (r *Repo) expandAbbrev(prefix string) (plumbing.Hash, error) {
 	type prefixLister interface {
 		HashesWithPrefix(prefix []byte) ([]plumbing.Hash, error)
 	}
 	lister, ok := r.repo.Storer.(prefixLister)
 	if !ok {
-		// Every repository here is on the filesystem storer, which has the
-		// indexed lookup. Without it the only option is a scan of every
-		// object, which is not worth offering for a convenience.
+		// Every repository here is on the filesystem storer, which has
+		// HashesWithPrefix. Without it the only option is iterating every
+		// object through the generic storer interface, which is not worth
+		// offering for a convenience.
 		return plumbing.ZeroHash, ErrEmptyRepo
 	}
 	even, err := hex.DecodeString(prefix[:len(prefix)&^1])
@@ -387,24 +447,52 @@ func (r *Repo) refNames(prefix string) ([]string, error) {
 	return out, err
 }
 
-// ResetBranch moves refs/heads/branch back to target, but only if it still
-// points at expect; a zero target deletes the ref (an aborted first commit on
-// an unborn branch). It exists for the WAL write path: Commit advances the
-// local ref before the WAL CAS runs, and if that CAS fails the local ref must
-// be rolled back -- otherwise this instance serves a commit the WAL never
-// accepted, and every later commit attempt sees a head the index disagrees
-// with and is rejected as stale.
+// ResetBranch undoes a local branch move that the WAL refused (or never
+// heard about): it is the rollback of the write paths that advance a ref on
+// disk before the authoritative WAL write runs -- Commit, SquashBranch -- and
+// it only acts if refs/heads/branch still points at expect, the commit the
+// caller itself put there.
 //
-// expect is the commit the caller itself created, and the compare is the
-// whole point. Commit releases r.mu before the WAL CAS, so two local commits
-// on one branch can interleave: A advances main X->A, B advances A->B, A's
-// CAS fails. An unconditional reset would put main back to X underneath B;
-// then B's CAS (Old=A) fails as stale and resets main to A -- a commit the WAL
-// never accepted, which wedges the branch. With the compare, A's rollback sees
-// main at B, not A, and leaves it: whoever moved the ref owns its rollback
-// (or its WAL entry). That case is reported as success, since there is
-// nothing left for this caller to undo.
-func (r *Repo) ResetBranch(branch string, expect, target plumbing.Hash) error {
+// Where it rolls back to is the WAL's own value for the ref, as recorded in
+// the local copy's state file at its last materialisation (wal.LocalRefs), not
+// parent -- the commit the caller built on. The two differ exactly when local
+// commits chained on one branch before either reached the index, and parent
+// is then a commit the WAL never accepted. The sequence that made this matter:
+// A advances main X->A, B advances A->B, A's WAL write fails for a non-stale
+// reason (a GCS 5xx) and its rollback correctly leaves main alone (it is at
+// B); B's write is then stale, because the index still says X. Rolling B back
+// to its parent would set main to A -- a commit no index contains -- while the
+// index generation stays where it was, so every later EnsureLocal is a cache
+// hit that never re-projects the refs, and every later commit on the branch is
+// rejected as stale: the branch is wedged until something else bumps the
+// generation. Rolling back to X leaves disk and index agreeing.
+//
+// A state file that is behind the index is still a safe target: its
+// generation no longer matches, so the next materialisation re-projects every
+// ref from the index and overwrites whatever was put here. With no state file
+// at all on a WAL-managed copy, EnsureLocal found no index (a repository that
+// was never written), so the WAL's value is "absent" and the ref is deleted --
+// which also keeps a chained pair of first commits from leaving a ref behind
+// that would make the next EnsureLocal refuse the copy as ErrIndexMissing.
+// Only a repository the WAL does not manage at all falls back to parent. A
+// zero target deletes the ref.
+//
+// The compare against expect is what keeps two interleaved rollbacks from
+// fighting: whoever moved the ref last owns its rollback (or its WAL entry),
+// and a caller whose commit is no longer at the tip -- including one a
+// concurrent materialisation already replaced -- has nothing left to undo.
+// That case is reported as success.
+//
+// The compare is exact with respect to this process's writers only. r.mu
+// serialises them and is also the lock EnsureLocal and AdoptLocal hold, so no
+// materialisation can interleave. `git receive-pack` on the same directory
+// does not take it, and nothing here is atomic against it: go-git's
+// CheckAndSetReference re-reads the ref under an flock that git's own
+// .lock-file-and-rename protocol does not honour, and the delete path is a
+// plain RemoveReference after the compare. A push landing in that window can
+// be overwritten; the index is unaffected either way (the push's own CAS
+// decides that), and the next generation bump re-projects the ref.
+func (r *Repo) ResetBranch(branch string, expect, parent plumbing.Hash) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	name := plumbing.NewBranchReferenceName(branch)
@@ -418,17 +506,43 @@ func (r *Repo) ResetBranch(branch string, expect, target plumbing.Hash) error {
 	if !exists || current != expect {
 		return nil
 	}
+	target := r.walRefOr(name, parent)
+	if target == expect {
+		return nil
+	}
 	if target.IsZero() {
 		return r.repo.Storer.RemoveReference(name)
 	}
-	// CheckAndSet rather than Set: r.mu only serialises this process's
-	// writers, while `git receive-pack` updates the same ref file directly.
 	err = r.repo.Storer.CheckAndSetReference(
 		plumbing.NewHashReference(name, target), plumbing.NewHashReference(name, expect))
 	if errors.Is(err, storage.ErrReferenceHasChanged) {
 		return nil
 	}
 	return err
+}
+
+// walRefOr is the value the WAL last recorded for name (see ResetBranch), or
+// fallback when this copy is not managed by the WAL. Callers hold r.mu, which
+// is what keeps the state file from being rewritten underneath the read.
+func (r *Repo) walRefOr(name plumbing.ReferenceName, fallback plumbing.Hash) plumbing.Hash {
+	refs, ok := wal.LocalRefs(r.dir)
+	if !ok {
+		if r.walManaged {
+			return plumbing.ZeroHash
+		}
+		return fallback
+	}
+	v := refs[name.String()]
+	switch {
+	case strings.Trim(v, "0") == "":
+		return plumbing.ZeroHash // absent, in either of the index's spellings
+	case len(v) == 2*len(plumbing.ZeroHash) && isHex(v):
+		return plumbing.NewHash(strings.ToLower(v))
+	default:
+		// Not a value the index writes. Refusing to guess keeps the caller's
+		// own parent, which is what this did before the state file was read.
+		return fallback
+	}
 }
 
 func (r *Repo) Branches() ([]string, error) { return r.refNames("refs/heads/") }

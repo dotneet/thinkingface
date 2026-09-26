@@ -178,7 +178,7 @@ func (d *Dispatcher) loop(ctx context.Context, id int) {
 }
 
 func (d *Dispatcher) step(ctx context.Context) (bool, error) {
-	job, err := d.store.ClaimWebhookDelivery(ctx, leaseDuration)
+	job, err := d.store.ClaimWebhookDelivery(ctx, leaseDuration, MaxAttempts)
 	if err != nil || job == nil {
 		return false, err
 	}

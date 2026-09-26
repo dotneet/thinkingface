@@ -98,6 +98,13 @@ tf login [ENDPOINT] [--token TOKEN | --token -]
 発行されたトークンのスコープが `read` だった場合は警告が表示されます（`tf up` には write
 スコープのトークンが必要です）。
 
+既にログイン済みのエンドポイントに対してもう一度ログインすると、新しいトークンが無事に
+保存された時点で、それまでの `tf login` がそのエンドポイント用に発行していたトークンが
+失効させられます — この際 `tf` は stderr にメモを表示します
+（`revoked the token saved by the previous tf login (id N)`）。`--token` で貼り付けた
+トークンはこの仕組みでは失効されません。それを取り除くのは `tf logout`（またはあなた自身）
+だけです。
+
 ### `tf logout [ENDPOINT]` { #tf-logout-endpoint }
 
 サーバーに対して保存されている認証情報を破棄します（デフォルトは、設定されているデフォルト
@@ -320,8 +327,8 @@ huggingface.co 向けのトークンを thinkingface のサーバーへうっか
 ```
 
 保存されたトークンが `tf login` の発行したものではなく `--token` で貼り付けたものである場合、
-`token_id` は `0` になります。`tf logout` はこれを見て、サーバー側に失効させるものがあるか
-どうかを判断します。
+`token_id` は `0` になります。`tf logout`、そして同じエンドポイントへの後続の `tf login` は
+これを見て、サーバー側に失効させるべき過去発行のトークンがあるかどうかを判断します。
 
 ## `hf upload` との関係 { #relationship-to-hf-upload }
 

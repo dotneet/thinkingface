@@ -336,6 +336,53 @@ func TestBuildRepoWhereEmptyTagsIsNoFilter(t *testing.T) {
 	}
 }
 
+// A NUL byte in a filter value used to reach a PostgreSQL bind uncleaned:
+// GET /api/models?tags=%00 became `["\u0000"]::jsonb`, which Postgres refuses
+// as an "unsupported Unicode escape sequence" (SQLSTATE 22P05), and
+// ?q=/?license=/?task=/?author=%00 hit a raw NUL in a text bind (22021) --
+// an unauthenticated listing request turning into a 500. buildRepoWhere now
+// sanitizes every free-text field the same way a pushed README's card is
+// sanitized before it is stored (text.go), so no argument it binds ever
+// carries a NUL, on any of these fields.
+func TestBuildRepoWhereSanitizesNULFromEveryTextField(t *testing.T) {
+	f := RepoFilter{
+		Query:     "a\x00b",
+		Search:    "a\x00b",
+		Author:    "a\x00b",
+		License:   "a\x00b",
+		Task:      "a\x00b",
+		Tags:      []string{"a\x00b"},
+		BaseModel: "a\x00b/c\x00d",
+		Relation:  "a\x00b",
+		Dataset:   "a\x00b/c\x00d",
+	}
+	clause, args := buildRepoWhere(pgDialect{}, f, repoFilterScopeAll)
+	for _, a := range args {
+		s, ok := a.(string)
+		if !ok {
+			continue
+		}
+		if strings.ContainsRune(s, 0) {
+			t.Fatalf("bound arg %q in clause %q still carries a NUL", s, clause)
+		}
+	}
+}
+
+// A filter value that is nothing but NUL sanitizes to the empty string, the
+// same way it would have if a stored card held one -- so it filters like an
+// impossible value (matches nothing storable) rather than being rejected or
+// silently dropped and widening the listing.
+func TestBuildRepoWhereAllNULQuerySanitizesToEmptyMatch(t *testing.T) {
+	f := RepoFilter{License: "\x00"}
+	clause, args := buildRepoWhere(pgDialect{}, f, repoFilterScopeAll)
+	if !strings.Contains(clause, `(r.card->>'license') = $1`) {
+		t.Fatalf("clause = %q, want the license filter still applied", clause)
+	}
+	if len(args) != 1 || args[0] != "" {
+		t.Fatalf("args = %#v, want the NUL folded to the empty string", args)
+	}
+}
+
 // --------------------------------------------------------- BuildPrefixTSQuery
 
 func TestBuildPrefixTSQuery(t *testing.T) {
@@ -446,6 +493,67 @@ func TestIntegrationRepoDescriptionSurvivesACardlessPush(t *testing.T) {
 		}
 		if updated.Description != "" {
 			t.Fatalf("description = %q, want it cleared", updated.Description)
+		}
+	})
+}
+
+// TestIntegrationListReposToleratesNULInFilterValues pins the fix for a NUL
+// byte in a listing query parameter reaching a live database: on PostgreSQL,
+// ?tags=%00 used to become `["\u0000"]::jsonb`, which is refused as an
+// "unsupported Unicode escape sequence" (22P05), and ?q=/?license=/?task=/
+// ?author=%00 hit a raw NUL in a text bind (22021) -- an unauthenticated
+// GET /api/models turning into a 500. SQLite itself tolerates a NUL in a
+// bound value, but the same filter has to answer the same way on both
+// engines (buildRepoWhere's own doc comment), so this runs the requests that
+// used to 500 on Postgres and checks none of them error here either.
+func TestIntegrationListReposToleratesNULInFilterValues(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		ctx := f.ctx
+		f.repo(t, "alice", "m", "model", map[string]any{
+			"tags": []any{"nlp"}, "license": "mit", "pipeline_tag": "text-classification",
+		})
+
+		allCases := []RepoFilter{
+			{Query: "\x00"},
+			{Search: "\x00"},
+			{Author: "\x00"},
+			{License: "\x00"},
+			{Task: "\x00"},
+			{Tags: []string{"\x00"}},
+			{BaseModel: "a\x00b/c\x00d"},
+			{Relation: "\x00"},
+			{Dataset: "a\x00b/c\x00d"},
+		}
+		for _, filter := range allCases {
+			if _, _, _, err := s.ListRepos(ctx, filter); err != nil {
+				t.Fatalf("ListRepos(%+v): %v", filter, err)
+			}
+		}
+
+		// These compare a card field for equality or containment, so a NUL
+		// sanitized to the empty string can never match a real card's text
+		// and the listing narrows to nothing -- unlike Query/Search, where
+		// an empty substring/tsquery is trivially satisfied by everything,
+		// or Relation alone, which (per buildRepoWhere) falls back to "has
+		// any base model at all" once the relation value itself sanitizes
+		// away.
+		matchesNothing := []RepoFilter{
+			{Author: "\x00"},
+			{License: "\x00"},
+			{Task: "\x00"},
+			{Tags: []string{"\x00"}},
+			{BaseModel: "a\x00b/c\x00d"},
+			{Dataset: "a\x00b/c\x00d"},
+		}
+		for _, filter := range matchesNothing {
+			repos, total, _, err := s.ListRepos(ctx, filter)
+			if err != nil {
+				t.Fatalf("ListRepos(%+v): %v", filter, err)
+			}
+			if total != 0 || len(repos) != 0 {
+				t.Fatalf("ListRepos(%+v) = %d repos, want none to match a NUL folded to the empty string", filter, total)
+			}
 		}
 	})
 }

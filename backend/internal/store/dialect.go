@@ -79,6 +79,11 @@ type dialect interface {
 	// Postgres). SQLite has no row locks: writes are serialised on a single
 	// connection instead, so it renders "".
 	forUpdate(suffix string) string
+	// forShare renders a shared row lock clause (" FOR SHARE" on Postgres,
+	// "" on SQLite for forUpdate's reason). Shared locks do not conflict with
+	// each other, nor with the FOR KEY SHARE a foreign-key check takes, but
+	// they still wait for FOR UPDATE and for any UPDATE/DELETE of the row.
+	forShare() string
 	// advisoryXactLock serialises concurrent transactions on a logical key
 	// until the transaction ends. A no-op on SQLite (see forUpdate).
 	advisoryXactLock(ctx context.Context, ex executor, name string, id int64) error

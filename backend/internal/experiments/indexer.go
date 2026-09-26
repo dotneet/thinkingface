@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
 	"github.com/dotneet/thinkingface/backend/internal/storage"
@@ -441,17 +440,36 @@ func toTime(v any) (time.Time, bool) {
 			}
 		}
 	case int64:
-		// Heuristic on magnitude: trackio writes seconds, other tools ms.
-		if t > 1e12 {
-			return time.UnixMilli(t), true
-		}
-		if t > 1e9 {
-			return time.Unix(t, 0), true
+		return epochToTime(t)
+	case uint64:
+		// The viewer returns every cell of an INT(64,false) column as a Go
+		// uint64 (see toInt's comment on the same shape), so a UINT64
+		// started_at/timestamp column -- one written by an exporter other
+		// than this package's own flush -- must be accepted here too, or the
+		// run's start time silently goes missing and any time-based chart
+		// renders empty. Values past int64's range are rejected rather than
+		// wrapped negative, the same as toInt does for the identical case.
+		if t <= math.MaxInt64 {
+			return epochToTime(int64(t))
 		}
 	case float64:
 		if t > 1e9 {
 			return time.Unix(int64(t), 0), true
 		}
+	}
+	return time.Time{}, false
+}
+
+// epochToTime is the int64 arm of toTime's heuristic on magnitude: trackio
+// writes seconds, other tools milliseconds. Factored out so toTime's uint64
+// case (a UINT64 epoch column) can share it after its own range check,
+// instead of duplicating the two thresholds.
+func epochToTime(t int64) (time.Time, bool) {
+	if t > 1e12 {
+		return time.UnixMilli(t), true
+	}
+	if t > 1e9 {
+		return time.Unix(t, 0), true
 	}
 	return time.Time{}, false
 }
@@ -470,13 +488,8 @@ const maxGroupingBytes = 256
 // column the run table groups by.
 func groupingFromConfig(config map[string]any, key string) *string {
 	s, ok := config[key].(string)
-	if !ok || s == "" || len(s) > maxGroupingBytes || !utf8.ValidString(s) {
+	if !ok || s == "" || len(s) > maxGroupingBytes || hasInvalidIngestChars(s) {
 		return nil
-	}
-	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
-			return nil
-		}
 	}
 	return &s
 }
