@@ -56,7 +56,14 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         <I18nProvider locale={locale}>
           <Providers>
             <SiteHeader />
-            <main id="main-content" className="mx-auto max-w-7xl px-4 pb-24 pt-6">
+            {/* `has-[[data-full-bleed]]`: a page that marks its root with
+                `data-full-bleed` (the experiment workspace) drops the
+                max-w-7xl cap and keeps only the px-4 gutters. Keyed to the
+                content rather than the route so no other page changes. */}
+            <main
+              id="main-content"
+              className="mx-auto max-w-7xl px-4 pb-24 pt-6 has-[[data-full-bleed]]:max-w-none"
+            >
               {children}
             </main>
           </Providers>

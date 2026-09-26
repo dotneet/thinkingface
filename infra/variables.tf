@@ -228,6 +228,12 @@ variable "api_placeholder_image" {
   default     = "us-docker.pkg.dev/cloudrun/container/hello"
 }
 
+variable "require_auth_for_read" {
+  description = "Sets TF_REQUIRE_AUTH_FOR_READ on the api service: every request without a token, Basic credential or session answers 401, reads included. The services stay reachable from the internet (ingress ALL, allUsers invoker); this closes the anonymous read path inside the app. git / huggingface_hub keep working with their tokens."
+  type        = bool
+  default     = false
+}
+
 variable "api_max_instances" {
   description = "Upper bound for Cloud Run api autoscaling. min_instance_count is fixed at 1 (see main.tf) to keep the tmpfs git cache warm."
   type        = number

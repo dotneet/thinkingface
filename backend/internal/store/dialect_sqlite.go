@@ -160,10 +160,12 @@ func (sqliteDialect) isUniqueViolation(err error) bool {
 
 func (sqliteDialect) queries() dialectQueries {
 	return dialectQueries{
-		upsertExpRun: `INSERT INTO exp_runs (project_id, name, status, config, summary, metric_keys, last_step, num_points, started_at, group_name, job_type)
+		upsertExpRun: `INSERT INTO exp_runs (project_id, name, status, config, summary, metric_keys, last_step, num_points, started_at, group_name, job_type,
+			                      summary_min, summary_max, heartbeat_secs)
 			 VALUES ($1, $2, COALESCE(NULLIF($3, ''), 'finished'),
 			         COALESCE($4, '{}'), COALESCE($5, '{}'), COALESCE($6, '[]'), $7, $8, $9,
-			         COALESCE($10, ''), COALESCE($11, ''))
+			         COALESCE($10, ''), COALESCE($11, ''),
+			         COALESCE($12, '{}'), COALESCE($13, '{}'), $14)
 			 ON CONFLICT (project_id, name) DO UPDATE SET
 			   status      = COALESCE(NULLIF($3, ''), exp_runs.status),
 			   config      = COALESCE($4, exp_runs.config),
@@ -174,7 +176,11 @@ func (sqliteDialect) queries() dialectQueries {
 			   started_at  = COALESCE(exp_runs.started_at, $9),
 			   group_name  = COALESCE($10, exp_runs.group_name),
 			   job_type    = COALESCE($11, exp_runs.job_type),
-			   updated_at  = now()
+			   summary_min = COALESCE($12, exp_runs.summary_min),
+			   summary_max = COALESCE($13, exp_runs.summary_max),
+			   heartbeat_secs = COALESCE(NULLIF($14, 0), exp_runs.heartbeat_secs),
+			   updated_at  = CASE WHEN $15 OR $7 > exp_runs.last_step
+			                      THEN now() ELSE exp_runs.updated_at END
 			 RETURNING id`,
 		updateExpRunAnnotation: `UPDATE exp_runs SET
 			   tags        = COALESCE($3, tags),

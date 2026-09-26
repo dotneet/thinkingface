@@ -180,7 +180,9 @@ generated locally when the script runs (or in a separate bucket via `DEST=gs://�
 ## 5. Git Server
 
 - Serves the **Smart HTTP protocol** in Go. `/{ns}/{name}.git/info/refs`, `git-upload-pack`, and `git-receive-pack` are implemented by wrapping `--stateless-rpc` invocations of the `git` binary (more battle-tested and faster than a from-scratch implementation; `git` is bundled in the container)
-- Authentication is HTTP Basic (username + access token). Reads are anonymous-allowed for public repositories
+- Authentication is HTTP Basic (username + access token). Reads are anonymous-allowed for public repositories,
+  unless the operator sets `TF_REQUIRE_AUTH_FOR_READ=true` (§11), in which case an anonymous `info/refs` /
+  `git-upload-pack` gets `401` + `WWW-Authenticate: Basic` and git prompts for a token
 - Bare repositories are placed at `/data/git/{storage_path}.git` (`{storage_path}` is the same
   `repositories.storage_path` as in §4. Since it isn't the logical name `{ns}/{name}`, the
   directory never moves when a repository is renamed or transferred; see
@@ -428,8 +430,8 @@ script itself. Both paths converge here:
 
 Because telemetry is sampled on a wall-clock timer, it is **never added** to the run table's
 `num_points` / `last_step` / `started_at` (otherwise "how many points this run logged" would
-depend on how many hours the machine happened to be up). Only `metric_keys` and `summary` are
-touched. A run that appears only in the `_system` side is never created either — which runs
+depend on how many hours the machine happened to be up). Only `metric_keys` and the per-metric
+summaries (`summary`, `summary_min`, `summary_max`) are touched. A run that appears only in the `_system` side is never created either — which runs
 exist is decided by the metrics file.
 
 #### Resuming a Run (Interruption and Restart)
@@ -725,6 +727,12 @@ Constraints:
     credentials at all — repo listings, tree, resolve, `git clone`, and the LFS download side.
     Nothing in `internal/api` filters reads on a visibility column, and no such column exists in
     either migration set (`repositories` in `migrations/postgres/0001_init.sql`).
+    **The one exception is instance-wide, not per repository:** `TF_REQUIRE_AUTH_FOR_READ=true`
+    (default `false`) makes the API answer `401 authentication_required` to *every* request with
+    no identity, reads included, apart from a short allowlist (`/healthz`, login / signup /
+    logout, `GET /api/v1/me`, `GET /api/v1/server-info`) and the emulator's signed LFS transfer
+    URLs (`backend/internal/api/readauth.go`, `docs/dev/agent-features.md` §1.5). It changes who
+    may read, not what a signed-in user may read: every account still reads everything.
   - **Writes** need write scope plus a namespace role: the owner for a personal namespace, or
     `admin` / `write` for an organization (`read` members get 403). The full permission matrix
     and organization features are in `docs/dev/organization-design.md`.
@@ -880,7 +888,9 @@ flowchart LR
 > none of the three (`infra/README.md` discusses adding a load balancer with Cloud Armor or IAP,
 > but no resource does it). That is deliberate for `api` (git / git-lfs / HF clients
 > invoke it directly and authenticate inside the app), but it means **applying `infra/` as-is
-> makes every repository on the instance world-readable, unauthenticated, from any IP**.
+> makes every repository on the instance world-readable, unauthenticated, from any IP** —
+> unless `TF_REQUIRE_AUTH_FOR_READ=true` is set, which closes the anonymous read path inside
+> the app (§11) while leaving git and `huggingface_hub` working with their tokens.
 > An operator who wants an actual boundary has to add one: `ingress =
 > "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"` behind an internal LB or VPN, IAP in front of `web`,
 > a Cloud Armor policy on an external LB, or equivalent. Note that any such layer must still let

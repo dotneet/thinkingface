@@ -32,6 +32,14 @@ const RUN_COLUMNS = ["run", "group", "status", "tags", "last_step", "started_at"
  * sweep a run belonged to, which is the one thing the nesting was showing.
  * `updated_at` joins them because it is what makes a "stale" status readable
  * outside the UI, where there is no badge to hover.
+ *
+ * Every metric exports three columns whatever the table is showing: the last
+ * value under the metric's own name, then `min:<metric>` and `max:<metric>`
+ * (the spelling `tf experiments runs --sort` uses). The table's last / min /
+ * max switch is a way of reading the runs; the file carries all three so it
+ * never depends on which one was selected. Pass the runs *before*
+ * `projectRunSummaries` (lib/exp-goals.ts), or "last" would be whatever the
+ * switch was set to.
  */
 export function runTableCsv(
   runs: readonly ExpRun[],
@@ -41,7 +49,7 @@ export function runTableCsv(
   const columns = [
     ...RUN_COLUMNS,
     "updated_at",
-    ...metricKeys,
+    ...metricKeys.flatMap((key) => [key, `min:${key}`, `max:${key}`]),
     ...(options.includeModels ? ["checkpoints"] : []),
   ];
   const rows = runs.map((run) => {
@@ -57,10 +65,12 @@ export function runTableCsv(
       updated_at: run.updated_at,
     };
     for (const key of metricKeys) {
-      const value = run.summary?.[key];
       // A metric this run never logged stays blank rather than becoming 0:
-      // "not measured" and "measured zero" are different claims.
-      row[key] = typeof value === "number" && Number.isFinite(value) ? value : "";
+      // "not measured" and "measured zero" are different claims. min / max are
+      // optional-chained for a server that predates them.
+      row[key] = csvNumber(run.summary?.[key]);
+      row[`min:${key}`] = csvNumber(run.summary_min?.[key]);
+      row[`max:${key}`] = csvNumber(run.summary_max?.[key]);
     }
     if (options.includeModels) {
       row.checkpoints = (options.modelsByRun?.[run.name] ?? []).join("; ");
@@ -68,6 +78,10 @@ export function runTableCsv(
     return row;
   });
   return toCsv(columns, rows);
+}
+
+function csvNumber(value: number | undefined): number | "" {
+  return typeof value === "number" && Number.isFinite(value) ? value : "";
 }
 
 /**

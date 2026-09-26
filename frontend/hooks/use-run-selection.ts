@@ -14,6 +14,8 @@ export type RunSelection = {
   toggleAll: (names: string[]) => void;
   /** Drops one run, for a deletion the selection has no other way to hear about. */
   remove: (name: string) => void;
+  /** Replaces the whole selection ("only the running runs", "clear"). */
+  replace: (names: string[]) => void;
 };
 
 /**
@@ -72,5 +74,7 @@ export function useRunSelection(initialNames: string[]): RunSelection {
 
   const remove = useCallback((name: string) => update((next) => next.delete(name)), [update]);
 
-  return { selected, toggle, toggleMany, toggleAll, remove };
+  const replace = useCallback((names: string[]) => setSelected(new Set(names)), []);
+
+  return { selected, toggle, toggleMany, toggleAll, remove, replace };
 }

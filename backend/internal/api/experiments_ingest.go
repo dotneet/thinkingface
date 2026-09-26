@@ -62,6 +62,10 @@ const (
 	// batch's names with the ones already stored (mergeRunState), so the limit
 	// cannot be walked past a batch at a time.
 	maxIngestKeys = 1000
+	// maxHeartbeatSecs bounds a declared heartbeat interval. A run silent for
+	// four times this long reads as stale, so an hour already means a crash
+	// goes unnoticed for four.
+	maxHeartbeatSecs = 3600
 )
 
 // validateIngestName rejects names that would otherwise go straight into an
@@ -219,6 +223,10 @@ type runBatch struct {
 	// summary is the last value the batch carried for each metric, merged
 	// onto the stored summary for the same reason.
 	summary map[string]any
+	// summaryMin / summaryMax are the smallest and largest value the batch
+	// carried per metric, folded into the stored extremes the same way.
+	summaryMin map[string]float64
+	summaryMax map[string]float64
 }
 
 // buildRunPoints turns the wire points of one batch into store rows,
@@ -227,9 +235,11 @@ type runBatch struct {
 // is the whole reason the validation happens here rather than at flush time.
 func buildRunPoints(w http.ResponseWriter, raw []ingestPoint) (runBatch, bool) {
 	batch := runBatch{
-		points:  make([]store.MetricPoint, 0, len(raw)),
-		keys:    map[string]bool{},
-		summary: map[string]any{},
+		points:     make([]store.MetricPoint, 0, len(raw)),
+		keys:       map[string]bool{},
+		summary:    map[string]any{},
+		summaryMin: map[string]float64{},
+		summaryMax: map[string]float64{},
 	}
 	for _, p := range raw {
 		ts := time.Now()
@@ -270,6 +280,12 @@ func buildRunPoints(w http.ResponseWriter, raw []ingestPoint) (runBatch, bool) {
 			}
 			batch.keys[k] = true
 			batch.summary[k] = *v
+			if cur, seen := batch.summaryMin[k]; !seen || *v < cur {
+				batch.summaryMin[k] = *v
+			}
+			if cur, seen := batch.summaryMax[k]; !seen || *v > cur {
+				batch.summaryMax[k] = *v
+			}
 			metrics[k] = *v
 		}
 		batch.points = append(batch.points, store.MetricPoint{Step: p.Step, TS: ts, Metrics: metrics})
@@ -283,9 +299,14 @@ func buildRunPoints(w http.ResponseWriter, raw []ingestPoint) (runBatch, bool) {
 // runState is what the store already holds for a run: the zero value when the
 // project, or the run inside it, has never been written.
 type runState struct {
-	keys    []string
-	summary map[string]any
-	status  string
+	keys       []string
+	summary    map[string]any
+	summaryMin map[string]any
+	summaryMax map[string]any
+	status     string
+	// lastStep is the highest step the run has recorded, which is what tells
+	// an out-of-order batch apart from a newer one (see mergeRunState).
+	lastStep int64
 }
 
 // loadRunState reads a run's stored state, creating nothing on the way: the
@@ -327,7 +348,11 @@ func (s *Server) loadRunState(ctx context.Context, repoID int64, project, run st
 	case err != nil:
 		return runState{}, fmt.Errorf("read experiment run %q: %w", run, err)
 	}
-	return runState{keys: existing.MetricKeys, summary: existing.Summary, status: existing.Status}, nil
+	return runState{
+		keys: existing.MetricKeys, summary: existing.Summary,
+		summaryMin: existing.SummaryMin, summaryMax: existing.SummaryMax,
+		status: existing.Status, lastStep: existing.LastStep,
+	}, nil
 }
 
 // mergeRunState folds a batch onto whatever the run already holds, and applies
@@ -336,13 +361,23 @@ func (s *Server) loadRunState(ctx context.Context, repoID int64, project, run st
 //
 // Existing metric keys *and* summary values must survive: this batch may not
 // carry every metric the run logs. A batch of only "loss" must not drop the
-// "accuracy" a previous batch recorded, and a batch with no points at all (a
-// status ping) must not empty the summary -- the stored column is replaced
+// "accuracy" a previous batch recorded -- the stored column is replaced
 // wholesale by the upsert, so the merge has to happen here.
 //
-// summary comes back nil when nothing is known either way, so a status ping
-// against a run this read could not see keeps whatever is stored instead of
-// writing an empty object over it.
+// A batch that carries no metric value at all -- the shim's liveness ping, or
+// points whose every value was null -- answers nil for all four, "keep what is
+// stored", rather than a copy of what this handler read. The upsert replaces
+// each column wholesale, and the read and the write are not one transaction:
+// echoing the read back would overwrite whatever a concurrent batch (or the
+// indexer) stored in between with an older copy, from a request that had
+// nothing to say about any of it.
+//
+// A batch whose highest step is below the run's stored last_step is an
+// out-of-order delivery -- `tf experiments sync` replaying points the shim
+// spilled to disk after newer ones already went out online -- and its last
+// values are older than the stored ones. It only adds summary keys the run
+// does not have yet; min / max fold in as usual, since an extreme is an
+// extreme whenever it arrives.
 //
 // maxIngestKeys is a ceiling on the run, not on the request: every key a batch
 // introduces is written into metric_keys and stays there for the life of the
@@ -356,7 +391,11 @@ func (s *Server) loadRunState(ctx context.Context, repoID int64, project, run st
 // become unwritable on upgrade, including the status ping that marks it
 // finished, which carries no metric names at all and cannot make anything
 // worse.
-func mergeRunState(w http.ResponseWriter, run string, stored runState, batch runBatch) (keys []string, summary map[string]any, ok bool) {
+func mergeRunState(w http.ResponseWriter, run string, stored runState, batch runBatch) (mergedRun, bool) {
+	if len(batch.summary) == 0 {
+		// Nothing to merge, and no new name to check against the cap.
+		return mergedRun{}, true
+	}
 	keySet := batch.keys
 	for _, k := range stored.keys {
 		keySet[k] = true
@@ -369,22 +408,61 @@ func mergeRunState(w http.ResponseWriter, run string, stored runState, batch run
 		badRequest(w, fmt.Sprintf(
 			"a run may carry at most %d distinct metrics; run %q already has %d and this batch adds %d more (%d in total)",
 			maxIngestKeys, run, len(stored.keys), added, len(keySet)))
-		return nil, nil, false
+		return mergedRun{}, false
 	}
+	var out mergedRun
 	for k := range keySet {
-		keys = append(keys, k)
+		out.keys = append(out.keys, k)
 	}
 	merged := map[string]any{}
 	for k, v := range stored.summary {
 		merged[k] = v
 	}
+	outOfOrder := batch.lastStep < stored.lastStep
 	for k, v := range batch.summary {
+		if _, has := merged[k]; has && outOfOrder {
+			continue
+		}
 		merged[k] = v
 	}
-	if len(merged) == 0 {
-		return keys, nil, true
+	if len(merged) > 0 {
+		out.summary = merged
 	}
-	return keys, merged, true
+	out.summaryMin = mergeExtreme(stored.summaryMin, batch.summaryMin, func(a, b float64) bool { return a < b })
+	out.summaryMax = mergeExtreme(stored.summaryMax, batch.summaryMax, func(a, b float64) bool { return a > b })
+	return out, true
+}
+
+// mergedRun is the run state mergeRunState hands to the upsert. A nil map
+// means "keep what is stored".
+type mergedRun struct {
+	keys       []string
+	summary    map[string]any
+	summaryMin map[string]any
+	summaryMax map[string]any
+}
+
+// mergeExtreme folds a batch's per-metric extremes into the stored ones:
+// better(a, b) reports that a should replace b. A stored value that is not a
+// number (a hand-edited row) is treated as absent. It answers nil -- keep the
+// stored column untouched -- when the batch has nothing to fold in: rewriting
+// the column with the copy this request read could only lose a value another
+// writer stored since.
+func mergeExtreme(stored map[string]any, batch map[string]float64, better func(a, b float64) bool) map[string]any {
+	if len(batch) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(stored)+len(batch))
+	for k, v := range stored {
+		out[k] = v
+	}
+	for k, v := range batch {
+		if cur, ok := out[k].(float64); ok && !better(v, cur) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func (s *Server) handleExperimentLog(w http.ResponseWriter, r *http.Request) {
@@ -397,6 +475,10 @@ func (s *Server) handleExperimentLog(w http.ResponseWriter, r *http.Request) {
 		Status string         `json:"status"`
 		Config map[string]any `json:"config"`
 		Points []ingestPoint  `json:"points"`
+		// HeartbeatSecs is how often the client promises to check in while
+		// the run is alive (docs/dev/agent-features.md §2.6). 0 / absent keeps
+		// whatever the run declared before.
+		HeartbeatSecs int `json:"heartbeat_secs"`
 		// Group and JobType are the sweep grouping (`init(group=...,
 		// job_type=...)`). Both are optional and an omitted -- or empty --
 		// value keeps whatever the run already declared, so a client that
@@ -413,6 +495,10 @@ func (s *Server) handleExperimentLog(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Points) > maxIngestPoints {
 		badRequest(w, fmt.Sprintf("a batch may carry at most %d points", maxIngestPoints))
+		return
+	}
+	if req.HeartbeatSecs != 0 && (req.HeartbeatSecs < 1 || req.HeartbeatSecs > maxHeartbeatSecs) {
+		badRequest(w, fmt.Sprintf("heartbeat_secs must be between 1 and %d", maxHeartbeatSecs))
 		return
 	}
 	batch, ok := buildRunPoints(w, req.Points)
@@ -435,9 +521,15 @@ func (s *Server) handleExperimentLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prevStatus := stored.status
-	keys, summary, ok := mergeRunState(w, id.run, stored, batch)
+	merged, ok := mergeRunState(w, id.run, stored, batch)
 	if !ok {
 		return
+	}
+	// status is what the upsert writes ("" keeps the stored one) and what the
+	// webhook compares against prevStatus.
+	status := id.status
+	if keepsTerminalStatus(req.Points, req.Config, prevStatus, status) {
+		status = ""
 	}
 
 	// Nothing is written until every name, status and limit has been checked,
@@ -450,9 +542,11 @@ func (s *Server) handleExperimentLog(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	runID, err := s.store.UpsertExpRunWith(ctx, projectID, store.ExpRunUpsert{
-		Name: id.run, Status: id.status, Config: req.Config, Summary: summary,
-		MetricKeys: keys, LastStep: batch.lastStep, StartedAt: &now,
-		Group: id.group, JobType: id.jobType,
+		Name: id.run, Status: status, Config: req.Config, Summary: merged.summary,
+		SummaryMin: merged.summaryMin, SummaryMax: merged.summaryMax,
+		MetricKeys: merged.keys, LastStep: batch.lastStep, StartedAt: &now,
+		Group: id.group, JobType: id.jobType, HeartbeatSecs: req.HeartbeatSecs,
+		Touch: true,
 	})
 	if err != nil {
 		internalError(w, "upsert experiment run", err)
@@ -475,14 +569,40 @@ func (s *Server) handleExperimentLog(w http.ResponseWriter, r *http.Request) {
 	// them.
 	total, _ := s.store.CountPoints(ctx, runID)
 	if _, err := s.store.UpsertExpRunWith(ctx, projectID, store.ExpRunUpsert{
-		Name: id.run, Status: id.status, LastStep: batch.lastStep, NumPoints: total,
+		Name: id.run, Status: status, LastStep: batch.lastStep, NumPoints: total,
+		Touch: true,
 	}); err != nil {
 		internalError(w, "update run counters", err)
 		return
 	}
-	s.fireRunStatusWebhook(ctx, repo, id.project, id.run, prevStatus, id.status)
+	if status != "" {
+		s.fireRunStatusWebhook(ctx, repo, id.project, id.run, prevStatus, status)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "run": id.run, "accepted": len(batch.points)})
+}
+
+// keepsTerminalStatus reports whether a /log must leave the run's stored
+// status alone: a pure liveness ping (no points, no config) asking for
+// "running" on a run that already finished or failed.
+//
+// The shim's ping says "running" because that is what it believes, and it can
+// be wrong: the heartbeat thread races finish(), and a ping delayed in a proxy
+// or retried after a timeout can land after the /finish it preceded. Writing
+// it would resurrect a finished run as running -- and then as stale, forever,
+// since nothing will ever finish it again -- and fire run.finished a second
+// time on the next finish. A ping carries no information that could justify
+// that. A batch with points still moves the status as before: a run that
+// really is logging again after a finish (a resumed run) is running.
+func keepsTerminalStatus(points []ingestPoint, config map[string]any, stored, requested string) bool {
+	if len(points) != 0 || config != nil || requested != string(apitypes.RunStatusRunning) {
+		return false
+	}
+	switch apitypes.RunStatus(stored) {
+	case apitypes.RunStatusFinished, apitypes.RunStatusFailed:
+		return true
+	}
+	return false
 }
 
 // fireRunStatusWebhook notifies run.finished/run.failed exactly on the
@@ -550,6 +670,7 @@ func (s *Server) handleExperimentFinish(w http.ResponseWriter, r *http.Request) 
 	}
 	if _, err := s.store.UpsertExpRunWith(ctx, projectID, store.ExpRunUpsert{
 		Name: id.run, Status: id.status, Group: id.group, JobType: id.jobType,
+		Touch: true,
 	}); err != nil {
 		internalError(w, "update run status", err)
 		return

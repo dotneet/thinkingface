@@ -63,6 +63,13 @@ make down        # stop (volumes are kept); `make clean` also removes the volume
 | PostgreSQL | `localhost:5432` (`make psql` opens a shell) |
 | Default login | `admin` / `admin` (`TF_ADMIN_USERNAME` / `TF_ADMIN_PASSWORD` in `.env`) |
 
+`docker-compose.yml` publishes the api and web ports on `127.0.0.1` by default rather than every
+interface, since Docker's published ports bypass any firewall running on the host. Set
+`TF_BIND_ADDR=0.0.0.0` in `.env` to make the stack reachable from other devices on the LAN. The
+postgres and gcs ports always stay loopback-only regardless of `TF_BIND_ADDR`: fake-gcs-server
+has no authentication of its own, and only host-side tooling (`make test-store-pg`,
+`scripts/gcs-host-proxy.py`, the E2E bucket checks) needs to reach either one directly.
+
 `make up-sqlite` brings up the same stack without the `postgres` container, with the API on
 SQLite (`docker-compose.sqlite.yml`). The tradeoffs between the two database backends are
 documented in [Deployment](../users/self-hosting/deployment.md#choosing-a-database-backend).
@@ -84,13 +91,21 @@ does not change it. Run the framework dev servers on the host instead, against t
 services:
 
 ```bash
-make dev-web     # next dev on :3100, talking to the compose API on :8080
+make dev-web     # next dev on :3100; the browser calls :3100, which proxies /api to the compose API on :8080
 make dev-api     # the Go API on :8081 with SQLite + the compose GCS emulator (via a Host-rewriting proxy on :14443)
 make dev-stop    # stop everything the two targets above started (docker is untouched)
 ```
 
 Login cookies are shared across ports, so a session on :3000 is valid on :3100. If a port is
 taken, override it: `make dev-web WEB_DEV_PORT=3111`.
+
+`make dev-web` runs in same-origin mode unless `NEXT_PUBLIC_API_URL` is set: the browser
+calls the dev server's own origin and `frontend/app/api/[...path]/route.ts` forwards to
+`API_URL` (default `http://localhost:8080`, the compose API). Pointing it at `make dev-api`
+is therefore just `make dev-web API_URL=http://localhost:8081` — no CORS or
+`TF_ALLOWED_ORIGINS` involved. `make dev-web NEXT_PUBLIC_API_URL=http://localhost:8081
+API_URL=http://localhost:8081` still gives the old cross-origin setup, for checking that
+mode.
 
 `make dev-api` starts `scripts/gcs-host-proxy.py` (`make gcs-proxy`) automatically. It is
 needed because the emulator is started with `-public-host=gcs:4443`, so a host-side process
@@ -375,9 +390,12 @@ cleanly when neither is installed.
 - The Makefile resolves `bun` and `node` to absolute paths via mise. On a plain `PATH`, `node`
   may resolve to an older version and vitest / `next build` fail — go through `make`
   (`make test`, `make build-web`) rather than running `bun run test` / `bun run build` directly.
-- Inside Compose, web → api is `http://api:8080` while browser → api is
-  `http://localhost:8080`; the two are split via `API_URL` / `NEXT_PUBLIC_API_URL`
-  (`apiBaseUrl()` in `frontend/lib/api.ts`).
+- Inside Compose, web → api is `http://api:8080` (`API_URL`, read at runtime). The browser
+  calls the web UI's own origin, and `frontend/app/api/[...path]/route.ts` (plus the
+  `resolve` routes under `app/models/` and `app/datasets/`) forwards to `API_URL` — unless the
+  image was built with a non-empty `NEXT_PUBLIC_API_URL`, in which case the browser calls
+  that URL cross-origin as it used to (`apiBaseUrl()` in `frontend/lib/api.ts`,
+  `publicApiBase()` in `frontend/lib/paths.ts`; docs/dev/agent-features.md §1.2).
 - `frontend/public/duckdb/` holds the DuckDB-WASM assets used by the SQL console. They are
   generated (gitignored) and copied from `node_modules` automatically before `bun run dev` /
   `bun run build`.

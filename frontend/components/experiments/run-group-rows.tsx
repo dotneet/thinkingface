@@ -2,6 +2,7 @@
 
 import { ChevronDown, ChevronRight } from "lucide-react";
 
+import { BestRunMarker } from "@/components/experiments/metric-goal-marker";
 import { RunRow } from "@/components/experiments/run-row";
 import { statusLabel, statusTone } from "@/components/experiments/run-status-badge";
 import { runColumnKey, useRunTable } from "@/components/experiments/run-table-context";
@@ -10,10 +11,11 @@ import { Button } from "@/components/ui/button";
 import { Td } from "@/components/ui/table";
 import { TimeText } from "@/components/ui/time-text";
 import { TriStateCheckbox } from "@/components/ui/tri-state-checkbox";
+import { bestInRuns, metricGoal } from "@/lib/exp-goals";
 import { metricCellText } from "@/lib/experiments";
 import { formatNumber } from "@/lib/format";
 import { useT } from "@/lib/i18n/client";
-import { bestMetric, bestRunFor, groupJobTypes, type RunGroup } from "@/lib/run-grouping";
+import { groupJobTypes, type RunGroup } from "@/lib/run-grouping";
 import type { RunStatus } from "@/types/api";
 
 /**
@@ -40,7 +42,7 @@ export function GroupRows({
   onToggleMany: (names: string[], select: boolean) => void;
 }) {
   const t = useT();
-  const { columns } = useRunTable();
+  const { columns, goals, best } = useRunTable();
   const names = group.runs.map((r) => r.name);
   const allSelected = names.every((name) => selected.has(name));
   const someSelected = !allSelected && names.some((name) => selected.has(name));
@@ -94,7 +96,9 @@ export function GroupRows({
                     >
                       {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                     </Button>
-                    <span>{group.key}</span>
+                    <span className="max-w-[16rem] truncate" title={group.key}>
+                      {group.key}
+                    </span>
                     <Badge>
                       {t(
                         group.runs.length === 1
@@ -114,7 +118,7 @@ export function GroupRows({
             case "status":
               return (
                 <Td key={key}>
-                  <div className="flex flex-wrap gap-1.5">
+                  <div className="flex gap-1.5">
                     {Array.from(statusCounts.entries()).map(([status, count]) => (
                       <Badge key={status} tone={statusTone(status)}>
                         {t("experiments.table.statusCount", {
@@ -134,26 +138,38 @@ export function GroupRows({
               );
             case "lastStep":
               return (
-                <Td key={key} className="tabular-nums">
+                <Td key={key} align="right" className="tabular-nums">
                   {formatNumber(lastStep)}
                 </Td>
               );
             case "metric": {
-              const best = bestMetric(group.runs, column.metric);
-              const holder = bestRunFor(group.runs, column.metric);
+              // "Best" follows the metric's declared goal when it has one, the
+              // naming heuristic otherwise (effectiveDirection).
+              const groupBest = bestInRuns(group.runs, column.metric, goals);
+              // The trophy says "the project's best run is in this sweep", so a
+              // folded group does not hide it.
+              const holdsBest = group.runs.some((r) => best[column.metric] === r.name);
               return (
-                <Td key={key} className="tabular-nums">
-                  {best === null ? (
+                <Td key={key} align="right" className="tabular-nums">
+                  {groupBest === null ? (
                     <span className="text-fg-subtle">—</span>
                   ) : (
-                    <span
-                      className="text-fg"
-                      title={t("experiments.table.bestInGroup", {
-                        metric: column.metric,
-                        run: holder?.name ?? "",
-                      })}
-                    >
-                      {metricCellText(best)}
+                    <span className="inline-flex items-center gap-1">
+                      <span
+                        className="text-fg"
+                        title={t("experiments.table.bestInGroup", {
+                          metric: column.metric,
+                          run: groupBest.run,
+                        })}
+                      >
+                        {metricCellText(groupBest.value)}
+                      </span>
+                      {holdsBest && (
+                        <BestRunMarker
+                          metric={column.metric}
+                          goal={metricGoal(goals, column.metric)}
+                        />
+                      )}
                     </span>
                   )}
                 </Td>
@@ -162,7 +178,7 @@ export function GroupRows({
             case "started":
               return (
                 <Td key={key} className="text-fg-muted">
-                  <TimeText iso={started ?? null} style="dateTime" />
+                  <TimeText iso={started ?? null} style="relative" />
                 </Td>
               );
             case "models":

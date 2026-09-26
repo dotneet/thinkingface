@@ -1,10 +1,9 @@
 /**
  * Section wrapper: a heading, an optional blurb, and the content below it.
  *
- * The run detail page is a stack of these — summary, charts, artifacts,
- * checkpoints, note, hyperparameters, TrainingArguments, environment, danger
- * zone — and each section is its own component, so the wrapper has to live
- * somewhere all of them can reach.
+ * The run detail page uses it for the sections that sit on their own — the
+ * charts and the "Outputs & environment" card — so it lives somewhere every
+ * section component can reach.
  */
 export function Section({
   title,

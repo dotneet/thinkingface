@@ -54,6 +54,13 @@ type Server struct {
 	// authGuard throttles password verification. It is process-local state,
 	// so it lives on the Server rather than in the store (see ratelimit.go).
 	authGuard *authGuard
+	// corsRejections records origins the cors/requireSameOrigin middleware
+	// has already logged a rejection for, so a browser that keeps retrying
+	// (or a scanner) doesn't spam the log (docs/dev/agent-features.md §1.3).
+	corsRejections corsRejectionLog
+	// webProxies is TF_TRUSTED_WEB_PROXIES, parsed (webproxy.go); nil trusts
+	// no peer to name the browser's address.
+	webProxies *trustedWebProxies
 }
 
 // experiments exposes the indexer used by the experiment endpoints.
@@ -86,6 +93,7 @@ func NewServer(d Deps) *Server {
 		webhooks: d.Webhooks,
 	}
 	s.authGuard = newAuthGuard(d.Config.AuthRateLimitPerMinute)
+	s.webProxies = newTrustedWebProxies(d.Config.TrustedWebProxies)
 	if s.models == nil {
 		// A Server built without one still has to answer checkpoint
 		// requests; the cache is pure memoisation, never a dependency.
@@ -139,6 +147,9 @@ func (s *Server) Handler() http.Handler {
 	// Identity is resolved once per request and never rejects here; each
 	// handler decides what it requires.
 	r.Use(s.identify)
+	// TF_REQUIRE_AUTH_FOR_READ: after identify, whose user it checks for;
+	// a no-op when the switch is off (readauth.go).
+	r.Use(s.requireAuthForRead)
 	// After identify, because it only applies to cookie-authenticated calls.
 	r.Use(s.requireSameOrigin)
 	// Innermost, so that every middleware above has already written its
@@ -164,6 +175,9 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	// ------------------------------------------------ HuggingFace-compatible
+	// The programmatic surface as OpenAPI 3.1 (docs/dev/agent-features.md §5).
+	r.Get("/api/openapi.json", s.handleOpenAPI)
+
 	r.Get("/api/whoami-v2", s.handleWhoami)
 	r.Post("/api/repos/create", s.handleHFCreateRepo)
 	r.Delete("/api/repos/delete", s.handleHFDeleteRepo)
@@ -227,6 +241,7 @@ func (s *Server) Handler() http.Handler {
 		r.Post("/auth/signup", s.handleSignup)
 		r.Post("/auth/logout", s.handleLogout)
 		r.Get("/me", s.handleMe)
+		r.Get("/server-info", s.handleServerInfo)
 		r.Patch("/me/profile", s.handleUpdateMyProfile)
 		r.Patch("/me/password", s.handleChangeMyPassword)
 
@@ -299,7 +314,13 @@ func (s *Server) Handler() http.Handler {
 
 		r.Get("/experiments", s.handleListExperiments)
 		r.Get("/experiments/{ns}/{repo}", s.handleExperimentRepo)
+		r.Patch("/experiments/{ns}/{repo}/{project}", s.handleUpdateExperimentProject)
 		r.Get("/experiments/{ns}/{repo}/{project}/runs", s.handleExperimentRuns)
+		// Long-polls with ?wait= (docs/dev/agent-features.md §2.4).
+		r.Get("/experiments/{ns}/{repo}/{project}/runs/{run}", s.handleExperimentRun)
+		r.Get("/experiments/{ns}/{repo}/{project}/config-diff", s.handleExperimentConfigDiff)
+		r.Get("/experiments/{ns}/{repo}/{project}/notes", s.handleGetExperimentNotes)
+		r.Put("/experiments/{ns}/{repo}/{project}/notes", s.handlePutExperimentNotes)
 		r.Patch("/experiments/{ns}/{repo}/{project}/runs/{run}", s.handleExperimentRunAnnotation)
 		r.Delete("/experiments/{ns}/{repo}/{project}/runs/{run}", s.handleDeleteExperimentRun)
 		r.Get("/experiments/{ns}/{repo}/{project}/runs/{run}/artifacts", s.handleExperimentRunArtifacts)
@@ -531,8 +552,27 @@ func cascadeDeleteRoute(r *http.Request) bool {
 	return false
 }
 
-// boundHandlerTime applies handlerTimeout to every route streamingRoute and
-// cascadeDeleteRoute do not exempt.
+// longPollRoute reports whether a request is the one long-poll this API has:
+// GET .../runs/{run} with `wait` (docs/dev/agent-features.md §2.4). It may
+// legitimately hold the request for up to maxRunWait, which is handlerTimeout
+// itself, so the deadline would race it and answer a wait that ran its course
+// with a timeout. The handler bounds itself (maxRunWait, and it stops on
+// r.Context()), and like streamingRoute the decision is made on the route
+// pattern, never on the path -- PATCH and DELETE share the pattern and are not
+// exempted here (DELETE is cascadeDeleteRoute's business).
+func longPollRoute(routes chi.Routes, r *http.Request) bool {
+	if routes == nil || r.Method != http.MethodGet || r.URL.Query().Get("wait") == "" {
+		return false
+	}
+	path := r.URL.RawPath
+	if path == "" {
+		path = r.URL.Path
+	}
+	return routes.Find(chi.NewRouteContext(), r.Method, path) == "/api/v1/experiments/{ns}/{repo}/{project}/runs/{run}"
+}
+
+// boundHandlerTime applies handlerTimeout to every route streamingRoute,
+// cascadeDeleteRoute and longPollRoute do not exempt.
 //
 // The router streamingRoute consults is the one serving the request, which chi
 // records in the route context before running any middleware. A handler
@@ -548,7 +588,7 @@ func boundHandlerTime(next http.Handler) http.Handler {
 		} else {
 			routes = defaultRoutes()
 		}
-		if streamingRoute(routes, r) || cascadeDeleteRoute(r) {
+		if streamingRoute(routes, r) || cascadeDeleteRoute(r) || longPollRoute(routes, r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -609,6 +649,70 @@ func (s *Server) originAllowed(origin string) bool {
 	return false
 }
 
+// corsRejectionLogCap bounds how many distinct rejected origins
+// corsRejectionLog remembers. Without a cap, a scanner that cycles through
+// distinct Origin headers could grow the set without limit; past the cap, a
+// single "further rejected origins not logged" line replaces one line per
+// origin (docs/dev/agent-features.md §1.3).
+const corsRejectionLogCap = 64
+
+// corsRejectionLogMaxOrigin bounds the bytes of one origin corsRejectionLog
+// keeps and logs. The entry cap alone bounds the count, not the size: an
+// Origin header may be as long as the server's header limit (1 MiB by
+// default), so 64 of them pinned ~64 MiB for the life of the process and
+// wrote a megabyte log line each. A real origin is a scheme, a host and a
+// port; 256 bytes is more than any of them needs.
+const corsRejectionLogMaxOrigin = 256
+
+// truncateLoggedOrigin cuts origin to corsRejectionLogMaxOrigin bytes and
+// marks the cut, so the log does not present a prefix as the origin that was
+// sent. Origins that share their first 256 bytes then
+// share one entry, which is fine: they are all equally not allowed.
+func truncateLoggedOrigin(origin string) string {
+	if len(origin) <= corsRejectionLogMaxOrigin {
+		return origin
+	}
+	// ToValidUTF8 drops a rune the byte cut split in half.
+	return strings.ToValidUTF8(origin[:corsRejectionLogMaxOrigin], "") + "...(truncated)"
+}
+
+// corsRejectionLog records, once each, the origins a CORS check has refused,
+// so an operator sees each misconfigured or malicious origin exactly once in
+// the log rather than once per request. It is embedded in Server rather than
+// held as a pointer field so a zero Server (as tests construct directly) has
+// a working, empty log.
+type corsRejectionLog struct {
+	mu           sync.Mutex
+	seen         map[string]struct{}
+	overflowSaid bool
+}
+
+// logOnce logs the first rejection of a given origin at Warn level, naming
+// TF_ALLOWED_ORIGINS and the same-origin proxy as the two ways to fix it. A
+// repeat of an already-logged origin, or one seen after the cap is reached,
+// is silent -- except that crossing the cap itself is logged exactly once.
+func (l *corsRejectionLog) logOnce(origin string) {
+	origin = truncateLoggedOrigin(origin)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.seen == nil {
+		l.seen = make(map[string]struct{})
+	}
+	if _, ok := l.seen[origin]; ok {
+		return
+	}
+	if len(l.seen) >= corsRejectionLogCap {
+		if !l.overflowSaid {
+			l.overflowSaid = true
+			slog.Warn("cors: further rejected origins not logged", "cap", corsRejectionLogCap)
+		}
+		return
+	}
+	l.seen[origin] = struct{}{}
+	slog.Warn("cors: origin not allowed", "origin", origin,
+		"hint", "add it to TF_ALLOWED_ORIGINS, or use the web UI's same-origin /api proxy")
+}
+
 // cors answers preflights and decorates responses for the origins the
 // operator named in TF_ALLOWED_ORIGINS.
 //
@@ -642,6 +746,8 @@ func (s *Server) cors(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Expose-Headers",
 				"ETag, X-Repo-Commit, X-Linked-Etag, X-Linked-Size, "+
 					"Content-Length, Content-Range, Accept-Ranges, Location")
+		} else if origin != "" {
+			s.corsRejections.logOnce(origin)
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -686,6 +792,7 @@ func (s *Server) requireSameOrigin(next http.Handler) http.Handler {
 			return
 		}
 		if origin := requestOrigin(r); origin != "" && !s.originAllowed(origin) {
+			s.corsRejections.logOnce(origin)
 			forbidden(w, "cross-origin request refused; sign in from an allowed origin")
 			return
 		}
@@ -779,6 +886,13 @@ func securityHeaders(next http.Handler) http.Handler {
 type authRecord struct {
 	username string
 	method   authMethod
+	// tokenID / tokenName name the access token behind an authToken request
+	// (0 / "" otherwise), and tokenRestricted says whether it is limited to
+	// a repository list (docs/dev/agent-features.md §3) -- what makes an
+	// agent's actions attributable to the one token it was handed.
+	tokenID         int64
+	tokenName       string
+	tokenRestricted bool
 }
 
 func authRecordFrom(ctx context.Context) *authRecord {
@@ -821,6 +935,10 @@ func (s *Server) requestLogger(next http.Handler) http.Handler {
 		// subject whose name failed to render.
 		if rec.username != "" {
 			attrs = append(attrs, "user", rec.username, "auth", string(rec.method))
+			if rec.tokenID != 0 {
+				attrs = append(attrs, "token_id", rec.tokenID, "token_name", rec.tokenName,
+					"token_restricted", rec.tokenRestricted)
+			}
 		}
 		slog.Log(r.Context(), level, "http", attrs...)
 	})

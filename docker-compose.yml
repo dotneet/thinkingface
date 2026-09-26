@@ -14,10 +14,13 @@ services:
     volumes:
       - pg-data:/var/lib/postgresql/data
     ports:
-      # Lets the host connect directly (`make test-store-pg` runs
-      # backend/internal/store's integration tests against
+      # Always loopback, never TF_BIND_ADDR: Docker's published ports bypass
+      # the host firewall, so a wildcard bind here would expose Postgres to
+      # the LAN with no auth hardening of its own. Only `make test-store-pg`
+      # needs it reachable from the host (backend/internal/store's
+      # integration tests against
       # TF_TEST_DATABASE_URL=postgres://...@localhost:${POSTGRES_PORT:-5432}/...).
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tf} -d ${POSTGRES_DB:-thinkingface}"]
       interval: 5s
@@ -39,7 +42,10 @@ services:
     volumes:
       - gcs-data:/data
     ports:
-      - "4443:4443"
+      # Always loopback, never TF_BIND_ADDR: fake-gcs-server has no
+      # authentication of its own, and scripts/gcs-host-proxy.py plus the
+      # E2E bucket checks need it reachable at a fixed host address.
+      - "127.0.0.1:4443:4443"
     healthcheck:
       # fake-gcs-server exposes a lightweight internal healthcheck endpoint;
       # falls back fine to the JSON bucket-list API on older image tags.
@@ -89,6 +95,15 @@ services:
       TF_VIEWER_CACHE_DIR: ${TF_VIEWER_CACHE_DIR:-/data/cache}
       TF_SYNC_WORKERS: ${TF_SYNC_WORKERS:-2}
       TF_ALLOW_SIGNUP: ${TF_ALLOW_SIGNUP:-true}
+      TF_REQUIRE_AUTH_FOR_READ: ${TF_REQUIRE_AUTH_FOR_READ:-false}
+      # The browser's address behind the web UI's /api proxy
+      # (docs/dev/agent-features.md §1.2): believed only from the web
+      # container, which "web" resolves to on the compose network. Direct
+      # callers of the published api port arrive from Docker's gateway and
+      # cannot forge it. TF_WEB_PROXY_SECRET is the alternative for setups
+      # where the connection peer says nothing; give web the same value.
+      TF_TRUSTED_WEB_PROXIES: ${TF_TRUSTED_WEB_PROXIES:-web}
+      TF_WEB_PROXY_SECRET: ${TF_WEB_PROXY_SECRET:-}
       # git over SSH (docs/dev/thinkingface-design.md §5). The host key lives on
       # the git-data volume so it survives `docker compose down`; a fresh key
       # on every restart would make every client warn about a mismatch.
@@ -98,8 +113,12 @@ services:
     volumes:
       - git-data:/data
     ports:
-      - "8080:8080"
-      - "${TF_SSH_PORT:-2222}:2222"
+      # Loopback by default: Docker's published ports bypass the host
+      # firewall, so binding 0.0.0.0 here would expose the API (and git over
+      # SSH) to the whole LAN regardless of any host firewall rule.
+      # TF_BIND_ADDR=0.0.0.0 restores LAN reachability when that's wanted.
+      - "${TF_BIND_ADDR:-127.0.0.1}:8080:8080"
+      - "${TF_BIND_ADDR:-127.0.0.1}:${TF_SSH_PORT:-2222}:2222"
     depends_on:
       postgres:
         condition: service_healthy
@@ -110,22 +129,35 @@ services:
     build:
       context: ./frontend
       args:
-        # NEXT_PUBLIC_API_URL is inlined into the client bundle by `bun run
-        # build` (Next.js build-time env), so it must be passed as a build
-        # arg here, not (only) as a runtime `environment:` var below -- a
-        # runtime-only value would never reach the browser bundle. See
-        # frontend/Dockerfile and infra/README.md for the non-compose case.
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+        # Empty by default: the browser calls the API on the web UI's own
+        # origin and the web server forwards to API_URL below, read at
+        # runtime -- so the API's browser-facing address is never baked into
+        # the image (docs/dev/agent-features.md §1.2). Set NEXT_PUBLIC_API_URL
+        # in .env only to have the browser call the API directly instead; it
+        # is inlined into the client bundle by `bun run build`, so that needs
+        # `docker compose up -d --build web` and a matching
+        # TF_ALLOWED_ORIGINS entry. See frontend/Dockerfile.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
     restart: unless-stopped
     environment:
-      # Server-side (SSR/route handlers) talk to the api container directly.
+      # Server Components and the /api proxy talk to the api container over
+      # the compose network. Read at runtime: changing it needs a restart,
+      # not a rebuild.
       API_URL: http://api:8080
       # Kept for reference/consistency with the build arg above; the browser
       # bundle already has the value baked in from the build arg and does not
       # read this at runtime.
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+      # server.ts pins each browser's socket address for the api's rate
+      # limiter. Set the hops only when reverse proxies that append to
+      # X-Forwarded-For sit in front of this container; the secret only when
+      # the api side sets it too.
+      TF_WEB_TRUSTED_PROXY_HOPS: ${TF_WEB_TRUSTED_PROXY_HOPS:-0}
+      TF_WEB_PROXY_SECRET: ${TF_WEB_PROXY_SECRET:-}
     ports:
-      - "3000:3000"
+      # Loopback by default, same reasoning as the api service above.
+      # TF_BIND_ADDR=0.0.0.0 restores LAN reachability.
+      - "${TF_BIND_ADDR:-127.0.0.1}:3000:3000"
     depends_on:
       api:
         condition: service_healthy

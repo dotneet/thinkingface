@@ -55,6 +55,7 @@ func (h *expHarness) ingestPoints(project, run string, points []metricPoint) int
 	if err := h.st.InsertPoints(h.ctx, runID, rows); err != nil {
 		h.t.Fatalf("insert points: %v", err)
 	}
+	h.mergeIngestSummaries(projectID, run, rows)
 	return projectID
 }
 

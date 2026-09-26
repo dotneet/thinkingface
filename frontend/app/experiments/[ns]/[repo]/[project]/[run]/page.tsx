@@ -1,10 +1,12 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 
 import { titleMetadata } from "@/app/page-metadata";
 import { RunDetail } from "@/components/experiments/run-detail";
+import { RunPageBreadcrumb } from "@/components/experiments/run-page-breadcrumb";
 import { ErrorState } from "@/components/ui/error-state";
 import { errorMessage } from "@/lib/api-error-message";
+import { runListBest, runListGoals } from "@/lib/exp-goals";
+import { projectHref } from "@/lib/exp-runpage-order";
 import { listRuns } from "@/lib/experiments";
 import { getT } from "@/lib/i18n/server";
 import { decodeRouteParams } from "@/lib/paths";
@@ -51,45 +53,36 @@ export default async function ExperimentRunPage({
       `/experiments/${encodeURIComponent(toNs)}/${encodeURIComponent(toRepo)}/${encodeURIComponent(project)}/${encodeURIComponent(run)}`,
   );
 
-  const projectHref = `/experiments/${encodeURIComponent(ns)}/${encodeURIComponent(repo)}/${encodeURIComponent(project)}`;
-
-  return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-center gap-1.5 text-sm text-fg-subtle">
-        <Link href="/experiments" className="hover:text-fg hover:underline">
-          {t("experiments.repo.breadcrumbRoot")}
-        </Link>
-        <span>/</span>
-        <Link
-          href={`/experiments/${encodeURIComponent(ns)}/${encodeURIComponent(repo)}`}
-          className="hover:text-fg hover:underline"
-        >
-          {ns}/{repo}
-        </Link>
-        <span>/</span>
-        <Link href={projectHref} className="hover:text-fg hover:underline">
-          {project}
-        </Link>
-        <span>/</span>
-        <span className="break-all text-fg">{run}</span>
-      </div>
-
-      {!result.ok ? (
+  if (!result.ok) {
+    return (
+      <div className="flex flex-col gap-6">
+        <RunPageBreadcrumb
+          ns={ns}
+          repo={repo}
+          project={project}
+          projectHref={projectHref(ns, repo, project)}
+        />
         <ErrorState
           title={t("experiments.errorTitle")}
           message={errorMessage(t, result)}
           hint={t("experiments.project.errorHint")}
         />
-      ) : (
-        <RunDetail
-          ns={ns}
-          repo={repo}
-          project={project}
-          runName={run}
-          runs={result.data.runs}
-          canWrite={repoResult.ok && repoResult.data.repo.can_write}
-        />
-      )}
-    </div>
+      </div>
+    );
+  }
+
+  // RunDetail draws its own breadcrumb: it sits on one line with the run
+  // switcher, which needs the run list this page just loaded.
+  return (
+    <RunDetail
+      ns={ns}
+      repo={repo}
+      project={project}
+      runName={run}
+      runs={result.data.runs}
+      metricGoals={runListGoals(result.data)}
+      best={runListBest(result.data)}
+      canWrite={repoResult.ok && repoResult.data.repo.can_write}
+    />
   );
 }

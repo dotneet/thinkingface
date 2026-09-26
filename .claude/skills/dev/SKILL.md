@@ -47,13 +47,16 @@ Since the emulator runs with `-public-host=gcs:4443`, connecting directly to
 `localhost:4443` returns 404 on object reads. `scripts/gcs-host-proxy.py` rewrites the Host
 header to absorb the difference (`make dev-api` starts it automatically).
 
-When hitting the host-side API from the host-side web, credentialed CORS requires the web
-origin to be in `TF_ALLOWED_ORIGINS` (not `TF_CORS_ORIGINS`). `make dev-api` defaults this to
-the value of `WEB_DEV_PORT`.
+`make dev-web` runs in same-origin mode: the browser calls `/api/*` on the dev server and
+Next.js forwards it to `API_URL`, so no CORS setup is needed:
 
 ```bash
-NEXT_PUBLIC_API_URL=http://localhost:8081 API_URL=http://localhost:8081 make dev-web
+make dev-web API_URL=http://localhost:8081
 ```
+
+Passing a non-empty `NEXT_PUBLIC_API_URL` switches back to the browser calling the API
+directly; then the web origin must be in `TF_ALLOWED_ORIGINS` (not `TF_CORS_ORIGINS`), which
+`make dev-api` defaults to the value of `WEB_DEV_PORT`.
 
 ## Verifying in the Browser pane
 

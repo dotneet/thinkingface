@@ -42,6 +42,15 @@ func (e forbiddenError) Error() string { return e.msg }
 // immediate path, since store.TransferRepo does not hand back the row it
 // inserts).
 func (s *Server) startTransfer(ctx context.Context, actor *store.User, repo *store.Repo, toNamespace, toName string) (moved *store.Repo, transfer apitypes.RepoTransfer, pending bool, err error) {
+	// A repository-restricted token may push to a listed repository, which
+	// is enough to get a caller past loadRepoForWrite -- but moving the
+	// repository is administration, and the role check below reads the
+	// owner's role without knowing about the token. Refused here, first, so
+	// every route into a transfer inherits it.
+	if tokenRestricted(ctx) {
+		return nil, apitypes.RepoTransfer{}, false, restrictedTokenError{
+			"this access token is restricted to specific repositories and cannot transfer or rename a repository"}
+	}
 	if toName == "" {
 		toName = repo.Name
 	}
@@ -139,7 +148,10 @@ func (s *Server) auditTransfer(ctx context.Context, actor *store.User, kind, fro
 func writeTransferError(w http.ResponseWriter, err error) {
 	var bad inputError
 	var forb forbiddenError
+	var restricted restrictedTokenError
 	switch {
+	case errors.As(err, &restricted):
+		refuseRestrictedToken(w, restricted.Error())
 	case errors.As(err, &forb):
 		forbidden(w, forb.Error())
 	case errors.As(err, &bad):
@@ -317,7 +329,7 @@ func (s *Server) handleCancelTransfer(w http.ResponseWriter, r *http.Request) {
 	// source of the pending transfer (a repository only leaves it once the
 	// transfer is accepted).
 	if !s.canAdmin(r.Context(), repo) {
-		forbidden(w, "you must have admin access to "+repo.Namespace+
+		refuseRepoAdmin(r.Context(), w, "you must have admin access to "+repo.Namespace+
 			" to cancel a transfer of "+repo.FullName())
 		return
 	}

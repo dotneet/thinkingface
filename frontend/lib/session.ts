@@ -1,10 +1,6 @@
-import type { ApiResult } from "@/lib/api";
+import { type ApiResult, apiBaseUrl } from "@/lib/api";
 import { authHeaders } from "@/lib/server-auth";
 import type { ApiErrorBody, User } from "@/types/api";
-
-function apiBaseUrl(): string {
-  return process.env.API_URL ?? process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
-}
 
 /**
  * Server-only: resolves the current logged-in user (if any) by forwarding

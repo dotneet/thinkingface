@@ -104,6 +104,18 @@ type AccessToken struct {
 	// ExpiresAt is nil for a token that never expires.
 	ExpiresAt *time.Time `json:"expires_at"`
 	CreatedAt time.Time  `json:"created_at"`
+	// Repos is the repository restriction (store/token_repos.go), empty for
+	// an unrestricted token. Filled by ListTokens and CreateTokenWithRepos;
+	// LookupToken leaves it empty -- authentication reads the restriction
+	// through LookupTokenRestriction instead.
+	Repos []TokenRepo `json:"-"`
+	// Restricted reports that the token carries a repository restriction.
+	// LookupToken fills it in the same statement that finds the token, so the
+	// common unrestricted token costs no second query on the authentication
+	// path; only a restricted one has its list read (LookupTokenRestriction).
+	// A restriction is written in the transaction that mints the token and
+	// never added later, so this cannot go stale between the two reads.
+	Restricted bool `json:"-"`
 }
 
 // CreateUser inserts the user and their personal namespace in one transaction,
@@ -532,16 +544,7 @@ func (s *Store) DeleteAllSSHKeys(ctx context.Context, userID int64) (int64, erro
 // PostgreSQL/SQLite dialects it runs against) never has to do date
 // arithmetic itself.
 func (s *Store) CreateToken(ctx context.Context, userID int64, name, scope, tokenHash string, expiresAt *time.Time) (*AccessToken, error) {
-	t := &AccessToken{}
-	err := s.db.QueryRow(ctx,
-		`INSERT INTO access_tokens (user_id, name, token_hash, scope, expires_at) VALUES ($1, $2, $3, $4, $5)
-		 RETURNING id, user_id, name, scope, last_used_at, expires_at, created_at`,
-		userID, name, tokenHash, scope, expiresAt,
-	).Scan(&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.ExpiresAt, &t.CreatedAt)
-	if err != nil {
-		return nil, fmt.Errorf("insert token: %w", err)
-	}
-	return t, nil
+	return s.CreateTokenWithRepos(ctx, userID, name, scope, tokenHash, expiresAt, nil)
 }
 
 // LookupToken resolves a hashed token to its owner, rejecting expired ones
@@ -557,13 +560,14 @@ func (s *Store) LookupToken(ctx context.Context, tokenHash string) (*User, *Acce
 	t := &AccessToken{}
 	row := s.db.QueryRow(ctx,
 		`SELECT t.id, t.user_id, t.name, t.scope, t.last_used_at, t.created_at,
+		        EXISTS (SELECT 1 FROM access_token_repos atr WHERE atr.token_id = t.id),
 		        `+userColumnsOn("u")+`
 		 FROM access_tokens t JOIN users u ON u.id = t.user_id
 		 WHERE t.token_hash = $1 AND (t.expires_at IS NULL OR t.expires_at > now())
 		   AND u.disabled_at IS NULL AND u.approval_pending_at IS NULL`,
 		tokenHash)
 	err := scanUserAfter(row, u,
-		&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.CreatedAt)
+		&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.CreatedAt, &t.Restricted)
 	if err != nil {
 		return nil, nil, norm(err)
 	}
@@ -597,7 +601,21 @@ func (s *Store) ListTokens(ctx context.Context, userID int64) ([]AccessToken, er
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	// A second query rather than a join, so a token with several
+	// repositories is still one AccessToken. Failing it fails the listing:
+	// showing a restricted token as unrestricted would misstate its power.
+	repos, err := s.tokenReposFor(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list token repositories: %w", err)
+	}
+	for i := range out {
+		out[i].Repos = repos[out[i].ID]
+	}
+	return out, nil
 }
 
 // DeleteToken revokes a token regardless of whether it has already expired --

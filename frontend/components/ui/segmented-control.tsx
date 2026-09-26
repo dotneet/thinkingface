@@ -10,6 +10,12 @@ export type SegmentedOption<T extends string> = {
   label: string;
   icon?: LucideIcon;
   disabled?: boolean;
+  /**
+   * Draws a small dot after the label — "there is something here" (a
+   * workspace's Notes tab when the project has notes). The string is the
+   * dot's accessible text, so it is never colour alone.
+   */
+  indicator?: string;
 };
 
 /**
@@ -57,6 +63,18 @@ export function SegmentedControl<T extends string>({
           >
             {Icon && <Icon size={13} />}
             {option.label}
+            {option.indicator && (
+              <>
+                <span
+                  aria-hidden
+                  className={cn(
+                    "h-1.5 w-1.5 rounded-full",
+                    selected ? "bg-accent-fg" : "bg-accent",
+                  )}
+                />
+                <span className="sr-only">{option.indicator}</span>
+              </>
+            )}
           </Button>
         );
       })}

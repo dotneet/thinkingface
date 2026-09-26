@@ -546,6 +546,33 @@ resource "google_secret_manager_secret_version" "session_secret" {
   secret_data = random_password.session_secret.result
 }
 
+# Shared by web and api (TF_WEB_PROXY_SECRET): a web image built without
+# NEXT_PUBLIC_API_URL proxies the browser's API calls, and the api believes the
+# browser address it reports (X-TF-Client-Addr) only with this secret -- on
+# Cloud Run the web service reaches the api through Google's front end, so the
+# connection peer cannot vouch for it (docs/dev/agent-features.md §1.2). Unused
+# by a cross-origin web image, and harmless then.
+resource "google_secret_manager_secret" "web_proxy_secret" {
+  project   = var.project_id
+  secret_id = "thinkingface-${var.environment}-web-proxy-secret"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.required]
+}
+
+resource "random_password" "web_proxy_secret" {
+  length  = 48
+  special = false
+}
+
+resource "google_secret_manager_secret_version" "web_proxy_secret" {
+  secret      = google_secret_manager_secret.web_proxy_secret.id
+  secret_data = random_password.web_proxy_secret.result
+}
+
 # ---------------------------------------------------------------------------
 # Service account for the api workload (Cloud Run, attached directly via
 # google_cloud_run_v2_service.api.template.service_account -- no Workload
@@ -604,6 +631,12 @@ resource "google_secret_manager_secret_iam_member" "api_session_secret_accessor"
   member    = "serviceAccount:${google_service_account.api.email}"
 }
 
+resource "google_secret_manager_secret_iam_member" "api_web_proxy_secret_accessor" {
+  secret_id = google_secret_manager_secret.web_proxy_secret.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.api.email}"
+}
+
 # ---------------------------------------------------------------------------
 # Cloud Run: api (Go backend -- HF-compatible REST + git smart HTTP + LFS)
 #
@@ -653,6 +686,8 @@ locals {
       TF_ADMIN_EMAIL     = "admin@example.com"
       TF_WAL_MODE        = "authoritative"
       TF_GIT_HOOKS_PATH  = "/opt/thinkingface/hooks" # baked into the image, see backend/Dockerfile
+      # Instance-wide read authentication (docs/dev/agent-features.md §1.5).
+      TF_REQUIRE_AUTH_FOR_READ = tostring(var.require_auth_for_read)
       # The materialised-repository cache lives on the memory-backed
       # filesystem and shares the 8 GiB instance memory with the
       # git/pack-objects processes: budget it explicitly (2 GiB) instead of
@@ -828,6 +863,15 @@ resource "google_cloud_run_v2_service" "api" {
           }
         }
       }
+      env {
+        name = "TF_WEB_PROXY_SECRET"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.web_proxy_secret.secret_id
+            version = "latest"
+          }
+        }
+      }
     }
   }
 
@@ -842,6 +886,7 @@ resource "google_cloud_run_v2_service" "api" {
     google_secret_manager_secret_iam_member.api_database_url_accessor,
     google_secret_manager_secret_iam_member.api_admin_password_accessor,
     google_secret_manager_secret_iam_member.api_session_secret_accessor,
+    google_secret_manager_secret_iam_member.api_web_proxy_secret_accessor,
   ]
 }
 
@@ -1229,6 +1274,12 @@ resource "google_service_account" "web" {
   display_name = "thinkingface web (${var.environment})"
 }
 
+resource "google_secret_manager_secret_iam_member" "web_web_proxy_secret_accessor" {
+  secret_id = google_secret_manager_secret.web_proxy_secret.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.web.email}"
+}
+
 resource "google_cloud_run_v2_service" "web" {
   project  = var.project_id
   name     = var.web_service_name
@@ -1245,6 +1296,21 @@ resource "google_cloud_run_v2_service" "web" {
         name  = "API_URL"
         value = local.api_public_url
       }
+      # Vouches for the browser address the same-origin proxy reports to the
+      # api (see google_secret_manager_secret.web_proxy_secret).
+      env {
+        name = "TF_WEB_PROXY_SECRET"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.web_proxy_secret.secret_id
+            version = "latest"
+          }
+        }
+      }
+      # API_URL is also what a web image built *without* NEXT_PUBLIC_API_URL
+      # forwards the browser's /api/* calls to (same-origin mode,
+      # docs/dev/agent-features.md §1.2), read at container start.
+      #
       # NEXT_PUBLIC_API_URL has no effect here: Next.js inlines
       # process.env.NEXT_PUBLIC_* into both the browser bundle and every
       # server-side code path at `docker build` time (frontend/lib/api.ts,
@@ -1273,7 +1339,10 @@ resource "google_cloud_run_v2_service" "web" {
     ]
   }
 
-  depends_on = [google_project_service.required]
+  depends_on = [
+    google_project_service.required,
+    google_secret_manager_secret_iam_member.web_web_proxy_secret_accessor,
+  ]
 }
 
 resource "google_cloud_run_v2_service_iam_member" "web_public" {

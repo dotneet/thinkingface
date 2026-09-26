@@ -36,6 +36,14 @@ import (
 // fails. The database is already open and migrated; closing it is run()'s job,
 // since it owns the handle.
 func runServe(ctx context.Context, cfg *config.Config, db *store.Store) error {
+	// Logged once, before anything else can fail startup, so the effective
+	// configuration is on record even if a later step (the hooks check, the
+	// storage client, a listener) is what ends up returning an error
+	// (docs/dev/agent-features.md §1.3). LogAttrs is an explicit allowlist:
+	// it never includes DatabaseURL or SessionSecret, which is what makes
+	// this safe to log at Info level rather than a level nobody enables.
+	slog.Info("effective configuration", cfg.LogAttrs()...)
+
 	// Fail closed on a hooks directory git would silently ignore, before
 	// anything starts listening. This is the server's check rather than
 	// config.Load's: only the process that actually serves pushes is broken

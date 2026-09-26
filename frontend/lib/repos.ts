@@ -421,6 +421,17 @@ export function createRepo(input: CreateRepoInput): Promise<ApiResult<{ repo: Re
   });
 }
 
+/**
+ * The download URL of one file (or, with `path` empty, the directory base a
+ * README's relative images resolve against).
+ *
+ * `baseUrl` is `publicApiBase()`. A configured API origin gets the HF shape —
+ * models at the root, `/{ns}/{name}/resolve/...` — exactly as before. An empty
+ * one (same-origin mode) gets a root-relative URL with the `/models` prefix
+ * the API also accepts: this app's own `/{ns}/{name}/...` is the namespace
+ * page, so the web UI proxies `resolve` only under `/models/` and `/datasets/`
+ * (see `app/api/[...path]/route.ts`).
+ */
 export function resolveFileUrl(
   kind: RepoKind,
   ns: string,
@@ -429,7 +440,7 @@ export function resolveFileUrl(
   path: string[],
   baseUrl: string,
 ): string {
-  const prefix = kind === "dataset" ? "/datasets" : "";
+  const prefix = kind === "dataset" ? "/datasets" : baseUrl ? "" : "/models";
   const suffix = path.map(encodeURIComponent).join("/");
   const root = `${baseUrl.replace(/\/$/, "")}${prefix}/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/resolve/${encodeURIComponent(rev)}`;
   return suffix ? `${root}/${suffix}` : `${root}/`;

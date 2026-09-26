@@ -218,17 +218,36 @@ class TestLightningLoggerResendsConfigThroughARealRun:
 
 
 class TestConfigThatCannotBePrepared:
-    """A config value deepcopy refuses must not cost the run its points.
+    """A config that cannot be prepared must not cost the run its points.
 
     The points are the part that cannot be reconstructed, and an exception out
     of flush() on the timer thread would also stop _schedule_flush from ever
-    running again -- so the copy failure is reported and the config skipped.
+    running again -- so the failure is reported and the config skipped.
     """
 
-    def test_uncopyable_config_still_sends_the_metrics(self, server):
+    def test_unrecognised_values_are_stringified_not_dropped(self, server):
+        """A value with no JSON spelling (here a lock, which deepcopy also
+        refuses) used to cost the whole config; it is now its str()."""
         run = trackio.init("proj", name="r1", config={"lr": 0.1})
-        run.config["handle"] = threading.Lock()  # deepcopy refuses this
+        run.config["handle"] = threading.Lock()
 
+        run.log({"loss": 1.0})
+        with pytest.warns(UserWarning, match="'handle' of run 'r1' are not JSON types"):
+            run.flush()
+
+        batches = _payloads(server, "/log")
+        assert len(batches) == 1
+        assert batches[0]["config"]["lr"] == 0.1
+        assert isinstance(batches[0]["config"]["handle"], str)
+        assert [p["metrics"]["loss"] for p in batches[0]["points"]] == [1.0]
+
+    def test_a_config_that_cannot_be_prepared_still_sends_the_metrics(self, server, monkeypatch):
+        run = trackio.init("proj", name="r1", config={"lr": 0.1})
+
+        def boom(value):
+            raise RuntimeError("cannot even look at it")
+
+        monkeypatch.setattr(trackio._sanitize, "sanitize", boom)
         run.log({"loss": 1.0})
         with pytest.warns(UserWarning, match="could not prepare the config"):
             run.flush()

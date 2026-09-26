@@ -177,3 +177,37 @@ export function parseTagInput(raw: string): string[] {
   }
   return out;
 }
+
+/**
+ * The axes the scatter plot opens on.
+ *
+ * x: the first numeric config key whose value actually varies across the
+ * runs — a key every run shares plots as one vertical line of dots, which
+ * answers nothing — falling back to the first config axis, then to anything.
+ * y: the primary goal metric when the runs logged it, else the first metric,
+ * else the last axis. y avoids repeating x whenever there is another choice.
+ */
+export function defaultScatterAxes(
+  runs: readonly ExpRun[],
+  axes: readonly ScatterAxis[],
+  primaryMetric?: string,
+): { x: string; y: string } {
+  const varies = (axis: ScatterAxis) => {
+    const values = new Set<number>();
+    for (const run of runs) {
+      const value = axisValue(run, axis);
+      if (value !== null) values.add(value);
+    }
+    return values.size >= 2;
+  };
+  const configs = axes.filter((a) => a.source === "config");
+  const x = configs.find(varies) ?? configs[0] ?? axes[0];
+  const metrics = axes.filter((a) => a.source === "metric" && a.id !== x?.id);
+  const preferred = primaryMetric ? metrics.find((a) => a.key === primaryMetric) : undefined;
+  const y =
+    preferred ??
+    metrics[0] ??
+    [...axes].reverse().find((a) => a.id !== x?.id) ??
+    axes[axes.length - 1];
+  return { x: x?.id ?? "", y: y?.id ?? "" };
+}

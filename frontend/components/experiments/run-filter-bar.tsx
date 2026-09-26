@@ -1,29 +1,26 @@
 "use client";
 
-import { Checkbox, Input, Select } from "@/components/ui/field";
-import { SpinnerSlot } from "@/components/ui/spinner";
+import { Input, Select } from "@/components/ui/field";
 import type { RunFilters } from "@/hooks/use-run-filters";
 import { useT } from "@/lib/i18n/client";
 import { METRIC_FILTER_OPS } from "@/lib/run-grouping";
 
 /**
- * What narrows the run table, and therefore the charts: a tag, a metric
- * threshold, and whether archived runs are listed at all.
+ * The less common ways to narrow the run list: a tag, and a metric threshold.
+ * (The search box, the status chips and the archived toggle sit in the run
+ * sidebar itself; these live behind its "More filters" disclosure.)
  *
- * The tag picker and the metric picker only appear when the project has
- * anything to offer for them — a filter over an empty set of values is a
- * control that can only ever say "no". Every group that *is* shown keeps its
- * shape as the results change (DESIGN.md §8.4).
+ * Stacked rather than one long row, because they sit in a ~300px sidebar. The
+ * tag picker and the metric picker only appear when the project has anything
+ * to offer for them — a filter over an empty set of values is a control that
+ * can only ever say "no". Every group that *is* shown keeps its shape as the
+ * results change (DESIGN.md §8.4).
  */
 export function RunFilterBar({
   filters,
   onChange,
   tags,
   metricKeys,
-  archivedCount,
-  selectedCount,
-  visibleCount,
-  saving,
 }: {
   filters: RunFilters;
   onChange: (patch: Partial<RunFilters>) => void;
@@ -31,30 +28,20 @@ export function RunFilterBar({
   tags: string[];
   /** Every metric the project logged — not just the table's capped columns. */
   metricKeys: string[];
-  archivedCount: number;
-  selectedCount: number;
-  visibleCount: number;
-  /** An annotation write is in flight somewhere in the table. */
-  saving: boolean;
 }) {
   const t = useT();
 
   return (
-    <div className="flex flex-wrap items-center gap-5 rounded-lg border border-border bg-bg-sunken px-4 py-3 text-sm">
-      <span className="text-fg-subtle">
-        {t("experiments.dashboard.selectedCount", {
-          selected: selectedCount,
-          total: visibleCount,
-        })}
-      </span>
-
+    <div className="flex flex-col gap-2 text-sm">
       {tags.length > 0 && (
         <label className="flex items-center gap-2">
-          <span className="text-fg-subtle">{t("experiments.dashboard.tagLabel")}</span>
+          <span className="w-16 shrink-0 text-xs font-medium text-fg-subtle">
+            {t("experiments.dashboard.tagLabel")}
+          </span>
           <Select
             value={filters.tag}
             onChange={(e) => onChange({ tag: e.target.value })}
-            className="w-auto bg-bg-raised px-2 py-1"
+            className="min-w-0 flex-1 bg-bg-raised px-2 py-1 text-sm"
           >
             <option value="">{t("experiments.dashboard.allTags")}</option>
             {tags.map((tag) => (
@@ -67,13 +54,15 @@ export function RunFilterBar({
       )}
 
       {metricKeys.length > 0 && (
-        <div className="flex items-center gap-2">
-          <span className="text-fg-subtle">{t("experiments.dashboard.metricFilterLabel")}</span>
+        <div className="flex flex-col gap-1.5">
+          <span className="text-xs font-medium text-fg-subtle">
+            {t("experiments.dashboard.metricFilterLabel")}
+          </span>
           <Select
             value={filters.metric}
             onChange={(e) => onChange({ metric: e.target.value })}
             aria-label={t("experiments.dashboard.metricFilterMetricAria")}
-            className="w-auto bg-bg-raised px-2 py-1 font-mono text-xs"
+            className="bg-bg-raised px-2 py-1 font-mono text-xs"
           >
             <option value="">{t("experiments.dashboard.metricFilterNone")}</option>
             {metricKeys.map((key) => (
@@ -82,42 +71,32 @@ export function RunFilterBar({
               </option>
             ))}
           </Select>
-          <Select
-            value={filters.op}
-            onChange={(e) => onChange({ op: e.target.value })}
-            aria-label={t("experiments.dashboard.metricFilterOpAria")}
-            disabled={!filters.metric}
-            className="w-auto bg-bg-raised px-2 py-1"
-          >
-            {METRIC_FILTER_OPS.map((op) => (
-              <option key={op} value={op}>
-                {op}
-              </option>
-            ))}
-          </Select>
-          <Input
-            value={filters.value}
-            onChange={(e) => onChange({ value: e.target.value })}
-            inputMode="decimal"
-            disabled={!filters.metric}
-            placeholder={t("experiments.dashboard.metricFilterValuePlaceholder")}
-            aria-label={t("experiments.dashboard.metricFilterValueAria")}
-            className="w-24 bg-bg-raised px-2 py-1 tabular-nums"
-          />
+          <div className="flex items-center gap-2">
+            <Select
+              value={filters.op}
+              onChange={(e) => onChange({ op: e.target.value })}
+              aria-label={t("experiments.dashboard.metricFilterOpAria")}
+              disabled={!filters.metric}
+              className="w-16 bg-bg-raised px-2 py-1"
+            >
+              {METRIC_FILTER_OPS.map((op) => (
+                <option key={op} value={op}>
+                  {op}
+                </option>
+              ))}
+            </Select>
+            <Input
+              value={filters.value}
+              onChange={(e) => onChange({ value: e.target.value })}
+              inputMode="decimal"
+              disabled={!filters.metric}
+              placeholder={t("experiments.dashboard.metricFilterValuePlaceholder")}
+              aria-label={t("experiments.dashboard.metricFilterValueAria")}
+              className="min-w-0 flex-1 bg-bg-raised px-2 py-1 tabular-nums"
+            />
+          </div>
         </div>
       )}
-
-      <label className="flex items-center gap-2">
-        <Checkbox
-          checked={filters.showArchived}
-          onChange={(e) => onChange({ showArchived: e.target.checked })}
-        />
-        <span className="text-fg-subtle">
-          {t("experiments.dashboard.showArchived", { count: archivedCount })}
-        </span>
-      </label>
-
-      <SpinnerSlot active={saving} size={14} label={t("experiments.dashboard.savingAnnotation")} />
     </div>
   );
 }

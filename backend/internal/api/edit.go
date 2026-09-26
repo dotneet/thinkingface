@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
@@ -115,6 +116,30 @@ func (s *Server) uiWriteTarget(w http.ResponseWriter, r *http.Request, what stri
 		return nil, "", "", false
 	}
 	return repo, path, rev, true
+}
+
+// commitAndSync is the tail the single-file server-side writes share (the web
+// editor's save and delete, and the experiment notes endpoint): commit through
+// the WAL, answer the commit failures every such caller shares
+// (writeCommitError), then schedule the post-push sync -- blob publishing, the
+// metadata index and the repo.push webhook -- exactly as a git push would. It
+// reports whether the caller may go on to write its success response; on
+// false a response has already been written.
+//
+// req.Branch is the ref the sync job is scheduled for, so the two can never
+// name different branches. what names the operation in writeCommitError's
+// retry sentence. retryOnStale is commitThroughWAL's, and its comment says
+// when it may be true.
+func (s *Server) commitAndSync(w http.ResponseWriter, r *http.Request, repo *store.Repo, req gitrepo.CommitRequest, retryOnStale bool, what string) (plumbing.Hash, bool) {
+	newHash, oldHash, err := s.commitThroughWAL(r.Context(), repo, req, retryOnStale)
+	if writeCommitError(w, err, what) {
+		return plumbing.ZeroHash, false
+	}
+	if err := s.sync.Enqueue(r.Context(), repo.ID, req.Branch, oldHash.String(), newHash.String()); err != nil {
+		internalError(w, "schedule sync", err)
+		return plumbing.ZeroHash, false
+	}
+	return newHash, true
 }
 
 // handleEditFile lets the web UI save small text-file edits straight to a
@@ -232,16 +257,12 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request) {
 	case req.BaseOID != "":
 		preconditions = []gitrepo.PathPrecondition{{Path: path, OID: req.BaseOID}}
 	}
-	newHash, oldHash, err := s.commitThroughWAL(r.Context(), repo, gitrepo.CommitRequest{
+	newHash, ok := s.commitAndSync(w, r, repo, gitrepo.CommitRequest{
 		Branch: rev, Message: summary, Author: author,
 		Ops:           []gitrepo.Op{{Kind: gitrepo.OpAdd, Path: path, Data: content}},
 		Preconditions: preconditions,
-	}, false)
-	if writeCommitError(w, err, "edit") {
-		return
-	}
-	if err := s.sync.Enqueue(r.Context(), repo.ID, rev, oldHash.String(), newHash.String()); err != nil {
-		internalError(w, "schedule sync", err)
+	}, false, "edit")
+	if !ok {
 		return
 	}
 
@@ -364,16 +385,12 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	if req.BaseOID != "" {
 		preconditions = []gitrepo.PathPrecondition{{Path: path, OID: req.BaseOID}}
 	}
-	newHash, oldHash, err := s.commitThroughWAL(r.Context(), repo, gitrepo.CommitRequest{
+	newHash, ok := s.commitAndSync(w, r, repo, gitrepo.CommitRequest{
 		Branch: rev, Message: deleteSummary(path, req.Message, req.Description), Author: author,
 		Ops:           []gitrepo.Op{{Kind: gitrepo.OpDelete, Path: path}},
 		Preconditions: preconditions,
-	}, false)
-	if writeCommitError(w, err, "deletion") {
-		return
-	}
-	if err := s.sync.Enqueue(r.Context(), repo.ID, rev, oldHash.String(), newHash.String()); err != nil {
-		internalError(w, "schedule sync", err)
+	}, false, "deletion")
+	if !ok {
 		return
 	}
 

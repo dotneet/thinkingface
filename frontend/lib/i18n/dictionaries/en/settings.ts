@@ -93,6 +93,17 @@ export const settings = {
       noExpiration: "Never",
       expiredBadge: "Expired",
     },
+    // Repository-restricted tokens (docs/dev/agent-features.md §3). Only
+    // offered for write tokens: a read token changes nothing, so a list
+    // would restrict nothing.
+    repos: {
+      label: "Restrict to repositories (optional)",
+      placeholder: "datasets/alice/experiments\nmodels/alice/ocr",
+      hint: "One per line, as datasets/NAMESPACE/NAME or models/NAMESPACE/NAME. The token can then change only these repositories, and cannot create or delete repositories, change settings, or mint tokens. Leave empty for an unrestricted token.",
+      column: "Repositories",
+      unrestricted: "All",
+      noneWritable: "—",
+    },
   },
   sshKeys: {
     title: "SSH keys",

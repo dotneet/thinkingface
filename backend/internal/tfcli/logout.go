@@ -20,13 +20,25 @@ best-effort basis.
 
 Flags:
   --endpoint URL         same as passing ENDPOINT
+  --json                 print {"endpoint", "revoked", "revoke_error"} on stdout
   --verbose              print how the endpoint was resolved to stderr
 `
+
+// logoutJSON is the shape written by `tf logout --json`.
+type logoutJSON struct {
+	Endpoint string `json:"endpoint"`
+	// Revoked reports that the saved token was also revoked on the server
+	// (only a token tf login minted is; a pasted one never is).
+	Revoked     bool   `json:"revoked"`
+	RevokeError string `json:"revoke_error,omitempty"`
+}
 
 func runLogout(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("logout", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	cf := addCommonFlags(fs)
+	var jsonOut bool
+	fs.BoolVar(&jsonOut, "json", false, "print the result as JSON")
 
 	if hasHelpFlag(args) {
 		fmt.Fprint(stdout, logoutUsage)
@@ -68,10 +80,14 @@ func runLogout(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitError
 	}
 
+	result := logoutJSON{Endpoint: normalized}
 	if cred.TokenID != 0 {
 		client := hub.New(normalized, cred.Token, hub.WithUserAgent(userAgent()))
 		if err := client.RevokeToken(context.Background(), cred.TokenID); err != nil {
 			fmt.Fprintf(stderr, "tf: warning: could not revoke token: %s\n", err)
+			result.RevokeError = err.Error()
+		} else {
+			result.Revoked = true
 		}
 	}
 
@@ -81,6 +97,9 @@ func runLogout(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitError
 	}
 
+	if jsonOut {
+		return writeJSONLine(stdout, stderr, &result)
+	}
 	fmt.Fprintf(stdout, "Logged out of %s\n", normalized)
 	return exitOK
 }

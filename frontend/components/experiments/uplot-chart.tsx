@@ -1,13 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
 
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { chartDataEquals, planLogScale } from "@/lib/chart-scale";
 import { spanGapsForMode } from "@/lib/chart-utils";
-import { useT } from "@/lib/i18n/client";
+import { axisSizeFor, formatAxisTicks, paddedRange } from "@/lib/exp-chart-ticks";
+import { formatMetricValue } from "@/lib/experiments";
+import { formatNumber } from "@/lib/format";
+import { useLocale, useT } from "@/lib/i18n/client";
 import {
   CHART_THEME_FALLBACKS,
   type ChartThemeColors,
@@ -45,6 +48,32 @@ export type UplotSeriesMeta = {
  */
 export type UplotMode = "line" | "scatter";
 
+/** Legend entries shown before the rest collapse into "+N more". */
+const LEGEND_LIMIT = 10;
+/** Rows the hover readout lists before it stops. */
+const READOUT_LIMIT = 12;
+/**
+ * How far either side of the cursor the readout looks for a series' nearest
+ * point. Runs are downsampled independently, so at a given x most series have
+ * a gap (`alignSeriesForKey`); the line spans it, and so should the readout.
+ */
+const READOUT_REACH = 40;
+
+/** What the hover readout needs: which x index, and where the cursor is. */
+type Hover = { idx: number; left: number; top: number; width: number };
+
+/** The value series `s` has at `idx`, or at its nearest non-null neighbour. */
+function nearestValue(column: readonly (number | null)[] | undefined, idx: number): number | null {
+  if (!column) return null;
+  for (let d = 0; d <= READOUT_REACH; d++) {
+    const before = column[idx - d];
+    if (before !== undefined && before !== null) return before;
+    const after = column[idx + d];
+    if (after !== undefined && after !== null) return after;
+  }
+  return null;
+}
+
 export function UplotChart({
   title,
   data,
@@ -56,6 +85,7 @@ export function UplotChart({
   yLabel,
   height = 240,
   syncKey,
+  titleAdornment,
 }: {
   title: string;
   /** [xValues, ...yValuesPerSeries], numbers or null for gaps */
@@ -73,8 +103,17 @@ export function UplotChart({
    * unset for a standalone chart.
    */
   syncKey?: string;
+  /** Rendered next to the title, e.g. a metric's goal marker. */
+  titleAdornment?: ReactNode;
 }) {
   const t = useT();
+  const locale = useLocale();
+  // The hover readout. Only the chart under the pointer shows one: a synced
+  // chart moves its cursor line too, but a readout on every chart at once is
+  // a wall of numbers.
+  const [hover, setHover] = useState<Hover | null>(null);
+  const hoveredRef = useRef(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   // What a log y axis can actually be handed: uPlot draws a 0 or a negative
@@ -128,7 +167,6 @@ export function UplotChart({
     const opts: uPlot.Options = {
       width,
       height,
-      title,
       cursor: {
         points: { size: 5 },
         // Drag-zoom only along x (step/time): the default also drags a y
@@ -140,8 +178,30 @@ export function UplotChart({
         focus: { prox: 30 },
         ...(syncKey ? { sync: { key: syncKey, scales: ["x", null] as [string, null] } } : {}),
       },
-      legend: { show: true },
+      // The built-in legend printed a "step: -- run: --" table under every
+      // chart whenever the pointer was elsewhere; the component draws a
+      // compact one of its own, with values only while hovering.
+      legend: { show: false },
       hooks: {
+        setCursor: [
+          (u) => {
+            const idx = u.cursor.idx;
+            const left = u.cursor.left ?? -1;
+            if (!hoveredRef.current || idx == null || left < 0) {
+              setHover((prev) => (prev === null ? prev : null));
+              return;
+            }
+            const wrapper = wrapperRef.current;
+            const over = u.over.getBoundingClientRect();
+            const origin = wrapper?.getBoundingClientRect();
+            setHover({
+              idx,
+              left: over.left - (origin?.left ?? 0) + left,
+              top: over.top - (origin?.top ?? 0) + (u.cursor.top ?? 0),
+              width: origin?.width ?? over.width,
+            });
+          },
+        ],
         setScale: [
           (u, key) => {
             if (key !== "x") return;
@@ -162,17 +222,35 @@ export function UplotChart({
               markZoomed(false);
               return;
             }
-            const tolerance = ZOOM_EPSILON * Math.max(1, Math.abs(fullMax - fullMin));
-            markZoomed(Math.abs(min - fullMin) > tolerance || Math.abs(max - fullMax) > tolerance);
+            // A scatter's unzoomed x range is the data padded on both sides
+            // (see `scales.x` below), not the data's own extremes.
+            const [homeMin, homeMax] =
+              mode === "scatter" && !xIsTime ? paddedRange(fullMin, fullMax) : [fullMin, fullMax];
+            if (homeMin == null || homeMax == null) {
+              markZoomed(false);
+              return;
+            }
+            const tolerance = ZOOM_EPSILON * Math.max(1, Math.abs(homeMax - homeMin));
+            markZoomed(Math.abs(min - homeMin) > tolerance || Math.abs(max - homeMax) > tolerance);
           },
         ],
       },
       scales: {
-        x: { time: xIsTime },
+        // A scatter's axes are hyperparameters and results, not a timeline:
+        // pad around the data instead of pinning the edges to the extreme
+        // points (x) or reaching down to zero (y), which squashed a CER of
+        // 0.04…0.09 into a line along the top.
+        x:
+          mode === "scatter" && !xIsTime
+            ? { time: false, range: (_u, min, max) => paddedRange(min, max) }
+            : { time: xIsTime },
         // plan.logEnabled, not the prop: a request for log over data with no
         // positive value at all falls back to linear rather than drawing an
         // empty chart (the Alert below says so).
-        y: { distr: plan.logEnabled ? 3 : 1 },
+        y:
+          mode === "scatter" && !plan.logEnabled
+            ? { distr: 1, range: (_u, min, max) => paddedRange(min, max) }
+            : { distr: plan.logEnabled ? 3 : 1 },
       },
       axes: [
         {
@@ -181,6 +259,9 @@ export function UplotChart({
           ticks: { stroke: gridStroke },
           label: xLabel,
           labelSize: xLabel ? 24 : undefined,
+          // A time axis keeps uPlot's date formatting; a numeric one gets the
+          // same readable ticks as y (steps of 15000 read "15k").
+          ...(xIsTime ? {} : { values: (_u: uPlot, splits: number[]) => formatAxisTicks(splits) }),
         },
         {
           stroke: axisStroke,
@@ -188,6 +269,11 @@ export function UplotChart({
           ticks: { stroke: gridStroke },
           label: yLabel,
           labelSize: yLabel ? 24 : undefined,
+          // uPlot's formatter caps the decimals, so a learning rate of 3e-4
+          // ticked "0, 0, 0, 0". Precision comes from the ticks instead, and
+          // the axis is as wide as its widest label.
+          values: (_u: uPlot, splits: number[]) => formatAxisTicks(splits, plan.logEnabled),
+          size: (_u: uPlot, values: string[]) => axisSizeFor(values),
         },
       ],
       series: [
@@ -210,6 +296,15 @@ export function UplotChart({
 
     const plot = new uPlot(opts, plotData as uPlot.AlignedData, containerRef.current);
     plotRef.current = plot;
+    const onEnter = () => {
+      hoveredRef.current = true;
+    };
+    const onLeave = () => {
+      hoveredRef.current = false;
+      setHover(null);
+    };
+    plot.over.addEventListener("mouseenter", onEnter);
+    plot.over.addEventListener("mouseleave", onLeave);
 
     const resizeObserver = new ResizeObserver(() => {
       if (containerRef.current) {
@@ -220,6 +315,10 @@ export function UplotChart({
 
     return () => {
       resizeObserver.disconnect();
+      plot.over.removeEventListener("mouseenter", onEnter);
+      plot.over.removeEventListener("mouseleave", onLeave);
+      hoveredRef.current = false;
+      setHover(null);
       plot.destroy();
       plotRef.current = null;
     };
@@ -280,22 +379,120 @@ export function UplotChart({
     );
   }
 
+  const xs = plotData[0] ?? [];
+  const hoverX = hover ? xs[hover.idx] : undefined;
+  const readout =
+    hover && hoverX !== undefined && hoverX !== null
+      ? series
+          .map((meta, i) => {
+            const column = plotData[i + 1];
+            const value =
+              mode === "scatter" ? (column?.[hover.idx] ?? null) : nearestValue(column, hover.idx);
+            return { meta, value };
+          })
+          .filter((row) => mode !== "scatter" || row.value !== null)
+          .slice(0, READOUT_LIMIT)
+      : [];
+  const xText =
+    hoverX === undefined || hoverX === null
+      ? ""
+      : xIsTime
+        ? new Date(hoverX * 1000).toLocaleString(locale)
+        : mode === "scatter"
+          ? `${xLabel ?? ""} ${formatMetricValue(hoverX)}`
+          : `${xLabel ?? t("experiments.chart.step")} ${formatNumber(hoverX)}`;
+  const legend = series.slice(0, LEGEND_LIMIT);
+  const legendRest = series.slice(LEGEND_LIMIT);
+  const flip = hover !== null && hover.left > hover.width / 2;
+
   return (
-    <div className="relative w-full">
+    <div ref={wrapperRef} className="relative w-full">
+      {/* The title is drawn here rather than by uPlot so it can carry an
+          adornment (the goal marker) and truncate a long metric key; the row
+          has a fixed height, so the Reset zoom button appearing in it moves
+          nothing (DESIGN.md §8). */}
+      <div className="flex h-6 items-center gap-1">
+        <span className="min-w-0 truncate font-mono text-xs font-medium text-fg" title={title}>
+          {title}
+        </span>
+        {titleAdornment}
+        {isZoomed && (
+          <Button variant="secondary" size="sm" onClick={resetZoom} className="ml-auto px-2 py-0.5">
+            {t("experiments.chart.resetZoom")}
+          </Button>
+        )}
+      </div>
       {/* uPlot draws into this div with its own canvases; it never touches the
           div's own attributes, so role/aria-label placed here survive and give
           the chart the same accessible name a screen reader gets from the
           parallel-coordinates <svg> (which sets role="img" directly). */}
-      <div ref={containerRef} className="w-full" role="img" aria-label={title} />
-      {isZoomed && (
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={resetZoom}
-          className="absolute right-1 top-1 z-10 bg-bg-raised"
+      {/* min-height = the plot's own height: the plot is destroyed and rebuilt
+          when the series change (a run toggled in the sidebar), and without a
+          floor every chart collapses to 0px for that moment — the page gets
+          shorter than the scroll position and the browser jumps to the top. */}
+      <div
+        ref={containerRef}
+        className="w-full"
+        style={{ minHeight: height }}
+        role="img"
+        aria-label={title}
+      />
+      {hover && readout.length > 0 && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute top-7 z-20 max-w-[18rem] rounded-md border border-border bg-bg-raised/95 px-2 py-1.5 text-xs shadow-lg"
+          style={
+            flip ? { right: Math.max(0, hover.width - hover.left + 12) } : { left: hover.left + 12 }
+          }
         >
-          {t("experiments.chart.resetZoom")}
-        </Button>
+          <div className="mb-1 whitespace-nowrap font-medium text-fg-subtle">{xText}</div>
+          {readout.map(({ meta, value }) => (
+            <div key={meta.label} className="flex items-center gap-1.5 whitespace-nowrap">
+              <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: meta.color }} />
+              <span className="min-w-0 truncate text-fg-muted">{meta.label}</span>
+              <span className="ml-auto pl-2 font-medium tabular-nums text-fg">
+                {value === null ? "—" : formatMetricValue(value)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {/* Names only: the numbers are in the hover readout, where they belong
+          to a step. The line sample repeats the series' dash, so the baseline
+          reads as the baseline here too. */}
+      {series.length > 0 && (
+        <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-fg-muted">
+          {legend.map((meta) => (
+            <li key={meta.label} className="flex min-w-0 max-w-[14rem] items-center gap-1.5">
+              {mode === "scatter" ? (
+                <span
+                  aria-hidden
+                  className="h-2 w-2 shrink-0 rounded-full"
+                  style={{ background: meta.color }}
+                />
+              ) : (
+                <span
+                  aria-hidden
+                  className="w-3 shrink-0"
+                  style={{
+                    borderTop: `${meta.width && meta.width > 2 ? 3 : 2}px ${meta.dash ? "dashed" : "solid"} ${meta.color}`,
+                  }}
+                />
+              )}
+              <span className="truncate" title={meta.label}>
+                {meta.label}
+              </span>
+            </li>
+          ))}
+          {legendRest.length > 0 && (
+            <li
+              className="font-medium text-fg-subtle"
+              title={legendRest.map((meta) => meta.label).join("\n")}
+            >
+              {t("experiments.workspace.legendMore", { count: legendRest.length })}
+            </li>
+          )}
+        </ul>
       )}
       {/* Below the plot, never above it: a note that appears when the log
           toggle is flipped must not push the chart (and the Reset zoom button

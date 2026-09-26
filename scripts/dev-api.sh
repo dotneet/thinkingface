@@ -15,8 +15,10 @@
 #   make dev-api                       # :8081, SQLite under .dev/
 #   API_DEV_PORT=8082 make dev-api     # a second one alongside it
 #
-# Point a host-side web at it with:
-#   NEXT_PUBLIC_API_URL=http://localhost:8081 API_URL=http://localhost:8081 make dev-web
+# Point a host-side web at it with (same-origin: the web proxies /api here):
+#   make dev-web API_URL=http://localhost:8081
+# or, for the cross-origin mode that TF_ALLOWED_ORIGINS below is for:
+#   make dev-web NEXT_PUBLIC_API_URL=http://localhost:8081 API_URL=http://localhost:8081
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -50,7 +52,8 @@ echo "==> building backend/cmd/thinkingface"
 
 echo "==> api on http://localhost:${API_DEV_PORT} (sqlite: ${DEV_DIR}/db/tf.db, admin/admin)"
 # Credentialed CORS from a host-side web needs the exact origin; the env var
-# is TF_ALLOWED_ORIGINS, not TF_CORS_ORIGINS.
+# is TF_ALLOWED_ORIGINS, not TF_CORS_ORIGINS. Only the cross-origin mode
+# (NEXT_PUBLIC_API_URL set) uses it; the same-origin proxy sends no Origin.
 exec env \
 	TF_ADDR=":${API_DEV_PORT}" \
 	TF_PUBLIC_URL="http://localhost:${API_DEV_PORT}" \

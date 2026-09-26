@@ -3,19 +3,24 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 
+	"github.com/dotneet/thinkingface/backend/internal/api"
 	"github.com/dotneet/thinkingface/backend/internal/auth"
 	"github.com/dotneet/thinkingface/backend/internal/store"
 )
 
 // The break-glass subcommands: `thinkingface admin passwd` and
-// `thinkingface admin promote`.
+// `thinkingface admin promote` -- plus `thinkingface admin token create`, which
+// mints an access token without a browser (docs/dev/agent-features.md §1.4).
 //
 // Everything else in this server assumes somebody can already sign in. A
 // forgotten password is reset by a site administrator at PATCH
@@ -37,29 +42,38 @@ import (
 // is no terminal (`printf '%s' "$pw" | thinkingface admin passwd alice`), so
 // a configuration-management run can do this unattended.
 
-// adminUsage is printed for a malformed invocation. It is deliberately not a
-// flag.FlagSet: these take no flags, and an -h that listed none would only
-// suggest there were some.
+// adminUsage is printed for a malformed invocation. passwd and promote are
+// deliberately not a flag.FlagSet: they take no flags, and an -h that listed
+// none would only suggest there were some. token create is the one that does.
 const adminUsage = `usage:
   thinkingface admin passwd <username>    reset a password (read from the terminal or stdin)
-  thinkingface admin promote <username>   grant site administrator rights`
+  thinkingface admin promote <username>   grant site administrator rights
+  thinkingface admin token create <username> [--name NAME] [--scope read|write]
+      [--expires-in-days N] [--repo KIND/NS/NAME ...] [--output FILE]
+                                          mint an access token; only the token goes to stdout
+                                          (or to FILE, created 0600 and never overwritten)`
 
 // adminDB is the store surface runAdmin needs. *store.Store implements it,
 // and naming it here keeps the commands testable against a real store without
 // dragging the rest of the server in.
 type adminDB interface {
+	api.TokenMintStore
 	GetUserByUsername(ctx context.Context, username string) (*store.User, error)
 	UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) (int64, error)
 	SetUserAdmin(ctx context.Context, userID int64, isAdmin bool) error
 }
 
 // runAdmin dispatches the `admin` subcommands. out is where the report goes;
-// main passes os.Stdout.
+// main passes os.Stdout. errOut is os.Stderr, which only `token create` uses:
+// its stdout carries the token and nothing else, so its report goes there.
 //
 // The output is plain text on stdout rather than slog JSON, because a human
 // is standing at the terminal reading it -- and because the whole point of
 // the command is to tell them exactly what it did to whom.
-func runAdmin(ctx context.Context, db adminDB, args []string, out io.Writer) error {
+func runAdmin(ctx context.Context, db adminDB, args []string, out, errOut io.Writer) error {
+	if len(args) >= 1 && args[0] == "token" {
+		return adminToken(ctx, db, args[1:], out, errOut)
+	}
 	if len(args) < 2 {
 		return errors.New(adminUsage)
 	}
@@ -161,6 +175,139 @@ func adminPromote(ctx context.Context, db adminDB, username string, out io.Write
 		user.Username, user.ID, user.Email)
 	fmt.Fprintln(out, "They can manage every account at /settings/admin/users after signing in.")
 	warnAboutGates(user, out)
+	return nil
+}
+
+// adminToken implements `thinkingface admin token create`: the way to hand an
+// automated client (an agent, a CI job) a token on an instance nobody has
+// signed into yet, or from provisioning that has no browser.
+//
+// The validation is api.MintToken's -- the same function POST /api/v1/tokens
+// calls -- so this cannot mint a token the web UI would refuse: the same scope
+// and expiry rules, and a --repo list whose every entry must exist and be
+// writable by the account the token is for.
+//
+// stdout receives the token and nothing else, so `TOKEN=$(thinkingface admin
+// token create alice)` works; what was done is reported on errOut. With
+// --output the token goes to a file created 0600 with O_EXCL instead, and an
+// existing file is refused before any token is minted -- overwriting whatever
+// is there, or following a symlink someone planted, is not something a
+// credential writer should ever do.
+func adminToken(ctx context.Context, db adminDB, args []string, out, errOut io.Writer) error {
+	if len(args) == 0 || args[0] != "create" {
+		return errors.New(adminUsage)
+	}
+	fs := flag.NewFlagSet("admin token create", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	name := fs.String("name", "admin-cli", "a label for the token, shown in the token list")
+	scope := fs.String("scope", "write", `"read" or "write"`)
+	days := fs.Int("expires-in-days", 0, "days until the token expires (0 = never)")
+	var repos repoList
+	fs.Var(&repos, "repo", "restrict the token to this repository, as datasets/NS/NAME or models/NS/NAME (repeatable)")
+	output := fs.String("output", "", "write the token to this file (created 0600; refused if it exists) instead of stdout")
+
+	// The username may come before or after the flags: flag stops at the
+	// first positional argument, so a leading one is taken off first.
+	rest := args[1:]
+	var username string
+	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		username, rest = rest[0], rest[1:]
+	}
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	extra := fs.Args()
+	if username == "" {
+		if len(extra) == 0 {
+			return fmt.Errorf("a username is required\n%s", adminUsage)
+		}
+		username, extra = extra[0], extra[1:]
+	}
+	if len(extra) > 0 {
+		return fmt.Errorf("unexpected argument %q\n%s", extra[0], adminUsage)
+	}
+
+	user, err := db.GetUserByUsername(ctx, username)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("no account named %q", username)
+		}
+		return fmt.Errorf("load account %q: %w", username, err)
+	}
+
+	// Claimed before the token exists, so a path that is already taken costs
+	// nothing: no token is minted that would then have nowhere to go.
+	var file *os.File
+	if *output != "" {
+		file, err = os.OpenFile(*output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return fmt.Errorf("%s already exists; refusing to overwrite it", *output)
+			}
+			return fmt.Errorf("create %s: %w", *output, err)
+		}
+	}
+	discardFile := func() {
+		if file != nil {
+			_ = file.Close()
+			_ = os.Remove(*output)
+		}
+	}
+
+	token, rec, err := api.MintToken(ctx, db, user, api.TokenMintRequest{
+		Name: *name, Scope: *scope, ExpiresInDays: *days, Repos: repos,
+	})
+	if err != nil {
+		discardFile()
+		return err
+	}
+	if file != nil {
+		_, werr := io.WriteString(file, token+"\n")
+		if cerr := file.Close(); werr == nil {
+			werr = cerr
+		}
+		if werr != nil {
+			_ = os.Remove(*output)
+			return fmt.Errorf("write %s: %w (token id %d was created and is unusable; revoke it from /settings/tokens)",
+				*output, werr, rec.ID)
+		}
+	} else if _, err := io.WriteString(out, token+"\n"); err != nil {
+		return fmt.Errorf("write token: %w (token id %d was created; revoke it from /settings/tokens)", err, rec.ID)
+	}
+
+	// The same audit line the HTTP handler writes, with the actor spelled out:
+	// nobody signed in to mint this one.
+	slog.Info("access token created", "username", user.Username, "user_id", user.ID,
+		"token_id", rec.ID, "token_name", rec.Name, "scope", rec.Scope,
+		"repos", len(rec.Repos), "actor", "admin-cli")
+
+	fmt.Fprintf(errOut, "Created access token %q (id %d, scope %s) for %s.\n", rec.Name, rec.ID, rec.Scope, user.Username)
+	if len(rec.Repos) > 0 {
+		names := make([]string, 0, len(rec.Repos))
+		for _, r := range rec.Repos {
+			names = append(names, api.TokenRepoSpec(r))
+		}
+		fmt.Fprintf(errOut, "It may change only: %s.\n", strings.Join(names, ", "))
+	}
+	if rec.ExpiresAt != nil {
+		fmt.Fprintf(errOut, "It expires at %s.\n", rec.ExpiresAt.UTC().Format(time.RFC3339))
+	} else {
+		fmt.Fprintln(errOut, "It never expires.")
+	}
+	if file != nil {
+		fmt.Fprintf(errOut, "The token was written to %s (mode 0600).\n", *output)
+	}
+	warnAboutGates(user, errOut)
+	return nil
+}
+
+// repoList is the repeatable --repo flag.
+type repoList []string
+
+func (l *repoList) String() string { return strings.Join(*l, ",") }
+
+func (l *repoList) Set(v string) error {
+	*l = append(*l, v)
 	return nil
 }
 

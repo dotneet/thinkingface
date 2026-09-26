@@ -80,13 +80,25 @@ func (r Role) orgRole() apitypes.OrgRole { return apitypes.OrgRole(r.String()) }
 // A namespace that does not exist is RoleNone with a nil error: callers that
 // care about existence look the namespace up themselves.
 func (s *Server) roleIn(ctx context.Context, user *store.User, ns string) (Role, error) {
+	return roleFor(ctx, s.store, user, ns)
+}
+
+// namespaceRoleReader is the one store method roleFor needs, named so the
+// token minting shared with `thinkingface admin token create` (MintToken) can
+// run the same role rule against the store without a Server.
+type namespaceRoleReader interface {
+	NamespaceRoleFor(ctx context.Context, userID int64, ns string) (store.NamespaceRole, error)
+}
+
+// roleFor is roleIn's body; see there.
+func roleFor(ctx context.Context, st namespaceRoleReader, user *store.User, ns string) (Role, error) {
 	if user == nil {
 		return RoleNone, nil
 	}
 	if user.IsAdmin {
 		return RoleAdmin, nil
 	}
-	nr, err := s.store.NamespaceRoleFor(ctx, user.ID, ns)
+	nr, err := st.NamespaceRoleFor(ctx, user.ID, ns)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return RoleNone, nil
@@ -111,21 +123,33 @@ func (s *Server) canWrite(ctx context.Context, repo *store.Repo) bool {
 	return s.canWriteIgnoringArchive(ctx, repo)
 }
 
+// A repository-restricted token (docs/dev/agent-features.md §3) is also
+// refused every repository not on its list; for one that is, the owner's own
+// role still has to allow the write, exactly as for any other token.
 func (s *Server) canWriteIgnoringArchive(ctx context.Context, repo *store.Repo) bool {
-	return s.hasRole(ctx, repo.Namespace, RoleWrite, true)
+	return tokenAllowsRepo(ctx, repo.ID) && s.hasRole(ctx, repo.Namespace, RoleWrite, true)
 }
 
 // canAdmin reports whether the caller may delete or transfer the repository
 // or manage its namespace's webhooks. In a personal namespace this is the
 // owner, so the bar is unchanged there; under an organisation it excludes
 // `write` members (docs/dev/organization-design.md §4).
+//
+// A repository-restricted token never passes, not even for a repository on
+// its list: the list grants content changes, and the one-way operations this
+// guards are exactly what handing an agent a narrow token is meant to rule out.
 func (s *Server) canAdmin(ctx context.Context, repo *store.Repo) bool {
-	return s.hasRole(ctx, repo.Namespace, RoleAdmin, true)
+	return !tokenRestricted(ctx) && s.hasRole(ctx, repo.Namespace, RoleAdmin, true)
 }
 
 // hasRole is the shared body of the three checks above. needWriteScope also
 // rejects a read-only token, which is orthogonal to the role: a namespace
 // admin holding a read token may still only read.
+//
+// It does not consult the token's repository restriction -- it has no
+// repository to match against -- so it must not be called directly to
+// authorize a write; canWriteIgnoringArchive and canAdmin apply the
+// restriction before they reach it.
 func (s *Server) hasRole(ctx context.Context, ns string, min Role, needWriteScope bool) bool {
 	user := currentUser(ctx)
 	if user == nil {
@@ -314,12 +338,70 @@ func (s *Server) loadRepoForWriteAllowArchived(w http.ResponseWriter, r *http.Re
 	// visibility), so a repository the caller cannot write is still one they can
 	// see -- hiding it behind a 404 would only teach clients that it is gone.
 	if !s.canWriteIgnoringArchive(r.Context(), repo) {
-		if currentUser(r.Context()) == nil {
+		switch {
+		case currentUser(r.Context()) == nil:
 			unauthorized(w, "authentication required to write to "+repo.FullName())
-		} else {
+		case !tokenAllowsRepo(r.Context(), repo.ID):
+			refuseRestrictedToken(w, "this access token is restricted to other repositories; "+
+				repo.FullName()+" is not one of them")
+		default:
 			forbidden(w, "you do not have write access to "+repo.FullName())
 		}
 		return nil, false
 	}
 	return repo, true
 }
+
+// ------------------------------------------- repository-restricted tokens
+
+// tokenRestricted reports whether this request authenticated with an access
+// token restricted to a repository list (docs/dev/agent-features.md §3). Such
+// a token may change the listed repositories' contents and nothing else: no
+// account-level write (requireWrite) and no repository administration
+// (canAdmin), anywhere.
+func tokenRestricted(ctx context.Context) bool {
+	tok := currentToken(ctx)
+	return tok != nil && tok.restricted
+}
+
+// tokenAllowsRepo reports whether the request's credential may touch the
+// repository with this id at all, before any role is considered: always for
+// an unrestricted credential, and only for a listed repository for a
+// restricted token. Matching is by id, so the grant follows a repository
+// through a rename or a transfer but never passes to another repository that
+// later takes its name.
+func tokenAllowsRepo(ctx context.Context, repoID int64) bool {
+	tok := currentToken(ctx)
+	if tok == nil || !tok.restricted {
+		return true
+	}
+	_, ok := tok.repoIDs[repoID]
+	return ok
+}
+
+// refuseRestrictedToken answers a request a repository-restricted token may
+// not make. Its own error type so a client -- an agent, typically -- can tell
+// "this token cannot do that" from "this user cannot", which call for
+// different fixes.
+func refuseRestrictedToken(w http.ResponseWriter, msg string) {
+	writeError(w, http.StatusForbidden, "token_restricted", msg)
+}
+
+// refuseRepoAdmin answers a failed canAdmin check: token_restricted when the
+// restriction is the reason, otherwise the caller's own role is, and msg says
+// so.
+func refuseRepoAdmin(ctx context.Context, w http.ResponseWriter, msg string) {
+	if tokenRestricted(ctx) {
+		refuseRestrictedToken(w, "this access token is restricted to specific repositories and "+
+			"cannot delete, transfer, rename, archive or reconfigure any repository")
+		return
+	}
+	forbidden(w, msg)
+}
+
+// restrictedTokenError is refuseRestrictedToken for the shared helpers that
+// report through an error value (createRepo, startTransfer) rather than
+// writing the response themselves.
+type restrictedTokenError struct{ msg string }
+
+func (e restrictedTokenError) Error() string { return e.msg }

@@ -1,17 +1,35 @@
 import type { ApiErrorBody, RepoLocation } from "@/types/api";
 
+/** An env value, with "" and whitespace treated as unset. */
+function envValue(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 /**
  * Base URL resolution:
  * - On the server (Server Components, route handlers) we talk to the
- *   backend over the internal network name, e.g. http://api:8080.
- * - In the browser we must use the publicly reachable URL, e.g.
- *   http://localhost:8080.
+ *   backend over the internal network name, e.g. http://api:8080 (`API_URL`,
+ *   read at runtime).
+ * - In the browser, a non-empty `NEXT_PUBLIC_API_URL` (inlined at build time)
+ *   is the API's publicly reachable URL, called cross-origin. Empty or unset —
+ *   the default image build — means the browser calls its own origin, and
+ *   `app/api/[...path]/route.ts` forwards to `API_URL` (docs/dev/agent-features.md
+ *   §1.2).
+ *
+ * Every fallback treats "" as unset: the Dockerfile's `ENV
+ * NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}` defines the variable as an empty
+ * string when the build arg is left out, and `??` would keep that.
  */
-function apiBaseUrl(): string {
+export function apiBaseUrl(): string {
   if (typeof window === "undefined") {
-    return process.env.API_URL ?? process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+    return (
+      envValue(process.env.API_URL) ??
+      envValue(process.env.NEXT_PUBLIC_API_URL) ??
+      "http://localhost:8080"
+    );
   }
-  return process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+  return envValue(process.env.NEXT_PUBLIC_API_URL) ?? window.location.origin;
 }
 
 export type ApiResult<T> =

@@ -18,17 +18,27 @@ bun run dev                  # http://localhost:3000
 
 Environment variables (see `.env.example`):
 
-- `API_URL` — backend URL as seen from the Next.js server process (SSR
-  fetches). In docker compose this is the internal service name, e.g.
-  `http://api:8080`.
-- `NEXT_PUBLIC_API_URL` — backend URL as seen from the browser (client-side
-  fetches, e.g. the Parquet viewer and experiment dashboard). Must be
-  publicly reachable, e.g. `http://localhost:8080`.
+- `API_URL` — backend URL as seen from the Next.js server process: Server
+  Component fetches and the same-origin API proxy. Read at runtime (default
+  `http://localhost:8080`). In docker compose this is the internal service
+  name, e.g. `http://api:8080`.
+- `NEXT_PUBLIC_API_URL` — backend URL as seen from the browser, inlined at
+  **build** time. Leave it empty (the default) and the browser calls this
+  app's own origin: `app/api/[...path]/route.ts` forwards `/api/*`, and the
+  `resolve` routes under `app/models/` / `app/datasets/` forward file
+  downloads, to `API_URL` — so the image never has to be rebuilt when the
+  API moves, and the API needs no `TF_ALLOWED_ORIGINS` entry for the UI. Set
+  it to have the browser call the API cross-origin instead (the old
+  behaviour, byte for byte); that URL must then be reachable from the browser
+  and listed in `TF_ALLOWED_ORIGINS`. Design: `docs/dev/agent-features.md` §1.2.
 
 All API calls send `credentials: "include"` so the `tf_session` cookie is
 forwarded on browser requests; Server Components forward the same cookie
 manually (see `lib/server-auth.ts`) since `fetch` on the server has no
-browser cookie jar.
+browser cookie jar. Through the proxy the cookie is simply a first-party
+cookie of this origin. The proxy does the CSRF origin check itself for
+unsafe methods (the API's own check compares against `TF_ALLOWED_ORIGINS`,
+which the UI's origin no longer has to be in) — see `lib/api-proxy.ts`.
 
 ## Scripts
 

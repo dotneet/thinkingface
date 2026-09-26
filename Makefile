@@ -127,9 +127,19 @@ psql: ## Open a psql shell against the postgres service
 frontend-deps: ## Install the frontend dependency tree if it is missing
 	@cd frontend && [ -d node_modules ] || $(BUN) install --frozen-lockfile
 
-dev-web: frontend-deps ## Run the Next.js dev server on the host, against the compose api (WEB_DEV_PORT, default 3100)
+# Same-origin by default: with NEXT_PUBLIC_API_URL unset the browser calls
+# :$(WEB_DEV_PORT) itself, and app/api/[...path]/route.ts forwards to API_URL
+# (default the compose api on :8080). Against `make dev-api` that is just
+# `make dev-web API_URL=http://localhost:8081`. Passing NEXT_PUBLIC_API_URL
+# (on the make command line -- an environment value loses to .env, which this
+# Makefile includes) restores the old cross-origin setup.
+dev-web: frontend-deps ## Run the Next.js dev server on the host, proxying /api to API_URL (default the compose api; WEB_DEV_PORT, default 3100)
 	@cd frontend && $(BUN) scripts/copy-duckdb-assets.mjs
-	@echo "==> next dev on http://localhost:$(WEB_DEV_PORT) (api: $${NEXT_PUBLIC_API_URL:-http://localhost:8080})"
+	@if [ -n "$${NEXT_PUBLIC_API_URL:-}" ]; then \
+		echo "==> next dev on http://localhost:$(WEB_DEV_PORT) (browser -> $$NEXT_PUBLIC_API_URL, cross-origin)"; \
+	else \
+		echo "==> next dev on http://localhost:$(WEB_DEV_PORT) (browser -> same origin, proxied to $${API_URL:-http://localhost:8080})"; \
+	fi
 	cd frontend && $(BUN) node_modules/next/dist/bin/next dev -p $(WEB_DEV_PORT)
 
 # Invoke next directly instead of `bun run dev`: via the launcher, `bun run`

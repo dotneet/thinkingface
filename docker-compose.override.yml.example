@@ -46,4 +46,6 @@ services:
       - /app/.next
     environment:
       API_URL: http://api:8080
-      NEXT_PUBLIC_API_URL: http://localhost:8080
+      # `next dev` reads this at startup. Empty: the browser calls the dev
+      # server's own origin, which proxies /api/* to API_URL above.
+      NEXT_PUBLIC_API_URL: ""

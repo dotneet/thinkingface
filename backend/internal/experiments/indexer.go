@@ -36,7 +36,69 @@ type runAggregate struct {
 	numPoints  int64
 	firstTS    time.Time
 	lastValues map[string]float64
-	keys       map[string]bool
+	// minValues / maxValues are the extremes over every point scanned, which
+	// become the run's summary_min / summary_max.
+	minValues map[string]float64
+	maxValues map[string]float64
+	keys      map[string]bool
+	// lastValueSteps is the step each lastValues entry was logged at, so a
+	// row with a lower step cannot displace it (observeAt).
+	lastValueSteps map[string]int64
+}
+
+func newRunAggregate() *runAggregate {
+	return &runAggregate{
+		lastValues: map[string]float64{},
+		minValues:  map[string]float64{},
+		maxValues:  map[string]float64{},
+		keys:       map[string]bool{},
+
+		lastValueSteps: map[string]int64{},
+	}
+}
+
+// observe records one metric value that carries no step: it becomes the last
+// value seen (scan order is chronological, see indexProject) and widens the
+// run's min / max.
+func (agg *runAggregate) observe(name string, v float64) {
+	agg.keys[name] = true
+	agg.lastValues[name] = v
+	delete(agg.lastValueSteps, name)
+	agg.widen(name, v)
+}
+
+// observeAt is observe for a value logged at step: it only becomes the last
+// value if no value at a higher step has been seen. Rows are chronological by
+// *write*, not by step -- `tf experiments sync` replaying points a training
+// run could not deliver at the time appends old steps after newer ones, and in
+// row order the summary would fall back to that stale value on every re-index.
+// A tie goes to the later row, which is how a resumed run overwriting a step
+// reads.
+func (agg *runAggregate) observeAt(step int64, name string, v float64) {
+	agg.keys[name] = true
+	if prev, ok := agg.lastValueSteps[name]; !ok || step >= prev {
+		agg.lastValues[name] = v
+		agg.lastValueSteps[name] = step
+	}
+	agg.widen(name, v)
+}
+
+func (agg *runAggregate) widen(name string, v float64) {
+	if cur, ok := agg.minValues[name]; !ok || v < cur {
+		agg.minValues[name] = v
+	}
+	if cur, ok := agg.maxValues[name]; !ok || v > cur {
+		agg.maxValues[name] = v
+	}
+}
+
+// floatsToAny copies a metric map into the map[string]any the store writes.
+func floatsToAny(in map[string]float64) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // IndexRepo rebuilds the project and run index for a repository. It is
@@ -84,12 +146,13 @@ func (ix *Indexer) indexProject(ctx context.Context, repo *store.Repo, gitRepo *
 			func(run string, row map[string]any) error {
 				agg, ok := aggregates[run]
 				if !ok {
-					agg = &runAggregate{lastValues: map[string]float64{}, keys: map[string]bool{}}
+					agg = newRunAggregate()
 					aggregates[run] = agg
 				}
 				agg.numPoints++
 
-				if step, ok := rowStep(row); ok && step > agg.lastStep {
+				step, hasStep := rowStep(row)
+				if hasStep && step > agg.lastStep {
 					agg.lastStep = step
 				}
 				if ts, ok := rowTime(row); ok {
@@ -97,10 +160,11 @@ func (ix *Indexer) indexProject(ctx context.Context, repo *store.Repo, gitRepo *
 						agg.firstTS = ts
 					}
 				}
-				forEachMetricValue(row, "", func(name string, v float64) {
-					agg.keys[name] = true
-					agg.lastValues[name] = v
-				})
+				observe := agg.observe
+				if hasStep {
+					observe = func(name string, v float64) { agg.observeAt(step, name, v) }
+				}
+				forEachMetricValue(row, "", observe)
 				return nil
 			})
 		if err != nil {
@@ -129,10 +193,9 @@ func (ix *Indexer) indexProject(ctx context.Context, repo *store.Repo, gitRepo *
 		}
 		sort.Strings(keys)
 
-		summary := make(map[string]any, len(agg.lastValues))
-		for k, v := range agg.lastValues {
-			summary[k] = v
-		}
+		summary := floatsToAny(agg.lastValues)
+		summaryMin := floatsToAny(agg.minValues)
+		summaryMax := floatsToAny(agg.maxValues)
 
 		var startedAt *time.Time
 		if !agg.firstTS.IsZero() {
@@ -143,16 +206,28 @@ func (ix *Indexer) indexProject(ctx context.Context, repo *store.Repo, gitRepo *
 		// already has a row -- and on that question being answered honestly
 		// even when the database is the thing that failed. See
 		// indexedRunStatus.
-		_, lookupErr := ix.store.GetExpRun(ctx, projectID, run)
+		existing, lookupErr := ix.store.GetExpRun(ctx, projectID, run)
 		status, err := indexedRunStatus(run, lookupErr)
 		if err != nil {
 			return err
+		}
+		if lookupErr == nil {
+			buffered, err := ix.store.CountPoints(ctx, existing.ID)
+			if err != nil {
+				return fmt.Errorf("count buffered points of run %q: %w", run, err)
+			}
+			if buffered > 0 {
+				summary, summaryMin, summaryMax, keys = mergeBufferedSummaries(existing,
+					summary, summaryMin, summaryMax, keys)
+			}
 		}
 		if _, err := ix.store.UpsertExpRunWith(ctx, projectID, store.ExpRunUpsert{
 			Name:       run,
 			Status:     status,
 			Config:     configs[run],
 			Summary:    summary,
+			SummaryMin: summaryMin,
+			SummaryMax: summaryMax,
 			MetricKeys: keys,
 			LastStep:   agg.lastStep,
 			NumPoints:  agg.numPoints,
@@ -162,6 +237,12 @@ func (ix *Indexer) indexProject(ctx context.Context, repo *store.Repo, gitRepo *
 			// ingest API already declared, so route A never clears a sweep.
 			Group:   groupingFromConfig(configs[run], "group"),
 			JobType: groupingFromConfig(configs[run], "job_type"),
+			// A re-index is not a sign of life: it runs for every run of the
+			// repository whenever any one of them flushes or anything is
+			// pushed, so touching updated_at here would keep a crashed run
+			// looking alive (store.ExpRunUpsert.Touch). A parquet that grew
+			// past the stored step still moves it.
+			Touch: false,
 		}); err != nil {
 			return err
 		}
@@ -169,11 +250,66 @@ func (ix *Indexer) indexProject(ctx context.Context, repo *store.Repo, gitRepo *
 	return ix.store.DeleteProjectRunsNotIn(ctx, projectID, names)
 }
 
+// mergeBufferedSummaries folds what the store already holds for a run into
+// the summaries a re-index computed from the parquet, for a run that still has
+// points buffered in exp_points.
+//
+// "The parquet is the truth" only holds once everything has been flushed into
+// it. A flush of one project re-indexes the whole repository, and a run
+// that logged a batch after the flush read exp_points -- or one in another
+// project, whose flush has not come round yet -- has points the file does not
+// contain. Its stored summary already reflects them (ingest merged each batch
+// in), so writing the parquet's figures over it would roll the "last value"
+// back, narrow min / max to the flushed subset, and drop metric names only the
+// buffered points carry -- until the next flush put them back.
+//
+// So: min of the mins and max of the maxes, the stored last value wins for a
+// metric both sides know (the buffered points are the newer ones), and the
+// metric names are the union. Stored values that are not numbers (a
+// hand-edited row) are ignored for min / max.
+func mergeBufferedSummaries(stored *store.ExpRun, summary, summaryMin, summaryMax map[string]any,
+	keys []string) (map[string]any, map[string]any, map[string]any, []string) {
+
+	for k, v := range stored.Summary {
+		summary[k] = v
+	}
+	mergeExtremes(summaryMin, stored.SummaryMin, func(a, b float64) bool { return a < b })
+	mergeExtremes(summaryMax, stored.SummaryMax, func(a, b float64) bool { return a > b })
+
+	seen := make(map[string]bool, len(keys)+len(stored.MetricKeys))
+	for _, k := range keys {
+		seen[k] = true
+	}
+	for _, k := range stored.MetricKeys {
+		if !seen[k] {
+			seen[k] = true
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return summary, summaryMin, summaryMax, keys
+}
+
+// mergeExtremes folds other into dst in place: better(a, b) reports that a
+// should replace b.
+func mergeExtremes(dst, other map[string]any, better func(a, b float64) bool) {
+	for k, raw := range other {
+		v, ok := raw.(float64)
+		if !ok {
+			continue
+		}
+		if cur, ok := dst[k].(float64); ok && !better(v, cur) {
+			continue
+		}
+		dst[k] = v
+	}
+}
+
 // indexSystemMetrics folds trackio's {project}_system.parquet into the run
 // summaries under SystemMetricPrefix, so route A's telemetry lands in the same
 // namespace the Python shim already writes to.
 //
-// Only agg.keys and agg.lastValues are touched. numPoints, lastStep and
+// Only the per-metric values (agg.observe) are touched. numPoints, lastStep and
 // firstTS deliberately are not: telemetry is sampled on a wall-clock timer of
 // its own, so counting it would make "how many points did this run log" and
 // "what step is it on" depend on how long the machine happened to be up.
@@ -195,10 +331,7 @@ func (ix *Indexer) indexSystemMetrics(ctx context.Context, gitRepo *gitrepo.Repo
 			if !ok {
 				return nil
 			}
-			forEachMetricValue(row, SystemMetricPrefix, func(name string, v float64) {
-				agg.keys[name] = true
-				agg.lastValues[name] = v
-			})
+			forEachMetricValue(row, SystemMetricPrefix, agg.observe)
 			return nil
 		})
 	if err != nil {
@@ -408,6 +541,11 @@ func toFloat(v any) (float64, bool) {
 		}
 		return t, true
 	case float32:
+		// The same guard as float64: a NaN or Inf logged at float32 precision
+		// would otherwise reach the summary, which JSON cannot encode.
+		if math.IsNaN(float64(t)) || math.IsInf(float64(t), 0) {
+			return 0, false
+		}
 		return float64(t), true
 	case int64:
 		return float64(t), true

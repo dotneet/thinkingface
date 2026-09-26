@@ -108,6 +108,47 @@ that skipped this would see the escaped form itself where the client meant a pla
 
 ## 1. Authentication & Accounts
 
+### Instance-wide read authentication (`TF_REQUIRE_AUTH_FOR_READ`)
+
+Off by default: anonymous callers can read everything (there is no repository visibility,
+`thinkingface-design.md` §11). With `TF_REQUIRE_AUTH_FOR_READ=true` every request that carries
+no identity (no valid token, Basic credential or session cookie — an account that is disabled or
+waiting for approval counts as none) is answered before any handler runs with
+
+```
+401  WWW-Authenticate: Basic realm="thinkingface"
+{"error": {"message": "...", "type": "authentication_required"}}
+```
+
+— writes included, so an anonymous write sees this type rather than the handler's own
+`unauthorized`. The header makes git and git-lfs prompt for (or ask a credential helper for) a
+token and retry; `huggingface_hub` surfaces the `X-Error-Message`. Allowlist (exact path and
+method): `GET /healthz`, `POST /api/v1/auth/login`, `POST /api/v1/auth/signup`,
+`POST /api/v1/auth/logout`, `GET /api/v1/me` (keeps its own `unauthorized` 401),
+`GET /api/v1/server-info`, and every `OPTIONS` preflight. `GET /api/openapi.json` is **not** on
+it. The emulator's self-authenticating LFS transfer URLs (`/api/v1/lfs/{repoID}/{oid}?op=&exp=&sig=`
+for download / upload, `/api/v1/lfs/{repoID}/verify?op=verify&...`) stay valid with a correct,
+unexpired signature: only the batch endpoint mints them, which needs a signed-in caller when the
+switch is on, and git-lfs / `huggingface_hub` send no `Authorization` with the transfer itself.
+The same route without a valid signature is refused. SSH is unaffected (it always requires a
+registered key). Implemented in `backend/internal/api/readauth.go`.
+
+### `GET /api/v1/server-info`
+Public (on the allowlist above), `Cache-Control: no-store`.
+
+res 200: `ServerInfo`
+
+```ts
+type ServerInfo = {
+  require_auth_for_read: boolean  // TF_REQUIRE_AUTH_FOR_READ
+  allow_signup: boolean           // TF_ALLOW_SIGNUP
+}
+```
+
+The web UI's `frontend/proxy.ts` reads it (cached ~30 s in memory) for a visitor with no
+`tf_session` cookie and redirects page requests to `/login?next=<path>` when
+`require_auth_for_read` is true. A failed fetch never redirects.
+
 ### `POST /api/v1/auth/login`
 req: `{"username": "admin", "password": "admin"}`
 res 200: `{"user": User}` + `Set-Cookie: tf_session=...`
@@ -282,14 +323,15 @@ experiment repository is a dataset, and it also appears in `GET /api/datasets`. 
 `GET /api/v1/namespaces/{ns}`, conversely, splits `num_datasets` and `num_experiments` (§1.2).
 
 ### Token management
-- `GET /api/v1/tokens` → `{"items": [{id, name, scope, created_at, last_used_at, expires_at}]}`.
-  Includes expired tokens (`expires_at` in the past) -- the list never filters on expiry, so the
-  owner can see why a token stopped working and still delete it.
-- `POST /api/v1/tokens` req `{"name","scope":"read"|"write","expires_in_days"?: number | null}` →
-  a whole `TokenItem` plus the secret: `{id, name, scope, created_at, last_used_at, expires_at,
-  token}` (`token` is returned only at creation time, with a `tf_` prefix; `last_used_at` is
-  necessarily `null` here). The response embeds the same item the list returns, so a client can
-  append it to the table it already has without re-fetching.
+- `GET /api/v1/tokens` → `{"items": [{id, name, scope, created_at, last_used_at, expires_at,
+  repos}]}`. Includes expired tokens (`expires_at` in the past) -- the list never filters on
+  expiry, so the owner can see why a token stopped working and still delete it.
+- `POST /api/v1/tokens` req `{"name","scope":"read"|"write","expires_in_days"?: number | null,
+  "repos"?: string[] | null}` → a whole `TokenItem` plus the secret: `{id, name, scope,
+  created_at, last_used_at, expires_at, repos, token}` (`token` is returned only at creation
+  time, with a `tf_` prefix; `last_used_at` is necessarily `null` here). The response embeds the
+  same item the list returns, so a client can append it to the table it already has without
+  re-fetching. Requires an unrestricted write-scoped credential (below).
 - `DELETE /api/v1/tokens/{id}` → 204. Works on an expired token the same as a live one.
 
 `scope` must be exactly `"read"` or `"write"`; anything else -- including the empty string,
@@ -306,6 +348,62 @@ so PostgreSQL and SQLite cannot disagree about it. `LookupToken` (used by every 
 request) rejects a token once `expires_at` has passed, indistinguishably from a token that never
 existed -- an unauthenticated caller learns nothing about whether a given token string used to be
 valid.
+
+The same rules (`api.MintToken`) back `thinkingface admin token create`
+(docs/dev/agent-features.md §1.4), so a token the web UI would refuse cannot be minted from a
+shell either.
+
+#### Repository-restricted tokens (`repos`)
+
+`repos` restricts a **write** token to a list of repositories
+(docs/dev/agent-features.md §3). Each entry is `"datasets/{ns}/{name}"` or
+`"models/{ns}/{name}"` -- the plural kind, as in the web UI's URLs; a bare `ns/name` is
+ambiguous and refused. Omitted, `null` or `[]` is an ordinary unrestricted token. On create:
+
+| Condition | Answer |
+|---|---|
+| more than 32 entries, a malformed entry, or `repos` on a `read` token | 400 `bad_request` |
+| an entry that does not exist under exactly that name (a former name that now redirects is refused, not followed) | 400 `bad_request` |
+| the caller does not currently have write access to an entry | 403 `forbidden` |
+| the same repository listed twice | collapsed to one entry |
+
+`repos` in `TokenItem` is always an array -- `[]` for an unrestricted token -- and lists each
+repository under its **current** name. The list is stored by repository **id**
+(`access_token_repos`, migration `0008`), so the grant follows a repository through a rename or a
+transfer, and never passes to a different repository that later takes a listed name. A deleted
+repository stays on the list under its last name and matches nothing: a token whose repositories
+have all been deleted is restricted to nothing, never promoted to unrestricted.
+
+What a restricted token may do:
+
+- **Reads**: exactly what an unrestricted token of the same user may read, **except
+  admin-level configuration**: webhooks (listing a namespace's hooks and reading one or its
+  deliveries go through `requireNamespaceAdmin` / `loadWebhookForAdmin`, which refuse a
+  restricted token like any other admin operation) -- 403 `token_restricted`.
+- **Repository-scoped writes** (git push, HF commit / preupload / branch / tag / super-squash,
+  LFS batch upload and verify, in-browser edit / delete / rename / upload, experiment ingest,
+  run annotations and deletion, project notes and goals): only on a listed repository, and only
+  while its owner's own role still allows the write -- the restriction narrows the owner's
+  permission, it never adds to it. Elsewhere: 403 `token_restricted`.
+- **Administrative repository operations** (delete, archive / unarchive, settings and rename via
+  `PATCH /api/v1/repos/...`, transfer and cancelling one, `POST /api/repos/move`): refused on
+  every repository, listed or not -- 403 `token_restricted`. `RepoDetail.can_admin` is `false`
+  and `can_write` is `true` only for listed repositories.
+- **Account-level writes** (creating repositories, minting or revoking tokens, SSH keys, profile,
+  password, organisations and their members, webhooks -- including reading them, which already
+  requires namespace admin -- transfer accept / reject, and every `/api/v1/admin` endpoint): 403
+  `token_restricted`.
+
+One HF-compatible exception keeps `huggingface_hub` scripts working: `POST /api/repos/create`
+aimed at a repository that already exists **and is on the list** answers the usual 409 (with
+`url`), which `create_repo(exist_ok=True)` -- called by `push_to_hub` and most upload scripts --
+swallows. Aimed at anything else, it is 403 `token_restricted` whether or not the repository
+exists.
+
+The restriction is read on every token-authenticated request; if it cannot be read the credential
+is treated as absent (anonymous), never as unrestricted. The access log line carries `token_id`,
+`token_name` and `token_restricted` for every token-authenticated request. SSH is unaffected:
+it authenticates with registered keys, never tokens.
 
 ### 1.1 Organizations
 
@@ -2567,7 +2665,12 @@ dtype names are normalized to a shared vocabulary across safetensors and PyTorch
 ## 7. Experiment tracking
 
 ```ts
-type ExpProject = { name: string; num_runs: number; updated_at: string }
+type ExpProject = {
+  name: string
+  num_runs: number
+  updated_at: string
+  metric_goals: Record<string, "min" | "max">   // Which direction each metric improves in (below). {} if none
+}
 type ExpRun = {
   name: string
   status: "running" | "finished" | "failed" | "stale"
@@ -2578,6 +2681,9 @@ type ExpRun = {
   config: Record<string, unknown>
   metric_keys: string[]
   summary: Record<string, number>   // The final value of each metric
+  summary_min: Record<string, number>  // The smallest value each metric reached over the run
+  summary_max: Record<string, number>  // The largest value each metric reached over the run
+  heartbeat_secs: number            // The check-in interval the logging client declared; 0 if none (below)
   group: string                     // The name of the sweep it belongs to ("" if unspecified)
   job_type: string                  // Its role within the sweep (e.g. "train" / "eval"; "" if unspecified)
   tags: string[]                    // Manually attached labels
@@ -2595,12 +2701,31 @@ type ExpRunModelRef = {
 ```
 
 `status: "stale"` is **derived on read, never stored**: a run still recorded as
-`running` whose `updated_at` is older than 30 minutes is reported as stale. A
-training job killed by OOM or a lost host never gets to call `finish()`, so
+`running` whose `updated_at` is older than its staleness window is reported as
+stale. The window is `max(4 × heartbeat_secs, 2 minutes)` for a run whose client
+declared a heartbeat (see "Heartbeats" below), and 30 minutes for one that did not
+(`heartbeat_secs: 0` — an older client, or a run only the parquet indexer knows).
+A training job killed by OOM or a lost host never gets to call `finish()`, so
 without this a dead run sits in the listing as `running` forever,
 indistinguishable from a live one. Ingest never writes the value, and a run that
 logs again goes straight back to `running` — so the window is a display rule,
 not a state transition. Clients that switch on `status` must handle it.
+
+`summary_min` / `summary_max` are maintained exactly like `summary`: merged at ingest
+(the smaller / larger of the stored value and the batch's) and recomputed from the whole
+parquet by the indexer. Like `summary` they hold only numbers. The one exception to
+"recomputed from the parquet" is a run that still has points buffered in `exp_points` (not yet
+flushed): the indexer then merges the parquet's figures with the stored ones -- min of the mins,
+max of the maxes, the stored `summary` value wins for a metric both know, and `metric_keys` is
+the union -- because the buffered points are newer than the file. Once nothing is buffered the
+parquet is the truth again.
+
+**`updated_at` is the run's heartbeat, not a "row last written" stamp.** It moves on ingest
+(`POST .../log`, including an empty ping, and `POST .../finish`) and when a re-index finds the
+parquet reaching a higher `last_step` than stored (a batch-path run still being written). A
+re-index that finds nothing new -- which happens to every run of a repository on every flush,
+notes or artifact commit and push -- leaves it alone, so a crashed run goes stale even while its
+siblings keep logging, and a long-poll's `since` does not wake on it.
 
 
 `tags` / `archived` / `is_baseline` / `note` / `models` are annotations attached by a human (or a
@@ -2641,7 +2766,16 @@ to it directly. While archived, both ingest (`log` / `finish`) and PATCH/DELETE 
   namespace page's Experiments tab and by the `/experiments` listing (for the latter, search and
   paging are mandatory since this endpoint caps out at 100 entries).
 - `GET /api/v1/experiments/{ns}/{repo}` → `{"repo": RepoSummary, "projects": ExpProject[]}`
-- `GET /api/v1/experiments/{ns}/{repo}/{project}/runs` → `{"runs": ExpRun[]}`
+- `PATCH /api/v1/experiments/{ns}/{repo}/{project}` (write permission required) — set metric
+  goals; see "Metric goals" below.
+- `GET /api/v1/experiments/{ns}/{repo}/{project}/runs` →
+  `{"runs": ExpRun[], "metric_goals": Record<string, "min"|"max">, "best": Record<string, string>}`
+  Optional query parameters filter and sort server-side; see "Querying runs" below. With none, the
+  runs are every run of the project (archived included) in the stored order, as before. A project
+  that does not exist answers 200 with empty `runs` / `metric_goals` / `best`.
+- `GET /api/v1/experiments/{ns}/{repo}/{project}/runs/{run}` → `{"run": ExpRun}`, optionally
+  long-polling; see "One run, and waiting on it" below.
+- `GET /api/v1/experiments/{ns}/{repo}/{project}/config-diff` — see "Config diff" below.
 - `PATCH /api/v1/experiments/{ns}/{repo}/{project}/runs/{run}` (write permission required)
   A partial update of a run's annotations. An omitted field is left unchanged.
   req: `{"tags":["lr-sweep"],"archived":false,"is_baseline":true,"note":"# lr sweep\n...","models":[{"repo_id":"team/bert-ja","revision":"a1b2c3d"}]}` (at least one of these)
@@ -2714,16 +2848,34 @@ to it directly. While archived, both ingest (`log` / `finish`) and PATCH/DELETE 
   req:
   ```json
   {"run":"run-1","config":{"lr":0.001},"status":"running",
-   "group":"lr-sweep","job_type":"train",
+   "group":"lr-sweep","job_type":"train","heartbeat_secs":30,
    "points":[{"step":1,"timestamp":"2026-08-21T00:00:00Z","metrics":{"loss":0.5}}]}
   ```
   res 200: `{"ok":true,"run":"run-1","accepted":1}`
+  - `heartbeat_secs` is optional: 1..3600, 400 outside that. Absent or `0` keeps the value the run
+    already declared. See "Heartbeats" below.
+  - **A batch with `"points": []` is a liveness ping**: it moves `updated_at` (and so clears
+    `stale`) and changes nothing else — `summary`, `summary_min`, `summary_max`, `metric_keys`,
+    counters and config are left exactly as stored (not re-written from the handler's read, so a
+    concurrent batch cannot be undone by a ping). The same holds for a batch whose every value is
+    `null`. Its status defaults to `running` like any other batch, **except that a ping with no
+    `config` never moves a `finished` / `failed` run back to `running`**: the stored status is kept
+    and no webhook fires (a ping that raced `finish()` must not resurrect the run). A batch that
+    carries points still sets the status it asks for.
   - `group` / `job_type` are optional. Empty or omitted means "keep the current value" (as above).
     Values follow the same constraint as run names (1-256 bytes, no control characters); anything
     outside that returns 400.
   - **`summary` and `metric_keys` are merged across batches.** A batch that sends only `loss`
     doesn't wipe out an existing `accuracy`, and a batch with `points: []` (a status notification)
-    doesn't empty out the summary. The same key is overwritten with the new value.
+    doesn't empty out the summary. The same key is overwritten with the new value — **unless the
+    batch is out of order**: when its highest step is below the run's stored `last_step` (e.g.
+    `tf experiments sync` replaying spilled points after newer ones were delivered online), it
+    only adds `summary` keys the run does not have yet and leaves existing ones alone.
+    `summary_min` / `summary_max` are merged the same way, keeping the smaller / larger value
+    (in order or not).
+    The parquet indexer applies the same rule when it recomputes `summary` from the file: the
+    last value of a metric is the one at the highest step, with a later row winning a tie, not
+    whatever row happened to be written last (`runAggregate.observeAt`).
   - Metric names follow the same constraint as run names (1-256 bytes, no control characters) and
     additionally must not be one of the **structural columns** of the metrics parquet — `id`,
     `log_id`, `space_id`, `run_id`, `run_name`, `run`, `step`, `_step`, `global_step`, `timestamp`,
@@ -2753,6 +2905,108 @@ to it directly. While archived, both ingest (`log` / `finish`) and PATCH/DELETE 
     such a run can also be placed into a group.
   - `{project}` is validated exactly as in `log`, since this call creates the project too.
 
+### Metric goals
+
+`PATCH /api/v1/experiments/{ns}/{repo}/{project}` (write permission required)
+
+req: `{"metric_goals": {"cvl_val/CER": "min", "acc": "max", "old_metric": ""}}`
+res 200: `ExpProject` (with the merged `metric_goals`)
+
+- A metric mapped to `"min"` / `"max"` gets that goal; one mapped to `""` has its goal removed;
+  **metrics not mentioned keep theirs** (a key-by-key merge, not a replace).
+- The project row is created if it does not exist yet, so goals can be declared before the first
+  run logs anything. `{project}` is therefore validated as in `log`.
+- Metric names follow the ingest rules (1-256 bytes, no control characters, not a structural
+  column); a goal other than `"min"` / `"max"` / `""` is 400. A project may carry at most 256
+  goals (400 past that, on the merged result). A body without `metric_goals` is 400.
+
+### Querying runs
+
+`GET /api/v1/experiments/{ns}/{repo}/{project}/runs` takes these optional query parameters,
+applied server-side after loading (a project's runs are few):
+
+| Parameter | Meaning |
+|---|---|
+| `group` | exact sweep group; repeatable (any of). `group=` selects runs with no group |
+| `status` | derived status (`running` / `finished` / `failed` / `stale`); repeatable (any of) |
+| `tag` | repeatable; a run must carry every tag given |
+| `archived` | `true` / `false`; absent = both |
+| `sort` | `name`, `started_at`, `updated_at`, `last_step`, `last:<metric>` (summary), `min:<metric>` (summary_min), `max:<metric>` (summary_max), `best:<metric>`, `config:<key>` (dotted path into the nested config, e.g. `config:optimizer.lr`) |
+| `order` | `asc` / `desc`, default `asc`. Ignored by `best:`, which always puts the best run first |
+| `limit` | 1..1000 |
+
+- **Runs lacking the sort value sort last in both orders.** Ties keep the stored order.
+- `best:<metric>` needs a goal for the metric (400 otherwise) and sorts by `summary_min` for
+  `"min"` (ascending), `summary_max` for `"max"` (descending).
+- `config:` compares numbers numerically and strings lexically; when a key holds different kinds
+  across runs, numbers sort before strings, strings before booleans.
+- An unknown `sort`, `order`, `status` or `archived` value, or a `limit` outside 1..1000, is 400
+  rather than silently ignored.
+- `metric_goals` is the project's goals. `best` names, for every metric with a goal, the best
+  **non-archived** run among the filtered runs (before `limit`) — lowest `summary_min` for `"min"`,
+  highest `summary_max` for `"max"`, ties to the lexically smaller name. A metric no candidate has
+  logged is absent.
+
+### One run, and waiting on it
+
+```
+GET /api/v1/experiments/{ns}/{repo}/{project}/runs/{run}
+    [?wait=<duration>&since=<updated_at, RFC 3339>&status=<derived status>]
+```
+
+res 200: `{"run": ExpRun}`; 404 when the project or run does not exist — **immediately, even with
+`wait`** (a client that starts waiting before the job has logged anything keeps polling on its
+own).
+
+- `wait` is a Go duration (`30s`) or a number of seconds, **at most 60s** (longer is clamped to
+  60s, negative or unparsable is 400). Without it the run is answered at once.
+- With `wait`, the request is held until the run's `updated_at` is later than `since`, **or** its
+  derived status differs from `status` (so a run going stale ends a wait), or `wait` elapses. It
+  answers 200 with the current run in every case; the client compares and decides.
+- `since` / `status` default to what the first read found, so a bare `?wait=30s` means "until
+  anything about the run changes". A `status` that is not one of the four derived statuses is 400.
+- The store is polled at most once a second, and the wait ends when the client disconnects. This
+  route (GET with `wait`) is exempt from the server's 60-second handler deadline
+  (`longPollRoute` in `server.go`); `maxRunWait` is its bound instead.
+- **At most 256 requests wait at once, process-wide** (`defaultMaxRunWaiters`). Past that, a
+  request with `wait` is answered immediately with the run as it stands, exactly as if its wait
+  had elapsed — still 200, so a client simply compares and asks again.
+
+### Config diff
+
+```
+GET /api/v1/experiments/{ns}/{repo}/{project}/config-diff?run=a&run=b[&include_meta=true]
+```
+
+res 200:
+
+```ts
+{
+  runs: string[]                                          // the runs compared
+  keys: { key: string; values: Record<string, unknown> }[]  // run -> value; a run lacking the key is absent
+}
+```
+
+- `run` is repeatable (at most 200, 400 past that); the runs are compared in the order given,
+  archived ones included, and a run that does not exist is 404. With no `run`, every non-archived
+  run of the project is compared (the 200 most recently updated, if there are more); an unknown
+  project then answers 200 with nothing to compare.
+- Configs are flattened to dotted paths (`optimizer.lr`); lists are leaves. The top-level
+  bookkeeping keys `_meta` and `_resume` are left out unless `include_meta=true`.
+- Only keys whose value differs across the runs — or that some run lacks — are listed, sorted by
+  key.
+
+### Heartbeats
+
+`POST .../log` accepts `heartbeat_secs` (1..3600): how often the client promises to check in
+while the run is alive. It is stored on the run (`exp_runs.heartbeat_secs`, `0` = never declared)
+and reported on `ExpRun`. The Python shim sends it on every batch and, when a run has sent
+nothing for `heartbeat_secs` (30 by default), posts `"points": []` purely as a liveness ping.
+
+A `running` run with `heartbeat_secs > 0` reads as `stale` once
+`now - updated_at > max(4 × heartbeat_secs, 2 minutes)`; without one the 30-minute window
+still applies, so runs logged by older clients do not flicker.
+
 ### Run artifacts
 
 Files saved by `trackio.log_artifact(path, name=None)` are placed **inside the same dataset
@@ -2769,10 +3023,13 @@ repository** as the metrics. No dedicated artifact store is created.
 - Artifacts are therefore version-controlled by git, included in `git clone`, and also retrievable
   via `gcloud storage cp` through the script `GET /api/v1/repos/{kind}/{ns}/{name}/gcs/{rev}`
   returns (§17).
-- The Python shim **buffers these during the run rather than sending them immediately, and bundles
-  them into a single commit at `finish()`** (commit message:
-  `chore(trackio): artifacts for {project}/{run}`) — so a run that saves 20 figures doesn't turn
-  into 20 commits.
+- The Python shim **batches these rather than committing each one**: whatever is pending is
+  committed in the background every `THINKINGFACE_ARTIFACT_INTERVAL` seconds (default 60), on
+  `trackio.save()`, and at `finish()` (commit message:
+  `chore(trackio): artifacts for {project}/{run}`) — so a run that saves 20 figures in a minute
+  makes one commit, not 20, while still being visible during training. Logged
+  `trackio.Image` / `trackio.Table` values land here too, as `media/{key}/step_{step:08d}.png`
+  and `tables/{key}/step_{step:08d}.parquet` (docs/dev/agent-features.md §2.8).
 
 **The `artifacts/` segment exists to avoid colliding with parquet layout detection.** The indexer
 (`backend/internal/experiments.DetectLayouts`) discovers a project from `{project}/metrics.parquet`
@@ -2782,6 +3039,63 @@ exception is when an artifact's name is **exactly `metrics.parquet`**, which wou
 fictitious project named `{project}/artifacts/{run}`. So the Python shim rejects this name
 (forcing you to pass an alternate `name=`). The equivalent of `aux/configs.parquet` is harmless,
 since configs alone don't become a project.
+
+### Project notes
+
+A project's experiment notebook is a Markdown file **inside the same dataset repository**, so
+`git clone` keeps it next to the metrics parquet:
+
+```
+{project}/NOTES.md        (on the repository's default branch)
+```
+
+```
+GET /api/v1/experiments/{ns}/{repo}/{project}/notes     (read access)
+PUT /api/v1/experiments/{ns}/{repo}/{project}/notes     (write access)
+```
+
+```ts
+type ExpNotesResponse = {
+  path: string        // "{project}/NOTES.md"
+  content: string     // "" when exists is false
+  exists: boolean
+  blob_sha: string    // the file's git blob; "" when it does not exist
+  commit_sha: string  // the default branch head it was read from ("" for an empty repository)
+}
+type ExpNotesUpdateRequest = {
+  content: string
+  base_sha?: string   // optimistic lock, below
+  message?: string    // commit message; default "docs(experiments): update notes for {project}"
+}
+```
+
+- `GET` of a project with no notes (including a project that has no runs yet, or an empty
+  repository) is **200 with `exists: false`**, not 404.
+- `PUT` answers `ExpNotesResponse` for the state it wrote (`commit_sha` is the new commit). It
+  commits through the same path as a Web UI file edit (`PUT /api/v1/edit/...`): the WAL, the
+  post-push sync job (which fires `repo.push` and re-indexes the experiment), commit author
+  attribution (the caller), and the archived-repository refusal (403
+  `repository_archived`) all behave identically. Saving content identical to the current file
+  creates no commit and answers the current state.
+- **`base_sha`**: present and equal to the current `blob_sha` → the write proceeds; present and
+  different (with `""` meaning "the file must not exist yet") → **409 `conflict`**, nothing is
+  written. Absent → unconditional overwrite. The check is repeated inside the commit, against the
+  parent it builds on, so an edit landing between the read and the commit is still caught. The lock
+  is on the notes path only: a metrics flush (or any other commit to another path) in between does
+  not make `base_sha` stale.
+- Unlike the Web UI editor, a commit that loses the WAL's branch CAS to a concurrent writer is
+  rebuilt on the new head and retried (the `base_sha` precondition is re-evaluated each attempt),
+  because the metrics flusher commits to the same branch every few seconds during a live run.
+- `content` is at most **256 KiB** (UTF-8) → **413 `payload_too_large`** otherwise. `message`
+  must be a single line of at most 200 bytes (trimmed) → 400 otherwise.
+- `{project}` follows the ingest rules (`POST .../log`, same encoding rules as the rest of §7) and
+  must be usable as a directory name — `.`, `..`, `.git` segments are **400**.
+- A `NOTES.md` that is a directory or an LFS pointer (a `.gitattributes` rule matching it) can't be
+  read or written here: `GET` answers 409, `PUT` 400. A file pushed by git that exceeds 2 MiB is
+  409 on `GET`.
+- The indexer ignores `NOTES.md` (layout detection only looks at `*.parquet`), so it never creates
+  or alters a project. Links of the form `[text](run:<run name>)` in the notes are rendered by the
+  Web UI as links to that run in the same project.
 
 ### Run-to-produced-model links
 
@@ -3084,6 +3398,26 @@ that says nothing about which ids exist.
   on, so signing in does not bring more repositories into the count — see §11 of the design doc)
 - CORS / CSRF / security headers: see the shared specification at the top of this document
   (the `TF_ALLOWED_ORIGINS` allowlist approach)
+
+### `GET /api/openapi.json`  (docs/dev/agent-features.md §5)
+
+An OpenAPI 3.1 document for the programmatic surface: auth (`/api/v1/auth/login` /
+`/api/v1/auth/logout` / `/api/v1/me` / `/api/whoami-v2` / `/api/v1/server-info`), token
+management (`/api/v1/tokens`), repository listing/creation (`/api/v1/repos`,
+`/api/repos/create`), and the whole of `/api/v1/experiments` (projects, runs with every query
+parameter, config diff, notes, metrics, lineage, run annotations, artifacts, and the `/log` /
+`/finish` ingest bodies). It is hand-maintained (`backend/internal/api/openapi.json`), embedded
+in the binary with `//go:embed`, and served with `Cache-Control: public, max-age=300`; the
+`servers` entry is patched at serve time to the instance's own `TF_PUBLIC_URL` rather than left
+as the static placeholder the embedded file carries.
+
+`backend/internal/api/openapi_test.go` is what keeps it from drifting: it walks the chi router
+and fails when a path this document describes is no longer routed, and — the direction that
+matters for invariant 1 below — when a routed `/api/v1/experiments` or `/api/v1/tokens`
+path+method is *not* documented. It also checks that every `$ref` resolves, and that a handful of
+the declared schemas (`ExpRun`, `ExpRunListResponse`, `ExpProject`, `TokenItem`,
+`CreateTokenResponse`, `ExpNotesResponse`, `ExpConfigDiffResponse`, `ServerInfo`) carry exactly
+their `apitypes` Go type's JSON field names, by reflection.
 
 ### `GET /api/v1/usage`  (auth required)
 

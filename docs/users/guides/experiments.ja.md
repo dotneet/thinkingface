@@ -19,9 +19,14 @@ thinkingface は、trackio や Weights & Biases、MLflow と同じように学�
 | run | プロジェクト内の 1 回の学習の試行。名前・ステータス・config・メトリクスを持ちます。 |
 | config | run のハイパーパラメータ。JSON オブジェクトで、run の開始時に一度だけ記録されます。 |
 | メトリクス系列 | 1 つの run の 1 つのメトリクス名について記録された `(step, value)` の点の集まり。 |
-| サマリー | 各メトリクスについて最後に観測された値。run 一覧と run ページに表示されます。 |
+| サマリー | 各メトリクスについて最後に観測された値と、run の間にそのメトリクスが取った最小値・最大値。run 一覧と run ページに表示されます。 |
+| メトリクスのゴール | プロジェクトごとの設定で、あるメトリクスについて低いほうが良いのか高いほうが良いのかを表します。「ベストな run」のマーカーと `best:` によるソートの基準になります。 |
+| ノート | プロジェクトごとの Markdown のノートブック。リポジトリに `{project}/NOTES.md` としてコミットされます。 |
 
-run のステータスは `running`、`finished`、`failed` のいずれかです。それ以外は保存されません。
+保存される run のステータスは `running`、`finished`、`failed` のいずれかです。4 つ目のステータス
+`stale` は、run を読み出すときに導出されます。`running` として記録されたままの run が、その
+staleness ウィンドウ（[クラッシュした run を検出する](#detect-crashed-runs) を参照）より長く音沙汰
+がない場合は `stale` として報告され、再び記録を始めればすぐに `running` に戻ります。
 
 データセットリポジトリは、次のいずれかに当てはまるとき実験リポジトリとして扱われます。
 
@@ -95,6 +100,10 @@ pip install -e clients/python
 | `THINKINGFACE_REPO` | 書き込み先のデータセットリポジトリ（`namespace/name`）。デフォルトは `{your username}/trackio-metrics`。 |
 | `THINKINGFACE_META` | `off` にすると、環境の自動スナップショットを行いません。 |
 | `THINKINGFACE_SYSTEM_METRICS` | `off` にすると、GPU/CPU/メモリのテレメトリを行いません。 |
+| `THINKINGFACE_MODE` | `online`（デフォルト）または `offline`。`offline` では run をネットワークではなくディスクに書き出します。[オフラインの run と `tf experiments sync`](#offline-runs-and-tf-experiments-sync) を参照してください。 |
+| `THINKINGFACE_OFFLINE_DIR` | オフラインの run と、オンラインモードで届けられなかった点の書き出し先。デフォルトは `./thinkingface-offline`。 |
+| `THINKINGFACE_HEARTBEAT_SECS` | run が生存を知らせると約束する間隔（秒）。デフォルトは `30`、最大 `3600` で、`0` にするとハートビートを無効にします。[クラッシュした run を検出する](#detect-crashed-runs) を参照してください。 |
+| `THINKINGFACE_ARTIFACT_INTERVAL` | ステージされたアーティファクト・画像・テーブルをバックグラウンドでコミットする間隔（秒）。デフォルトは `60` で、`0` にすると `save()` / `finish()` まで保持します。 |
 
 !!! warning
 
@@ -153,6 +162,49 @@ run が生涯に持てる異なるメトリクス名は最大 1,000 個です（
 ```python
 import thinkingface.trackio as trackio  # `import trackio` の代わりに
 ```
+
+### `config` に渡せるもの { #what-config-accepts }
+
+`config` には dict、`argparse.Namespace`、dataclass のインスタンスのいずれでも渡せるので、
+`trackio.init(project="mnist", config=parser.parse_args())` はそのまま動きます。JSON に表現の
+ない値は、config 全体を失う原因になる代わりに、送信時に変換されます。
+
+| 値 | 保存される形 |
+|---|---|
+| `pathlib.Path` | その文字列 |
+| `enum.Enum` | その `.value`（値自体をエンコードできない場合は名前） |
+| dataclass / `argparse.Namespace` | フィールドを持つ入れ子のオブジェクト |
+| numpy のスカラー / 配列 | 数値 / リスト（要素数が 1,000 を超える配列は、短い `ndarray(shape=..., dtype=...)` という文字列になります） |
+| `datetime` / `date` | ISO 8601 |
+| `set` / `tuple` | リスト |
+| 文字列でない dict のキー | その `str()` |
+| `NaN` / `inf` / `-inf` | 文字列 `"nan"` / `"inf"` / `"-inf"` |
+| それ以外 | `str(value)`。run ごとに 1 回、該当するキーを挙げた警告が出ます |
+
+`run.config` 自体には元のオブジェクトがそのまま残り、変換されるのは送信される内容だけです。
+この変換のためにクライアントが numpy を import することはありません。
+
+一方、*メトリクス*の値は数値でなければなりません。値が `NaN` や `±inf` のメトリクスはその点から
+取り除かれ（run ごとに 1 回警告が出ます）、点の残りはいつもどおり送信されます。そのため発散した
+loss は、run の記録を止めてしまうのではなく、グラフ上の途切れとして現れます。
+
+### クラッシュした run を検出する { #detect-crashed-runs }
+
+OOM killer に殺された学習ジョブや、ホストごと失われたジョブは `finish()` を呼ぶ機会がないので、
+何の手当てもなければその run は一覧に `running` のまま永遠に居座ります。そこでシムはハートビート
+を宣言します。各バッチで、その run からの便りをどのくらいの間隔で期待すればよいかをサーバーに伝え
+（`THINKINGFACE_HEARTBEAT_SECS`、デフォルトは 30 秒）、その時間何も送っていない run — 時間のかかる
+評価や、長いチェックポイントの書き込みの最中など — は、生存確認のためだけの空のバッチを送ります。
+
+サーバーは、`running` の run が **ハートビート 4 回分か 2 分のどちらか長いほう** 沈黙した時点で、
+それを `stale` として報告します。デフォルトのハートビートでは、クラッシュした run は最後の便りから
+約 2 分で `stale` になります。単に静かなだけの run は ping を送り続けるので、`stale` になることは
+ありません。ハートビートなしで記録された run（古いクライアントや、ルート A で入ってくる run）には、
+30 分のウィンドウが適用されます。
+
+ping はシムのバックグラウンドのフラッシュスレッドから送られるので、学習ステップが長いというだけで
+run が stale になることはありません。`stale` も保存はされず、再び記録を始めた run は再び `running`
+になります。宣言と ping の両方を無効にするには `THINKINGFACE_HEARTBEAT_SECS=0` を設定します。
 
 ### 中断した run を再開する { #resume-an-interrupted-run }
 
@@ -218,9 +270,12 @@ trackio.log_artifact("out/samples/")                         # ディレクト�
 リポジトリの `.gitattributes` に照らして十分大きくなれば自動的に LFS 経由になります。取り出し方
 は [ファイルのダウンロード](downloading.md) を参照してください。
 
-run の実行中は何もアップロードされません。すべては `finish()` の実行時にまとめてコミットされる
-ので、20 枚のプロットを保存する run が作るコミットは 20 個ではなく 1 個です。存在しないパス、
-`..` を含む名前、予約名 `metrics.parquet` は、例外ではなく警告になります。
+アーティファクトは、run の実行中にまとめてコミットされます。保留中のものがあれば、ステージされた
+すべてが `THINKINGFACE_ARTIFACT_INTERVAL` 秒（デフォルトは 60）ごとにバックグラウンドでまとめて
+コミットされ、`trackio.save()` はその場でコミットし、`finish()` が残りをコミットします。したがって、
+1 分に 20 枚のプロットを保存する run が作るコミットは 1 分に 1 個で、クラッシュした run でも、落ちる
+前にコミットされたアーティファクトはすべて残ります。存在しないパス、`..` を含む名前、予約名
+`metrics.parquet` は、例外ではなく警告になります。
 
 この方法で添付するディレクトリには上限があり、そのどれかを超えると、その呼び出しのファイルは
 **1 つも**アップロードされません。一部だけアップロードされる、ということはありません。
@@ -234,6 +289,36 @@ run の実行中は何もアップロードされません。すべては `finis
   ん — どちらもスキップされ、対象を挙げた警告が出ます。
 - **空のディレクトリはエラーになり、空のアップロードとして黙って成功することはありません** —
   ステージするものが何もないため、500 ファイル上限を超えた場合と同じ扱いで失敗します。
+
+### 画像とテーブルを記録する { #log-images-and-tables }
+
+`trackio.Image` と `trackio.Table` は、ほかのメトリクスの値と同じように記録できます — 生成した
+サンプル、混同行列、あるチェックポイント時点での予測のテーブルなどです。これらはメトリクスでは
+ありません。それぞれファイルに書き出され、キーとステップにちなんだ名前で run のアーティファクト
+としてコミットされ、点そのものはそのキーの値を持ちません。
+
+```python
+trackio.log({"samples": trackio.Image("out/grid.png"), "train/loss": 0.4}, step=100)
+# -> {project}/artifacts/{run}/media/samples/step_00000100.png
+
+trackio.log({"preds": trackio.Table(columns=["text", "label"], data=rows)}, step=100)
+# -> {project}/artifacts/{run}/tables/preds/step_00000100.parquet
+
+trackio.save()  # 任意: 次の間隔を待たずに、ステージ済みのものを今コミットする
+```
+
+- `Image(value, caption=None)` は、画像ファイルへのパス、PIL の画像、または HxW / HxWxC の numpy
+  配列（uint8、または `[0, 1]` の範囲の浮動小数点数）を受け取ります。PNG ファイルはそのままコミット
+  され、それ以外は Pillow でエンコードされます。Pillow はオプションで、入っていなければ配列と PIL
+  の画像は警告を 1 回出してスキップされ、PNG 以外のファイルは元の形式のままコミットされます。
+- `Table(dataframe=None, columns=None, data=None)` は、pandas の DataFrame、`pyarrow.Table`、
+  または行（`columns` に対応するリスト、または dict）を受け取ります。pyarrow（または pandas）で
+  Parquet として書き出され、どちらも入っていなければテーブルは警告とともにスキップされます。
+
+どちらも `log_artifact()` と同じ、まとめて行われるバックグラウンドのコミットを通るので、1 分ほどで
+run ページの **Artifacts** の下に現れます。記録したテーブルはリポジトリ内のごく普通の Parquet
+ファイルです。アーティファクト一覧やファイルツリーから開けば [データセットビューア](dataset-viewer.md)
+がテーブルとして表示し、SQL コンソールでクエリすることもできます。
 
 ### run が生成したモデルを紐づける { #link-the-model-a-run-produced }
 
@@ -333,6 +418,114 @@ trainer.fit(model)
 extras は `pip install "thinkingface[transformers]"` または
 `pip install "thinkingface[lightning]"` でインストールします。
 
+## オフラインの run と `tf experiments sync` { #offline-runs-and-tf-experiments-sync }
+
+学習中にサーバーへ到達できないマシンもあります。NAT の内側にある vast.ai や RunPod のレンタル
+GPU マシン、オフィスのネットワークへの経路がないクラスタのノード、機内のラップトップなどです。
+シムはそうした場所で run をディスクに記録し、あとからそのマシン、あるいは別のどこかから `tf`
+CLI でアップロードさせることができます。
+
+`THINKINGFACE_MODE=offline` を設定する（または `trackio.init()` に `mode="offline"` を渡す）と、
+シムはネットワークリクエストを一切行わず — ユーザー名の問い合わせすら行いません — 代わりに run
+をディレクトリに書き出します。
+
+```text
+thinkingface-offline/20260927T101500-mnist-baseline-1a2b3c4d/
+    run.jsonl         # init / log / artifact / model / finish のレコード、1 行に 1 つ
+    artifacts/        # log_artifact のファイル、画像、テーブルのコピー
+    sync-state.json   # tf experiments sync が書き込む。シムが書くことはない
+```
+
+それ以外はオンラインのときと同じように動きます。点（システムメトリクスを含む）は 5 秒ごとまたは
+100 点ごとに書き出され、`log_artifact()` はファイルをその場でコピーし、`log_model()` は渡した
+revision を記録し、`finish()` は最終ステータスを記録します。ディレクトリと、それをアップロードする
+コマンドは、run の開始時に stderr に表示されます。親ディレクトリは `THINKINGFACE_OFFLINE_DIR`
+（デフォルトは `./thinkingface-offline`）です。
+
+アップロードには `tf experiments sync` を使います。
+
+```bash
+tf experiments sync                                  # ./thinkingface-offline 以下のすべての run
+tf experiments sync thinkingface-offline/20260927T101500-mnist-baseline-1a2b3c4d  # 1 つの run だけ
+tf experiments sync --watch                          # まだ書き込み中の run を追いかけ続ける
+```
+
+- **リポジトリ** は、run の開始時に `THINKINGFACE_REPO` が設定されていればそれ、そうでなければ
+  sync を実行した人の `{you}/trackio-metrics` です。存在しなければ作成されます。
+- **run 名** は、最初の sync のときに、オンラインと同じ `resume=` のルールで決まります。デフォルト
+  の `resume="never"` では、サーバー上ですでに使われている名前は `name-1`、`name-2` のようになり
+  ます。
+- **進捗は保存されます。** 各 run ディレクトリの `sync-state.json` に残るので、sync は中断して
+  再実行できます。最後に届けたバッチの続きから再開します。`finish()` がまだ記録されていない run は、その
+  時点の末尾まで sync されて開いたまま残ります。終了した run は、アーティファクトがコミットされ、
+  ステータスが設定され、生成したモデルが記録され、以後はスキップされます。
+- `--watch` は、Ctrl-C を押すまで `--interval`（デフォルトは `60s`）ごとにこの処理を繰り返し、
+  新しい run ディレクトリと新しい行を拾います。そのため、ディレクトリが見えるマシンならどこからでも、
+  オフラインの run の曲線をライブで眺められます。
+
+ディレクトリは自己完結しているので、**書き出したマシンから sync する必要はありません**。SSH
+トンネル経由でサーバーに到達できる GPU マシンなら、その場で sync を実行します。まったく到達でき
+ないマシンなら、ディレクトリを — `rsync`、`scp`、バケットなどで — 外にコピーし、到達できるマシン
+から sync します。
+
+```bash
+# 手元のワークステーションで、tf はサーバーにログイン済み
+rsync -a gpu-box:work/thinkingface-offline/ ./thinkingface-offline/
+tf experiments sync ./thinkingface-offline
+```
+
+`sync-state.json` がディレクトリと一緒に移動するので、あとで再コピーして再度 sync しても、送られる
+のは新しい分だけです。配送はリクエスト単位で at-least-once です。バッチを送ってからそれを記録する
+までの間に sync が kill されると、そのバッチは再送されますが、グラフが描画するのは 1 回だけです
+（2 回記録されたステップは、後の値が表示されます）。
+
+**オンラインモードも、同じディレクトリをセーフティネットとして使います。** 本来なら捨てるしか
+なかった点 — 長い障害の間にメモリ上の再試行バッファがあふれたときの最も古い点と、`finish()` が
+再試行を使い果たした時点でまだ送れていないもの — は、代わりに `THINKINGFACE_OFFLINE_DIR` 以下の
+run ディレクトリに書き出され、`finish()` がコミットできなかったアーティファクトも一緒に書き出され
+ます。警告には、そのディレクトリと、それらを同じ run に届ける `tf experiments sync` コマンドが示され
+ます。サーバーに *拒否された* 点（不正なトークン、存在しないリポジトリ、不正な形式のデータ）は
+これまでどおり破棄されます。それらは遅れて届いたデータではなく、不正なデータだからです。
+
+## 過去の run をインポートする { #import-past-runs }
+
+thinkingface を使う前に記録した run — 別のトラッカーからエクスポートした CSV や、以前の学習スク
+リプトが書き出した JSONL — は、`tf experiments import` でインポートできます。1 行が 1 つの点です。
+
+```text
+run,step,timestamp,train/loss,eval/accuracy
+lr-0.01,0,2026-09-01T10:00:00Z,2.31,
+lr-0.01,100,2026-09-01T10:05:00Z,1.12,0.61
+lr-0.03,0,2026-09-01T11:00:00Z,2.29,
+```
+
+```json
+{"run": "lr-0.01", "step": 200, "train/loss": 0.87, "eval/accuracy": 0.72}
+```
+
+`run` と `step`（整数）は必須で、`timestamp`（RFC 3339 または unix 秒）は任意、それ以外の列や
+キーはすべてメトリクスです。インポートされるのは数値だけで、空・数値でない・`NaN`・無限大のセルは
+スキップされ、件数が数えられます。形式は拡張子（`.csv`、`.jsonl`、`.ndjson`）または `--format` で
+決まり、複数のファイルを一度に指定できます — 同じ run の行はファイルをまたいでマージされます。
+
+```bash
+tf experiments import alice/trackio-metrics ocr old-runs.csv --configs old-configs.jsonl --dry-run
+tf experiments import alice/trackio-metrics ocr old-runs.csv --configs old-configs.jsonl
+```
+
+`--configs` は任意の JSONL ファイルで、run ごとに 1 行、その run と一緒に送る config と、任意で
+最終ステータスとスイープのグループ分けを指定します。
+
+```json
+{"run": "lr-0.01", "config": {"lr": 0.01, "batch_size": 32}, "status": "finished", "group": "lr-sweep", "job_type": "train"}
+```
+
+エントリのない run（または `status` のない run）は、`--status`（デフォルトは `finished`、または
+`failed`）で終了します。リポジトリが存在しなければ作成されます。**プロジェクトにすでに存在する run
+があると、何も送信する前にインポート全体が拒否されます。** 2 回インポートすると点が重複してしまう
+からです。`--replace` は、そうした run をそれぞれ先に削除してからインポートし直します。`--dry-run`
+は、何も送信せずに、パース・検証・既存 run の確認を行います。
+
 ## Web UI で run を見る { #explore-runs-in-the-web-ui }
 
 トップナビゲーションの **Experiments** には、検索ボックスとプロジェクト数とともに、すべての
@@ -342,10 +535,32 @@ extras は `pip install "thinkingface[transformers]"` または
 ![プロジェクトの run 一覧。run 名・ステータス・最終ステップ・メトリクスの列・タグが並んでいる](../images/experiment-runs.png)
 
 run テーブルには、各 run の名前、ステータス、タグ、最終ステップ、サマリーメトリクス（列として）、
-開始した時刻、そして生成したチェックポイントが表示されます。列はソートでき、グループは 1 行に
-折りたためます。メトリクスフィルタを使えば、しきい値に合致する run だけに絞り込めます（例:
-`eval/accuracy > 0.9`）。ページを開いた時点では先頭 5 件の run が選択されており、下に並ぶビュー
-が何を描画するかはこのチェックボックスで決まります。
+開始した時刻、そして生成したチェックポイントが表示されます。テーブルの上にある **Values** の切り
+替えで、ダッシュボードが各メトリクスのどのサマリーを使うかを選べます。各 run の **Last** の値、
+run の間の **Min** または **Max**、あるいは **Best** — 最小値と最大値のうち、そのメトリクスの
+ゴールがより良いとするほう（ゴールを設定すると使えるようになります）— です。この切り替えは、
+メトリクスの列、そのソート、メトリクスフィルタ、そして下にある Scatter と Parallel のビューに
+適用されます。列はソートでき、グループは 1 行に折りたためます。メトリクスフィルタを使えば、
+しきい値に合致する run だけに絞り込めます（例: `eval/accuracy > 0.9`）。ページを開いた時点では
+先頭 5 件の run が選択されており、下に並ぶビューが何を描画するかはこのチェックボックスで決まり
+ます。**Export table CSV** ボタンはテーブルをそのままダウンロードします — 折りたたんだグループも
+見出しの行だけでなくメンバー全員が出力されるので、ファイルは常に、たまたま見えているものではなく
+現在のフィルタが選んだものと一致します。各メトリクスは 3 回出力されます。最後の値がそのメトリクス
+自身の名前で、続いて `min:<metric>` と `max:<metric>` です。下の Metrics ビューには、プロジェクト
+のダッシュボードと個々の run のページの両方に、専用の **Export metrics CSV** ボタンがあります。
+
+各メトリクスの列見出しにはゴールのマーカーが付きます — 「低いほうが良い」なら下向き、「高いほうが
+良い」なら上向きの矢印です。書き込み権限があれば、これ（まだゴールのないメトリクスでは薄いターゲット
+のアイコン）をクリックして、そのメトリクスのゴールを **Lower is better**、**Higher is better**、
+**No goal** のいずれかに設定できます。この設定はプロジェクトを見るすべての人に適用されます。
+メトリクスにゴールが設定されると、アーカイブされていない run のうち最も良い値を持つ run にトロフィー
+の印が付きます。同じことをコマンドラインから行う方法は
+[メトリクスのゴールとベストな run](#metric-goals-and-the-best-run) を参照してください。
+
+プロジェクトページの **Notes** セクションには、プロジェクトのノートブック（後述）が Markdown と
+してレンダリングされて表示されます。書き込み権限があれば、その場で書いたり編集したりできます。
+その間に誰かが保存していた場合、あなたの保存は相手の内容を上書きせずに拒否され、下書きはコピー
+できるように残されます。
 
 ![複数の run を重ねたメトリクスのグラフ。step と時刻の軸、スムージングの操作が見えている](../images/experiment-charts.png)
 
@@ -363,9 +578,12 @@ run テーブルには、各 run の名前、ステータス、タグ、最終�
 
 ### run のページ { #the-run-page }
 
-run をクリックすると専用のページが開き、上から順に、各メトリクスの最終値のサマリー、その run
-のグラフ、アーティファクト、生成したモデル、自由記述の Markdown ノート、ハイパーパラメータ、
-Trainer が記録していれば `TrainingArguments`、そして環境のスナップショットが並びます。
+run をクリックすると専用のページが開き、上から順に、各メトリクスのサマリー（最終値と、それまでに
+取った最小値・最大値）、その run のグラフ、アーティファクト、生成したモデル、自由記述の Markdown
+ノート、ハイパーパラメータ、Trainer が記録していれば `TrainingArguments`、そして環境のスナップ
+ショットが並びます。`running` または `stale` の run では、ヘッダーに、その run が最後に確認
+された時刻（**last seen**）も表示され、その run が stale とみなされるまでどのくらい沈黙していてよいかを説明する
+ヒントが付きます。
 
 ### run に注釈を付ける・整理する { #annotate-and-clean-up-runs }
 
@@ -387,6 +605,156 @@ Trainer が記録していれば `TrainingArguments`、そして環境のスナ�
     を持つ run は、そのエクスポートが次にインデックスされたときに再び現れます。その経路では、
     エクスポートしたファイルこそが正だからです。それらを恒久的に消すには、リポジトリごと削除
     してください。
+
+## コマンドラインから run を扱う { #work-with-runs-from-the-command-line }
+
+ダッシュボードに表示されるものはすべて `tf` CLI からも取得できます。スクリプトや、学習の run を
+動かす AI エージェント（[AI エージェントから thinkingface を使う](agents.md) を参照）は、これを
+使ってブラウザなしで結果を読みます。`REPO` は `ns/name` 形式の実験リポジトリで、`tf exp` は
+`tf experiments` の別名です。どのコマンドも `--json` で機械可読な出力（API のレスポンスそのまま）
+を返します。匿名での読み取りを許可しているインスタンスでは、読み取りにトークンは不要です。何かを
+変更するコマンドには write トークンが必要です。フラグの一覧は
+[tf CLI リファレンス](../reference/tf-cli.md#tf-experiments) にあります。
+
+### メトリクスのゴールとベストな run { #metric-goals-and-the-best-run }
+
+メトリクスのゴールは、そのメトリクスでどちらの方向が良いのかを表します。ゴールはプロジェクトごと
+に一度設定します — 望むなら最初の run より前でも構いません。
+
+```bash
+tf experiments goals alice/trackio-metrics ocr val/CER=min eval/accuracy=max
+tf experiments goals alice/trackio-metrics ocr            # 現在のゴールを表示
+tf experiments goals alice/trackio-metrics ocr old_metric=none   # 1 つ削除
+```
+
+指定しなかったゴールはそのまま残ります。ゴールを設定すると、run テーブルとダッシュボードが、アーカ
+イブされていない run のうちそのメトリクスのベストな run — `min` なら最小値が最も低いもの、`max`
+なら最大値が最も高いもの — に印を付け、`best:<metric>` がソートキーとして使えるようになります。
+
+### run を一覧・ソートする { #list-and-sort-runs }
+
+```bash
+tf experiments runs alice/trackio-metrics ocr --sort best:val/CER --limit 5
+tf experiments runs alice/trackio-metrics ocr --status running --status stale
+tf experiments runs alice/trackio-metrics ocr --group lr-sweep --sort config:optimizer.lr \
+    --columns config:optimizer.lr,min:val/CER,last:train/loss
+tf experiments runs alice/trackio-metrics ocr --sort min:val/CER --json
+```
+
+絞り込みとソートはサーバー側で行われます。
+
+| フラグ | 意味 |
+|---|---|
+| `--group G` | スイープグループ `G` の run（複数指定可: いずれか） |
+| `--status S` | `running`、`finished`、`failed`、`stale`（複数指定可: いずれか） |
+| `--tag T` | タグ `T` を持つ run（複数指定可: すべて） |
+| `--archived true\|false` | アーカイブ済みのみ / 未アーカイブのみ（デフォルト: 両方） |
+| `--sort SPEC` | `name`、`started_at`、`updated_at`、`last_step`、`last:<metric>`、`min:<metric>`、`max:<metric>`、`best:<metric>`（ゴールが必要）、`config:<dotted.key>` |
+| `--order asc\|desc` | デフォルトは `asc`。`best:` では常にベストな run が先頭 |
+| `--limit N` | 最大 `N` 件の run（1–1000） |
+| `--columns LIST` | 追加の列: `config:<key>`、`last:<metric>`、`min:<metric>`、`max:<metric>`、`best:<metric>`、`group`、`job_type`、`tags`、`points`、`note` |
+
+ソートの値を持たない run は常に最後に並びます。`--columns` を指定しない場合、テーブルにはゴールを
+持つすべてのメトリクスがそのゴールの方向で表示され、続いてそれ以外の最大 3 つのメトリクスの最終値
+が表示されます。ゴールを持つ各メトリクスのベストな run には `*` が付きます。
+`tf experiments run REPO PROJECT RUN` は 1 つの run をすべて表示します。ステータス、ステップと点
+の数、タイムスタンプ、タグ、ノート、平坦化した config、そして各メトリクスの最終値 / 最小値 / 最大値
+です。
+
+### config を比較する { #compare-configs }
+
+```bash
+tf experiments diff alice/trackio-metrics ocr                 # アーカイブされていないすべての run
+tf experiments diff alice/trackio-metrics ocr lr-0.01 lr-0.03 # これらだけ
+```
+
+config はドット区切りのパスに平坦化され、値が異なるキー（または run が持っていないキー。`-` と
+表示されます）だけが一覧されます。`_meta` の環境スナップショットと `_resume` の記録用キーは、
+`--include-meta` を渡さない限り除外されます。
+
+### run を待つ { #wait-for-a-run }
+
+`tf experiments wait` は、run が条件を満たすまでブロックします。これにより「学習を開始し、その
+結果に応じて動く」ことをスクリプトにできます。
+
+```bash
+tf experiments wait alice/trackio-metrics ocr lr-0.03                       # running でなくなるまで
+tf experiments wait alice/trackio-metrics ocr lr-0.03 --until 'step>=12000'
+tf experiments wait alice/trackio-metrics ocr lr-0.03 \
+    --until 'min:val/CER < 0.05 and step >= 1000' --timeout 6h --json
+```
+
+条件（`--until`、デフォルトは `status!=running`）は、1 つ以上の比較を `and` / `or` でつないだ
+ものです（`and` のほうが強く結合し、括弧でグループ化できます）。
+
+| フィールド | 比較対象 |
+|---|---|
+| `step` | 最後に記録されたステップ |
+| `points` | 記録された点の数 |
+| `status` | `running`、`finished`、`failed`、`stale`。`==` / `!=` のみ |
+| `metric:<name>`（または `last:<name>`） | そのメトリクスの最終値 |
+| `min:<name>` / `max:<name>` | それまでに取った最小値 / 最大値 |
+
+演算子は `==`、`!=`、`>=`、`<=`、`>`、`<` です。空白、括弧、引用符、`= ! < >` を含むメトリクス名
+は、コロンの直後で引用符で囲みます: `metric:"val loss" < 0.2`。run がまだ記録していないメトリクス
+に対する比較は偽になります。パースできない条件は使い方のエラーになり、問題の桁の下にキャレットが
+表示されます。
+
+| 終了コード | 意味 |
+|---|---|
+| `0` | 条件が成り立った |
+| `1` | タイムアウトした（`--timeout`、デフォルトは `24h`、`0` で無期限）、または条件を満たさないまま run が止まった |
+| `2` | 使い方のエラー（パースできない `--until` を含む） |
+
+使い方のエラー以外のすべての場合で、run の最後の状態が表示されます。`--json` では
+`{"run": {...}, "met": true|false, "reason": "met"|"timeout"|"stopped", "until": "..."}` です。
+
+- **run はまだ存在していなくても構いません。** 見つからない run は 5 秒ごとに再試行されるので、
+  ジョブを起動した直後、まだ何も記録していないうちから待ち始められます。
+- **run が止まると待機も終わります。** run が `running` でなくなったとき — 終了した、失敗した、
+  あるいはジョブがクラッシュして stale になった — に条件が成り立っておらず、条件が `status` にも
+  触れていなければ、その条件が真になることはもうありません。そのため、タイムアウトまでぶら下がる
+  のではなく、理由 `stopped` で終了コード 1 を返します。ステップ 5000 で死んだジョブに対して
+  `step>=12000` を待つと、ハートビートが止まってから、つまりクラッシュから約 2 分後に戻ります。
+  `--ignore-stale` を指定すると待ち続けます（stale な run は戻ってくることがあり、終了した run
+  も再開されることがあるからです）。
+- 待機にはサーバーのロングポーリングを使うので、サーバーに負荷をかけることなく、新しいバッチから
+  1〜2 秒以内に反応します。
+
+### プロジェクトのノートを残す { #keep-project-notes }
+
+各プロジェクトにはノートブックがあります。リポジトリのデフォルトブランチにある `{project}/NOTES.md`
+なので、メトリクスと一緒にバージョン管理され、`git clone` で一緒に降りてきます。プロジェクトページ
+に表示され、CLI から読み書きできます。
+
+```bash
+tf experiments notes alice/trackio-metrics ocr > NOTES.md     # 表示（まだなければ何も出力しない）
+$EDITOR NOTES.md
+tf experiments notes alice/trackio-metrics ocr --set NOTES.md -m "notes: lr sweep results"
+```
+
+`[text](run:<run name>)` の形で書いたリンク — たとえば `[best so far](run:lr-0.03)` — は、
+Web UI ではその run へのリンクになります。
+
+`--set` が闇雲に上書きすることはありません。まず現在のバージョンを読み、その間にノートが変更されて
+いればサーバーは書き込みを拒否します（終了コード 1）。読み取り・編集・書き込みを 2 回の実行に分けて
+行う場合は、`--json` で読み取り、その `blob_sha` を `--base-sha` で渡し返します（`--base-sha ""` は
+「ノートがまだ存在してはならない」という意味です）。`--force` は、そこに何があっても上書きします。
+
+### run に注釈を付ける { #annotate-runs }
+
+`tf experiments annotate` は、run の手で管理するメタデータ — run ページで編集するのと同じノート、
+タグ、アーカイブのフラグ — を変更します。変更されるのはフラグで指定したものだけです。
+
+```bash
+tf experiments annotate alice/trackio-metrics ocr lr-0.03 --note "Best CER so far; diverges after 20k steps."
+tf experiments annotate alice/trackio-metrics ocr lr-0.03 --add-tag keep --remove-tag wip
+tf experiments annotate alice/trackio-metrics ocr lr-0.10 --archive
+```
+
+`--note-file FILE`（標準入力なら `-`）はファイルからノートを設定し、`--tag T`（複数指定可）は
+タグの集合全体を置き換え、`--clear-tags` はすべてのタグを削除し、`--unarchive` はアーカイブした
+run を再び表示します。
 
 ## データが実際に置かれている場所 { #where-the-data-actually-lives }
 
@@ -442,4 +810,6 @@ Trainer が記録していれば `TrainingArguments`、そして環境のスナ�
 - [ファイルのダウンロード](downloading.md) — Parquet の取り出しと、バケットからの読み取り
 - [データセットの閲覧](dataset-viewer.md) — その Parquet をブラウザ上でテーブルとして見る
 - [認証](../reference/authentication.md) — ingest に必要な write スコープのトークンの発行
+- [AI エージェントから thinkingface を使う](agents.md) — MCP サーバーと、上のコマンドの上に組み立てたエージェントのループ
+- [tf CLI](../reference/tf-cli.md#tf-experiments) — `tf experiments` のすべてのフラグ
 - [Organization](organizations.md) — 実験リポジトリをチームで共有する

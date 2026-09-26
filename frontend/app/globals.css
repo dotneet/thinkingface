@@ -199,14 +199,20 @@
   }
 }
 
+/* `clip`, not `hidden`: both stop a stray wide element from scrolling the
+   page sideways, but `hidden` on <body> (with <html> also set) turns the body
+   into a scroll container that never scrolls, and every `position: sticky`
+   inside it — the site header, the experiment workspace's run sidebar — then
+   sticks to the body instead of the viewport, i.e. never. `clip` creates no
+   scroll container. */
 html {
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 body {
   background: var(--tf-bg);
   color: var(--tf-fg);
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 .tabular-nums {

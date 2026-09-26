@@ -22,7 +22,7 @@ import pathlib
 import re
 
 DOCS = pathlib.Path(__file__).resolve().parents[1] / "docs" / "users"
-HEADING = re.compile(r"^(#{2,4})\s+(.*?)\s*$")
+HEADING = re.compile(r"^(#{2,4})\s+(.*?)\s*$", re.MULTILINE)
 ANCHOR = re.compile(r"\{\s*#([A-Za-z0-9_-]+)\s*\}")
 FENCE = re.compile(r"```.*?```", re.DOTALL)
 

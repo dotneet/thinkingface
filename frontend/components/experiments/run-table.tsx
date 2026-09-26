@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 
 import { CsvDownloadButton } from "@/components/experiments/csv-download-button";
+import { MetricGoalMarker } from "@/components/experiments/metric-goal-marker";
 import { csvFilename, runTableCsv } from "@/components/experiments/run-csv";
 import { GroupRows } from "@/components/experiments/run-group-rows";
 import { RunRow } from "@/components/experiments/run-row";
@@ -14,20 +15,38 @@ import {
   runColumns,
 } from "@/components/experiments/run-table-context";
 import { SortHeader } from "@/components/experiments/sort-header";
+import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Table, TBody, THead, Th } from "@/components/ui/table";
 import { TriStateCheckbox } from "@/components/ui/tri-state-checkbox";
 import { runColorIndex } from "@/lib/chart-utils";
+import {
+  type BestRuns,
+  hasAnyGoal,
+  type MetricGoals,
+  metricGoal,
+  type SummaryMode,
+} from "@/lib/exp-goals";
+import { orderChartKeys, orderedGoalMetrics } from "@/lib/exp-workspace";
 import { useT } from "@/lib/i18n/client";
 import type { RunModels } from "@/lib/lineage";
 import {
   groupRuns,
-  hiddenMetricCount,
   metricColumns,
   type RunSort,
   type RunSortColumn,
   sortGroups,
 } from "@/lib/run-grouping";
 import type { ExpRun } from "@/types/api";
+
+/**
+ * Metric columns the table shows before the rest are left to the CSV. Wider
+ * than the old five: the table now has the workspace's full width and scrolls
+ * sideways with the run name pinned.
+ */
+const MAX_TABLE_METRICS = 8;
+
+/** Up to this many runs, sweeps start unfolded: every row fits on a screen or two. */
+const EXPAND_GROUPS_UP_TO = 50;
 
 /**
  * The run list.
@@ -51,6 +70,7 @@ export function RunTable({
   repo,
   project,
   runs,
+  sourceRuns,
   runOrder,
   selected,
   onToggle,
@@ -60,12 +80,27 @@ export function RunTable({
   actions,
   sort,
   onSort,
+  goals,
+  best,
+  canWrite,
+  onEditGoal,
+  summaryMode,
+  onSummaryModeChange,
 }: {
   /** Identity of the project, so each row can link to its run detail page. */
   ns: string;
   repo: string;
   project: string;
+  /**
+   * The runs to draw, with `summary` already projected to `summaryMode`
+   * (`projectRunSummaries` in lib/exp-goals.ts).
+   */
   runs: ExpRun[];
+  /**
+   * The same runs as the server sent them. The CSV export is built from these,
+   * so it carries the real last / min / max whatever the switch shows.
+   */
+  sourceRuns: ExpRun[];
   /** Full project run order, so colours stay put when the list is filtered. */
   runOrder: string[];
   selected: Set<string>;
@@ -82,17 +117,39 @@ export function RunTable({
   /** Current sort, or null for the order the server returned. */
   sort: RunSort | null;
   onSort: (column: RunSortColumn) => void;
+  /** The project's metric goals. */
+  goals: MetricGoals;
+  /** Metric → the server's best non-archived run for it. */
+  best: BestRuns;
+  /** Viewer has write access, and so may set goals. */
+  canWrite: boolean;
+  /** Opens the goal dialog for one metric. */
+  onEditGoal: (metric: string) => void;
+  /** Which summary the metric columns show. */
+  summaryMode: SummaryMode;
+  onSummaryModeChange: (mode: SummaryMode) => void;
 }) {
   const t = useT();
-  // Groups start folded: folding forty sweep runs into one row is the whole
-  // point, and every group can be opened in one click.
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // A project small enough to read row by row starts with every sweep open;
+  // past that, groups start folded — folding forty sweep runs into one row is
+  // the point, and every group opens in one click.
+  const [expanded, setExpanded] = useState<Set<string>>(() =>
+    runs.length <= EXPAND_GROUPS_UP_TO
+      ? new Set(runs.map((r) => r.group).filter(Boolean))
+      : new Set(),
+  );
 
   const allSelected = runs.length > 0 && runs.every((r) => selected.has(r.name));
   const someSelected = !allSelected && runs.some((r) => selected.has(r.name));
   const groups = useMemo(() => sortGroups(groupRuns(runs), sort), [runs, sort]);
-  const metricKeys = useMemo(() => metricColumns(runs), [runs]);
-  const hiddenMetrics = useMemo(() => hiddenMetricCount(runs), [runs]);
+  // Goal metrics lead, then the rest alphabetically — the columns that
+  // decide "which run is best" must never be the ones cut off at the cap.
+  const allMetricKeys = useMemo(() => {
+    const all = metricColumns(runs, Number.POSITIVE_INFINITY);
+    return orderChartKeys(all, orderedGoalMetrics(goals, runs)).main;
+  }, [runs, goals]);
+  const metricKeys = useMemo(() => allMetricKeys.slice(0, MAX_TABLE_METRICS), [allMetricKeys]);
+  const hiddenMetrics = allMetricKeys.length - metricKeys.length;
   // The column only appears once something in this project has declared a run
   // as its origin; otherwise every experiment table would carry a dead column.
   const hasModels = useMemo(
@@ -105,15 +162,18 @@ export function RunTable({
   const colorIndex = useMemo(() => runColorIndex(runOrder), [runOrder]);
 
   const context = useMemo(
-    () => ({ ns, repo, project, colorIndex, columns, runModels, actions }),
-    [ns, repo, project, colorIndex, columns, runModels, actions],
+    () => ({ ns, repo, project, colorIndex, columns, runModels, actions, goals, best }),
+    [ns, repo, project, colorIndex, columns, runModels, actions, goals, best],
   );
 
   // The rows in the order the table draws them: group members follow their
   // group header, and a folded group still exports its members — a CSV has no
   // fold, and dropping them would silently export a subset of what the filters
   // selected.
-  const exportRows = useMemo(() => groups.flatMap((group) => group.runs), [groups]);
+  const exportRows = useMemo(() => {
+    const source = new Map(sourceRuns.map((run) => [run.name, run]));
+    return groups.flatMap((group) => group.runs).map((run) => source.get(run.name) ?? run);
+  }, [groups, sourceRuns]);
   const exportModels = useMemo(() => {
     const out: Record<string, string[]> = {};
     for (const [run, models] of Object.entries(runModels ?? {})) {
@@ -165,11 +225,31 @@ export function RunTable({
       case "status":
         return <Th key={key}>{sortable("status", t("experiments.table.colStatus"))}</Th>;
       case "tags":
-        return <Th key={key}>{t("experiments.table.colTags")}</Th>;
+        return (
+          <Th key={key} className="min-w-[8rem]">
+            {t("experiments.table.colTags")}
+          </Th>
+        );
       case "lastStep":
-        return <Th key={key}>{sortable("last_step", t("experiments.table.colLastStep"))}</Th>;
+        return (
+          <Th key={key} align="right">
+            {sortable("last_step", t("experiments.table.colLastStep"))}
+          </Th>
+        );
       case "metric":
-        return <Th key={key}>{sortable(column.sort, column.metric, true)}</Th>;
+        return (
+          <Th key={key} align="right">
+            <span className="inline-flex items-center justify-end gap-0.5">
+              {sortable(column.sort, column.metric, true)}
+              <MetricGoalMarker
+                metric={column.metric}
+                goal={metricGoal(goals, column.metric)}
+                canWrite={canWrite}
+                onEdit={() => onEditGoal(column.metric)}
+              />
+            </span>
+          </Th>
+        );
       case "started":
         return <Th key={key}>{sortable("started_at", t("experiments.table.colStarted"))}</Th>;
       case "models":
@@ -186,7 +266,61 @@ export function RunTable({
   return (
     <RunTableProvider value={context}>
       <div className="flex flex-col gap-2">
-        <Table minWidth={960} className="max-h-[60vh] overflow-y-auto">
+        {/* Above the table and always rendered, so the rows never move when the
+            mode changes (DESIGN.md §8). "Best" needs a goal to mean anything
+            declared, so it stays visible but disabled until one exists. */}
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-fg-subtle">{t("experiments.goals.valuesLabel")}</span>
+          <SegmentedControl<SummaryMode>
+            value={summaryMode}
+            onChange={onSummaryModeChange}
+            label={t("experiments.goals.valuesAria")}
+            options={[
+              { value: "last", label: t("experiments.goals.modeLast") },
+              { value: "min", label: t("experiments.goals.modeMin") },
+              { value: "max", label: t("experiments.goals.modeMax") },
+              {
+                value: "best",
+                label: t("experiments.goals.modeBest"),
+                disabled: !hasAnyGoal(goals),
+              },
+            ]}
+          />
+          {hiddenMetrics > 0 && (
+            <span className="text-xs font-medium text-fg-subtle">
+              {t(
+                hiddenMetrics === 1
+                  ? "experiments.table.moreMetricsOne"
+                  : "experiments.table.moreMetricsOther",
+                { count: hiddenMetrics },
+              )}
+            </span>
+          )}
+          <div className="ml-auto">
+            <CsvDownloadButton
+              label={t("experiments.table.exportCsv")}
+              filename={csvFilename([ns, repo, project, "runs"])}
+              disabled={exportRows.length === 0}
+              // Built from the flattened display order, not from the project: what
+              // comes out is what is on screen, filters, sort, folded sweeps and
+              // metric columns included.
+              build={() =>
+                runTableCsv(exportRows, metricKeys, {
+                  includeModels: hasModels,
+                  modelsByRun: exportModels,
+                })
+              }
+            />
+          </div>
+        </div>
+        {/* Every cell stays on one line (`whitespace-nowrap` on the table): a
+            wrapped date or status badge is what made rows three lines tall.
+            The table scrolls sideways inside its own box with the run name
+            pinned, and vertically under a sticky header. */}
+        <Table
+          tableClassName="whitespace-nowrap"
+          className="max-h-[calc(100dvh-13rem)] overflow-y-auto"
+        >
           <THead sticky>{columns.map(headerCell)}</THead>
           <TBody>
             {groups.map((group) => {
@@ -217,34 +351,6 @@ export function RunTable({
             })}
           </TBody>
         </Table>
-        <div className="flex flex-wrap items-center gap-2">
-          {hiddenMetrics > 0 && (
-            <p className="text-xs font-medium text-fg-subtle">
-              {t(
-                hiddenMetrics === 1
-                  ? "experiments.table.moreMetricsOne"
-                  : "experiments.table.moreMetricsOther",
-                { count: hiddenMetrics },
-              )}
-            </p>
-          )}
-          <div className="ml-auto">
-            <CsvDownloadButton
-              label={t("experiments.table.exportCsv")}
-              filename={csvFilename([ns, repo, project, "runs"])}
-              disabled={exportRows.length === 0}
-              // Built from the flattened display order, not from the project: what
-              // comes out is what is on screen, filters, sort, folded sweeps and
-              // metric columns included.
-              build={() =>
-                runTableCsv(exportRows, metricKeys, {
-                  includeModels: hasModels,
-                  modelsByRun: exportModels,
-                })
-              }
-            />
-          </div>
-        </div>
       </div>
     </RunTableProvider>
   );

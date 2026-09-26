@@ -145,7 +145,7 @@ func TestDeriveRunStatus(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := deriveRunStatus(tc.stored, tc.updatedAt, now); got != tc.want {
+			if got := deriveRunStatus(tc.stored, tc.updatedAt, 0, now); got != tc.want {
 				t.Fatalf("deriveRunStatus(%q, %v) = %q, want %q", tc.stored, tc.updatedAt, got, tc.want)
 			}
 		})

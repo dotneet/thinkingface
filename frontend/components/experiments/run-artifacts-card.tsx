@@ -13,13 +13,13 @@ import {
 import Link from "next/link";
 
 import { LIVE_REFRESH_INTERVAL_MS } from "@/components/experiments/live-refresh";
+import { RunPageOutputRow } from "@/components/experiments/run-page-output-row";
 import { Badge } from "@/components/ui/badge";
-import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiResultError, queryErrorMessage } from "@/lib/api-error-message";
 import { expArtifactHref, listRunArtifacts } from "@/lib/experiments";
-import { formatBytes } from "@/lib/format";
+import { formatBytes, formatNumber } from "@/lib/format";
 import { useT } from "@/lib/i18n/client";
 import type { PreviewKind } from "@/types/api";
 
@@ -77,56 +77,58 @@ export function RunArtifactsCard({
     refetchIntervalInBackground: false,
   });
 
+  const row = {
+    icon: FileArchive,
+    title: t("experiments.artifacts.title"),
+    description: t("experiments.artifacts.description", { project, run: runName }),
+  };
+
   if (artifacts.isPending) {
     return (
-      <div className="flex flex-col gap-2">
-        {["a", "b", "c"].map((key) => (
-          <Skeleton key={key} className="h-10 w-full" />
-        ))}
-      </div>
+      <RunPageOutputRow {...row}>
+        <Skeleton className="h-9 w-full" />
+      </RunPageOutputRow>
     );
   }
 
   if (artifacts.isError) {
     return (
-      <ErrorState
-        title={t("experiments.errorTitle")}
-        message={queryErrorMessage(t, artifacts.error, t("experiments.artifacts.loadFailed"))}
-      />
+      <RunPageOutputRow {...row}>
+        <ErrorState
+          title={t("experiments.errorTitle")}
+          message={queryErrorMessage(t, artifacts.error, t("experiments.artifacts.loadFailed"))}
+        />
+      </RunPageOutputRow>
     );
   }
 
   const { artifacts: items, rev } = artifacts.data;
   if (items.length === 0) {
-    return (
-      <EmptyState
-        icon={FileArchive}
-        title={t("experiments.artifacts.emptyTitle")}
-        description={t("experiments.artifacts.emptyDescription")}
-      />
-    );
+    return <RunPageOutputRow {...row} empty={t("experiments.runPage.artifactsNone")} />;
   }
 
   return (
-    <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-lg border border-border">
-      {items.map((artifact) => {
-        const Icon = ICONS[artifact.preview] ?? FileArchive;
-        return (
-          <li key={artifact.path}>
-            <Link
-              href={expArtifactHref(ns, repo, rev, artifact)}
-              className="flex items-center gap-3 px-3 py-2 text-sm hover:bg-bg-sunken"
-            >
-              <Icon size={15} strokeWidth={1.5} className="shrink-0 text-fg-subtle" />
-              <span className="min-w-0 flex-1 truncate font-mono text-xs">{artifact.name}</span>
-              {artifact.lfs && <Badge>{t("experiments.artifacts.lfsBadge")}</Badge>}
-              <span className="shrink-0 tabular-nums text-xs font-medium text-fg-subtle">
-                {formatBytes(artifact.size)}
-              </span>
-            </Link>
-          </li>
-        );
-      })}
-    </ul>
+    <RunPageOutputRow {...row} count={formatNumber(items.length)}>
+      <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-lg border border-border">
+        {items.map((artifact) => {
+          const Icon = ICONS[artifact.preview] ?? FileArchive;
+          return (
+            <li key={artifact.path}>
+              <Link
+                href={expArtifactHref(ns, repo, rev, artifact)}
+                className="flex items-center gap-3 px-3 py-2 text-sm hover:bg-bg-sunken"
+              >
+                <Icon size={15} strokeWidth={1.5} className="shrink-0 text-fg-subtle" />
+                <span className="min-w-0 flex-1 truncate font-mono text-xs">{artifact.name}</span>
+                {artifact.lfs && <Badge>{t("experiments.artifacts.lfsBadge")}</Badge>}
+                <span className="shrink-0 tabular-nums text-xs font-medium text-fg-subtle">
+                  {formatBytes(artifact.size)}
+                </span>
+              </Link>
+            </li>
+          );
+        })}
+      </ul>
+    </RunPageOutputRow>
   );
 }

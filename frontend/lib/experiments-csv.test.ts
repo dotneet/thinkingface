@@ -18,6 +18,9 @@ function run(name: string, over: Partial<ExpRun> = {}): ExpRun {
     config: {},
     metric_keys: [],
     summary: {},
+    summary_min: {},
+    summary_max: {},
+    heartbeat_secs: 0,
     group: "",
     job_type: "",
     tags: [],
@@ -64,12 +67,28 @@ describe("runTableCsv", () => {
     expect(header).toContain("loss");
     expect(header).not.toContain("accuracy");
     expect(header).not.toContain("system/gpu");
-    expect(first?.at(-1)).toBe("0.5");
+    expect(first?.[header?.indexOf("loss") ?? -1]).toBe("0.5");
+  });
+
+  it("exports last, min and max for every metric whatever the table shows", () => {
+    const csv = runTableCsv(
+      [run("a", { summary: { loss: 0.5 }, summary_min: { loss: 0.2 }, summary_max: { loss: 3 } })],
+      ["loss"],
+    );
+    const [header, first] = rows(csv);
+    expect(header?.slice(-3)).toEqual(["loss", "min:loss", "max:loss"]);
+    expect(first?.slice(-3)).toEqual(["0.5", "0.2", "3"]);
   });
 
   it("leaves an unlogged metric blank rather than zero", () => {
     const csv = runTableCsv([run("a", { summary: {} })], ["loss"]);
-    expect(rows(csv)[1]?.at(-1)).toBe("");
+    expect(rows(csv)[1]?.slice(-3)).toEqual(["", "", ""]);
+  });
+
+  it("leaves min / max blank for a server that predates them", () => {
+    const old = { ...run("a", { summary: { loss: 1 } }), summary_min: undefined };
+    const csv = runTableCsv([old as unknown as ExpRun], ["loss"]);
+    expect(rows(csv)[1]?.slice(-3)).toEqual(["1", "", ""]);
   });
 
   it("joins tags with a semicolon so they read as one column", () => {

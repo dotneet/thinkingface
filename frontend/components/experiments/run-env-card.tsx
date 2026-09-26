@@ -3,8 +3,8 @@
 import { Server } from "lucide-react";
 
 import { ConfigEntryTable } from "@/components/experiments/config-entry-table";
+import { RunPageOutputRow } from "@/components/experiments/run-page-output-row";
 import { Badge } from "@/components/ui/badge";
-import { EmptyState } from "@/components/ui/empty-state";
 import { useT } from "@/lib/i18n/client";
 import { type ConfigEntry, isEnvEmpty, runEnv } from "@/lib/run-config";
 
@@ -22,14 +22,14 @@ export function RunEnvCard({ meta }: { meta: ConfigEntry[] }) {
   const t = useT();
   const env = runEnv(meta);
 
+  const row = {
+    icon: Server,
+    title: t("experiments.env.title"),
+    description: t("experiments.env.description"),
+  };
+
   if (isEnvEmpty(env)) {
-    return (
-      <EmptyState
-        icon={Server}
-        title={t("experiments.env.emptyTitle")}
-        description={t("experiments.env.emptyDescription")}
-      />
-    );
+    return <RunPageOutputRow {...row} empty={t("experiments.runPage.envNone")} />;
   }
 
   const rows: { label: string; value: React.ReactNode }[] = [];
@@ -93,26 +93,28 @@ export function RunEnvCard({ meta }: { meta: ConfigEntry[] }) {
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      {rows.length > 0 && (
-        <dl className="grid grid-cols-1 gap-x-6 gap-y-3 rounded-lg border border-border bg-bg-raised p-4 sm:grid-cols-[max-content_1fr]">
-          {rows.map((row) => (
-            // The label/value pair is one grid row on wide screens and two
-            // stacked lines when the grid collapses to a single column.
-            <div key={row.label} className="contents">
-              <dt className="text-sm font-medium text-fg-muted">{row.label}</dt>
-              <dd className="min-w-0 text-sm text-fg">{row.value}</dd>
-            </div>
-          ))}
-        </dl>
-      )}
+    <RunPageOutputRow {...row}>
+      <div className="flex flex-col gap-4">
+        {rows.length > 0 && (
+          <dl className="grid grid-cols-1 gap-x-6 gap-y-1.5 rounded-lg border border-border bg-bg-sunken px-4 py-3 sm:grid-cols-[max-content_1fr]">
+            {rows.map((row) => (
+              // The label/value pair is one grid row on wide screens and two
+              // stacked lines when the grid collapses to a single column.
+              <div key={row.label} className="contents">
+                <dt className="text-sm font-medium text-fg-muted">{row.label}</dt>
+                <dd className="min-w-0 text-sm text-fg">{row.value}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
 
-      {env.extra.length > 0 && (
-        <div className="flex flex-col gap-2">
-          <h3 className="text-sm font-semibold">{t("experiments.env.otherTitle")}</h3>
-          <ConfigEntryTable entries={env.extra} emptyTitle={t("experiments.env.emptyTitle")} />
-        </div>
-      )}
-    </div>
+        {env.extra.length > 0 && (
+          <div className="flex flex-col gap-2">
+            <h3 className="text-sm font-semibold">{t("experiments.env.otherTitle")}</h3>
+            <ConfigEntryTable entries={env.extra} emptyTitle={t("experiments.env.emptyTitle")} />
+          </div>
+        )}
+      </div>
+    </RunPageOutputRow>
   );
 }

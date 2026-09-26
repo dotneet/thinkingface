@@ -2,13 +2,15 @@
 
 このページは thinkingface を運用する人向けです。評価用にどう起動するか、どのデータベース・ストレージバックエンドが存在してどちらを選ぶべきか、GCP 上の本番環境がどのようなものか、そしてアップグレードやバックアップまわりで何が起きる（あるいは起きない）のかを扱います。環境変数の完全なリファレンスは [設定](configuration.md) を参照してください。
 
-!!! warning "ネットワークの到達範囲が、あなたの唯一の読み取り境界です"
+!!! warning "ネットワークの到達範囲が、読み取りの境界です"
 
-    thinkingface にはリポジトリ単位の公開設定がありません。インスタンス上のすべてのリポジトリは、
-    認証の有無にかかわらず、そこに到達できる誰からでも読み取り・クローン・ダウンロードが可能です
-    — アカウントと Organization のロールが制御するのは書き込みだけです。想定する利用者だけが
-    到達できる場所にデプロイし、ネットワークの到達可能性こそが実質的なアクセス制御であると
-    捉えてください。
+    thinkingface にはリポジトリ単位の公開設定がありません。デフォルトでは、インスタンス上のすべての
+    リポジトリは、認証の有無にかかわらず、そこに到達できる誰からでも読み取り・クローン・ダウンロード
+    が可能です — アカウントと Organization のロールが制御するのは書き込みだけです。想定する利用者
+    だけが到達できる場所にデプロイし、ネットワークの到達可能性こそが実質的なアクセス制御であると
+    捉えてください。`TF_REQUIRE_AUTH_FOR_READ`（[後述](#require-sign-in-for-reads)）を使うと
+    インスタンス全体で匿名の読み取りを閉じられますが、サインインできるアカウントであれば、依然として
+    すべてのリポジトリを読めます。
 
 ## ローカル環境と評価用デプロイ（Docker Compose） { #local-and-evaluation-deployment-docker-compose }
 
@@ -24,7 +26,7 @@ docker compose up -d
 
 | サービス | イメージ / ビルド元 | 役割 |
 |---|---|---|
-| `web` | `frontend/` からビルド | Next.js の UI。ポート 3000 で `next start` により提供される |
+| `web` | `frontend/` からビルド | Next.js の UI。ポート 3000 で `next start` により提供される。ブラウザからの API 呼び出しを `api` へ中継する役割も担う（[後述](#how-the-web-ui-reaches-the-api)） |
 | `api` | `backend/` からビルド | Go のバイナリ。HF 互換 REST API、git smart HTTP、LFS、Parquet ビューア、バックグラウンド同期ワーカーをすべて 1 プロセスに含み、ポート 8080 で待ち受ける |
 | `postgres` | `postgres:17-alpine` | メタデータ用データベース（リポジトリ、ユーザー、トークン、ジョブ、実験の run） |
 | `gcs` | `fsouza/fake-gcs-server` | 実際の GCS バケットの代わりとなるローカルエミュレータ |
@@ -32,8 +34,13 @@ docker compose up -d
 起動後は次のようになります。
 
 - Web UI: <http://localhost:3000>
-- API: <http://localhost:8080>
+- API: <http://localhost:8080> — `tf`、`huggingface_hub`、`git`、trackio シム用です。ブラウザに
+  必要なのは Web UI のポートだけです
 - デフォルトのログイン: `admin` / `admin`（下記の警告を参照）
+
+これらのポートは `127.0.0.1` にだけ公開されるので、Docker を動かしているマシンからしか到達でき
+ません。その理由と、LAN に開放する方法・リモートのマシンに SSH 経由で接続する方法については
+[ネットワークからのアクセス](#network-access) を参照してください。
 
 ### データの永続化 { #data-persistence }
 
@@ -71,6 +78,240 @@ make clean              # down -v on both stacks (default and SQLite) -- also re
     `localhost`/`127.0.0.1`（および `.localhost` 名）以外になっている場合、サーバーはこれらの
     デフォルト値のままでは一切起動を拒否します。社内ホスト名や IP に対する平文の `http://` インスタンス
     も対象で、`https://` の場合に限りません。
+
+## ネットワークからのアクセス { #network-access }
+
+### 公開ポートはデフォルトでループバック限定 { #published-ports-are-loopback-only-by-default }
+
+`docker-compose.yml` は `web`（3000）、`api`（8080）、git over SSH（2222）のポートを `127.0.0.1`
+に公開します。**Docker が公開したポートはホストのファイアウォールを素通りします。** Docker は
+`ufw` や `firewalld` などよりも前段に独自のパケットフィルタのルールを書き込むため、すべての
+インターフェースに公開したポートは、ホストのファイアウォールの設定にかかわらずネットワーク全体
+から到達できてしまいます。よく知られた `admin` / `admin` のログインを持つ立ち上げ直後のスタックを、
+それが動いているマシンの中だけに閉じておけるのは、ループバックへのバインドのおかげです。
+
+同じネットワーク上の他のマシンからスタックに到達できるようにするには、`.env` で `TF_BIND_ADDR`
+を設定してコンテナを作り直します。
+
+```bash
+echo 'TF_BIND_ADDR=0.0.0.0' >> .env    # または特定のインターフェースのアドレス
+docker compose up -d
+```
+
+その前に `TF_ADMIN_PASSWORD` と `TF_SESSION_SECRET` を設定し、`TF_PUBLIC_URL` を他のマシンが
+使うアドレスに向けてください（ループバック以外になると、サーバーはデフォルトのシークレットのまま
+では起動を拒否します — 上の警告を参照）。
+
+`postgres`（5432）と `gcs` エミュレータ（4443）は、`TF_BIND_ADDR` の値にかかわらず常に
+`127.0.0.1` に公開されます。エミュレータには独自の認証がなく、どちらかに直接到達する必要がある
+のはホスト側のツール（`make test-store-pg`、E2E スイートのバケット検査）だけだからです。コンテナ
+同士は、これとは関係なく Compose のネットワーク経由で通信します。
+
+### Web UI が API に到達する仕組み { #how-the-web-ui-reaches-the-api }
+
+ブラウザが通信するのは Web UI のオリジンだけです。ブラウザが行う API 呼び出し — `/api/` 配下と
+ファイルのダウンロード — はすべて Next.js のサーバーに届き、そこから `API_URL`（Compose では
+`http://api:8080`）の API へ転送されます。アップロードもダウンロードも、両方向ともストリーミング
+で中継されます。したがって、次のようになります。
+
+- **ブラウザに必要なのは Web UI のポートだけです。** API のポートは、ブラウザ以外のクライアント
+  — `tf` CLI、trackio シム、`huggingface_hub`、`git`、`git-lfs` — のためのものです。
+- **`API_URL` はコンテナの起動時に読まれます。** イメージに焼き込まれるわけではないので、同じ
+  `web` イメージを API の置き場所にかかわらず使え、値を変えるときに必要なのはリビルドではなく
+  再起動です。
+- **Web UI のために `TF_ALLOWED_ORIGINS` へエントリを追加する必要はありません。** ブラウザが
+  クロスオリジンで API を呼ぶことはないからです。状態を変更するリクエストについては、転送の前に
+  プロキシ自身が、自分のオリジンに対して同等のクロスサイトリクエストのチェックを行います。
+- **クローン URL と、使い方スニペット中の `HF_ENDPOINT` は、引き続き `TF_PUBLIC_URL` から
+  作られます。** これらは API と直接通信する `git` や `huggingface_hub` のためのものなので、
+  `TF_PUBLIC_URL` は依然として *それらのクライアント* が API に到達するアドレスでなければなりません。
+  エミュレータモード（`STORAGE_DRIVER=gcs-emulator`）では、同じ URL が Git LFS の転送リンクにも
+  埋め込まれるため、`TF_PUBLIC_URL` に到達できないマシンからの LFS のアップロードやダウンロードは
+  失敗します。
+
+これがデフォルトの動作で、`NEXT_PUBLIC_API_URL` を空にして web イメージをビルドした場合に適用され
+ます。Compose と `frontend/Dockerfile` は、明示的に設定しない限りそのようにビルドします。
+`NEXT_PUBLIC_API_URL` を設定すると、従来のクロスオリジンの動作になります。ブラウザがその URL を
+直接呼ぶので、ブラウザからその URL に到達できる必要があり、値はイメージに組み込まれ（変更した後は
+`docker compose up -d --build web` でリビルドします）、Web UI のオリジンを `TF_ALLOWED_ORIGINS`
+に列挙しておく必要があります。
+
+!!! note "プロキシの背後でのクライアントアドレス"
+    プロキシの背後では、ブラウザからのリクエストはすべて `web` コンテナから API に届きます。一方で
+    API は、パスワード認証の失敗をクライアントアドレスごとにレート制限しています（デフォルトで
+    1 分あたり 10 回、`TF_AUTH_RATE_LIMIT_PER_MIN`）。1 人の訪問者がサインインに失敗し続けても他の
+    ブラウザが巻き込まれないよう、web コンテナのサーバーは各ブラウザ自身のソケットアドレスを専用の
+    ヘッダーで API に伝え、API はそのヘッダーを Web 層から届いたときだけ信用します。
+
+    - API 側の `TF_TRUSTED_WEB_PROXIES` に接続元が含まれている場合。compose ファイルではこれを
+      web コンテナの名前である `web` にしているので、追加の設定なしで機能します。API のポートを直接
+      呼び出す相手は別のアドレスから届くため、このヘッダーを偽装できません。
+    - あるいは、`TF_WEB_PROXY_SECRET` を持つリクエストの場合。API と web コンテナの両方に同じ値
+      （32 バイト以上、`openssl rand -hex 32`）を設定します。Web UI がロードバランサ経由で API に
+      到達し、接続元アドレスが何も示さない構成ではこちらを使います。Terraform のデプロイは値を自動で
+      生成します。
+
+    `X-Forwarded-For` に追記するリバースプロキシが Web UI の前段にある場合は、web コンテナの
+    `TF_WEB_TRUSTED_PROXY_HOPS` にその段数を設定してください。ブラウザのアドレスを右からその数だけ
+    手前のエントリとして読み取ります。そうでなければ `0` のままにしておけば、ブラウザが
+    `X-Forwarded-For` に何を書いても無視されます。`TF_TRUST_PROXY_IPS` は *API* の前段のプロキシ
+    向けの、これとは別の古いスイッチです。すべての接続から届く `X-Forwarded-For` を信用するので、
+    API のポートが信頼できないクライアントから到達できない場合にだけ有効にしてください。
+
+    `TF_TRUSTED_WEB_PROXIES` も `TF_WEB_PROXY_SECRET` も設定していない場合（あるいは Web UI を本番用
+    サーバーではなく `next start` / `next dev` で動かしている場合）、ブラウザはすべて 1 つのアドレス
+    の枠を共有する状態に戻ります。このとき Web UI に到達できる者は誰でも、自分のサインインを繰り返し
+    失敗させるだけで、全員のブラウザサインインを `429` にできてしまいます。既存のセッション、個人
+    アクセストークン、`git`、SSH はこの制限を経由しません。`huggingface_hub`、`git`、`tf` は API と
+    直接通信するので、それぞれ自身のアドレスで識別されます。
+
+### SSH トンネル越しのプライベートなデプロイ { #a-private-deployment-over-an-ssh-tunnel }
+
+自分や小さなチームのために thinkingface を動かすよくある方法は、パブリック IP を一切持たない VM
+に置き、SSH（直接、踏み台経由、あるいは `gcloud compute ssh --tunnel-through-iap`）で到達する
+構成です。ポートがループバック限定なので何も外に公開されず、トンネルが唯一の入口になります。
+
+VM 上で:
+
+```bash
+cp .env.example .env
+# 下のトンネル越しにワークステーションから到達する API のアドレス。クローン URL、
+# HF_ENDPOINT のスニペット、（エミュレータ使用時は）LFS のリンクに埋め込まれる。
+echo 'TF_PUBLIC_URL=http://localhost:18080' >> .env
+docker compose up -d
+```
+
+ワークステーション上で:
+
+```bash
+ssh -N -L 13000:127.0.0.1:3000 -L 18080:127.0.0.1:8080 my-vm
+```
+
+- Web UI は <http://localhost:13000> です。ブラウザに必要なのはこの転送だけです。
+- 2 つ目の転送は、それ以外のすべて — `tf` CLI、trackio シム、`huggingface_hub`、`git` — のための
+  ものです。
+
+  ```bash
+  tf login http://localhost:18080
+  export THINKINGFACE_ENDPOINT=http://localhost:18080   # trackio シム
+  export HF_ENDPOINT=http://localhost:18080 HF_HUB_DISABLE_XET=1
+  ```
+
+- 代わりに同じポート番号で転送する（`-L 3000:127.0.0.1:3000 -L 8080:127.0.0.1:8080`）と、
+  デフォルトの `TF_PUBLIC_URL=http://localhost:8080` のまま動きます。ワークステーション側でそれらの
+  ポートが空いていれば、こちらでも構いません。
+- ここでの `TF_PUBLIC_URL` はループバックアドレスなので、サーバーはデフォルト以外のシークレットを
+  要求しません。それでも、VM に他の誰かがシェルを持っていたりトンネルを共有したりするなら、
+  `TF_ADMIN_PASSWORD` と `TF_SESSION_SECRET` を設定してください。
+- git over SSH を使うなら `-L 12222:127.0.0.1:2222` を追加し、UI に表示されるクローン URL と一致
+  するよう `TF_SSH_PUBLIC_PORT=12222` を設定します。
+
+別の場所にある学習用マシンも、同じ方法 — そのマシンから VM への `ssh -L` — で同じ API に到達
+できます。VM にまったく到達できないマシンなら、run をオフラインで記録して後から同期してください
+（[オフラインの run](../guides/experiments.md#offline-runs-and-tf-experiments-sync)）。
+
+### 読み取りにもサインインを必須にする { #require-sign-in-for-reads }
+
+デフォルトでは、インスタンスに到達できる人なら誰でも、サインインせずにすべてのリポジトリとすべての
+run を読めます。ネットワークの境界だけでは足りない場合 — 1 つの VPN の背後で複数のチームが共有する
+インスタンスや、インターネットから到達できるインスタンス — は、次のように設定します。
+
+```bash
+TF_REQUIRE_AUTH_FOR_READ=true
+TF_ALLOW_SIGNUP=false
+```
+
+こうすると、すべてのリクエストが身元 — セッションクッキー、アクセストークン、HTTP Basic 認証の
+いずれか — を伴う必要があり、伴わないものは読み取りか書き込みかにかかわらず、エラー種別
+`authentication_required` の `401` で応答されます。サインインが必要だと知り、実際にサインインする
+ために必要な少数のルート — `/healthz`、サインイン・サインアップ・サインアウト、`/api/v1/me`、
+`/api/v1/server-info` — だけは開いたままです。`/api/openapi.json` はこれに含まれません。
+
+各クライアントの振る舞いは次のとおりです。
+
+- **Web UI**: サインインしていない訪問者は `/login` にリダイレクトされ、サインイン後は元のページ
+  に戻ります。
+- **`git` / `git-lfs`**: `401` に `WWW-Authenticate` チャレンジが付くので、git は認証情報を尋ねて
+  （あるいはクレデンシャルヘルパーに問い合わせて）再試行します。パスワードとしてアクセストークンを
+  使ってください。サーバーが署名済みの Git LFS 転送リンクは引き続き使えます。git over SSH は影響を
+  受けません。もともと登録済みの鍵が必要だからです。
+- **`huggingface_hub` / `datasets`**: 書き込みのときと同じく `HF_TOKEN` を設定します。
+- **`tf` と trackio シム**: 読み取りにもトークンが必要になります — `tf login`、
+  `THINKINGFACE_API_KEY`、または `THINKINGFACE_TOKEN`。
+
+停止中のアカウントや、サインアップの承認待ちのアカウントも、ここでは匿名として扱われます。
+**`TF_ALLOW_SIGNUP=false` と組み合わせてください** — あるいは `TF_SIGNUP_REQUIRE_APPROVAL` /
+`TF_SIGNUP_EMAIL_DOMAINS` と。そうしないと、サインアップフォームに到達できる人なら誰でも
+アカウントを作って結局すべてを読めてしまいます。サインイン済みのアカウントと有効なトークン
+（read スコープのものやリポジトリ限定のものも含む）は、依然としてすべてのリポジトリを読めます。
+この設定は匿名アクセスを閉じるものであって、リポジトリ単位の公開設定を追加するものではありません。
+
+## ブラウザを使わずにトークンを発行する { #provisioning-a-token-without-a-browser }
+
+CI パイプライン、学習用マシン、AI エージェントといった自動化にはアクセストークンが必要ですが、
+立ち上げたばかりのインスタンスでは、まだ誰も Web UI を開いていないかもしれません。
+`thinkingface admin token create` は、Web UI のトークンフォームと同じルールでデータベースの
+すぐそばからトークンを発行し、stdout にはトークンだけを出力します。
+
+```bash
+docker compose exec -T api thinkingface admin token create admin \
+    --name ci --expires-in-days 30 --repo datasets/admin/trackio-metrics > ci-token.txt
+chmod 600 ci-token.txt
+```
+
+`-T` は重要です。これがないと Docker が端末を割り当て、コマンドの stderr（何を、誰のために、
+いつまで有効なものとして作ったか）がファイルに混ざってしまいます。`--repo` はトークンをその
+リポジトリに限定しますが、リポジトリはあらかじめ存在している必要があります — 先に `tf up`、
+`huggingface_hub`、または Web UI で作成してください。`--output FILE` を使うとトークンをファイルに
+書き出せますが（モード `0600`、既存ファイルなら拒否）、そのファイルは *コンテナの中* に作られるので、
+Compose では上のように stdout をリダイレクトするほうが簡単です。すべてのフラグについては
+[コマンドラインからトークンを発行する](../reference/authentication.md#minting-a-token-from-the-command-line)
+を、リポジトリ限定トークンで何ができるかについては
+[トークンをリポジトリに限定する](../reference/authentication.md#restricting-a-token-to-repositories)
+を参照してください。
+
+## ログからのトラブルシューティング { #troubleshooting-from-the-logs }
+
+### 実効設定のログ行 { #the-effective-configuration-line }
+
+`thinkingface serve` は起動時に、実際に解決した設定 — `.env`、Compose の `environment:` ブロック、
+組み込みのデフォルト値がすべて反映された後のもの — を 1 行ログに出力します。
+
+```bash
+docker compose logs api | grep 'effective configuration'
+```
+
+```json
+{"time":"...","level":"INFO","msg":"effective configuration","public_url":"http://localhost:8080",
+ "listen_addr":":8080","ssh_enabled":true,"ssh_addr":":2222","ssh_public_port":"",
+ "allowed_origins":["http://localhost:8080","http://localhost:3000","http://127.0.0.1:3000"],
+ "database_driver":"postgres","storage_driver":"gcs-emulator","storage_bucket":"thinkingface",
+ "storage_prefix":"","storage_emulator_host":"http://gcs:4443","wal_mode":"shadow","allow_signup":true,
+ "signup_require_approval":false,"signup_email_domains_count":0,"org_creation":"anyone",
+ "require_auth_for_read":false,"cookie_secure":"inferred","trust_proxy_ips":false,
+ "trusted_proxy_hops":1,"session_secret_default":true,"admin_password_default":true}
+```
+
+設定が効いていないように見えるときは、この行を見ればサーバーがそもそもその値を受け取ったかどうかが
+分かります。シークレットがログに出ることはありません。データベースはドライバ名としてしか現れず、
+`session_secret_default` / `admin_password_default` は、その 2 つがまだよく知られた開発用の
+デフォルト値のままかどうかを示すだけです。
+
+### "cors: origin not allowed" { #cors-origin-not-allowed }
+
+```json
+{"level":"WARN","msg":"cors: origin not allowed","origin":"http://10.0.0.5:3000",
+ "hint":"add it to TF_ALLOWED_ORIGINS, or use the web UI's same-origin /api proxy"}
+```
+
+そのオリジンのブラウザのページが API を直接呼び、CORS ヘッダーを返してもらえなかったため、ページは
+レスポンスを読めませんでした。オリジンごとに 1 回（異なるオリジン 64 個まで）記録されます。
+デフォルトの同一オリジンのプロキシを使っていればブラウザがクロスオリジンで API を呼ぶことはない
+ので、これが出るのは通常、web イメージが `NEXT_PUBLIC_API_URL` を設定した状態でビルドされている
+場合です。Web UI のオリジン（スキーム・ホスト・ポートを、ブラウザのアドレスバーに表示されている
+とおりに）を `TF_ALLOWED_ORIGINS` に追加するか、`NEXT_PUBLIC_API_URL` を空にして web イメージを
+リビルドしてください。見覚えのないオリジンであれば、それは API を探っている別のページであり、
+対処は不要です。
 
 ## データベースバックエンドを選ぶ { #choosing-a-database-backend }
 
@@ -237,14 +478,15 @@ Terraform はインフラをプロビジョニングしますが、その後の�
   `infra/README.md` を参照）で、`web` サービスが存在すればその `*.run.app` URL にデフォルトで
   設定されるため、この手順をしなくても最初から機能します。`web_public_url` を明示的に設定するのは、
   `web` の前にカスタムドメインを置く場合だけで構いません。
-- **web フロントエンドのイメージは、api の URL が分かった後にビルドする必要があります。**
-  他の設定とは異なり、`NEXT_PUBLIC_API_URL` はコンテナ起動時に環境変数として読まれるのではなく、
-  `docker build` 時に Next.js のブラウザバンドルに組み込まれるためです。`web` をデプロイする前に
-  `docker build --build-arg NEXT_PUBLIC_API_URL=$(terraform output -raw api_url) ...` でビルド
-  してください。それより前に（あるいは build arg なしで）ビルドすると
-  `frontend/lib/api.ts` のフォールバック `http://localhost:8080` が焼き込まれ、API と通信する
-  クライアント側の機能（トークン、アカウント／プロフィール／SSH 鍵設定、Webhook、リポジトリ
-  作成、Parquet ビューアなど）が全訪問者に対して動かなくなります。
+- **`infra/README.md` では、api の URL が分かった *後に* web フロントエンドのイメージを
+  ビルドします。** `docker build --build-arg NEXT_PUBLIC_API_URL=$(terraform output -raw api_url) ...`
+  という形です。これは [Web UI が API に到達する仕組み](#how-the-web-ui-reaches-the-api) で説明した
+  クロスオリジンのモードです。ブラウザは api の `*.run.app` の URL を直接呼び、値は起動時に読まれる
+  のではなく `docker build` 時にブラウザバンドルに組み込まれ、Web UI のオリジンが
+  `TF_ALLOWED_ORIGINS`（前述のとおり Terraform が導出します）に含まれている必要があります。
+  build arg なしでビルドすると、代わりに同一オリジンのイメージになり、そのサーバーがブラウザからの
+  API 呼び出しを、Terraform がすでに `web` サービスに設定している `API_URL` へ転送します — その
+  方法を取る場合は、同セクションのクライアントアドレスに関する注意に気をつけてください。
 
 この Terraform ではプロビジョニングされないもの: カスタムドメインや TLS のフロントエンドです。
 Cloud Run 自体が TLS を終端し、各サービスをそれぞれの `*.run.app` の URL で提供するため、

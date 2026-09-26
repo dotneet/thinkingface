@@ -140,6 +140,22 @@ export interface UserResponse {
   user: User;
 }
 /**
+ * ServerInfo is GET /api/v1/server-info: the instance-wide settings a
+ * signed-out client needs before it can decide what to show. It is readable
+ * without authentication even when TF_REQUIRE_AUTH_FOR_READ is on.
+ */
+export interface ServerInfo {
+  /**
+   * RequireAuthForRead is true when every read needs a signed-in caller,
+   * so the web UI sends a signed-out visitor to /login first.
+   */
+  require_auth_for_read: boolean;
+  /**
+   * AllowSignup mirrors TF_ALLOW_SIGNUP.
+   */
+  allow_signup: boolean;
+}
+/**
  * NamespaceProfile is the public face of a namespace -- a user or an
  * organisation -- as GET /api/v1/namespaces/{ns} returns it
  * (docs/dev/namespace-design.md §7.1). Both kinds share the same profile
@@ -217,6 +233,12 @@ export interface TokenItem {
    * ExpiresAt is null for a token that never expires.
    */
   expires_at: string | null;
+  /**
+   * Repos restricts what the token may change to these repositories,
+   * spelled "{datasets|models}/{ns}/{name}". Empty means unrestricted
+   * (docs/dev/agent-features.md §3).
+   */
+  repos: string[];
 }
 /**
  * TokenListResponse is the body of GET /api/v1/tokens.
@@ -481,6 +503,12 @@ export interface ExpProjectListItem {
   full_name: string;
   num_projects: number /* int */;
   updated_at: string;
+  /**
+   * Projects names the repository's projects, so the listing can link
+   * straight to one instead of making every visit go through the
+   * repository page first.
+   */
+  projects: string[];
 }
 /**
  * ExpProjectListResponse is the body of GET /api/v1/experiments.
@@ -500,6 +528,46 @@ export interface ExpProject {
   name: string;
   num_runs: number /* int */;
   updated_at: string;
+  /**
+   * MetricGoals says, per metric, whether a lower or a higher value is
+   * better. Metrics without a goal are absent (docs/dev/agent-features.md §2.2).
+   */
+  metric_goals: { [key: string]: MetricGoal};
+  /**
+   * StatusCounts counts the project's runs by derived status (archived runs
+   * excluded), so a listing can say "2 running, 1 stale" without loading
+   * every run. Only GET /api/v1/experiments/{ns}/{repo} fills it; it is
+   * empty elsewhere.
+   */
+  status_counts: { [K in RunStatus]?: number };
+  /**
+   * Best is, for each metric with a goal, the best non-archived run and its
+   * value. Filled like StatusCounts.
+   */
+  best: ExpProjectBest[];
+}
+/**
+ * ExpProjectBest is the best run of a project for one goal metric.
+ */
+export interface ExpProjectBest {
+  metric: string;
+  goal: MetricGoal;
+  run: string;
+  value: number /* float64 */;
+}
+/**
+ * MetricGoal is the direction in which a metric improves.
+ */
+export const MetricGoalMin = "min";
+export const MetricGoalMax = "max";
+export type MetricGoal = typeof MetricGoalMin | typeof MetricGoalMax;
+/**
+ * ExpProjectUpdateRequest is PATCH /api/v1/experiments/{ns}/{repo}/{project}.
+ * MetricGoals is merged key by key: "" removes that metric's goal, and a
+ * metric not mentioned is left alone.
+ */
+export interface ExpProjectUpdateRequest {
+  metric_goals?: { [key: string]: string};
 }
 /**
  * ExpRepoResponse is an experiment repository together with its projects.
@@ -537,6 +605,19 @@ export interface ExpRun {
    * Summary holds the last value seen for each metric.
    */
   summary: { [key: string]: number /* float64 */};
+  /**
+   * SummaryMin and SummaryMax hold the smallest and largest value seen for
+   * each metric over the whole run.
+   */
+  summary_min: { [key: string]: number /* float64 */};
+  summary_max: { [key: string]: number /* float64 */};
+  /**
+   * HeartbeatSecs is how often the logging client promised to check in
+   * while the run is alive; 0 when it never declared one (an older client,
+   * or a run indexed from a parquet export). It shortens the window after
+   * which a silent run reads as stale.
+   */
+  heartbeat_secs: number /* int */;
   /**
    * Group is the sweep this run belongs to, as `trackio.init(group=...)`
    * declared it, and JobType the role it played in that sweep
@@ -608,6 +689,72 @@ export interface ExpRunModelInput {
  */
 export interface ExpRunListResponse {
   runs: ExpRun[];
+  /**
+   * MetricGoals is the project's declared goals (ExpProject.MetricGoals).
+   */
+  metric_goals: { [key: string]: MetricGoal};
+  /**
+   * Best names, for every metric with a goal, the best non-archived run
+   * among the runs listed. A metric no listed run has logged is absent.
+   */
+  best: { [key: string]: string};
+}
+/**
+ * ExpRunResponse is the body of GET .../runs/{run}.
+ */
+export interface ExpRunResponse {
+  run: ExpRun;
+}
+/**
+ * ExpConfigDiffKey is one config key whose value differs across the runs
+ * compared. A run that does not have the key at all is absent from Values.
+ */
+export interface ExpConfigDiffKey {
+  key: string;
+  values: { [key: string]: unknown};
+}
+/**
+ * ExpConfigDiffResponse is the body of GET .../{project}/config-diff.
+ */
+export interface ExpConfigDiffResponse {
+  runs: string[];
+  keys: ExpConfigDiffKey[];
+}
+/**
+ * ExpNotesResponse is a project's experiment notebook, the Markdown file
+ * {project}/NOTES.md on the repository's default branch.
+ */
+export interface ExpNotesResponse {
+  path: string;
+  content: string;
+  /**
+   * Exists is false when the project has no notes yet; Content is "" then.
+   */
+  exists: boolean;
+  /**
+   * BlobSHA is the git blob of the file as read, "" when it does not exist.
+   * Send it back as ExpNotesUpdateRequest.BaseSHA to detect a concurrent edit.
+   */
+  blob_sha: string;
+  /**
+   * CommitSHA is the default branch's head the file was read from.
+   */
+  commit_sha: string;
+}
+/**
+ * ExpNotesUpdateRequest replaces a project's notes with Content.
+ */
+export interface ExpNotesUpdateRequest {
+  content: string;
+  /**
+   * BaseSHA, when present, must equal the current blob ("" = the file must
+   * not exist yet) or the write is refused with 409.
+   */
+  base_sha?: string;
+  /**
+   * Message is the commit message; a default is used when empty.
+   */
+  message?: string;
 }
 /**
  * ExpArtifact is one file a run stored under its artifact directory.

@@ -226,6 +226,12 @@ func (s *Server) handleRepoDetail(w http.ResponseWriter, r *http.Request) {
 
 // createRepo is the shared path behind both the UI and HF create endpoints.
 func (s *Server) createRepo(ctx context.Context, user *store.User, kind, ns, name, description string) (*store.Repo, error) {
+	// Both callers refuse a repository-restricted token already (requireWrite);
+	// repeated here because this is where the namespace role is read without
+	// any knowledge of the token, so it must not be reachable by one.
+	if tokenRestricted(ctx) {
+		return nil, restrictedTokenError{"this access token is restricted to specific repositories and cannot create repositories"}
+	}
 	if kind != "dataset" && kind != "model" {
 		return nil, badInput("kind must be dataset or model, got %q", kind)
 	}
@@ -363,9 +369,12 @@ func rollbackCreateRepo(ctx context.Context, s *Server, repo *store.Repo, remove
 func writeCreateRepoError(w http.ResponseWriter, err error) bool {
 	var bad inputError
 	var forb forbiddenError
+	var restricted restrictedTokenError
 	switch {
 	case errors.Is(err, store.ErrConflict):
 		return false
+	case errors.As(err, &restricted):
+		refuseRestrictedToken(w, restricted.Error())
 	case errors.As(err, &forb):
 		forbidden(w, forb.Error())
 	case errors.As(err, &bad):
@@ -413,7 +422,7 @@ func (s *Server) loadRepoForDelete(w http.ResponseWriter, r *http.Request, kind,
 		return nil, false
 	}
 	if !s.canAdmin(r.Context(), repo) {
-		forbidden(w, "you must have admin access to "+repo.Namespace+" to delete "+repo.FullName())
+		refuseRepoAdmin(r.Context(), w, "you must have admin access to "+repo.Namespace+" to delete "+repo.FullName())
 		return nil, false
 	}
 	return repo, true
@@ -516,7 +525,7 @@ func (s *Server) handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.canAdmin(r.Context(), repo) {
-		forbidden(w, "you must have admin access to "+repo.Namespace+" to change settings on "+repo.FullName())
+		refuseRepoAdmin(r.Context(), w, "you must have admin access to "+repo.Namespace+" to change settings on "+repo.FullName())
 		return
 	}
 	if repo.Archived() {
@@ -728,7 +737,7 @@ func (s *Server) setRepoArchived(w http.ResponseWriter, r *http.Request, archive
 		return
 	}
 	if !s.canAdmin(r.Context(), repo) {
-		forbidden(w, "you must have admin access to "+repo.Namespace+" to archive "+repo.FullName())
+		refuseRepoAdmin(r.Context(), w, "you must have admin access to "+repo.Namespace+" to archive "+repo.FullName())
 		return
 	}
 	user := currentUser(r.Context())
@@ -751,7 +760,10 @@ func (s *Server) setRepoArchived(w http.ResponseWriter, r *http.Request, archive
 // ------------------------------------------------------- HF-compatible repos
 
 func (s *Server) handleHFCreateRepo(w http.ResponseWriter, r *http.Request) {
-	user, ok := s.requireWrite(w, r)
+	// requireWriteScope rather than requireWrite: a repository-restricted
+	// token is still refused (below), but only once the body says which
+	// repository it was after -- see answerRestrictedHFCreate.
+	user, ok := s.requireWriteScope(w, r)
 	if !ok {
 		return
 	}
@@ -771,6 +783,10 @@ func (s *Server) handleHFCreateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind, ns, name := hfRepoTarget(user, req.Type, req.Name, req.Organization)
+	if tokenRestricted(r.Context()) {
+		s.answerRestrictedHFCreate(w, r, kind, ns, name)
+		return
+	}
 
 	repo, err := s.createRepo(r.Context(), user, kind, ns, name, "")
 	if err != nil {
@@ -791,6 +807,34 @@ func (s *Server) handleHFCreateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, hfRepoCreateResponse(s.repoWebURL(repo), repo.FullName(), kind))
+}
+
+// answerRestrictedHFCreate answers create_repo for a repository-restricted
+// token, which may never create anything. The one exception is not a creation
+// at all: huggingface_hub's create_repo(exist_ok=True) -- which push_to_hub and
+// most upload scripts call before they write -- aimed at a repository the
+// token is allowed to write gets the same 409 an existing repository always
+// gets, which the client swallows. Refusing that would break every such script
+// for a token handed out precisely so it could write to that repository.
+//
+// Anything else is token_restricted, whether or not the repository exists, so
+// the answer says nothing about repositories outside the token's list.
+func (s *Server) answerRestrictedHFCreate(w http.ResponseWriter, r *http.Request, kind, ns, name string) {
+	ctx := r.Context()
+	if kind == "dataset" || kind == "model" {
+		existing, err := s.store.GetRepo(ctx, kind, ns, name)
+		if err == nil && s.canWriteIgnoringArchive(ctx, existing) {
+			body := hfRepoCreateResponse(s.repoWebURL(existing), existing.FullName(), kind)
+			body["error"] = fmt.Sprintf("You already created this %s repo", kind)
+			writeJSON(w, http.StatusConflict, body)
+			return
+		}
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			internalError(w, "load repository", err)
+			return
+		}
+	}
+	refuseRestrictedToken(w, "this access token is restricted to specific repositories and cannot create repositories")
 }
 
 func hfRepoCreateResponse(url, fullName, kind string) map[string]any {

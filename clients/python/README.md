@@ -106,6 +106,49 @@ those values, so a point carrying one could never be delivered. A diverging
 loss therefore shows up as a gap in the chart rather than stopping the run's
 logging.
 
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `THINKINGFACE_ENDPOINT` | `http://localhost:8080` | server URL |
+| `THINKINGFACE_TOKEN` | — | access token (write scope) |
+| `THINKINGFACE_REPO` | `{user}/trackio-metrics` | target dataset repository |
+| `THINKINGFACE_MODE` | `online` | `offline` writes the run to disk instead (below) |
+| `THINKINGFACE_OFFLINE_DIR` | `./thinkingface-offline` | where offline runs and spilled points go |
+| `THINKINGFACE_HEARTBEAT_SECS` | `30` | liveness interval (max 3600, `0` = off) |
+| `THINKINGFACE_ARTIFACT_INTERVAL` | `60` | seconds between background artifact commits (`0` = only `save()` / `finish()`) |
+| `THINKINGFACE_META` / `THINKINGFACE_SYSTEM_METRICS` | on | `off` disables env metadata / system telemetry |
+
+### Config values
+
+`config` may be a dict, an `argparse.Namespace` or a dataclass instance —
+`trackio.init(project="mnist", config=parser.parse_args())` works as is.
+Values JSON cannot carry are converted when they are sent instead of costing
+the run its whole config:
+
+| Value | Stored as |
+| --- | --- |
+| `pathlib.Path` | its string |
+| `enum.Enum` | its `.value` (its name if the value is not encodable) |
+| dataclass / `argparse.Namespace` | a nested object of its fields |
+| numpy scalar / array | a number / a list (arrays over 1000 elements: a short `ndarray(shape=…, dtype=…)` string) |
+| `datetime` / `date` | ISO 8601 |
+| `set` / `tuple` | a list |
+| non-string dict keys | their `str()` |
+| `NaN` / `inf` / `-inf` | the strings `"nan"` / `"inf"` / `"-inf"` |
+| anything else | `str(value)`, with one warning per run naming the keys |
+
+`run.config` itself keeps your original objects; only what is sent is
+converted. numpy is never imported by the client.
+
+### Heartbeats
+
+Every batch tells the server how often to expect news from the run
+(`heartbeat_secs`, 30 by default), and a run that has sent nothing for that
+long — a slow evaluation, a long checkpoint write — posts an empty batch as a
+liveness ping. The server uses it to mark a run whose process died as
+`stale` within a couple of minutes instead of half an hour, without flagging
+a run that is merely quiet. Set `THINKINGFACE_HEARTBEAT_SECS=0` to turn both
+off.
+
 ### Artifacts
 
 `trackio.log_artifact(path, name=None)` attaches a file — or a whole
@@ -124,12 +167,40 @@ trackio.log_artifact("out/eval.json", name="eval/raw.json")  # → .../artifacts
 trackio.log_artifact("out/samples/")  # the whole directory, layout preserved
 ```
 
-Nothing is uploaded while the run is going: everything logged is committed
-together when `finish()` runs, so a run that saves twenty plots makes one
-commit rather than twenty. A path that does not exist, a name containing
-`..`, or the reserved name `metrics.parquet` (the server reads a file with
-that name as an experiment's metrics table) is a warning, never an
-exception.
+Artifacts are committed in batches while the run is going: everything
+staged is committed together in the background every
+`THINKINGFACE_ARTIFACT_INTERVAL` seconds (60 by default) when anything is
+pending, `trackio.save()` commits right away, and `finish()` commits the
+rest. A run that saves twenty plots a minute therefore makes one commit a
+minute, and a crash no longer loses every artifact the run ever logged. A
+path that does not exist, a name containing `..`, or the reserved name
+`metrics.parquet` (the server reads a file with that name as an experiment's
+metrics table) is a warning, never an exception.
+
+### Images and tables
+
+`trackio.Image` and `trackio.Table` can be logged like any metric value. They
+are not metrics: each is written to a file and committed as an artifact of
+the run, named after its key and step, and the point itself carries no value
+for that key.
+
+```python
+trackio.log({"samples": trackio.Image("out/grid.png"), "loss": 0.4}, step=100)
+# → {project}/artifacts/{run}/media/samples/step_00000100.png
+
+trackio.log({"preds": trackio.Table(columns=["text", "label"], data=rows)}, step=100)
+# → {project}/artifacts/{run}/tables/preds/step_00000100.parquet
+```
+
+- `Image(value, caption=None)` takes a path to an image file, a PIL image, or
+  an HxW / HxWxC numpy array (uint8, or floats in `[0, 1]`). A PNG file is
+  committed as is; anything else is encoded with Pillow, which is optional —
+  without it, arrays and PIL images are skipped with one warning, and a
+  non-PNG file is committed in its own format.
+- `Table(dataframe=None, columns=None, data=None)` takes a pandas DataFrame,
+  a `pyarrow.Table`, or rows (lists matching `columns`, or dicts). It is
+  written as parquet with pyarrow (or pandas), so the repository's parquet
+  viewer and SQL console can open it.
 
 ### Linking the model a run produced
 
@@ -204,7 +275,7 @@ Continuing a run means:
 - **Steps continue.** `init()` reads the run's `last_step` from the server
   and starts at `last_step + 1`, so the chart is one line rather than two
   overlapping ones. `run.step` is that starting step, which is what the loop
-  above resumes from.
+  above resumes from. (Online only: an offline run cannot ask — see below.)
 - **Status goes back to `running`.** A run that was already marked
   `finished` (or `failed`) reverts on the first flush.
 - **Configs are merged.** Keys only the previous attempt set survive; on a
@@ -221,6 +292,57 @@ Continuing a run means:
 `resume="never"` with an auto-generated name (no `name=`) makes no extra
 request, so the default path works exactly as before with no server
 reachable.
+
+### Offline runs and `tf experiments sync`
+
+With `THINKINGFACE_MODE=offline` (or `trackio.init(..., mode="offline")`)
+the shim makes no network request at all — not even to look up your user —
+and writes the run to a directory instead:
+
+```
+thinkingface-offline/20260927T101500-mnist-baseline-1a2b3c4d/
+    run.jsonl     # init / log / artifact / model / finish records, one per line
+    artifacts/    # copies of log_artifact files, media and tables
+```
+
+Everything behaves as online: points (including system metrics) are written
+every 5 seconds or 100 points, `log_artifact` copies the file in right away,
+`log_model` records the revision you pass (or none — there is no server to
+ask), and `finish()` records the final status. Where the directory is, and
+the command that uploads it, is printed to stderr when the run starts:
+
+```bash
+tf experiments sync thinkingface-offline/          # every run in it
+tf experiments sync thinkingface-offline/ --watch  # keep following live runs
+```
+
+The repository is `THINKINGFACE_REPO` if set, otherwise
+`{user}/trackio-metrics` resolved at sync time; `resume=` is honoured at sync
+time too — with one exception: **offline, steps do not continue.** There is no
+server to ask for the existing run's `last_step`, so auto-numbered steps start
+at 0 and the sync does not shift them (a one-time warning says so). Pass
+explicit `step=` if an offline run continues an existing one:
+
+```python
+run = trackio.init(project="mnist", name="baseline", resume="allow", mode="offline")
+for step in range(checkpoint_step + 1, 100_000):
+    trackio.log({"loss": ...}, step=step)
+```
+
+The **online** mode uses the same directories as a safety net. Points it
+would otherwise have had to drop — the oldest ones when the in-memory retry
+buffer overflows during a long outage, and whatever is still unsent when
+`finish()` runs out of retries — are written to a run directory under
+`THINKINGFACE_OFFLINE_DIR` instead (and so are artifacts `finish()` could not
+commit), and the warning names the directory and the `tf experiments sync`
+command that delivers them to the same run. Points the server *rejected*
+(a 4xx: bad token, unknown repository, malformed data) are still dropped.
+If the disk refuses too, the points are dropped with a warning as before —
+the client never raises into your training script. A spilled record leaves
+the config out once the server already has it, so syncing late points never
+rolls back a newer config; and when `THINKINGFACE_REPO` was unset and your
+user could not be looked up, the directory names no repository and the sync
+resolves `{user}/trackio-metrics` itself.
 
 ### Drop-in replacement for `trackio`
 

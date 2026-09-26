@@ -8,7 +8,7 @@ import { CodeBlock } from "@/components/ui/code-block";
 import { Dialog } from "@/components/ui/dialog";
 import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
-import { publicApiBase } from "@/lib/paths";
+import { hubEndpoint } from "@/lib/paths";
 import { type UsageSnippetKind, usageEnv, usageSnippets } from "@/lib/usage-snippets";
 import type { RepoKind } from "@/types/api";
 
@@ -39,21 +39,29 @@ export function UsageDialog({
   ns,
   name,
   rev,
+  cloneUrl,
 }: {
   kind: RepoKind;
   ns: string;
   name: string;
   /** The revision the reader is looking at, named in the "pin it" hint. */
   rev: string;
+  /**
+   * The repository's `clone_url`, which carries the API's `TF_PUBLIC_URL` —
+   * the endpoint when the browser itself talks to the API through this app's
+   * origin (see `hubEndpoint`).
+   */
+  cloneUrl: string;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
 
   const label = t(kind === "dataset" ? "repo.usage.labelDataset" : "repo.usage.labelModel");
-  // The endpoint is never hard-coded: it is the same origin the browser uses
-  // for downloads and resolve URLs, so a deployment behind another host name
-  // hands out snippets that actually work.
-  const env = usageEnv(publicApiBase());
+  // The endpoint is never hard-coded: it is the API's public URL, so a
+  // deployment behind another host name hands out snippets that actually
+  // work — and never the web UI's origin, which only proxies part of the HF
+  // surface.
+  const env = usageEnv(hubEndpoint(cloneUrl, kind, ns, name));
   const snippets = usageSnippets(kind, `${ns}/${name}`);
 
   return (

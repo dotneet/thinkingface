@@ -3,8 +3,9 @@
 import { Archive, ArchiveRestore, Star, Tag, Trash2 } from "lucide-react";
 import Link from "next/link";
 
+import { BestRunMarker } from "@/components/experiments/metric-goal-marker";
 import { RunColorDot } from "@/components/experiments/run-color-dot";
-import { RunStatusBadge } from "@/components/experiments/run-status-badge";
+import { RunStatusInline } from "@/components/experiments/run-status-indicator";
 import { runColumnKey, useRunTable } from "@/components/experiments/run-table-context";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,6 +13,7 @@ import { Checkbox } from "@/components/ui/field";
 import { Td, Tr } from "@/components/ui/table";
 import { TimeText } from "@/components/ui/time-text";
 import { cn } from "@/lib/cn";
+import { isBestRun, metricGoal } from "@/lib/exp-goals";
 import { expRunHref, metricCellText } from "@/lib/experiments";
 import { formatNumber } from "@/lib/format";
 import { useT } from "@/lib/i18n/client";
@@ -46,7 +48,7 @@ export function RunRow({
   onToggle: (name: string) => void;
 }) {
   const t = useT();
-  const { ns, repo, project, colorIndex, columns, runModels, actions } = useRunTable();
+  const { ns, repo, project, colorIndex, columns, runModels, actions, goals, best } = useRunTable();
   const busy = actions.pendingRun === run.name;
   const models = runModels?.[run.name] ?? [];
 
@@ -78,7 +80,8 @@ export function RunRow({
                   <RunColorDot run={run.name} colorIndex={colorIndex} />
                   <Link
                     href={expRunHref(ns, repo, project, run.name)}
-                    className="hover:text-accent hover:underline"
+                    title={run.name}
+                    className="max-w-[20rem] truncate hover:text-accent hover:underline"
                   >
                     {run.name}
                   </Link>
@@ -92,7 +95,7 @@ export function RunRow({
           case "status":
             return (
               <Td key={key}>
-                <RunStatusBadge status={run.status} updatedAt={run.updated_at} />
+                <RunStatusInline status={run.status} updatedAt={run.updated_at} />
               </Td>
             );
           case "tags":
@@ -101,9 +104,16 @@ export function RunRow({
                 {run.tags.length === 0 ? (
                   <Dash />
                 ) : (
-                  <div className="flex flex-wrap gap-1.5">
+                  // One line, clipped: the full list is on hover. Wrapping here
+                  // is what made a row with three tags three lines tall.
+                  <div
+                    className="flex max-w-[16rem] gap-1.5 overflow-hidden"
+                    title={run.tags.join(", ")}
+                  >
                     {run.tags.map((tag) => (
-                      <Badge key={tag}>{tag}</Badge>
+                      <Badge key={tag} className="shrink-0">
+                        {tag}
+                      </Badge>
                     ))}
                   </div>
                 )}
@@ -111,41 +121,59 @@ export function RunRow({
             );
           case "lastStep":
             return (
-              <Td key={key} className="tabular-nums">
+              <Td key={key} align="right" className="tabular-nums">
                 {formatNumber(run.last_step)}
               </Td>
             );
           case "metric": {
             const value = run.summary?.[column.metric];
             return (
-              <Td key={key} className="tabular-nums">
-                {typeof value === "number" ? metricCellText(value) : <Dash />}
+              <Td key={key} align="right" className="tabular-nums">
+                <span className="inline-flex items-center justify-end gap-1">
+                  {typeof value === "number" ? metricCellText(value) : <Dash />}
+                  {isBestRun(best, column.metric, run.name) && (
+                    <BestRunMarker metric={column.metric} goal={metricGoal(goals, column.metric)} />
+                  )}
+                </span>
               </Td>
             );
           }
           case "started":
             return (
               <Td key={key} className="text-fg-muted">
-                <TimeText iso={run.started_at} style="dateTime" />
+                {/* Relative on the page, the exact time on hover (TimeText's
+                    title) — "2026年9月27日 05:51" wrapped to three lines. */}
+                <TimeText iso={run.started_at} style="relative" />
               </Td>
             );
           case "models":
             return (
               <Td key={key}>
-                {models.length === 0 ? (
+                {models.length === 0 || !models[0] ? (
                   <Dash />
                 ) : (
-                  <div className="flex flex-col gap-0.5">
-                    {models.map((m) => (
-                      <Link
-                        key={m.repo.full_name}
-                        href={repoBase(m.repo.kind, m.repo.namespace, m.repo.name)}
-                        className="font-mono text-xs text-accent hover:underline"
-                      >
-                        {m.repo.full_name}
-                      </Link>
-                    ))}
-                  </div>
+                  // The first checkpoint as a link, the rest counted: a stacked
+                  // list made the row as tall as the number of checkpoints.
+                  <span
+                    className="inline-flex items-center gap-1.5"
+                    title={models.map((m) => m.repo.full_name).join("\n")}
+                  >
+                    <Link
+                      href={repoBase(
+                        models[0].repo.kind,
+                        models[0].repo.namespace,
+                        models[0].repo.name,
+                      )}
+                      className="font-mono text-xs text-accent hover:underline"
+                    >
+                      {models[0].repo.full_name}
+                    </Link>
+                    {models.length > 1 && (
+                      <span className="text-xs font-medium text-fg-subtle">
+                        +{models.length - 1}
+                      </span>
+                    )}
+                  </span>
                 )}
               </Td>
             );

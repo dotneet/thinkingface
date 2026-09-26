@@ -148,6 +148,9 @@ type expHarness struct {
 	indexer *Indexer
 	flusher *Flusher
 	repo    *store.Repo
+	// dbPath is the SQLite file behind st, for the few tests that have to
+	// reach a column no store method writes (backdateRun).
+	dbPath string
 }
 
 func newExpHarness(t *testing.T) *expHarness {
@@ -157,7 +160,8 @@ func newExpHarness(t *testing.T) *expHarness {
 	}
 	ctx := context.Background()
 
-	st, err := store.Open(ctx, "sqlite://"+filepath.Join(t.TempDir(), "store.db"))
+	dbPath := filepath.Join(t.TempDir(), "store.db")
+	st, err := store.Open(ctx, "sqlite://"+dbPath)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -203,7 +207,7 @@ func newExpHarness(t *testing.T) *expHarness {
 	}
 
 	h := &expHarness{
-		t: t, ctx: ctx, st: st, git: git, obj: obj, repo: repo,
+		t: t, ctx: ctx, st: st, git: git, obj: obj, repo: repo, dbPath: dbPath,
 		indexer: NewIndexer(st, git, obj, parquet),
 		flusher: NewFlusher(st, git, obj, parquet, "off"),
 	}
@@ -268,7 +272,48 @@ func (h *expHarness) ingest(project, run, status string, steps []int64, key stri
 	if err := h.st.InsertPoints(h.ctx, runID, points); err != nil {
 		h.t.Fatalf("insert points: %v", err)
 	}
+	h.mergeIngestSummaries(projectID, run, points)
 	return projectID
+}
+
+// mergeIngestSummaries folds a batch into the run's stored summary /
+// summary_min / summary_max the way the ingest handler does (last value in
+// batch order; the extremes widened). The indexer trusts those stored values
+// over the parquet's while points are still buffered, so a harness that
+// buffered points without them would be testing a state production never
+// reaches.
+func (h *expHarness) mergeIngestSummaries(projectID int64, run string, points []store.MetricPoint) {
+	h.t.Helper()
+	stored, err := h.st.GetExpRun(h.ctx, projectID, run)
+	if err != nil {
+		h.t.Fatalf("get run: %v", err)
+	}
+	summary, lo, hi := map[string]any{}, map[string]any{}, map[string]any{}
+	for k, v := range stored.Summary {
+		summary[k] = v
+	}
+	for k, v := range stored.SummaryMin {
+		lo[k] = v
+	}
+	for k, v := range stored.SummaryMax {
+		hi[k] = v
+	}
+	for _, p := range points {
+		for k, v := range p.Metrics {
+			summary[k] = v
+			if cur, ok := lo[k].(float64); !ok || v < cur {
+				lo[k] = v
+			}
+			if cur, ok := hi[k].(float64); !ok || v > cur {
+				hi[k] = v
+			}
+		}
+	}
+	if _, err := h.st.UpsertExpRunWith(h.ctx, projectID, store.ExpRunUpsert{
+		Name: run, Summary: summary, SummaryMin: lo, SummaryMax: hi, Touch: true,
+	}); err != nil {
+		h.t.Fatalf("upsert run summaries: %v", err)
+	}
 }
 
 func (h *expHarness) series(project string) []Series {

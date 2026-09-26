@@ -157,11 +157,13 @@ func (pgDialect) isUniqueViolation(err error) bool { return pgIsUniqueViolation(
 
 func (pgDialect) queries() dialectQueries {
 	return dialectQueries{
-		upsertExpRun: `INSERT INTO exp_runs (project_id, name, status, config, summary, metric_keys, last_step, num_points, started_at, group_name, job_type)
+		upsertExpRun: `INSERT INTO exp_runs (project_id, name, status, config, summary, metric_keys, last_step, num_points, started_at, group_name, job_type,
+			                      summary_min, summary_max, heartbeat_secs)
 			 VALUES ($1, $2, COALESCE(NULLIF($3, ''), 'finished'),
 			         COALESCE($4::jsonb, '{}'::jsonb), COALESCE($5::jsonb, '{}'::jsonb),
 			         COALESCE($6::jsonb, '[]'::jsonb), $7, $8, $9,
-			         COALESCE($10::text, ''), COALESCE($11::text, ''))
+			         COALESCE($10::text, ''), COALESCE($11::text, ''),
+			         COALESCE($12::jsonb, '{}'::jsonb), COALESCE($13::jsonb, '{}'::jsonb), $14::integer)
 			 ON CONFLICT (project_id, name) DO UPDATE SET
 			   status      = COALESCE(NULLIF($3, ''), exp_runs.status),
 			   config      = COALESCE($4::jsonb, exp_runs.config),
@@ -172,7 +174,11 @@ func (pgDialect) queries() dialectQueries {
 			   started_at  = COALESCE(exp_runs.started_at, $9),
 			   group_name  = COALESCE($10::text, exp_runs.group_name),
 			   job_type    = COALESCE($11::text, exp_runs.job_type),
-			   updated_at  = now()
+			   summary_min = COALESCE($12::jsonb, exp_runs.summary_min),
+			   summary_max = COALESCE($13::jsonb, exp_runs.summary_max),
+			   heartbeat_secs = COALESCE(NULLIF($14::integer, 0), exp_runs.heartbeat_secs),
+			   updated_at  = CASE WHEN $15::boolean OR $7::bigint > exp_runs.last_step
+			                      THEN now() ELSE exp_runs.updated_at END
 			 RETURNING id`,
 		updateExpRunAnnotation: `UPDATE exp_runs SET
 			   tags        = COALESCE($3::text[], tags),

@@ -372,6 +372,12 @@ order: deploy `api` (and learn its URL) before you build `web`.
      ../frontend
    docker push ${REGION}-docker.pkg.dev/${PROJECT}/thinkingface/frontend:latest
    ```
+   Alternatively, build without the build arg: the image then calls the API
+   on its own origin and forwards `/api/*` to the `API_URL` env var this
+   Terraform already sets on `web` (read at container start,
+   `docs/dev/agent-features.md` §1.2). That image needs no rebuild when
+   `api`'s URL changes and no CORS entry, at the cost of every browser API
+   call taking an extra hop through `web`.
 5. Point Cloud Run's `web` service at the real frontend image (same
    ignore-drift pattern):
    ```bash
@@ -401,7 +407,9 @@ order: deploy `api` (and learn its URL) before you build `web`.
 If `api`'s public URL changes later (a new custom domain, a regenerated
 `*.run.app` name, etc.), both step 3 (re-apply with the new `api_public_url`)
 and step 4 (rebuild+redeploy `web` with the new build arg) need to be redone
--- the frontend value is baked into the image, not read at container start.
+-- the frontend value is baked into the image, not read at container start
+(unless you built the same-origin image described under step 4, which reads
+`API_URL` at start and only needs step 3).
 
 ## Notes on the runtime filesystem
 

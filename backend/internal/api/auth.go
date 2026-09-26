@@ -27,12 +27,24 @@ const (
 	// ctxKeyAuthRecord carries the mutable *authRecord requestLogger installs
 	// and identify fills in (see authRecord in server.go).
 	ctxKeyAuthRecord
-	// ctxKeyTokenName carries the name of the access token a request
-	// authenticated with, for /api/whoami-v2 to report. Empty for every other
-	// credential: a session cookie and an HTTP Basic password have no token
-	// behind them to name.
-	ctxKeyTokenName
+	// ctxKeyToken carries the *tokenIdentity of the access token a request
+	// authenticated with: its name for /api/whoami-v2 to report, and its
+	// repository restriction for the authorization funnels in authz.go.
+	// Absent for every other credential: a session cookie and an HTTP Basic
+	// password have no token behind them.
+	ctxKeyToken
 )
+
+// tokenIdentity is the access token behind a request.
+type tokenIdentity struct {
+	id   int64
+	name string
+	// restricted is true for a token minted with a repository list
+	// (docs/dev/agent-features.md §3); repoIDs is that list, minus
+	// repositories that have since been deleted. See tokenAllowsRepo.
+	restricted bool
+	repoIDs    map[int64]struct{}
+}
 
 // authMethod names the credential a request arrived with. It is recorded on
 // the access log line (see requestLogger) and it is what tells the /admin
@@ -52,19 +64,22 @@ const (
 func (s *Server) identify(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		user, scope, method, tokenName := s.resolveIdentity(r)
+		user, scope, method, tok := s.resolveIdentity(r)
 		if user != nil {
 			ctx = context.WithValue(ctx, ctxKeyUser, user)
 			ctx = context.WithValue(ctx, ctxKeyScope, scope)
 			ctx = context.WithValue(ctx, ctxKeyCookieAuth, method == authSession)
-			if tokenName != "" {
-				ctx = context.WithValue(ctx, ctxKeyTokenName, tokenName)
+			if tok != nil {
+				ctx = context.WithValue(ctx, ctxKeyToken, tok)
 			}
 			// Hand the access log the subject it could not otherwise see:
 			// requestLogger runs upstream of this middleware, so it holds a
 			// pointer that is filled in here rather than a value it read.
 			if rec := authRecordFrom(ctx); rec != nil {
 				rec.username, rec.method = user.Username, method
+				if tok != nil {
+					rec.tokenID, rec.tokenName, rec.tokenRestricted = tok.id, tok.name, tok.restricted
+				}
 			}
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -86,10 +101,10 @@ func (s *Server) identify(next http.Handler) http.Handler {
 // this package runs) and handleLogin's own checkPassword call (which answers
 // passwordDisabled / passwordPending).
 //
-// The fourth return value is the name of the access token the request
-// authenticated with, or "" when it did not use one.
-func (s *Server) resolveIdentity(r *http.Request) (*store.User, string, authMethod, string) {
-	user, scope, method, tokenName := s.resolveCredential(r)
+// The fourth return value is the access token the request authenticated
+// with, or nil when it did not use one.
+func (s *Server) resolveIdentity(r *http.Request) (*store.User, string, authMethod, *tokenIdentity) {
+	user, scope, method, tok := s.resolveCredential(r)
 	if user.Blocked() {
 		// Warn rather than Info: a credential for a barred account is still
 		// being presented, which is worth seeing in a log even though the
@@ -102,25 +117,25 @@ func (s *Server) resolveIdentity(r *http.Request) (*store.User, string, authMeth
 			"username", user.Username, "user_id", user.ID,
 			"auth", string(method), "client_ip", s.clientIP(r),
 			"path", r.URL.Path)
-		return nil, "", authNone, ""
+		return nil, "", authNone, nil
 	}
-	return user, scope, method, tokenName
+	return user, scope, method, tok
 }
 
-func (s *Server) resolveCredential(r *http.Request) (*store.User, string, authMethod, string) {
+func (s *Server) resolveCredential(r *http.Request) (*store.User, string, authMethod, *tokenIdentity) {
 	ctx := r.Context()
 
 	if header := r.Header.Get("Authorization"); header != "" {
 		if token, ok := strings.CutPrefix(header, "Bearer "); ok {
-			u, sc, name := s.userForToken(ctx, strings.TrimSpace(token))
-			return u, sc, authToken, name
+			u, sc, tok := s.userForToken(ctx, strings.TrimSpace(token))
+			return u, sc, authToken, tok
 		}
 		// git and git-lfs authenticate with Basic; the password carries the
 		// token and the username is ignored.
 		if username, password, ok := r.BasicAuth(); ok {
 			if strings.HasPrefix(password, auth.TokenPrefix) {
-				u, sc, name := s.userForToken(ctx, password)
-				return u, sc, authToken, name
+				u, sc, tok := s.userForToken(ctx, password)
+				return u, sc, authToken, tok
 			}
 			// Basic-with-a-real-password is accepted on every route, so this
 			// is the cheapest place in the server to force bcrypt work. Both
@@ -131,24 +146,24 @@ func (s *Server) resolveCredential(r *http.Request) (*store.User, string, authMe
 			u, outcome := s.checkPassword(ctx, s.clientAddrKey(r), username, password)
 			switch outcome {
 			case passwordOK:
-				return u, "write", authPassword, ""
+				return u, "write", authPassword, nil
 			case passwordDisabled, passwordPending:
 				// Carried out so resolveIdentity can log it by name; the
 				// gate there is what turns it into an anonymous request.
-				return u, "", authPassword, ""
+				return u, "", authPassword, nil
 			}
-			return nil, "", authNone, ""
+			return nil, "", authNone, nil
 		}
 	}
 
 	if cookie, err := r.Cookie(auth.SessionCookieName); err == nil {
 		if userID, epoch, err := s.sessions.Verify(cookie.Value); err == nil {
 			if u, err := s.store.GetUserByID(ctx, userID); err == nil && u.SessionEpoch == epoch {
-				return u, "write", authSession, ""
+				return u, "write", authSession, nil
 			}
 		}
 	}
-	return nil, "", authNone, ""
+	return nil, "", authNone, nil
 }
 
 // checkPassword resolves a username/password pair under the brute-force and
@@ -252,16 +267,40 @@ func (s *Server) checkPassword(ctx context.Context, addrKey, username, password 
 	return user, passwordOK
 }
 
-// The third return value is the token's own name, which /api/whoami-v2
-// reports as auth.accessToken.displayName -- the string `hf auth whoami` and
-// the HF client libraries print to say *which* of a user's tokens is in use.
-func (s *Server) userForToken(ctx context.Context, token string) (*store.User, string, string) {
+// The third return value describes the token itself: its name, which
+// /api/whoami-v2 reports as auth.accessToken.displayName -- the string `hf auth
+// whoami` and the HF client libraries print to say *which* of a user's tokens
+// is in use -- and its repository restriction.
+//
+// The restriction is loaded here, on every request, rather than cached: a
+// restricted token must never be mistaken for an unrestricted one, so a
+// failure to read it fails the whole credential (the request proceeds as
+// anonymous, which can change nothing) instead of defaulting to "no list".
+func (s *Server) userForToken(ctx context.Context, token string) (*store.User, string, *tokenIdentity) {
 	if token == "" {
-		return nil, "", ""
+		return nil, "", nil
 	}
 	user, tok, err := s.store.LookupToken(ctx, auth.HashToken(token))
 	if err != nil {
-		return nil, "", ""
+		return nil, "", nil
+	}
+	ident := &tokenIdentity{id: tok.ID, name: tok.Name}
+	// LookupToken already said whether a restriction exists, in the same
+	// statement that found the token -- so an unrestricted token (the common
+	// case, on every git / LFS / ingest request) costs no second query, and
+	// the "restricted" answer still cannot be lost to a failed separate read.
+	if tok.Restricted {
+		restriction, err := s.store.LookupTokenRestriction(ctx, tok.ID)
+		if err != nil {
+			slog.Error("load access token restriction; treating the request as anonymous",
+				"token_id", tok.ID, "username", user.Username, "error", err)
+			return nil, "", nil
+		}
+		ident.restricted = true
+		ident.repoIDs = make(map[int64]struct{}, len(restriction.RepoIDs))
+		for _, id := range restriction.RepoIDs {
+			ident.repoIDs[id] = struct{}{}
+		}
 	}
 	submitDetached(func() {
 		// Detached from the request so a slow write never delays the response.
@@ -269,7 +308,7 @@ func (s *Server) userForToken(ctx context.Context, token string) (*store.User, s
 		defer cancel()
 		_ = s.store.TouchToken(writeCtx, tok.ID)
 	})
-	return user, tok.Scope, tok.Name
+	return user, tok.Scope, ident
 }
 
 // detachedWriteTimeout bounds a database write that has been cut loose from
@@ -311,8 +350,16 @@ func currentScope(ctx context.Context) string {
 // currentTokenName is the name of the access token this request authenticated
 // with, or "" for a session, a password, or an anonymous request.
 func currentTokenName(ctx context.Context) string {
-	name, _ := ctx.Value(ctxKeyTokenName).(string)
-	return name
+	if tok := currentToken(ctx); tok != nil {
+		return tok.name
+	}
+	return ""
+}
+
+// currentToken is the access token this request authenticated with, or nil.
+func currentToken(ctx context.Context) *tokenIdentity {
+	tok, _ := ctx.Value(ctxKeyToken).(*tokenIdentity)
+	return tok
 }
 
 // cookieAuthenticated reports whether this request's identity came from the
@@ -332,8 +379,33 @@ func (s *Server) requireUser(w http.ResponseWriter, r *http.Request) (*store.Use
 	return user, true
 }
 
-// requireWrite additionally rejects read-scoped tokens.
+// requireWrite is the gate for account-level writes -- everything that
+// changes state and is not scoped to one repository: creating repositories,
+// tokens, SSH keys, the profile and password, organisations, webhooks,
+// transfer decisions, site administration. It rejects read-scoped tokens and
+// repository-restricted ones (docs/dev/agent-features.md §3).
+//
+// A handler whose write is about one repository must not use this: it takes
+// requireWriteScope (if it needs an early scope check at all) and then the
+// repository-level gate -- loadRepoForWrite, canWrite, canAdmin -- which is
+// where a restricted token is matched against its list.
 func (s *Server) requireWrite(w http.ResponseWriter, r *http.Request) (*store.User, bool) {
+	user, ok := s.requireWriteScope(w, r)
+	if !ok {
+		return nil, false
+	}
+	if tokenRestricted(r.Context()) {
+		refuseRestrictedToken(w, "this access token is restricted to specific repositories and "+
+			"cannot make account-level changes; use an unrestricted token or sign in to the web UI")
+		return nil, false
+	}
+	return user, true
+}
+
+// requireWriteScope rejects anonymous callers and read-scoped tokens, and
+// nothing else. It is requireWrite without the restricted-token refusal, for
+// the few handlers that go on to authorize a specific repository themselves.
+func (s *Server) requireWriteScope(w http.ResponseWriter, r *http.Request) (*store.User, bool) {
 	user, ok := s.requireUser(w, r)
 	if !ok {
 		return nil, false
