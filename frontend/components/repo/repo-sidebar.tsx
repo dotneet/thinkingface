@@ -108,6 +108,7 @@ export async function RepoSidebar({ repo }: { repo: RepoDetail }) {
         ns={repo.namespace}
         name={repo.name}
         rev={repo.default_branch}
+        cloneUrl={repo.clone_url}
       />
 
       <GcsAccessDialog

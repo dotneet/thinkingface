@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  parallelAxes,
+  parallelLines,
   axisPoint,
   axisTicks,
   axisX,
   axisY,
+  defaultParallelAxes,
   linePath,
   MAX_AXIS_CATEGORIES,
-  parallelAxes,
-  parallelLines,
   repairParallelEmphasis,
 } from "@/lib/run-parallel";
 import type { ExpRun } from "@/types/api";
@@ -24,6 +25,9 @@ function run(name: string, overrides: Partial<ExpRun> = {}): ExpRun {
     config: {},
     metric_keys: [],
     summary: {},
+    summary_min: {},
+    summary_max: {},
+    heartbeat_secs: 0,
     group: "",
     job_type: "",
     tags: [],
@@ -230,5 +234,26 @@ describe("geometry", () => {
     expect(d).toMatch(new RegExp(`^M${expectedX.toFixed(2)} ${expectedY.toFixed(2)} L`));
     // Sanity check the two pads are not interchangeable for this point.
     expect(axisY(expectedFirst.t, 100, 20)).not.toBe(expectedY);
+  });
+});
+
+describe("defaultParallelAxes", () => {
+  const runs = [
+    run("a", { config: { lr: 0.1, epochs: 10, model: "s" }, summary: { loss: 1, "val/cer": 0.2 } }),
+    run("b", { config: { lr: 0.3, epochs: 10, model: "b" }, summary: { loss: 2, "val/cer": 0.1 } }),
+  ];
+
+  it("takes varying config axes and ends on the primary metric", () => {
+    expect(defaultParallelAxes(parallelAxes(runs), "val/cer")).toEqual([
+      "config:lr",
+      "config:model",
+      "metric:val/cer",
+    ]);
+  });
+
+  it("falls back to the first metric, then to the first axes", () => {
+    expect(defaultParallelAxes(parallelAxes(runs)).at(-1)).toBe("metric:loss");
+    const flat = [run("a", { config: { epochs: 10 }, summary: { loss: 1 } })];
+    expect(defaultParallelAxes(parallelAxes(flat))).toEqual(["config:epochs", "metric:loss"]);
   });
 });

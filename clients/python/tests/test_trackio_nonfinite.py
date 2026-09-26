@@ -21,6 +21,7 @@ body.
 
 from __future__ import annotations
 
+import copy
 import json
 import warnings
 from typing import Any
@@ -194,7 +195,21 @@ class TestUnencodableBatches:
         run.flush()
         assert _metrics(server) == [{"loss": 1.0}]
 
-    def test_an_unencodable_config_does_not_take_the_points_down_with_it(self, server):
+    def test_a_non_finite_config_value_is_sent_as_a_string(self, server):
+        """JSON cannot spell inf, so the config sanitiser does: the config and
+        the points go out together instead of the config being dropped."""
+        run = trackio.init("proj", name="r8", config={"limit": float("inf"), "x": float("nan")})
+        run.log({"loss": 1.0})
+        run.flush()
+
+        bodies = _log_bodies(server)
+        assert len(bodies) == 1
+        assert bodies[0]["config"] == {"limit": "inf", "x": "nan"}
+
+    def test_an_unencodable_config_does_not_take_the_points_down_with_it(self, server, monkeypatch):
+        """The last-resort path under the sanitiser: should a config ever
+        still reach the wire unencodable, the points go out without it."""
+        monkeypatch.setattr(trackio._sanitize, "sanitize", lambda v: (copy.deepcopy(v), []))
         run = trackio.init("proj", name="r8", config={"limit": float("inf")})
         run.log({"loss": 1.0})
         with pytest.warns(UserWarning, match="config for run 'r8' cannot be encoded"):

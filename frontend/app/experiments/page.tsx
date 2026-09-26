@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { titleMetadata } from "@/app/page-metadata";
+import { badgeClass } from "@/components/ui/badge";
 import { buttonClass } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
@@ -11,6 +12,7 @@ import { FilterChip } from "@/components/ui/filter-chip";
 import { Pagination } from "@/components/ui/pagination";
 import { TimeText } from "@/components/ui/time-text";
 import { errorMessage } from "@/lib/api-error-message";
+import { previewList } from "@/lib/exp-list-status";
 import { listExperiments } from "@/lib/experiments";
 import { formatNumber } from "@/lib/format";
 import { getT } from "@/lib/i18n/server";
@@ -25,6 +27,9 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 
 const LIMIT = 30;
+
+/** Project chips shown per repository row before "+N". */
+const PROJECT_PREVIEW = 3;
 
 type PageSearchParams = { search?: string; offset?: string };
 
@@ -168,31 +173,82 @@ export default async function ExperimentsPage({
         )
       ) : (
         <>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {result.data.items.map((item) => (
-              <Link
-                key={item.full_name}
-                href={`/experiments/${encodeURIComponent(item.namespace)}/${encodeURIComponent(item.name)}`}
-                className="flex flex-col gap-2 rounded-lg border border-border bg-bg-raised p-4 transition-colors hover:border-border-strong hover:bg-bg-hover"
-              >
-                <div className="flex items-center gap-1.5 text-sm font-medium">
-                  <FlaskConical size={14} className="text-fg-subtle" />
-                  {item.full_name}
-                </div>
-                <div className="flex items-center gap-3 text-xs font-medium text-fg-subtle">
-                  <span className="tabular-nums">
-                    {t(
-                      item.num_projects === 1
-                        ? "experiments.index.projectsOne"
-                        : "experiments.index.projectsOther",
-                      { count: formatNumber(item.num_projects) },
+          {/* A list, not a card grid: a row reads left to right — repository,
+              then its projects as direct links, then when it last changed —
+              and the names line up for scanning, which matters when most of
+              them share a prefix (`e2e-…`). The whole row opens the
+              repository (a stretched link); the project chips sit above it
+              and go straight to that project. */}
+          <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-lg border border-border bg-bg-raised">
+            {result.data.items.map((item) => {
+              const repoHref = `/experiments/${encodeURIComponent(item.namespace)}/${encodeURIComponent(item.name)}`;
+              const { shown, hidden } = previewList(item.projects ?? [], PROJECT_PREVIEW);
+              return (
+                <li
+                  key={item.full_name}
+                  className="relative flex flex-wrap items-center gap-x-4 gap-y-1.5 px-4 py-2.5 transition-colors hover:bg-bg-hover lg:flex-nowrap"
+                >
+                  <Link
+                    href={repoHref}
+                    className="flex min-w-0 flex-1 items-center gap-1.5 text-sm font-medium text-fg after:absolute after:inset-0 after:content-[''] hover:underline lg:w-80 lg:flex-none"
+                  >
+                    <FlaskConical size={14} className="shrink-0 text-fg-subtle" />
+                    <span className="truncate" title={item.full_name}>
+                      {item.full_name}
+                    </span>
+                  </Link>
+                  {/* Below lg the chips drop to a second line of their own
+                      (order-last + full width); from lg they sit between the
+                      name and the meta on one line. */}
+                  <div
+                    className="order-last flex w-full min-w-0 items-center gap-1.5 overflow-hidden lg:order-none lg:w-auto lg:flex-1"
+                    aria-label={t("experiments.listPage.projectsAria", { repo: item.full_name })}
+                  >
+                    {shown.map((name) => (
+                      <Link
+                        key={name}
+                        href={`${repoHref}/${encodeURIComponent(name)}`}
+                        title={name}
+                        className={badgeClass({
+                          className:
+                            "relative z-10 max-w-[11rem] shrink-0 truncate hover:border-border-strong hover:text-fg",
+                        })}
+                      >
+                        <span className="truncate">{name}</span>
+                      </Link>
+                    ))}
+                    {hidden > 0 && (
+                      <span
+                        className="shrink-0 text-xs font-medium tabular-nums text-fg-subtle"
+                        title={t("experiments.listPage.moreProjectsTitle", {
+                          count: formatNumber(hidden),
+                        })}
+                      >
+                        {t("experiments.listPage.moreProjects", { count: formatNumber(hidden) })}
+                      </span>
                     )}
-                  </span>
-                  <TimeText iso={item.updated_at} style="relative" />
-                </div>
-              </Link>
-            ))}
-          </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-3 text-xs font-medium whitespace-nowrap text-fg-subtle lg:order-last">
+                    {/* The chips already show the projects on a phone; the
+                        count is for the wide layout, where "+N" hides some. */}
+                    <span className="hidden tabular-nums sm:inline">
+                      {t(
+                        item.num_projects === 1
+                          ? "experiments.index.projectsOne"
+                          : "experiments.index.projectsOther",
+                        { count: formatNumber(item.num_projects) },
+                      )}
+                    </span>
+                    <TimeText
+                      iso={item.updated_at}
+                      style="relative"
+                      className="text-right sm:w-24"
+                    />
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
           <Pagination
             offset={offset}
             limit={LIMIT}

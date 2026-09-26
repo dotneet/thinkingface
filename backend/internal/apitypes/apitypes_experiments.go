@@ -11,6 +11,10 @@ type ExpProjectListItem struct {
 	FullName    string    `json:"full_name"`
 	NumProjects int       `json:"num_projects"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	// Projects names the repository's projects, so the listing can link
+	// straight to one instead of making every visit go through the
+	// repository page first.
+	Projects []string `json:"projects"`
 }
 
 // ExpProjectListResponse is the body of GET /api/v1/experiments.
@@ -26,6 +30,40 @@ type ExpProject struct {
 	Name      string    `json:"name"`
 	NumRuns   int       `json:"num_runs"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// MetricGoals says, per metric, whether a lower or a higher value is
+	// better. Metrics without a goal are absent (docs/dev/agent-features.md §2.2).
+	MetricGoals map[string]MetricGoal `json:"metric_goals"`
+	// StatusCounts counts the project's runs by derived status (archived runs
+	// excluded), so a listing can say "2 running, 1 stale" without loading
+	// every run. Only GET /api/v1/experiments/{ns}/{repo} fills it; it is
+	// empty elsewhere.
+	StatusCounts map[RunStatus]int `json:"status_counts" tstype:"{ [K in RunStatus]?: number }"`
+	// Best is, for each metric with a goal, the best non-archived run and its
+	// value. Filled like StatusCounts.
+	Best []ExpProjectBest `json:"best"`
+}
+
+// ExpProjectBest is the best run of a project for one goal metric.
+type ExpProjectBest struct {
+	Metric string     `json:"metric"`
+	Goal   MetricGoal `json:"goal"`
+	Run    string     `json:"run"`
+	Value  float64    `json:"value"`
+}
+
+// MetricGoal is the direction in which a metric improves.
+type MetricGoal string
+
+const (
+	MetricGoalMin MetricGoal = "min"
+	MetricGoalMax MetricGoal = "max"
+)
+
+// ExpProjectUpdateRequest is PATCH /api/v1/experiments/{ns}/{repo}/{project}.
+// MetricGoals is merged key by key: "" removes that metric's goal, and a
+// metric not mentioned is left alone.
+type ExpProjectUpdateRequest struct {
+	MetricGoals map[string]string `json:"metric_goals,omitempty"`
 }
 
 // ExpRepoResponse is an experiment repository together with its projects.
@@ -51,6 +89,15 @@ type ExpRun struct {
 	MetricKeys []string       `json:"metric_keys"`
 	// Summary holds the last value seen for each metric.
 	Summary map[string]float64 `json:"summary"`
+	// SummaryMin and SummaryMax hold the smallest and largest value seen for
+	// each metric over the whole run.
+	SummaryMin map[string]float64 `json:"summary_min"`
+	SummaryMax map[string]float64 `json:"summary_max"`
+	// HeartbeatSecs is how often the logging client promised to check in
+	// while the run is alive; 0 when it never declared one (an older client,
+	// or a run indexed from a parquet export). It shortens the window after
+	// which a silent run reads as stale.
+	HeartbeatSecs int `json:"heartbeat_secs"`
 	// Group is the sweep this run belongs to, as `trackio.init(group=...)`
 	// declared it, and JobType the role it played in that sweep
 	// (`job_type=...`). Both are "" for a run that declared neither, which is
@@ -101,6 +148,53 @@ type ExpRunModelInput struct {
 // ExpRunListResponse is the body of the run listing endpoint.
 type ExpRunListResponse struct {
 	Runs []ExpRun `json:"runs"`
+	// MetricGoals is the project's declared goals (ExpProject.MetricGoals).
+	MetricGoals map[string]MetricGoal `json:"metric_goals"`
+	// Best names, for every metric with a goal, the best non-archived run
+	// among the runs listed. A metric no listed run has logged is absent.
+	Best map[string]string `json:"best"`
+}
+
+// ExpRunResponse is the body of GET .../runs/{run}.
+type ExpRunResponse struct {
+	Run ExpRun `json:"run"`
+}
+
+// ExpConfigDiffKey is one config key whose value differs across the runs
+// compared. A run that does not have the key at all is absent from Values.
+type ExpConfigDiffKey struct {
+	Key    string         `json:"key"`
+	Values map[string]any `json:"values"`
+}
+
+// ExpConfigDiffResponse is the body of GET .../{project}/config-diff.
+type ExpConfigDiffResponse struct {
+	Runs []string           `json:"runs"`
+	Keys []ExpConfigDiffKey `json:"keys"`
+}
+
+// ExpNotesResponse is a project's experiment notebook, the Markdown file
+// {project}/NOTES.md on the repository's default branch.
+type ExpNotesResponse struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	// Exists is false when the project has no notes yet; Content is "" then.
+	Exists bool `json:"exists"`
+	// BlobSHA is the git blob of the file as read, "" when it does not exist.
+	// Send it back as ExpNotesUpdateRequest.BaseSHA to detect a concurrent edit.
+	BlobSHA string `json:"blob_sha"`
+	// CommitSHA is the default branch's head the file was read from.
+	CommitSHA string `json:"commit_sha"`
+}
+
+// ExpNotesUpdateRequest replaces a project's notes with Content.
+type ExpNotesUpdateRequest struct {
+	Content string `json:"content"`
+	// BaseSHA, when present, must equal the current blob ("" = the file must
+	// not exist yet) or the write is refused with 409.
+	BaseSHA *string `json:"base_sha,omitempty" tstype:"string"`
+	// Message is the commit message; a default is used when empty.
+	Message string `json:"message,omitempty" tstype:"string"`
 }
 
 // ExpArtifact is one file a run stored under its artifact directory.

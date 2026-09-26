@@ -77,6 +77,7 @@ plugins:
             Viewing Datasets: データセットの閲覧
             Inspecting Models: モデルの確認
             Tracking Experiments: 実験のトラッキング
+            Using AI Agents: AI エージェントから使う
             Organizations: Organization
             Webhooks: Webhook
             Reference: リファレンス
@@ -110,6 +111,7 @@ nav:
       - Viewing Datasets: guides/dataset-viewer.md
       - Inspecting Models: guides/model-checkpoints.md
       - Tracking Experiments: guides/experiments.md
+      - Using AI Agents: guides/agents.md
       - Organizations: guides/organizations.md
       - Webhooks: guides/webhooks.md
   - Reference:

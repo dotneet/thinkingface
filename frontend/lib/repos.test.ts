@@ -8,6 +8,7 @@ import {
   nearestExistingDir,
   type RepoListSearch,
   repoListHref,
+  resolveFileUrl,
 } from "@/lib/repos";
 import type { RepoSummary } from "@/types/api";
 
@@ -303,5 +304,27 @@ describe("listAllRepos", () => {
     // 3 pages of 100 each cross the 250 cap and the loop stops there, rather
     // than continuing toward the (bogus) 100000 total.
     expect(result.data).toHaveLength(300);
+  });
+});
+
+describe("resolveFileUrl", () => {
+  it("keeps the HF shape, models at the root, for a configured API origin", () => {
+    expect(resolveFileUrl("model", "acme", "bert", "main", ["a b.txt"], "http://api:8080/")).toBe(
+      "http://api:8080/acme/bert/resolve/main/a%20b.txt",
+    );
+    expect(resolveFileUrl("dataset", "acme", "sq", "v1", [], "http://api:8080")).toBe(
+      "http://api:8080/datasets/acme/sq/resolve/v1/",
+    );
+  });
+
+  // Same-origin mode: root-relative, and models under /models/ because the
+  // root-level /{ns}/{name} belongs to the web UI's own pages.
+  it("is root-relative with a /models prefix when the base is empty", () => {
+    expect(resolveFileUrl("model", "acme", "bert", "feature/x", ["d", "w.bin"], "")).toBe(
+      "/models/acme/bert/resolve/feature%2Fx/d/w.bin",
+    );
+    expect(resolveFileUrl("dataset", "acme", "sq", "main", ["t.parquet"], "")).toBe(
+      "/datasets/acme/sq/resolve/main/t.parquet",
+    );
   });
 });

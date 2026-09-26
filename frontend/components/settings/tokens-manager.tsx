@@ -11,7 +11,7 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { CopyButton } from "@/components/ui/copy-button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
-import { Field, Input, Select } from "@/components/ui/field";
+import { Field, Input, Select, Textarea } from "@/components/ui/field";
 import { SkeletonLines } from "@/components/ui/skeleton";
 import { Table, TBody, Td, THead, Th, Tr } from "@/components/ui/table";
 import { TimeText } from "@/components/ui/time-text";
@@ -19,7 +19,7 @@ import { isUnauthorized } from "@/lib/api";
 import { errorMessage, type FailedApiResult } from "@/lib/api-error-message";
 import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
-import { tokenCreateFormAfterContextSwitch } from "@/lib/token-create-form";
+import { parseTokenRepos, tokenCreateFormAfterContextSwitch } from "@/lib/token-create-form";
 import { createToken, deleteToken, listTokens } from "@/lib/tokens";
 import type { TokenItem } from "@/types/api";
 
@@ -63,6 +63,9 @@ export function TokensManager() {
   const [newName, setNewName] = useState("");
   const [newScope, setNewScope] = useState<"read" | "write">("read");
   const [newExpiryDays, setNewExpiryDays] = useState(DEFAULT_EXPIRY_DAYS);
+  // The "restrict to repositories" textarea, raw. Only sent for a write token
+  // (the field is hidden for read, and the API refuses the combination).
+  const [newRepos, setNewRepos] = useState("");
   const [creating, setCreating] = useState(false);
   const [justCreated, setJustCreated] = useState<{ name: string; token: string } | null>(null);
   // Id of the row whose delete is in flight, so a second click on the same
@@ -105,7 +108,8 @@ export function TokensManager() {
     // would otherwise leave the old banner standing where it reads as the
     // result of the attempt that just failed.
     setJustCreated(null);
-    const result = await createToken(newName.trim(), newScope, newExpiryDays);
+    const repos = newScope === "write" ? parseTokenRepos(newRepos) : [];
+    const result = await createToken(newName.trim(), newScope, newExpiryDays, repos);
     setCreating(false);
     if (!result.ok) {
       setCreateError(
@@ -117,6 +121,7 @@ export function TokensManager() {
     }
     setJustCreated({ name: result.data.name, token: result.data.token });
     setNewName("");
+    setNewRepos("");
     await refresh();
   }
 
@@ -184,6 +189,25 @@ export function TokensManager() {
               ))}
             </Select>
           </Field>
+          {newScope === "write" && (
+            <Field
+              label={t("settings.tokens.repos.label")}
+              hint={t("settings.tokens.repos.hint")}
+              className="basis-full"
+            >
+              <Textarea
+                value={newRepos}
+                rows={3}
+                spellCheck={false}
+                className="font-mono text-xs"
+                onChange={(e) => {
+                  setNewRepos(e.target.value);
+                  setCreateError(tokenCreateFormAfterContextSwitch().createError);
+                }}
+                placeholder={t("settings.tokens.repos.placeholder")}
+              />
+            </Field>
+          )}
           <Button
             type="submit"
             variant="primary"
@@ -247,10 +271,11 @@ export function TokensManager() {
           description={t("settings.tokens.emptyDescription")}
         />
       ) : (
-        <Table minWidth={720}>
+        <Table minWidth={840}>
           <THead>
             <Th>{t("settings.tokens.colName")}</Th>
             <Th>{t("settings.tokens.colScope")}</Th>
+            <Th>{t("settings.tokens.repos.column")}</Th>
             <Th>{t("settings.tokens.colCreated")}</Th>
             <Th>{t("settings.tokens.colLastUsed")}</Th>
             <Th>{t("settings.tokens.expiry.column")}</Th>
@@ -264,6 +289,21 @@ export function TokensManager() {
                   {token.scope === "write"
                     ? t("settings.tokens.scopeWrite")
                     : t("settings.tokens.scopeRead")}
+                </Td>
+                <Td className="text-fg-muted">
+                  {token.repos.length > 0 ? (
+                    <ul className="flex flex-col gap-0.5">
+                      {token.repos.map((repo) => (
+                        <li key={repo} className="font-mono text-xs">
+                          {repo}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : token.scope === "write" ? (
+                    t("settings.tokens.repos.unrestricted")
+                  ) : (
+                    t("settings.tokens.repos.noneWritable")
+                  )}
                 </Td>
                 <Td className="text-fg-subtle">
                   <TimeText iso={token.created_at} style="dateTime" />

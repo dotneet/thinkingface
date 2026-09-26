@@ -40,7 +40,8 @@
 | 変数 | 説明 | デフォルト | 備考 |
 |---|---|---|---|
 | `TF_ADDR` | HTTP API（git smart HTTP、LFS、REST、ビューア）の待ち受けアドレス。 | `:8080` | |
-| `TF_PUBLIC_URL` | 外部から到達可能な API のベース URL。CORS のデフォルトオリジンと Cookie のセキュリティ設定を推測するために使われ、生成される LFS / HF 互換 URL にも埋め込まれます。 | `http://localhost:8080` | これがループバック以外を指していると、サーバーは「本番」バリデーションに切り替わります。この場合、デフォルトの管理者パスワードやセッションシークレットのままでは起動を拒否します。 |
+| `TF_PUBLIC_URL` | 外部から到達可能な API のベース URL — `git`、`huggingface_hub`、`tf` が API に到達するアドレスです。CORS のデフォルトオリジンと Cookie のセキュリティ設定を推測するために使われ、生成される LFS / HF 互換 URL、Web UI が表示する clone URL と `HF_ENDPOINT` のスニペット、そして `/api/openapi.json` の `servers` エントリにも埋め込まれます。 | `http://localhost:8080` | これがループバック以外を指していると、サーバーは「本番」バリデーションに切り替わります。この場合、デフォルトの管理者パスワードやセッションシークレットのままでは起動を拒否します。 |
+| `TF_BIND_ADDR` | `docker-compose.yml` が `api`、git-over-SSH、`web` の各ポートを公開するホスト側のアドレス。 | `127.0.0.1` | Compose 専用。サーバー自体はこれを読み取りません。Docker が公開したポートはホストのファイアウォールをバイパスするため、デフォルトはループバックです。スタックを LAN から到達可能にするには `0.0.0.0`（または特定のインターフェースのアドレス）を設定してください — [デプロイ](deployment.md#published-ports-are-loopback-only-by-default) を参照してください。`postgres` と `gcs` は、この設定にかかわらず `127.0.0.1` のままです。 |
 | `GIT_ROOT` | ディスク上のベア git リポジトリを保持するディレクトリ。 | `/data/git` | Continuity/WAL 移行が `authoritative`（下記の git・キャッシュの表を参照）でない限り、永続ストレージである必要があります。`authoritative` の場合、これは再構築可能なキャッシュに過ぎません。 |
 
 ## ストレージ { #storage }
@@ -63,7 +64,7 @@
 | `POSTGRES_USER` | PostgreSQL のロール名。`postgres` コンテナで使われるほか、Compose での `DATABASE_URL` の組み立てにも使われます。 | `tf` | Compose 専用。サーバー自体はこれを読み取りません。 |
 | `POSTGRES_PASSWORD` | PostgreSQL のロールパスワード。 | `tf` | Compose 専用。ローカル用途を超える場合は、`TF_ADMIN_PASSWORD` と合わせてこれも変更してください。 |
 | `POSTGRES_DB` | PostgreSQL のデータベース名。 | `thinkingface` | Compose 専用。 |
-| `POSTGRES_PORT` | PostgreSQL が公開されるホスト側のポート。Compose ネットワークの外部から接続する場合に使います（`make test-store-pg`）。 | `5432` | Compose 専用。 |
+| `POSTGRES_PORT` | PostgreSQL が公開されるホスト側のポート。Compose ネットワークの外部から接続する場合に使います（`make test-store-pg`）。 | `5432` | Compose 専用。常に `127.0.0.1` で公開され、`TF_BIND_ADDR` で公開されることはありません。 |
 | `TF_LITESTREAM_REPLICA_URL` | Litestream が SQLite ファイルをレプリケートする先（および復元元）となる `gs://` の宛先。 | *(unset)* | Cloud Run 上の本番 SQLite デプロイにのみ関係します（[デプロイ](deployment.md) を参照）。ローカルでは未設定のままにしてください — Compose の SQLite モードは通常のボリュームで問題なく動作します。 |
 
 ## 認証とセッション { #authentication-and-sessions }
@@ -76,11 +77,14 @@
 | `TF_SESSION_SECRET` | セッションクッキー（`tf_session`）と LFS 転送用 URL に署名する HMAC-SHA256 キー。 | `dev-insecure-session-secret` | **これは変更してください。** `TF_PUBLIC_URL` がループバック以外を指している場合、最低 32 バイト必要になり、デフォルト値のままにしておくこともできません。デフォルト値を知っていれば任意のアカウントのセッションクッキーを偽造できるため、LAN 名のインスタンスであっても公開インスタンスと同じだけ本物の値が必要です。 |
 | `TF_SESSION_TTL` | 発行されたセッションクッキーが有効な期間。 | `168h`（7 日） | ログアウト時やパスワード変更時にも、それより早く無効化されます。 |
 | `TF_COOKIE_SECURE` | セッションクッキーに `Secure` 属性を強制的に付与します。 | *(inferred from `TF_PUBLIC_URL`)* | サーバーの手前（例: ロードバランサ）で TLS が終端し、コンテナ自体へのトラフィックがプレーンな HTTP である場合は、明示的に `true` を設定してください — そうした構成では自動推測が誤った結果になります。 |
-| `TF_ALLOWED_ORIGINS` | 資格情報付き CORS を許可する、ブラウザのオリジンのカンマ区切りリスト。 | *(inferred: `TF_PUBLIC_URL`'s origin, plus `http://localhost:3000` / `http://127.0.0.1:3000` when not `https`)* | Web UI が API と異なるホストから配信される場合は、本番環境ではこれを明示的に設定してください — 許可リストの外にあるオリジンには CORS ヘッダーが付与されず、状態変更を伴う Cookie 認証リクエストは 403 で拒否されます。`huggingface_hub`、`git`、`curl` は `Origin` ヘッダーを送らないため、いずれにせよ影響を受けません。 |
+| `TF_ALLOWED_ORIGINS` | 資格情報付き CORS を許可する、ブラウザのオリジンのカンマ区切りリスト。 | *(inferred: `TF_PUBLIC_URL`'s origin, plus `http://localhost:3000` / `http://127.0.0.1:3000` when not `https`)* | デフォルトの同一オリジンモードの Web UI には不要です。このモードではブラウザが API を直接呼び出すことはありません（[デプロイ](deployment.md#how-the-web-ui-reaches-the-api)）。Web イメージを `NEXT_PUBLIC_API_URL` 付きでビルドし、API と異なるオリジンから配信する場合に設定してください — 許可リストの外にあるオリジンには CORS ヘッダーが付与されず、状態変更を伴う Cookie 認証リクエストは 403 で拒否され、サーバーはそのオリジンについて `cors: origin not allowed` を一度だけログに記録します。`huggingface_hub`、`git`、`curl` は `Origin` ヘッダーを送らないため、いずれにせよ影響を受けません。 |
 | `TF_AUTH_RATE_LIMIT_PER_MIN` | クライアントのアドレスごとに 1 分間で許容されるパスワード失敗回数（同じアドレスからの同じユーザー名にはその半分、全アドレス合計での同じユーザー名にはその 5 倍）。IPv6 のクライアントは /64 単位で数えます。`0` で無効化します。 | `10` | ログインエンドポイントと（すべてのルートで受け付けられる）HTTP Basic 認証の両方に適用されます。プロセス単位でカウントされるため、複数レプリカがある場合、制限はグローバルではなくレプリカごとに適用されます。 |
-| `TF_TRUST_PROXY_IPS` | レート制限と認証ログの `client_ip` について、接続元ではなく `X-Forwarded-For` からクライアントを特定します。 | `false` | 自分が制御するプロキシが手前にある場合にのみ有効にしてください。プロキシがない場合、このヘッダーの中身はクライアントが好きに書いた値です。 |
+| `TF_TRUST_PROXY_IPS` | レート制限と認証ログの `client_ip` について、接続元ではなく `X-Forwarded-For` からクライアントを特定します。 | `false` | 自分が制御するプロキシが手前にある場合にのみ有効にしてください。プロキシがない場合、このヘッダーの中身はクライアントが好きに書いた値です。すべての接続から届くヘッダーを信用するため、API のポートが信頼できないクライアントから到達できない場合にだけ有効にしてください。Web UI の同一オリジンプロキシを通るブラウザからのトラフィックには不要です。web コンテナが各ブラウザのアドレスを自ら伝えます（`TF_TRUSTED_WEB_PROXIES` / `TF_WEB_PROXY_SECRET`）。[デプロイ](deployment.md#how-the-web-ui-reaches-the-api) を参照してください。 |
 | `TF_TRUSTED_PROXY_HOPS` | それらのプロキシが `X-Forwarded-For` に追記したエントリ数。クライアントは**右から**この数だけ手前のエントリとして読み取られます。 | `1` | このサーバーが背後に置かれるプロキシはいずれも上書きではなく追記します（GCLB、Cloud Run、nginx の `proxy_add_x_forwarded_for`）。したがって一番左のエントリはクライアントが送った値です。Cloud Run に直接アクセスする構成のようにプロキシが 1 段なら `1`、Google のロードバランサ配下（クライアントと GFE の 2 つが追記される）なら `2` を指定します。エントリ数がこれより少ないヘッダーは無視され、接続元アドレスが使われます。`TF_TRUST_PROXY_IPS` が `true` のときのみ参照されます。 |
+| `TF_TRUSTED_WEB_PROXIES` | Web UI の同一オリジンプロキシに代わってブラウザのアドレス（`X-TF-Client-Addr`）を伝えることを許す接続元。IP アドレス、CIDR プレフィックス、またはホスト名をカンマ区切りで指定します。 | *(空)*。Compose は `web` を設定 | ホスト名は 30 秒ごとに解決し直されるので、作り直された web コンテナにも追従します。API のポートを直接呼び出す相手はこれらの接続元から届かないため、このヘッダーを偽装できません。これ（または `TF_WEB_PROXY_SECRET`）がない場合、ブラウザはすべて 1 つのレート制限用アドレスを共有します。[デプロイ](deployment.md#how-the-web-ui-reaches-the-api) を参照してください。 |
+| `TF_WEB_PROXY_SECRET` | そのヘッダーを保証するもう 1 つの方法。`X-TF-Proxy-Secret` にこの値を持つリクエストは、接続元にかかわらず信用されます。web コンテナにも同じ値を設定してください。 | *(空)* | Web UI がロードバランサ経由で API に到達し、接続元アドレスが何も示さない構成向けです（Terraform のデプロイは Secret Manager に自動生成します）。32 バイト以上が必要で（`openssl rand -hex 32`）、短いと API は起動を拒否します。 |
 | `TF_ALLOW_SIGNUP` | セルフサービスでのアカウント作成を開放するかどうか。 | `true` | `false` にすると公開の **Sign up** タブが閉じます。一方通行ではありません: サイト管理者は **Settings → Users**（`/settings/admin/users`）から引き続きアカウントを追加できます。この画面は設計上このフラグを見ません。 |
+| `TF_REQUIRE_AUTH_FOR_READ` | 読み取りを含むすべてのリクエストに、サインイン済みの呼び出し元 — セッション、アクセストークン、または HTTP Basic の資格情報 — を要求します。 | `false` | 匿名リクエストには、`/healthz`、サインイン / サインアップ / サインアウト、`/api/v1/me`、`/api/v1/server-info` を除き `401` が返ります。Web UI はサインインしていない訪問者を `/login` に送ります。`TF_ALLOW_SIGNUP=false`（または承認制やメールドメインの制限）と組み合わせてください。そうしないと、インスタンスに到達できる誰もがサインアップして結局読み取れてしまいます。[デプロイ](deployment.md#require-sign-in-for-reads) を参照してください。 |
 | `TF_SIGNUP_EMAIL_DOMAINS` | セルフサービスのサインアップで受け付けるメールドメインのカンマ区切りリスト。 | *(empty — no restriction)* | 大文字小文字を区別せず、**完全一致**で判定します。`example.com` は `alice@example.com` を受け入れ、`alice@sub.example.com` は拒否します。サブドメインを許可したい場合は個別に列挙してください。拒否されたときは、受け付けるドメインが利用者に伝えられます。適用されるのは公開のサインアップフォームだけで、**Settings → Users** は `TF_ALLOW_SIGNUP` と同様にこの設定を見ません。 |
 | `TF_SIGNUP_REQUIRE_APPROVAL` | セルフサービスのサインアップを、管理者が承認するまで保留します。 | `false` | アカウントは作成されますが、**どの経路でも**認証されません。パスワードもアクセストークンも SSH 鍵もです。セッションも発行されず、承認待ちであることが本人に伝えられます。承認は **Settings → Users** から行い、承認待ちのアカウントは一覧の先頭に並びます。管理者が作成したアカウントと、この設定を有効にする前から存在していたアカウントは、すべて承認済みとして扱われます。 |
 | `TF_ORG_CREATION` | 誰が Organization を作成できるか: `anyone` または `admin`。 | `anyone` | これら以外の値を指定すると起動に失敗します。 |
@@ -109,7 +113,7 @@
 | `TF_SSH_IDLE_TIMEOUT` | 反応がなくなった SSH 接続を閉じます。 | `10m` | `0` で無効化します。放置された接続だけを刈り取るものであり、進行中の clone はそれに関係なくストリーミングを継続します。 |
 | `TF_SSH_MAX_UNAUTH_CONNS_PER_ADDR` | 1 つの送信元アドレスが認証前に保持できる接続数。 | `8` | **NAT や踏み台の背後では引き上げてください** — 多数の実クライアントが 1 つのアドレスとして到着するためです。認証が成功した時点で枠は解放されるので、これが制限するのは認証前の段階だけです。 |
 | `TF_SSH_MAX_UNAUTH_CONNS` | 同じ上限をプロセス全体に適用したもの。 | `512` | 単一の相手では到達しない高さに設定した最終防衛線です。1 台のホストが全体を締め出すことを実際に防いでいるのは、上の送信元アドレスごとの上限のほうです。 |
-| `TF_SSH_PORT` | SSH リスナーが公開されるホスト側のポート。 | `2222` | Compose 専用（`docker-compose.yml` のポートマッピング）。サーバー自体はこれを読み取りません。 |
+| `TF_SSH_PORT` | SSH リスナーが公開されるホスト側のポート。 | `2222` | Compose 専用（`docker-compose.yml` のポートマッピング、`TF_BIND_ADDR` 上）。サーバー自体はこれを読み取りません。 |
 
 クライアントは公開鍵認証のみで接続します。鍵は Web UI の `/settings/ssh-keys` で登録します。
 
@@ -138,18 +142,20 @@ git clone ssh://git@localhost:2222/admin/imdb-reviews.git
 
 | 変数 | 説明 | デフォルト | 備考 |
 |---|---|---|---|
-| `NEXT_PUBLIC_API_URL` | **ブラウザ**が使う API のベース URL。`docker build` 時にクライアントバンドルへコンパイルされます — 起動時にコンテナの環境変数から読み取られる**わけではない**ため、実行時の `environment:` に設定しても、ブラウザバンドルには何の効果もありません(まさにこの理由から、Compose もこれをビルド `arg` として渡しています)。 | `http://localhost:8080` | ブラウザ自身が到達できるアドレスである必要があります — 内部の Compose ネットワーク名ではありません。`.env` の値を変更して `docker compose up -d` を実行するだけでは新しい値は反映されません — 先に `docker compose up -d --build web` でイメージを再ビルドしてください。 |
-| `API_URL` | Next.js の **Server Components とルートハンドラ**が、コンテナ内部から使う API のベース URL。 | *(unset — falls back to `NEXT_PUBLIC_API_URL`)* | `.env.example` には記載されていません。`docker-compose.yml` が `web` サービスの環境変数に `http://api:8080` を直接設定します。これはデプロイごとに運用者が調整するものではなく、内部のサービス間アドレスだからです。この Compose ファイルの外でフロントエンドを実行する場合は、コンテナに直接設定してください。 |
+| `API_URL` | Web UI の**サーバー**が使う API のベース URL。Server Components と、ブラウザの API 呼び出しを転送する同一オリジンプロキシが使います。 | `http://localhost:8080` | コンテナの起動時に読み取られるため、変更には再ビルドではなく再起動が必要です。`.env.example` には記載されていません。`docker-compose.yml` が `web` サービスの環境変数に `http://api:8080` を設定します。これは内部のサービス間アドレスだからです。この Compose ファイルの外でフロントエンドを実行する場合は、コンテナに直接設定してください。 |
+| `NEXT_PUBLIC_API_URL` | **ブラウザ**が API 呼び出しを送る先。空の場合は Web UI 自身のオリジンを意味し、そこから `API_URL` へプロキシされます。 | *(empty)* | `docker build` 時にクライアントバンドルへコンパイルされる（Compose はこれをビルド `arg` として渡します）ため、実行時の値には何の効果もありません。変更した後は `docker compose up -d --build web` で再ビルドしてください。ブラウザが API を直接呼び出すクロスオリジンモードの場合にのみ設定します — その場合はブラウザが到達できるアドレスである必要があり、Web UI のオリジンを `TF_ALLOWED_ORIGINS` に含める必要があります。 |
+| `TF_WEB_TRUSTED_PROXY_HOPS` | Web UI の前段にある、`X-Forwarded-For` に追記するリバースプロキシの段数。Web サーバーは右からその数だけ手前のエントリを、ブラウザのアドレスとして API に伝えます。 | `0` | `0` は Web サーバー自身のソケットの接続元がブラウザであることを意味し、ブラウザが `X-Forwarded-For` に書いた内容は無視されます。本番用サーバー（`bun run start`）だけが読み取り、`next dev` は読み取りません。 |
+| `TF_WEB_PROXY_SECRET` | API の `TF_WEB_PROXY_SECRET` と同じ値。プロキシするすべてのリクエストに付けて送り、伝えたブラウザのアドレスを API に信用させます。 | *(空)* | API が web コンテナをアドレスで識別できない場合（`TF_TRUSTED_WEB_PROXIES` を参照）にだけ必要です。 |
 
 !!! note "なぜ API の URL が 2 つあるのか？"
-    `docker compose` の内部では、`web` コンテナは `http://api:8080`（内部のサービス名）で API に
-    到達しますが、そのコンテナからページを読み込むブラウザは `api` をまったく解決できません —
-    ホストが実際に公開している URL、`http://localhost:8080` が必要です。`API_URL` は前者のケース
-    （コンテナ内部で動くサーバーサイドレンダリングとルートハンドラ）をカバーし、
-    `NEXT_PUBLIC_API_URL` は後者のケース（ブラウザ上で動くすべて）をカバーします。実際のドメインの
-    背後にデプロイする場合も同じ考え方が通用します。`API_URL` にはフロントエンド自身のランタイムが
-    バックエンドに到達できるアドレスを、`NEXT_PUBLIC_API_URL` にはエンドユーザーのブラウザが呼び出す
-    公開アドレスを、それぞれ設定してください。
+    `API_URL` は、`web` コンテナ内で動く Web UI のサーバーが API に到達するアドレスです。Compose
+    では内部のサービス名 `http://api:8080` になります。`NEXT_PUBLIC_API_URL` は*ブラウザ*が API を
+    呼び出すアドレスですが、デフォルトではそのようなアドレスを設定する必要はありません。ブラウザは
+    Web UI 自身のオリジンを呼び出し、Web サーバーがそれを `API_URL` へ転送するからです。そのため、
+    API がどこにあっても同じイメージがそのまま動作します。`TF_PUBLIC_URL`（API 側）はこれらとは別の
+    3 つ目のアドレスで、`git`、`huggingface_hub`、`tf` が使うものであり、clone URL や使い方の
+    スニペットに表示されます。[デプロイ](deployment.md#how-the-web-ui-reaches-the-api) を参照して
+    ください。
 
 ## `.env.example` の外で設定する変数 { #variables-set-outside-envexample }
 

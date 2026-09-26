@@ -31,6 +31,17 @@ type UserResponse struct {
 	User User `json:"user"`
 }
 
+// ServerInfo is GET /api/v1/server-info: the instance-wide settings a
+// signed-out client needs before it can decide what to show. It is readable
+// without authentication even when TF_REQUIRE_AUTH_FOR_READ is on.
+type ServerInfo struct {
+	// RequireAuthForRead is true when every read needs a signed-in caller,
+	// so the web UI sends a signed-out visitor to /login first.
+	RequireAuthForRead bool `json:"require_auth_for_read"`
+	// AllowSignup mirrors TF_ALLOW_SIGNUP.
+	AllowSignup bool `json:"allow_signup"`
+}
+
 // ------------------------------------------------------------- namespaces
 
 // NamespaceProfile is the public face of a namespace -- a user or an
@@ -95,6 +106,10 @@ type TokenItem struct {
 	LastUsedAt *time.Time `json:"last_used_at" tstype:"string | null,required"`
 	// ExpiresAt is null for a token that never expires.
 	ExpiresAt *time.Time `json:"expires_at" tstype:"string | null,required"`
+	// Repos restricts what the token may change to these repositories,
+	// spelled "{datasets|models}/{ns}/{name}". Empty means unrestricted
+	// (docs/dev/agent-features.md §3).
+	Repos []string `json:"repos"`
 }
 
 // TokenListResponse is the body of GET /api/v1/tokens.

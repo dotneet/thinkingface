@@ -215,7 +215,9 @@ own compose stack: it is full of E2E leftovers, and the UI must be in English.
    `make check` / the CI contract job). Never hand-edit the generated file. Also update
    `docs/dev/api-contract.md` accordingly. HF-compatible / LFS / ingest endpoints are excluded
    from generation since the external protocol is the source of truth there (maintained by
-   hand in the handlers).
+   hand in the handlers). When adding or changing an `/api/v1/experiments` or `/api/v1/tokens`
+   route or its wire type, update `backend/internal/api/openapi.json` too (`openapi_test.go`
+   enforces route coverage).
 2. **Server Component authentication always goes through `authHeaders()` in
    `frontend/lib/server-auth.ts`.** `credentials: "include"` is a browser-fetch concept and
    does not work in Server Components. Forward the `tf_session` cookie explicitly into
@@ -345,9 +347,14 @@ instruction, read it first before re-deriving the steps yourself.
 
 ## Development notes
 
-- Inside `docker compose`, web → api is `http://api:8080`, while browser → api is
-  `http://localhost:8080`. These two paths are split via `API_URL` / `NEXT_PUBLIC_API_URL`
-  (`apiBaseUrl()` in `lib/api.ts`).
+- Inside `docker compose`, web → api is `http://api:8080` (`API_URL`, read at runtime). The
+  browser calls the API on the web UI's **own origin** (`/api/*` and the `resolve` download
+  paths), and `frontend/app/api/[...path]/route.ts` forwards those to `API_URL` — so the web
+  image has no API address baked in and needs no CORS allowlist entry. Setting
+  `NEXT_PUBLIC_API_URL` at build time restores the old cross-origin mode (`apiBaseUrl()` in
+  `lib/api.ts`, `lib/api-proxy.ts`; `docs/dev/agent-features.md` §1.2).
+- Compose publishes every port on `127.0.0.1` only (`TF_BIND_ADDR` for api/web/ssh;
+  postgres and fake-gcs are always loopback).
 - **`http://localhost:3000` is docker's `web` (a production build via `next start`), and
   editing source on the host does not show up there.** Use `make dev-web` (:3100) to check UI
   changes live. Login cookies are shared across ports, so if you're logged in on :3000 you're

@@ -1,8 +1,8 @@
 # tf CLI
 
 `tf` is a single static-binary command-line client for registering datasets and models with
-thinkingface. This page is the complete reference for its commands, flags, credential
-resolution, and configuration file. For a first walkthrough, see
+thinkingface, and for querying and managing experiment runs. This page is the complete reference
+for its commands, flags, credential resolution, and configuration file. For a first walkthrough, see
 [Uploading Files](../guides/uploading.md); this page assumes you already know why you'd
 reach for `tf` and want the exact details.
 
@@ -62,13 +62,14 @@ tf up ./imdb-ja
 
 ## Command reference
 
-Every subcommand except `version` accepts these flags:
+Every subcommand except `version` accepts these flags (`version` takes only `--json`):
 
 | Flag | Meaning |
 |---|---|
 | `--endpoint URL` | Server URL. If omitted, follows the [credential resolution order](#credential-resolution-order) |
 | `--token TOKEN` / `--api-key KEY` | An access token; both flags set the same value. If omitted, follows the resolution order |
 | `--verbose` | Print how the endpoint and token were resolved to stderr |
+| `--json` | Machine-readable output: the result as JSON on stdout (one object on one line; `tf experiments sync --watch` prints one line per pass). Progress, warnings and errors stay on stderr and the exit codes are unchanged, so a script can parse stdout without filtering it. Accepted by every command except `tf mcp`, including `tf version` |
 
 Every subcommand also accepts `-h` / `--help`, which prints usage to stdout and exits `0`
 (distinct from a usage error, which prints to stderr and exits `2`).
@@ -97,6 +98,11 @@ write-scoped personal access token — the password prompt has echo disabled on 
 is read from stdin via `--password-stdin` when piped. A warning is printed if the resulting
 token's scope turns out to be `read` (`tf up` needs a write-scoped token).
 
+With `--json`, `tf login` prints `{"endpoint", "username", "scope", "token_id", "minted",
+"config_path"}` instead of its confirmation lines. There is deliberately no token field: the
+output of a login is easily captured into a CI log. `token_id` is `0` and `minted` is `false` for a
+token pasted in with `--token`.
+
 Logging in again against an endpoint you already logged in to revokes the token that
 previous `tf login` minted for it, once the new one is safely saved — `tf` prints a note to
 stderr (`revoked the token saved by the previous tf login (id N)`) when this happens. A
@@ -107,13 +113,15 @@ yourself) takes it away.
 
 Forgets the saved credentials for a server (default: the configured default endpoint). If the
 saved token was minted by `tf login` itself (as opposed to pasted in with `--token`), it is
-also revoked server-side on a best-effort basis.
+also revoked server-side on a best-effort basis. `--json` prints `{"endpoint", "revoked"}`, plus
+`"revoke_error"` when the best-effort revoke failed (the logout itself still succeeds).
 
 ### `tf whoami`
 
 Shows the identity behind the current token: name, email, the token's scope, organization
 memberships, and the namespaces you can push to (yourself plus any organization where you
-hold `admin` or `write`).
+hold `admin` or `write`). `--json` prints `{"name", "fullname", "email", "scope", "endpoint",
+"orgs": [{"name", "role"}], "push_to"}`.
 
 ### `tf status [--json]`
 
@@ -269,9 +277,189 @@ The shape of `tf up --json`'s output:
     different origins (as in the docker compose development setup, `:8080` vs. `:3000`),
     swap in the web UI's origin and keep the path as-is.
 
+### `tf experiments` { #tf-experiments }
+
+Queries, waits on, annotates, imports and syncs experiment runs — the command-line side of
+[Tracking Experiments](../guides/experiments.md#work-with-runs-from-the-command-line). `tf exp` is an
+alias.
+
+```text
+tf experiments runs     REPO PROJECT [--group G] [--status S] [--tag T] [--archived true|false]
+                        [--sort SPEC] [--order asc|desc] [--limit N] [--columns LIST]
+tf experiments run      REPO PROJECT RUN
+tf experiments wait     REPO PROJECT RUN [--until EXPR] [--timeout 24h] [--ignore-stale]
+tf experiments diff     REPO PROJECT [RUN ...] [--include-meta]
+tf experiments goals    REPO PROJECT [METRIC=min|max|none ...]
+tf experiments notes    REPO PROJECT [--set FILE|-] [--base-sha SHA] [--force] [-m MSG]
+tf experiments annotate REPO PROJECT RUN [--note TEXT | --note-file FILE|-] [--tag T ...]
+                        [--clear-tags] [--add-tag T ...] [--remove-tag T ...] [--archive | --unarchive]
+tf experiments import   REPO PROJECT FILE... [--configs FILE] [--status finished|failed]
+                        [--replace] [--format csv|jsonl] [--dry-run]
+tf experiments sync     [DIR ...] [--watch] [--interval 60s]
+```
+
+Every subcommand also takes `--json` and the common `--endpoint` / `--token` / `--api-key` /
+`--verbose` flags; `tf experiments help SUBCOMMAND` prints its full usage.
+
+- `REPO` is the experiment repository as `ns/name` (a `datasets/` prefix is accepted). `PROJECT`
+  and `RUN` are passed through verbatim: names with `/`, spaces, `%` or non-ASCII characters work.
+- Reads work without a token on an instance that allows anonymous reads. Writes — `goals` with
+  arguments, `notes --set`, `annotate`, `import`, `sync` — need a write-scoped token for the
+  repository.
+- With `--json`, `runs`, `run`, `diff`, `goals`, `notes` and `annotate` print the API's response
+  unchanged; `wait`, `import` and `sync` print the shapes described below.
+
+#### `tf experiments runs`
+
+A table of a project's runs: name, status, last step, last update, then extra columns. Filtering
+and sorting happen on the server.
+
+| Flag | Meaning |
+|---|---|
+| `--group G` | only runs of sweep group `G`. Repeatable: any of |
+| `--status S` | only runs whose status is `running`, `finished`, `failed` or `stale`. Repeatable (or comma-separated): any of |
+| `--tag T` | only runs carrying tag `T`. Repeatable: all of |
+| `--archived true\|false` | only archived / only unarchived runs (default: both) |
+| `--sort SPEC` | `name`, `started_at`, `updated_at`, `last_step`, `last:<metric>`, `min:<metric>`, `max:<metric>`, `best:<metric>` (needs a [goal](#tf-experiments-goals)), `config:<dotted.key>`. Runs lacking the value always sort last |
+| `--order asc\|desc` | default `asc`; `best:` always puts the best run first |
+| `--limit N` | at most `N` runs (1–1000) |
+| `--columns LIST` | comma-separated extra columns: `config:<key>`, `last:<metric>` (alias `metric:<metric>`), `min:<metric>`, `max:<metric>`, `best:<metric>` (min or max by the goal), `group`, `job_type`, `tags`, `points`, `note` |
+
+Without `--columns`, the table shows the group when any run has one, every metric with a goal in
+its goal's direction (`min:loss`, `max:acc`), then the last value of up to three other metrics
+(`_`-prefixed system metrics are skipped; a note on stderr says how many were left out). A `*`
+marks the best non-archived run of each goal metric. `--json` prints `{"runs": [...],
+"metric_goals": {...}, "best": {metric: run}}`.
+
+#### `tf experiments run`
+
+One run as a key/value block: status (with its heartbeat), step and point count, timestamps, group,
+tags, note, produced models, the flattened config, and the last / min / max of every metric.
+`--json` prints `{"run": {...}}`.
+
+#### `tf experiments wait`
+
+Blocks until a run satisfies `--until EXPR` (default `status!=running`), using the server's long
+poll. The run does not have to exist yet: a 404 is retried every 5 seconds. Network errors, 5xx
+and 429 are retried with backoff; 400 / 401 / 403 end the wait at once.
+
+```text
+expr    := and ( "or" and )*          "and" binds tighter than "or"
+and     := primary ( "and" primary )*
+primary := "(" expr ")" | cond
+cond    := FIELD OP VALUE             OP: == != >= <= > <
+FIELD   := step | points | status | metric:<m> | last:<m> | min:<m> | max:<m>
+```
+
+- `step` is the last logged step, `points` the number of points, `metric:` / `last:` a metric's
+  last value, `min:` / `max:` its extremes so far.
+- `status` compares with `==` / `!=` only, against `running`, `finished`, `failed` or `stale`;
+  anything else is a parse error rather than a condition that is silently never true.
+- A metric name ends at whitespace, a parenthesis, `= ! < >` or a quote, so `metric:val/CER<0.2`
+  works bare; otherwise quote it right after the colon: `metric:"val loss" < 0.2`.
+- Keywords and field names are case-insensitive. A comparison on a metric the run has not logged is
+  false for every operator, `!=` included.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | the condition holds |
+| `1` | `--timeout` passed (default `24h`; `0` waits forever), or the run stopped without meeting the condition |
+| `2` | usage error, including an `--until` that does not parse (the message points at the column) |
+
+"Stopped" means the run is no longer `running` — finished, failed or stale — while the condition
+neither holds nor mentions `status`, so it cannot become true; the wait ends instead of hanging
+until the timeout. `--ignore-stale` disables that check. The last state is printed on stdout in
+every non-usage case; `--json` prints `{"run": {...}|null, "met": bool, "reason":
+"met"|"timeout"|"stopped", "until": "EXPR"}` (`run` is `null` when it never appeared).
+
+#### `tf experiments diff`
+
+The config keys, flattened to dotted paths, whose value differs between the named runs — or
+between every non-archived run (at most 200) when none is named — one column per run, `-` where a
+run lacks the key. `--include-meta` also compares the `_meta` and `_resume` subtrees.
+
+#### `tf experiments goals` { #tf-experiments-goals }
+
+Without arguments, prints the project's metric goals. With `METRIC=min`, `METRIC=max` or
+`METRIC=none` arguments, merges them in (`none` removes a goal; goals not mentioned are left
+alone; the last `=` splits, so a metric name may contain `=`). Works before the project has any
+run. Goals drive the best-run markers and `--sort best:<metric>`.
+
+#### `tf experiments notes`
+
+Prints the project's notes, `{project}/NOTES.md` on the default branch (nothing on stdout, and a
+note on stderr, when there are none yet). `--set FILE` (or `-` for stdin) replaces them, with `-m`
+as the commit message. `--set` reads the current version first and sends it as the base, so the
+server refuses the write (exit 1) if someone saved in between; for a read-edit-write across two
+invocations, read with `--json` and pass its `blob_sha` back with `--base-sha` (`--base-sha ""`
+means "the notes must not exist yet"). `--force` overwrites unconditionally.
+
+#### `tf experiments annotate`
+
+Changes a run's note (`--note TEXT`, `--note-file FILE|-`; `--note ""` clears it), tags (`--tag T`
+replaces the set, `--clear-tags`, `--add-tag T` / `--remove-tag T` edit it), or archived flag
+(`--archive` / `--unarchive`). Only what a flag names changes; no flag at all is a usage error.
+
+#### `tf experiments import`
+
+Imports past runs from CSV (with a header row) or JSONL files into `PROJECT`, creating the
+repository if it does not exist. Each row is one point: `run` and `step` (an integer) are
+required, `timestamp` (RFC 3339 or unix seconds) is optional, every other column is a metric.
+Only numeric values are imported; empty, non-numeric, `NaN` and infinite cells are skipped and
+counted.
+
+| Flag | Meaning |
+|---|---|
+| `--configs FILE` | JSONL of `{"run", "config", "status", "group", "job_type"}`: the config sent with the run, its final status and sweep grouping |
+| `--status S` | final status of runs without a `--configs` status: `finished` (default) or `failed` |
+| `--replace` | delete existing runs of the same name first. Without it, any run that already exists refuses the whole import before anything is sent |
+| `--format csv\|jsonl` | parse every file as this format (default: by extension, `.csv` / `.jsonl` / `.ndjson`) |
+| `--dry-run` | parse, validate and check for existing runs; send nothing |
+
+`--json` prints `{"runs": [{"run", "points", "status", "replaced"}], "skipped_cells": N}` (plus
+`"dry_run": true` on a dry run).
+
+#### `tf experiments sync`
+
+Uploads runs `thinkingface.trackio` recorded to disk — in offline mode, or points the online mode
+could not deliver (see [Offline runs](../guides/experiments.md#offline-runs-and-tf-experiments-sync)).
+Each `DIR` is either the parent directory holding one subdirectory per run, or one run directory
+(it contains `run.jsonl`); the default is `./thinkingface-offline`.
+
+Progress is kept in each run directory's `sync-state.json`, so a sync can be interrupted and
+re-run. A run with no finish record yet is synced up to its current end and left open; a finished
+one gets its artifacts committed, its status set and its produced models recorded, and is skipped
+afterwards. `--watch` repeats the pass every `--interval` (default `60s`) until interrupted. An
+error in one directory does not stop the others; the exit code is `1` if any failed. `--json`
+prints one object per pass:
+
+```json
+{"runs": [{"dir": "thinkingface-offline/20260927T101500-ocr-lr_0.01-1a2b3c4d", "repo": "alice/trackio-metrics",
+  "project": "ocr", "run": "lr-0.01", "synced_lines": 812, "points": 8100, "done": true, "status": "finished",
+  "artifacts_uploaded": 2, "artifacts_skipped": 0}]}
+```
+
+### `tf mcp` { #tf-mcp }
+
+```text
+tf mcp [--endpoint URL] [--token TOKEN] [--verbose]
+```
+
+Serves the `tf experiments` functionality to an AI agent over the
+[Model Context Protocol](https://modelcontextprotocol.io/) on stdin/stdout. The agent's client
+starts it as a subprocess; there is no port and no daemon. It uses the same credentials as every
+other command, resolved on the first tool call rather than at startup, so a server started before
+`tf login` keeps running and answers each call with an error naming the remedy until credentials
+exist. `--verbose` logs credential resolution and each request to stderr; without it, `tf mcp`
+writes nothing there.
+
+See [Using thinkingface from AI agents](../guides/agents.md) for registering it with a client and
+for the tools it offers.
+
 ### `tf version`
 
-Prints `tf <version> (<GOOS>/<GOARCH>)`.
+Prints `tf <version> (<GOOS>/<GOARCH>)`. `--json` prints `{"version", "os", "arch",
+"go_version"}`.
 
 ### `tf help [COMMAND]`
 
@@ -355,4 +543,6 @@ to work through `huggingface_hub`.
 
 - [Uploading Files](../guides/uploading.md) — a task-oriented walkthrough of getting data in
 - [Authentication](authentication.md) — how access tokens are issued and scoped
+- [Tracking Experiments](../guides/experiments.md) — what the `tf experiments` commands operate on
+- [Using thinkingface from AI agents](../guides/agents.md) — `tf mcp` and the agent workflow
 - [Compatibility](compatibility.md) — what's verified to work through `huggingface_hub` and git

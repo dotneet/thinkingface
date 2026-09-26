@@ -47,7 +47,7 @@ export function MetricsToolbar({
   const t = useT();
 
   return (
-    <div className="flex flex-wrap items-center gap-5 rounded-lg border border-border bg-bg-sunken px-4 py-3 text-sm">
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-border bg-bg-sunken px-3 py-2 text-sm">
       <label className="flex items-center gap-2">
         <span className="text-fg-subtle">{t("experiments.dashboard.xAxis")}</span>
         <Select
@@ -60,7 +60,7 @@ export function MetricsToolbar({
         </Select>
       </label>
 
-      <label className="flex min-w-[200px] flex-1 items-center gap-2">
+      <label className="flex min-w-[160px] flex-1 items-center gap-2">
         <span className="whitespace-nowrap text-fg-subtle">
           {t("experiments.dashboard.smoothing")}
         </span>
@@ -71,9 +71,11 @@ export function MetricsToolbar({
           value={options.smoothing}
           onChange={(e) => onChange({ smoothing: Number(e.target.value) })}
           aria-label={t("experiments.dashboard.smoothingAria")}
-          className="flex-1"
+          className="min-w-0 flex-1"
         />
-        <span className="w-10 tabular-nums text-fg-subtle">{options.smoothing.toFixed(2)}</span>
+        <span className="w-10 shrink-0 tabular-nums text-fg-subtle">
+          {options.smoothing.toFixed(2)}
+        </span>
       </label>
 
       <label className="flex items-center gap-2">

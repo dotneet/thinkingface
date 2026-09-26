@@ -1,8 +1,8 @@
 # tf CLI
 
-`tf` は、データセットやモデルを thinkingface に登録するための、単一の静的バイナリで動く
-コマンドラインクライアントです。このページは、コマンド、フラグ、認証情報の解決、設定ファイルに
-ついての完全なリファレンスです。最初にひととおり試す流れは
+`tf` は、データセットやモデルを thinkingface に登録し、実験の run を照会・管理するための、
+単一の静的バイナリで動くコマンドラインクライアントです。このページは、コマンド、フラグ、認証
+情報の解決、設定ファイルについての完全なリファレンスです。最初にひととおり試す流れは
 [ファイルのアップロード](../guides/uploading.md) を参照してください。ここでは、`tf` を使う理由
 はすでに分かっていて、正確な詳細を知りたいという前提で書いています。
 
@@ -62,13 +62,15 @@ tf up ./imdb-ja
 
 ## コマンドリファレンス { #command-reference }
 
-`version` を除くすべてのサブコマンドは、次のフラグを受け付けます。
+`version` を除くすべてのサブコマンドは、次のフラグを受け付けます（`version` が受け付けるのは
+`--json` だけです）。
 
 | フラグ | 意味 |
 |---|---|
 | `--endpoint URL` | サーバーの URL。省略した場合は [認証情報の解決順序](#credential-resolution-order) に従います |
 | `--token TOKEN` / `--api-key KEY` | アクセストークン。どちらのフラグも同じ値を設定します。省略した場合は解決順序に従います |
 | `--verbose` | エンドポイントとトークンがどのように解決されたかを stderr に表示します |
+| `--json` | 機械可読な出力です。結果を JSON として stdout に出力します（1 つのオブジェクトを 1 行で。`tf experiments sync --watch` は 1 回のパスごとに 1 行を出力します）。進捗、警告、エラーは stderr に出たままで、終了コードも変わらないので、スクリプトは stdout を絞り込まずにそのままパースできます。`tf mcp` を除くすべてのコマンドで受け付けられ、`tf version` も含まれます |
 
 すべてのサブコマンドは `-h` / `--help` も受け付けます。これは使い方を stdout に表示して `0` で
 終了します（使い方の誤りの場合は stderr に表示して `2` で終了するので、区別されます）。
@@ -98,6 +100,11 @@ tf login [ENDPOINT] [--token TOKEN | --token -]
 発行されたトークンのスコープが `read` だった場合は警告が表示されます（`tf up` には write
 スコープのトークンが必要です）。
 
+`--json` を付けると、`tf login` は確認のメッセージ行の代わりに `{"endpoint", "username", "scope",
+"token_id", "minted", "config_path"}` を出力します。トークンのフィールドは意図的に含めていません。
+ログインの出力は CI のログに取り込まれやすいからです。`--token` で貼り付けたトークンの場合、
+`token_id` は `0`、`minted` は `false` になります。
+
 既にログイン済みのエンドポイントに対してもう一度ログインすると、新しいトークンが無事に
 保存された時点で、それまでの `tf login` がそのエンドポイント用に発行していたトークンが
 失効させられます — この際 `tf` は stderr にメモを表示します
@@ -109,13 +116,16 @@ tf login [ENDPOINT] [--token TOKEN | --token -]
 
 サーバーに対して保存されている認証情報を破棄します（デフォルトは、設定されているデフォルト
 エンドポイント）。保存されていたトークンが（`--token` で貼り付けたものではなく）`tf login`
-自身が発行したものである場合は、サーバー側での失効もベストエフォートで行われます。
+自身が発行したものである場合は、サーバー側での失効もベストエフォートで行われます。`--json` は
+`{"endpoint", "revoked"}` を出力し、ベストエフォートの失効に失敗した場合はそれに `"revoke_error"`
+が加わります（ログアウト自体は成功します）。
 
 ### `tf whoami` { #tf-whoami }
 
 現在のトークンが表す身元を表示します。名前、メールアドレス、トークンのスコープ、所属している
 Organization、そして push できるネームスペース（自分自身と、`admin` または `write` を持っている
-Organization）です。
+Organization）です。`--json` は `{"name", "fullname", "email", "scope", "endpoint",
+"orgs": [{"name", "role"}], "push_to"}` を出力します。
 
 ### `tf status [--json]` { #tf-status-json }
 
@@ -272,9 +282,197 @@ tf up PATH [--to NS/NAME|NAME] [--kind dataset|model] [--rev BRANCH]
     （docker compose の開発環境のように `:8080` と `:3000` に分かれている場合）は、パスは
     そのままに、オリジンだけ Web UI のものに読み替えてください。
 
+### `tf experiments` { #tf-experiments }
+
+実験の run を照会し、待ち合わせ、注釈を付け、インポートし、同期します —
+[実験のトラッキング](../guides/experiments.md#work-with-runs-from-the-command-line) のコマンド
+ライン側にあたります。`tf exp` はエイリアスです。
+
+```text
+tf experiments runs     REPO PROJECT [--group G] [--status S] [--tag T] [--archived true|false]
+                        [--sort SPEC] [--order asc|desc] [--limit N] [--columns LIST]
+tf experiments run      REPO PROJECT RUN
+tf experiments wait     REPO PROJECT RUN [--until EXPR] [--timeout 24h] [--ignore-stale]
+tf experiments diff     REPO PROJECT [RUN ...] [--include-meta]
+tf experiments goals    REPO PROJECT [METRIC=min|max|none ...]
+tf experiments notes    REPO PROJECT [--set FILE|-] [--base-sha SHA] [--force] [-m MSG]
+tf experiments annotate REPO PROJECT RUN [--note TEXT | --note-file FILE|-] [--tag T ...]
+                        [--clear-tags] [--add-tag T ...] [--remove-tag T ...] [--archive | --unarchive]
+tf experiments import   REPO PROJECT FILE... [--configs FILE] [--status finished|failed]
+                        [--replace] [--format csv|jsonl] [--dry-run]
+tf experiments sync     [DIR ...] [--watch] [--interval 60s]
+```
+
+どのサブコマンドも `--json` と、共通の `--endpoint` / `--token` / `--api-key` / `--verbose`
+フラグを受け付けます。`tf experiments help SUBCOMMAND` でそのサブコマンドの詳しい使い方が表示
+されます。
+
+- `REPO` は実験リポジトリを `ns/name` の形で指定します（`datasets/` プレフィックスも受け付けます）。
+  `PROJECT` と `RUN` はそのまま渡されるので、`/`、空白、`%`、非 ASCII 文字を含む名前も使えます。
+- 匿名での読み取りを許可しているインスタンスでは、読み取りはトークンなしで動作します。書き込み
+  — 引数付きの `goals`、`notes --set`、`annotate`、`import`、`sync` — には、そのリポジトリに
+  対する write スコープのトークンが必要です。
+- `--json` を付けると、`runs`、`run`、`diff`、`goals`、`notes`、`annotate` は API のレスポンスを
+  そのまま出力します。`wait`、`import`、`sync` は以下で説明する形で出力します。
+
+#### `tf experiments runs` { #tf-experiments-runs }
+
+プロジェクトの run の一覧表です。名前、ステータス、最後のステップ、最終更新日時に続いて、追加の
+列が並びます。絞り込みと並べ替えはサーバー側で行われます。
+
+| フラグ | 意味 |
+|---|---|
+| `--group G` | スイープグループ `G` の run だけ。繰り返し指定可: いずれかに該当 |
+| `--status S` | ステータスが `running`、`finished`、`failed`、`stale` のいずれかである run だけ。繰り返し指定可（またはカンマ区切り）: いずれかに該当 |
+| `--tag T` | タグ `T` が付いた run だけ。繰り返し指定可: すべてに該当 |
+| `--archived true\|false` | アーカイブ済みの run だけ / アーカイブされていない run だけ（デフォルト: 両方） |
+| `--sort SPEC` | `name`、`started_at`、`updated_at`、`last_step`、`last:<metric>`、`min:<metric>`、`max:<metric>`、`best:<metric>`（[ゴール](#tf-experiments-goals) が必要）、`config:<dotted.key>`。その値を持たない run は常に最後に並びます |
+| `--order asc\|desc` | デフォルトは `asc`。`best:` は常に最良の run を先頭にします |
+| `--limit N` | 最大 `N` 件の run（1〜1000） |
+| `--columns LIST` | カンマ区切りの追加の列: `config:<key>`、`last:<metric>`（エイリアス `metric:<metric>`）、`min:<metric>`、`max:<metric>`、`best:<metric>`（ゴールに従って min または max）、`group`、`job_type`、`tags`、`points`、`note` |
+
+`--columns` を指定しない場合、表には、いずれかの run がグループを持っていればグループ、ゴールを
+持つすべてのメトリクスをそのゴールの向きで（`min:loss`、`max:acc`）、その後にそれ以外のメトリ
+クスを最大 3 つまで最終値で表示します（`_` で始まるシステムメトリクスは飛ばされます。いくつ省いた
+かは stderr のメモで示されます）。`*` は、ゴールを持つメトリクスごとに、アーカイブされていない
+run のうち最良のものを示します。`--json` は `{"runs": [...], "metric_goals": {...}, "best":
+{metric: run}}` を出力します。
+
+#### `tf experiments run` { #tf-experiments-run }
+
+1 つの run をキーと値のブロックとして表示します。ステータス（ハートビート付き）、ステップ数と点の
+数、タイムスタンプ、グループ、タグ、ノート、生成したモデル、フラット化した config、そしてすべての
+メトリクスの最終値 / 最小値 / 最大値です。`--json` は `{"run": {...}}` を出力します。
+
+#### `tf experiments wait` { #tf-experiments-wait }
+
+run が `--until EXPR`（デフォルトは `status!=running`）を満たすまで、サーバーのロングポーリングを
+使ってブロックします。run はまだ存在していなくても構いません。404 は 5 秒ごとに再試行されます。
+ネットワークエラー、5xx、429 はバックオフしながら再試行され、400 / 401 / 403 は即座に待機を
+終了させます。
+
+```text
+expr    := and ( "or" and )*          "and" binds tighter than "or"
+and     := primary ( "and" primary )*
+primary := "(" expr ")" | cond
+cond    := FIELD OP VALUE             OP: == != >= <= > <
+FIELD   := step | points | status | metric:<m> | last:<m> | min:<m> | max:<m>
+```
+
+- `step` は最後に記録されたステップ、`points` は点の数、`metric:` / `last:` はメトリクスの最終値、
+  `min:` / `max:` はその時点までの極値です。
+- `status` は `==` / `!=` だけで、`running`、`finished`、`failed`、`stale` のいずれかと比較します。
+  それ以外の値は、黙って永遠に真にならない条件になるのではなく、パースエラーになります。
+- メトリクス名は空白、括弧、`= ! < >`、引用符のところで終わるので、`metric:val/CER<0.2` は
+  そのまま書けます。そうでない場合はコロンの直後から引用符で囲みます: `metric:"val loss" < 0.2`。
+- キーワードとフィールド名は大文字・小文字を区別しません。run がまだ記録していないメトリクスに
+  対する比較は、`!=` も含めてどの演算子でも偽になります。
+
+| 終了コード | 意味 |
+|---|---|
+| `0` | 条件が成り立った |
+| `1` | `--timeout` が経過した（デフォルトは `24h`。`0` は無期限に待ちます）、または run が条件を満たさないまま止まった |
+| `2` | 使い方の誤り。パースできない `--until` も含みます（メッセージがその桁位置を示します） |
+
+「止まった」とは、run がもう `running` ではなく — finished、failed、stale のいずれか — 、しかも
+条件が成り立っておらず、`status` にも言及していないために、もう真になりえない状態のことです。
+このときはタイムアウトまで待ち続けるのではなく、待機を終了します。`--ignore-stale` はこの判定を
+無効にします。使い方の誤り以外のすべての場合で、最後の状態が stdout に出力されます。`--json` は
+`{"run": {...}|null, "met": bool, "reason": "met"|"timeout"|"stopped", "until": "EXPR"}` を出力
+します（run が一度も現れなかった場合、`run` は `null` です）。
+
+#### `tf experiments diff` { #tf-experiments-diff }
+
+ドット区切りのパスにフラット化した config のキーのうち、指定した run の間で値が異なるものを
+表示します — run を指定しなかった場合は、アーカイブされていないすべての run（最大 200 件）の間で
+比較します。run ごとに 1 列で、その run がキーを持たない箇所は `-` になります。`--include-meta` を
+付けると、`_meta` と `_resume` のサブツリーも比較します。
+
+#### `tf experiments goals` { #tf-experiments-goals }
+
+引数なしでは、プロジェクトのメトリクスのゴールを表示します。`METRIC=min`、`METRIC=max`、
+`METRIC=none` の引数を付けると、それらをマージします（`none` はゴールを削除し、言及されなかった
+ゴールはそのまま残ります。分割は最後の `=` で行われるので、メトリクス名に `=` が含まれていても
+構いません）。プロジェクトにまだ run が 1 つもなくても動作します。ゴールは、最良の run の印と
+`--sort best:<metric>` の基準になります。
+
+#### `tf experiments notes` { #tf-experiments-notes }
+
+プロジェクトのノート、つまりデフォルトブランチ上の `{project}/NOTES.md` を表示します（まだ存在
+しない場合は stdout には何も出力せず、stderr にメモを表示します）。`--set FILE`（stdin からの場合
+は `-`）はノートを置き換え、`-m` がコミットメッセージになります。`--set` は先に現在の版を読み、
+それをベースとして送信するので、その間に誰かが保存していればサーバーは書き込みを拒否します
+（終了コード 1）。2 回の起動にまたがって読み込み・編集・書き込みを行う場合は、`--json` で読み込み、
+その `blob_sha` を `--base-sha` で渡し返してください（`--base-sha ""` は「ノートがまだ存在して
+いてはならない」という意味です）。`--force` は無条件に上書きします。
+
+#### `tf experiments annotate` { #tf-experiments-annotate }
+
+run のノート（`--note TEXT`、`--note-file FILE|-`。`--note ""` で消去）、タグ（`--tag T` は集合を
+置き換え、`--clear-tags`、`--add-tag T` / `--remove-tag T` で編集）、アーカイブのフラグ
+（`--archive` / `--unarchive`）を変更します。変わるのはフラグで指定したものだけです。フラグを
+1 つも指定しないのは使い方の誤りです。
+
+#### `tf experiments import` { #tf-experiments-import }
+
+CSV（ヘッダー行付き）または JSONL のファイルから過去の run を `PROJECT` にインポートします。
+リポジトリが存在しない場合は作成します。各行が 1 つの点です。`run` と `step`（整数）は必須、
+`timestamp`（RFC 3339 または unix 秒）は任意で、それ以外の列はすべてメトリクスです。インポート
+されるのは数値だけで、空、数値でない、`NaN`、無限大のセルはスキップされ、その数が数えられます。
+
+| フラグ | 意味 |
+|---|---|
+| `--configs FILE` | `{"run", "config", "status", "group", "job_type"}` の JSONL。run とともに送る config、最終ステータス、スイープのグループ分けです |
+| `--status S` | `--configs` でステータスが指定されていない run の最終ステータス: `finished`（デフォルト）または `failed` |
+| `--replace` | 先に同じ名前の既存の run を削除します。これを付けない場合、既に存在する run が 1 つでもあれば、何かを送信する前にインポート全体が拒否されます |
+| `--format csv\|jsonl` | すべてのファイルをこの形式としてパースします（デフォルト: 拡張子で判定。`.csv` / `.jsonl` / `.ndjson`） |
+| `--dry-run` | パース、検証、既存の run の確認だけを行い、何も送信しません |
+
+`--json` は `{"runs": [{"run", "points", "status", "replaced"}], "skipped_cells": N}` を出力します
+（ドライランでは `"dry_run": true` が加わります）。
+
+#### `tf experiments sync` { #tf-experiments-sync }
+
+`thinkingface.trackio` がディスクに記録した run をアップロードします — オフラインモードで記録した
+もの、またはオンラインモードで届けられなかった点です（[オフラインの run](../guides/experiments.md#offline-runs-and-tf-experiments-sync)
+を参照してください）。各 `DIR` は、run ごとに 1 つのサブディレクトリを持つ親ディレクトリか、
+1 つの run のディレクトリ（`run.jsonl` を含むもの）のどちらかです。デフォルトは
+`./thinkingface-offline` です。
+
+進捗は各 run ディレクトリの `sync-state.json` に保存されるので、同期は中断して再実行できます。
+まだ終了の記録がない run は、その時点の末尾まで同期されて開いたままになります。終了した run は
+アーティファクトがコミットされ、ステータスが設定され、生成したモデルが記録され、以後はスキップ
+されます。`--watch` は、中断されるまで `--interval`（デフォルトは `60s`）ごとにパスを繰り返し
+ます。1 つのディレクトリでのエラーは他のディレクトリの処理を止めません。いずれかが失敗した場合、
+終了コードは `1` です。`--json` は 1 回のパスごとに 1 つのオブジェクトを出力します。
+
+```json
+{"runs": [{"dir": "thinkingface-offline/20260927T101500-ocr-lr_0.01-1a2b3c4d", "repo": "alice/trackio-metrics",
+  "project": "ocr", "run": "lr-0.01", "synced_lines": 812, "points": 8100, "done": true, "status": "finished",
+  "artifacts_uploaded": 2, "artifacts_skipped": 0}]}
+```
+
+### `tf mcp` { #tf-mcp }
+
+```text
+tf mcp [--endpoint URL] [--token TOKEN] [--verbose]
+```
+
+`tf experiments` の機能を、stdin/stdout 上の
+[Model Context Protocol](https://modelcontextprotocol.io/) で AI エージェントに提供します。
+エージェントのクライアントがこれをサブプロセスとして起動します。ポートもデーモンもありません。
+他のすべてのコマンドと同じ認証情報を使いますが、その解決は起動時ではなく最初のツール呼び出しの
+時点で行われます。そのため、`tf login` より前に起動したサーバーも動き続け、認証情報ができるまで
+は各呼び出しに対して対処方法を示すエラーを返します。`--verbose` を付けると、認証情報の解決と
+各リクエストを stderr に記録します。付けない場合、`tf mcp` は stderr に何も書きません。
+
+クライアントへの登録方法と、提供されるツールについては
+[AI エージェントから thinkingface を使う](../guides/agents.md) を参照してください。
+
 ### `tf version` { #tf-version }
 
-`tf <version> (<GOOS>/<GOARCH>)` を表示します。
+`tf <version> (<GOOS>/<GOARCH>)` を表示します。`--json` は `{"version", "os", "arch",
+"go_version"}` を出力します。
 
 ### `tf help [COMMAND]` { #tf-help-command }
 
@@ -361,4 +559,6 @@ hf upload admin/imdb-reviews ./imdb-ja . --repo-type dataset
 
 - [ファイルのアップロード](../guides/uploading.md) — データを入れるまでの、タスク指向の手順
 - [認証](authentication.md) — アクセストークンがどのように発行され、どうスコープされるか
+- [実験のトラッキング](../guides/experiments.md) — `tf experiments` コマンドが操作する対象
+- [AI エージェントから thinkingface を使う](../guides/agents.md) — `tf mcp` とエージェントでの作業の流れ
 - [互換性](compatibility.md) — `huggingface_hub` と git 経由で動作が確認されていること

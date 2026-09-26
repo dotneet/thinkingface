@@ -165,6 +165,10 @@ thinkingface admin promote alice    # grant site administrator rights
   still suspended or still waiting for approval — both of which refuse even a correct password,
   so without the warning you would think you were done.
 
+A third subcommand, `admin token create`, mints an access token from the same place without a
+browser — for provisioning an instance or a CI job. See
+[Minting a token from the command line](#minting-a-token-from-the-command-line).
+
 Authorization here is shell access to the deployment: anyone who can run this could already read
 the database directly. That is the point — it is the one repair that does not need a working
 account, and it replaces "edit the users table by hand" as the answer of last resort.
@@ -186,7 +190,8 @@ An access token (`tf_xxxxxxxxxxxx`) is what every non-browser client uses: `hugg
 
 ![The access token page, showing the create-token form and a list of existing tokens](../images/settings-tokens.png)
 
-Give the token a name, a scope, and an expiration, then create it:
+Give the token a name, a scope, an expiration and, optionally, the repositories it is restricted
+to, then create it:
 
 | Scope | Meaning |
 |---|---|
@@ -202,14 +207,97 @@ The token's value is displayed exactly once, immediately after creation — copy
 navigating away, since the server only ever stores its hash and cannot show it to you again.
 If you lose it, delete the token and create a new one.
 
-The token list shows each token's name, scope, creation date, last-used date, and expiration
-(or **Never** for one with no expiration), and lets you delete a token (with a confirmation
-step) at any time — deleting it takes effect immediately, the same as letting it expire.
+The token list shows each token's name, scope, the repositories it is restricted to (**All** for
+an unrestricted token), creation date, last-used date, and expiration (or **Never** for one with no
+expiration), and lets you delete a token (with a confirmation step) at any time — deleting it takes
+effect immediately, the same as letting it expire.
 
 !!! note "Minting tokens needs a write-scoped credential"
     Creating or deleting a token or an SSH key always requires write scope, even though
     reading the list only requires being signed in. A read-scoped token cannot use itself to
-    mint a more powerful one.
+    mint a more powerful one, and neither can a repository-restricted token (below).
+
+### Restricting a token to repositories
+
+A write token can be restricted to a list of repositories. Fill in **Restrict to repositories**
+on the token form — one per line, as `datasets/NAMESPACE/NAME` or `models/NAMESPACE/NAME` (the
+plural kind, as in the web UI's URLs) — or leave it empty for an ordinary, unrestricted token. The
+field appears for write tokens only: a read token changes nothing, so a list would restrict
+nothing.
+
+A restricted token:
+
+- **reads** exactly like an unrestricted token of the same user — the restriction is about what it
+  may change, not what it may see;
+- may **write** — `git push`, `huggingface_hub` uploads and commits, LFS uploads, file edits,
+  experiment ingest, run annotations, project notes and metric goals — **only to the listed
+  repositories**, and only while you yourself still have write access to them;
+- may **not** perform administrative repository operations anywhere, listed repositories included:
+  delete, archive, rename, change settings, transfer;
+- may **not** perform account-level writes: create repositories, mint or revoke tokens, register
+  SSH keys, change your profile or password, manage organizations or webhooks.
+
+Anything outside that is refused with 403 and the error type `token_restricted`. One
+`huggingface_hub` convenience keeps working: `create_repo(..., exist_ok=True)`, which
+`push_to_hub` and most upload scripts call first, succeeds for a listed repository that already
+exists.
+
+Each listed repository must exist and you must have write access to it when the token is created,
+so create the repository first — a restricted token cannot create one. The list is stored by
+repository, not by name: the grant follows a repository through a rename or transfer, and never
+passes to a different repository that later takes a listed name. A token whose repositories have
+all been deleted can change nothing; it does not become unrestricted.
+
+Over the API, pass the list as `repos` when creating the token (at most 32 entries):
+
+```bash
+curl -X POST http://localhost:8080/api/v1/tokens \
+  -H "Authorization: Bearer tf_xxxxxxxxxxxx" -H "Content-Type: application/json" \
+  -d '{"name": "ocr-agent", "scope": "write", "expires_in_days": 7,
+       "repos": ["datasets/alice/trackio-metrics"]}'
+```
+
+The credential making this request must itself be an unrestricted write credential.
+
+!!! tip "Give AI agents and CI a restricted, expiring token"
+    A token handed to an AI agent, a CI job or a rented GPU machine should be able to do exactly
+    what that job needs and nothing else. A write token restricted to the one experiment
+    repository the job logs to, expiring in 7 or 30 days, lets it ingest metrics, annotate runs
+    and edit notes there — and if it leaks, it cannot delete a repository, push anywhere else, or
+    mint itself a successor. Every request it makes is attributable in the server's access log
+    (`token_id`, `token_name`). See [Using thinkingface from AI agents](../guides/agents.md).
+
+### Minting a token from the command line
+
+`thinkingface admin token create` mints an access token without a browser, for provisioning a new
+instance or handing a token to automation. Like `admin passwd`, it runs next to the database with
+the same `DATABASE_URL` the server uses, and applies exactly the rules the web UI does:
+
+```text
+thinkingface admin token create <username> [--name NAME] [--scope read|write]
+    [--expires-in-days N] [--repo KIND/NS/NAME ...] [--output FILE]
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--name` | `admin-cli` | the label shown in the token list |
+| `--scope` | `write` | `read` or `write` |
+| `--expires-in-days` | `0` (never) | 1–365 days |
+| `--repo` | (unrestricted) | restrict the token to this repository, as `datasets/NS/NAME` or `models/NS/NAME`. Repeatable |
+| `--output` | (stdout) | write the token to this file instead, created with mode `0600`; refused if the file exists |
+
+The token — and nothing else — goes to stdout (or to `--output`); what was created, for whom, and
+until when goes to stderr, so `TOKEN=$(thinkingface admin token create ...)` captures exactly the
+token. Under Docker Compose, run it inside the `api` container with `-T` so that no terminal is
+allocated (a terminal would merge stderr into stdout):
+
+```bash
+docker compose exec -T api thinkingface admin token create admin \
+    --name ci --expires-in-days 30 --repo datasets/admin/trackio-metrics > ci-token.txt
+```
+
+Minting is logged as `access token created` with `actor: admin-cli`. As with the other `admin`
+commands, whoever can run this already has the database.
 
 ## Using a token
 
@@ -260,11 +348,14 @@ minting a token. Each fingerprint can only be registered to one account instance
 
 ## Security notes
 
-- **Authentication gates writes, not reads.** thinkingface has no per-repository visibility
-  setting, so every repository is readable — including by unauthenticated callers — by
-  anyone who can reach the instance. A token controls what its holder may *write*; it is not
+- **By default, authentication gates writes, not reads.** thinkingface has no per-repository
+  visibility setting, so every repository is readable — including by unauthenticated callers —
+  by anyone who can reach the instance. A token controls what its holder may *write*; it is not
   what keeps a repository unread. See
-  [Compatibility](compatibility.md#known-incompatibilities-and-limitations).
+  [Compatibility](compatibility.md#known-incompatibilities-and-limitations). An operator can
+  close anonymous reads instance-wide with `TF_REQUIRE_AUTH_FOR_READ`
+  ([Deployment](../self-hosting/deployment.md#require-sign-in-for-reads)); every signed-in account
+  and every valid token can then still read every repository.
 - **Rate limiting**: failed password attempts (both the web UI's login form and HTTP Basic
   auth, which every route accepts) are throttled per client address (an IPv4 address, or an
   IPv6 /64), at half that rate per username from that address, and at five times it per
@@ -280,7 +371,9 @@ minting a token. Each fingerprint can only be registered to one account instance
 - **CORS**: state-changing requests authenticated via the session cookie are only accepted
   from an allowlisted origin (the web UI's own origin, plus `localhost:3000` over plain HTTP
   in development). A token-authenticated request isn't subject to this, since it can't be
-  triggered ambiently by a browser the way a cookie can.
+  triggered ambiently by a browser the way a cookie can. When the web UI reaches the API through
+  its own same-origin proxy (the default), the proxy performs the equivalent check against its
+  own origin before forwarding.
 
 ## See also
 

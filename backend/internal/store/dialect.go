@@ -105,7 +105,17 @@ type dialectQueries struct {
 	// $4 config JSON (nil = keep), $5 summary JSON (nil = keep),
 	// $6 metric_keys JSON (nil = keep), $7 last_step, $8 num_points,
 	// $9 started_at (nil = keep), $10 group_name (nil = keep),
-	// $11 job_type (nil = keep). RETURNING id.
+	// $11 job_type (nil = keep), $12 summary_min JSON (nil = keep),
+	// $13 summary_max JSON (nil = keep), $14 heartbeat_secs (0 = keep),
+	// $15 touch (boolean). RETURNING id.
+	//
+	// updated_at is the run's heartbeat, not a "row last written" stamp: on
+	// conflict it moves only when $15 says the write is a sign of life from
+	// the run itself, or when $7 carries a step past the stored last_step
+	// (a batch-path run whose parquet grew). SET expressions read the row as
+	// it was before the statement on both engines, so exp_runs.last_step
+	// there is the old value, not the GREATEST just assigned. An insert
+	// leaves it to the column default.
 	upsertExpRun string
 	// updateExpRunAnnotation: $1 project_id, $2 name, $3 tags array
 	// (nil = keep), $4 archived (nil = keep), $5 is_baseline (nil = keep),

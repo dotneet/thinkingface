@@ -1,0 +1,3661 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "thinkingface API",
+    "version": "1.0.0",
+    "description": "The programmatic surface of a thinkingface instance: authentication, personal access tokens, repository listing/creation and the experiment-tracking API (docs/dev/agent-features.md §5). It excludes the HuggingFace-compatible endpoints (whoami-v2 aside) and the git/LFS transports, whose external protocols are documented by huggingface_hub and git themselves rather than here (see docs/dev/api-contract.md). This document is hand-maintained; backend/internal/api/openapi_test.go fails the build if a documented path stops being routed, or if a routed /api/v1/experiments or /api/v1/tokens path stops being documented."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    },
+    {
+      "basicAuth": []
+    },
+    {
+      "cookieAuth": []
+    },
+    {}
+  ],
+  "tags": [
+    {
+      "name": "Auth",
+      "description": "Signing in, the current user, and the two HF-compatible identity endpoints."
+    },
+    {
+      "name": "Tokens",
+      "description": "Personal access tokens: mint, list, revoke."
+    },
+    {
+      "name": "Repositories",
+      "description": "Listing and creating model/dataset repositories."
+    },
+    {
+      "name": "Experiments",
+      "description": "Training-run tracking: projects, runs, metrics, notes, lineage and live ingest (docs/dev/agent-features.md §2)."
+    }
+  ],
+  "paths": {
+    "/api/v1/auth/login": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "login",
+        "summary": "Sign in with a username and password",
+        "description": "Issues a signed `tf_session` cookie on success. Programmatic clients (scripts, agents) should not use this endpoint at all: mint a personal access token instead (`POST /api/v1/tokens`, which itself requires a write-scoped credential) and send it as `Authorization: Bearer tf_...` or as the password of an HTTP Basic request. Repeated failures from the same client address (or against the same username) are throttled with 429 and a `Retry-After` header; the throttle also applies to HTTP Basic password authentication on every other route.",
+        "security": [
+          {}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in. Sets `Set-Cookie: tf_session=...`.",
+            "headers": {
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "The session cookie, HttpOnly and SameSite=Lax."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Wrong username or password.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Account disabled or still waiting for approval.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited; see `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is temporarily out of password-hashing capacity; the password was not checked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "logout",
+        "summary": "Sign out and revoke every session",
+        "description": "Clears the session cookie and invalidates every session the current user holds (increments `users.session_epoch`), not just this one. A no-op (still 204) when the caller was not authenticated via the cookie.",
+        "responses": {
+          "204": {
+            "description": "Signed out."
+          }
+        }
+      }
+    },
+    "/api/v1/me": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "getMe",
+        "summary": "The signed-in account",
+        "description": "The one endpoint that stays on the read-authentication allowlist even when `TF_REQUIRE_AUTH_FOR_READ` is on, so an anonymous caller gets an ordinary 401 rather than the instance-wide `authentication_required` type.",
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/server-info": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "getServerInfo",
+        "summary": "Instance-wide settings a signed-out client needs",
+        "description": "Public even when `TF_REQUIRE_AUTH_FOR_READ` is on — it is how a client discovers that switch in the first place. `Cache-Control: no-store`.",
+        "security": [
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/whoami-v2": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "whoamiV2",
+        "summary": "HuggingFace-compatible identity (`HfApi.whoami`)",
+        "description": "The shape `huggingface_hub` expects from `/api/whoami-v2`, kept for compatibility with `hf auth whoami` and similar tooling. `auth.accessToken.displayName` is the name the caller gave the access token they authenticated with (or \"thinkingface\" for a session cookie or an HTTP Basic password, which name no token); `auth.accessToken.role` is the token's scope (`read` / `write`; a session or password is always `write`).",
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoamiV2Response"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tokens": {
+      "get": {
+        "tags": [
+          "Tokens"
+        ],
+        "operationId": "listTokens",
+        "summary": "List the caller's own personal access tokens",
+        "description": "Includes expired tokens (`expires_at` in the past); the list never filters on expiry, so the owner can see why a token stopped working and still delete it.",
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Tokens"
+        ],
+        "operationId": "createToken",
+        "summary": "Mint a new personal access token",
+        "description": "Requires an unrestricted write-scoped credential (a repository-restricted token may never mint another token, which would let it escalate its own restriction away). The plaintext token value is returned only in this response, with a `tf_…` prefix, and is never retrievable again.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateTokenResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`scope` was not exactly `\"read\"`/`\"write\"`, `expires_in_days` was negative or over 365, or `repos` was malformed, listed more than 32 repositories, named a repository that does not exist under that exact name, or was set on a `read`-scoped token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A `repos` entry the caller does not currently have write access to, or the credential itself is a repository-restricted token (`token_restricted`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tokens/{id}": {
+      "delete": {
+        "tags": [
+          "Tokens"
+        ],
+        "operationId": "deleteToken",
+        "summary": "Revoke a personal access token",
+        "description": "Works on an expired token exactly like a live one. Only the owner may revoke their own token.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "The token's numeric id, as returned by `GET /api/v1/tokens`."
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked."
+          },
+          "401": {
+            "description": "Not authenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such token (or it belongs to someone else).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos": {
+      "get": {
+        "tags": [
+          "Repositories"
+        ],
+        "operationId": "listRepos",
+        "summary": "Search and list repositories",
+        "description": "The Web UI's paginated browse endpoint, with facet counts. See docs/dev/api-contract.md §2 for the full filter semantics (lineage filters, sort orderings, facet exclusion rule).",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "basicAuth": []
+          },
+          {
+            "cookieAuth": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/RepoKind"
+            },
+            "description": "Restrict to one repository kind."
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Partial (ILIKE) match against name/namespace/description."
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Full-text search (tsquery prefix-match AND) over name and the repository card's description/tags/license/pipeline_tag/task_categories. Does not search the README body."
+          },
+          {
+            "name": "author",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Namespace name (exact, case-insensitive)."
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "A single tag filter, kept for backward-compatible links. Merged with `tags` when both are given."
+          },
+          {
+            "name": "tags",
+            "in": "query",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true,
+            "description": "Repeatable; every value must be present on the card (ANDed)."
+          },
+          {
+            "name": "license",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact match against the card's `license`."
+          },
+          {
+            "name": "task",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Matches the card's `pipeline_tag` or `task_categories`."
+          },
+          {
+            "name": "base_model",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "`ns/name`. Only derivatives of that base model. An unparseable value yields 0 results rather than being ignored."
+          },
+          {
+            "name": "relation",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "`finetune` | `adapter` | `quantized` | `merge`, or any other value a card declared. Filters the same edge as `base_model`."
+          },
+          {
+            "name": "dataset",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "`ns/name`. Only repositories trained on that dataset (the `dataset` edge only, not `run`)."
+          },
+          {
+            "name": "base_only",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Only repositories with no `base_model` edge at all. Mutually exclusive with `base_model`/`relation` (combined, yields 0 results)."
+          },
+          {
+            "name": "experiment",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Only (or never) repositories the experiment indexer has written runs into. Omitted lists both."
+          },
+          {
+            "name": "archived",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Omitted includes archived repositories too (they are marked with a badge, not hidden)."
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "updated",
+                "created",
+                "name",
+                "downloads",
+                "size"
+              ]
+            },
+            "description": "Default `updated`. `size` orders by total stored bytes, descending."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 30,
+              "maximum": 100
+            },
+            "description": "Page size, default 30, clamped to 100."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepoListResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Repositories"
+        ],
+        "operationId": "createRepo",
+        "summary": "Create a repository (Web UI shape)",
+        "description": "Requires write access in the target namespace (or the caller's own username, if `namespace` is omitted).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepoCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepoDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An unknown `kind`, a name/namespace failing the naming rule, or a `namespace` that does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "No write role in the namespace, or a read-scoped/repository-restricted credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A repository of that name already exists in the namespace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{kind}/{ns}/{name}": {
+      "get": {
+        "tags": [
+          "Repositories"
+        ],
+        "operationId": "getRepo",
+        "summary": "Repository detail",
+        "description": "A nonexistent repository and one the caller may not see both answer 404, indistinguishably.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "basicAuth": []
+          },
+          {
+            "cookieAuth": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/RepoKind"
+            }
+          },
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Namespace (user or organisation) name."
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepoDetailResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such repository, or the caller may not see it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/repos/create": {
+      "post": {
+        "tags": [
+          "Repositories"
+        ],
+        "operationId": "hfCreateRepo",
+        "summary": "Create a repository (HuggingFace-compatible: `HfApi.create_repo`)",
+        "description": "What `huggingface_hub.create_repo` / `push_to_hub` call. Also accepts and ignores `private` (bool) and `visibility` (`\"public\"|\"private\"`): this server has no notion of repository visibility. A repository-restricted write token may only reach this successfully via the `exist_ok=True` pattern, aimed at a repository already on its list.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HFCreateRepoRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HFCreateRepoResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An unknown `type`, or an invalid name/namespace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "No write role in the namespace, or a repository-restricted token aimed at a repository not on its list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already exists (the response still carries `url`/`repo_id`, which `create_repo(exist_ok=True)` reads).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HFCreateRepoResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/experiments": {
+      "get": {
+        "tags": [
+          "Experiments"
+        ],
+        "operationId": "listExperimentRepos",
+        "summary": "List experiment repositories",
+        "description": "Dataset repositories the experiment indexer has written runs into. Used by the namespace page's Experiments tab and the global `/experiments` listing.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "basicAuth": []
+          },
+          {
+            "cookieAuth": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "author",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Restrict to one namespace, case-insensitive."
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Full-text search, same as `store.RepoFilter.Search`."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "maximum": 100
+            },
+            "description": "This endpoint caps at 100 rows both by default and at the ceiling; use `offset` to page past it."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpProjectListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/experiments/{ns}/{repo}": {
+      "get": {
+        "tags": [
+          "Experiments"
+        ],
+        "operationId": "getExperimentRepo",
+        "summary": "An experiment repository's projects",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "basicAuth": []
+          },
+          {
+            "cookieAuth": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/expNs"
+          },
+          {
+            "$ref": "#/components/parameters/expRepo"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpRepoResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such repository.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/experiments/{ns}/{repo}/{project}": {
+      "patch": {
+        "tags": [
+          "Experiments"
+        ],
+        "operationId": "updateExperimentProject",
+        "summary": "Merge a project's metric goals",
+        "description": "A key-by-key merge: a metric mapped to `\"min\"`/`\"max\"` gets that goal, one mapped to `\"\"` has its goal removed, and metrics not mentioned keep theirs. The project row is created if it does not yet exist, so goals may be declared before the first run logs anything. A project may carry at most 256 goals.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/expNs"
+          },
+          {
+            "$ref": "#/components/parameters/expRepo"
+          },
+          {
+            "$ref": "#/components/parameters/expProject"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExpProjectUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpProject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`metric_goals` absent, a metric name invalid or reserved, a goal other than `min`/`max`/`\"\"`, or over 256 goals after the merge.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "No write access to the repository.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/experiments/{ns}/{repo}/{project}/runs": {
+      "get": {
+        "tags": [
+          "Experiments"
+        ],
+        "operationId": "listExperimentRuns",
+        "summary": "List a project's runs, with server-side filtering, sorting and a limit",
+        "description": "With no query parameters, every run of the project (archived included) in stored order, as before. A project that does not exist answers 200 with empty `runs`/`metric_goals`/`best`. Every parameter is validated: an unknown value is 400 rather than silently ignored.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "basicAuth": []
+          },
+          {
+            "cookieAuth": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/expNs"
+          },
+          {
+            "$ref": "#/components/parameters/expRepo"
+          },
+          {
+            "$ref": "#/components/parameters/expProject"
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true,
+            "description": "Repeatable; exact sweep group, any of. `group=` (empty value) selects runs with no group."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/RunStatus"
+              }
+            },
+            "style": "form",
+            "explode": true,
+            "description": "Repeatable derived status, any of."
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true,
+            "description": "Repeatable; a run must carry every tag given (ANDed)."
+          },
+          {
+            "name": "archived",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Omitted selects both."
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "One of `name`, `started_at`, `updated_at`, `last_step`, or `last:<metric>` (summary) / `min:<metric>` (summary_min) / `max:<metric>` (summary_max) / `best:<metric>` (needs a metric goal, 400 otherwise; ignores `order`, always best-first) / `config:<dotted.key>` (numbers < strings < booleans across mixed types). Runs lacking the sort value sort last in both orders."
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "description": "1..1000; unset means no limit."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpRunListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An unrecognised `sort`/`order`/`status`/`archived` value, `limit` outside 1..1000, or `sort=best:<metric>` with no goal set for that metric.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/experiments/{ns}/{repo}/{project}/runs/{run}": {
+      "get": {
+        "tags": [
+          "Experiments"
+        ],
+        "operationId": "getExperimentRun",
+        "summary": "One run, optionally long-polling for a change",
+        "description": "With `wait`, the request is held until the run's `updated_at` is later than `since`, or its derived status differs from `status`, or `wait` elapses — answering 200 with the current run in every case (the caller compares and decides). `since`/`status` default to what the first read found, so a bare `?wait=30s` means \"until anything changes\". A run that does not exist answers 404 immediately, wait or not. This route is exempt from the server's normal 60s handler deadline; `wait` is separately capped at 60s.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "basicAuth": []
+          },
+          {
+            "cookieAuth": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/expNs"
+          },
+          {
+            "$ref": "#/components/parameters/expRepo"
+          },
+          {
+            "$ref": "#/components/parameters/expProject"
+          },
+          {
+            "$ref": "#/components/parameters/expRun"
+          },
+          {
+            "name": "wait",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "A Go duration (`\"30s\"`) or a bare number of seconds. Longer than 60s is clamped to it, not refused; negative or unparsable is 400."
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "RFC 3339. Defaults to the run's `updated_at` at the first read."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/RunStatus"
+            },
+            "description": "Defaults to the run's derived status at the first read."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpRunResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`wait` unparsable/negative, or `since`/`status` malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such project or run.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Experiments"
+        ],
+        "operationId": "updateExperimentRunAnnotation",
+        "summary": "Update a run's hand-maintained annotations",
+        "description": "A partial update: an omitted field is left unchanged. For `tags` and `models`, omitting the key or sending `null` leaves the list unchanged; only an explicit `[]` clears it — sending `null` to clear either list is the mistake this distinction exists to prevent. `is_baseline: true` clears `is_baseline` on every other run in the same project. At least one field must be sent.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/expNs"
+          },
+          {
+            "$ref": "#/components/parameters/expRepo"
+          },
+          {
+            "$ref": "#/components/parameters/expProject"
+          },
+          {
+            "$ref": "#/components/parameters/expRun"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExpRunAnnotationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpRunAnnotationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No field given, a tag/note/model malformed or over its size limit (32 tags of 64 bytes each, a 16384-byte note, 32 produced models).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "No write access to the repository.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such run.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Experiments"
+        ],
+        "operationId": "deleteExperimentRun",
+        "summary": "Delete a run's indexed row and live metric points",
+        "description": "Irreversible for anything only ever ingested live, unlike `archived: true` which merely hides the run. A run sourced from a trackio parquet export reappears on the next re-index, since the export (not this index) is its source of truth there; delete the whole repository to remove those for good.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/expNs"
+          },
+          {
+            "$ref": "#/components/parameters/expRepo"
+          },
+          {
+            "$ref": "#/components/parameters/expProject"
+          },
+          {
+            "$ref": "#/components/parameters/expRun"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "401": {
+            "description": "Not authenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "No write access to the repository.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such run.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/experiments/{ns}/{repo}/{project}/runs/{run}/artifacts": {
+      "get": {
+        "tags": [
+          "Experiments"
+        ],
+        "operationId": "listExperimentRunArtifacts",
+        "summary": "Files `trackio.log_artifact` saved for a run",
+        "description": "A directory listing of `{project}/artifacts/{run}` on the repository's default branch — there is no dedicated artifact store; the files are ordinary version-controlled content. A run whose directory does not exist returns `artifacts: []`, not 404.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "basicAuth": []
+          },
+          {
+            "cookieAuth": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/expNs"
+          },
+          {
+            "$ref": "#/components/parameters/expRepo"
+          },
+          {
+            "$ref": "#/components/parameters/expProject"
+          },
+          {
+            "$ref": "#/components/parameters/expRun"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpArtifactListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`project` or `run` contains a path-traversal segment.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/experiments/{ns}/{repo}/{project}/config-diff": {
+      "get": {
+        "tags": [
+          "Experiments"
+        ],
+        "operationId": "getExperimentConfigDiff",
+        "summary": "Compare flattened configs across runs",
+        "description": "Only keys whose value differs across the chosen runs, or that some run lacks, are listed. With no `run`, every non-archived run of the project is compared (the 200 most recently updated, if there are more).",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "basicAuth": []
+          },
+          {
+            "cookieAuth": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/expNs"
+          },
+          {
+            "$ref": "#/components/parameters/expRepo"
+          },
+          {
+            "$ref": "#/components/parameters/expProject"
+          },
+          {
+            "name": "run",
+            "in": "query",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true,
+            "description": "Repeatable, at most 200. Order is the comparison order; a named run that does not exist is 404."
+          },
+          {
+            "name": "include_meta",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Include the top-level bookkeeping config keys `_meta` and `_resume`, left out by default."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpConfigDiffResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "More than 200 `run` values given.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "A named `run` does not exist in the project.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/experiments/{ns}/{repo}/{project}/notes": {
+      "get": {
+        "tags": [
+          "Experiments"
+        ],
+        "operationId": "getExperimentNotes",
+        "summary": "Read a project's notebook (`{project}/NOTES.md`)",
+        "description": "200 with `exists: false` for a project with no notes yet (including one with no runs, or an empty repository) — never 404.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "basicAuth": []
+          },
+          {
+            "cookieAuth": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/expNs"
+          },
+          {
+            "$ref": "#/components/parameters/expRepo"
+          },
+          {
+            "$ref": "#/components/parameters/expProject"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpNotesResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`NOTES.md` is a directory or an LFS pointer at that path, or exceeds the read size limit (2 MiB).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Experiments"
+        ],
+        "operationId": "putExperimentNotes",
+        "summary": "Replace a project's notebook, committing to the default branch",
+        "description": "Commits through the same path as a Web UI file edit: the WAL, the post-push sync job (`repo.push`, re-indexing), commit-author attribution and the archived-repository refusal (403 `repository_archived`) all apply. Saving content identical to the current file creates no commit and returns the current state. `content` is at most 256 KiB (413 `payload_too_large` otherwise); `message` is a single line of at most 200 bytes.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/expNs"
+          },
+          {
+            "$ref": "#/components/parameters/expRepo"
+          },
+          {
+            "$ref": "#/components/parameters/expProject"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExpNotesUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpNotesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid UTF-8, a malformed `message`, `project` unusable as a directory name, or the notes path is LFS-routed by `.gitattributes`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "No write access, or the repository is archived (`repository_archived`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`base_sha` did not match the current blob (or the emptiness of the file); the message says how to retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`content` over 256 KiB.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/experiments/{ns}/{repo}/{project}/metrics": {
+      "get": {
+        "tags": [
+          "Experiments"
+        ],
+        "operationId": "getExperimentMetrics",
+        "summary": "Metric series for a chart",
+        "description": "Merges the flushed parquet with any not-yet-flushed points buffered in the live-ingest table, so the series a client sees does not change across a flush. No authentication is required (this is a public read).",
+        "security": [
+          {}
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/expNs"
+          },
+          {
+            "$ref": "#/components/parameters/expRepo"
+          },
+          {
+            "$ref": "#/components/parameters/expProject"
+          },
+          {
+            "name": "run",
+            "in": "query",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true,
+            "description": "Repeatable; each value is one whole run name taken exactly as sent. Preferred over `runs`; the two are never merged (one repeated `run` wins outright)."
+          },
+          {
+            "name": "runs",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "A single comma-joined value, split and trimmed. Kept only for links that already carry it; unsafe for run names containing a comma."
+          },
+          {
+            "name": "key",
+            "in": "query",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true,
+            "description": "Repeatable metric name selection, same rule as `run`/`runs`."
+          },
+          {
+            "name": "keys",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "step",
+                "time"
+              ],
+              "default": "step"
+            }
+          },
+          {
+            "name": "max_points",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1000,
+              "maximum": 5000
+            },
+            "description": "Downsampling target per series. Default 1000, silently clamped to 5000 (never rejected, since this endpoint needs no authentication)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpMetricsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/experiments/{ns}/{repo}/{project}/lineage": {
+      "get": {
+        "tags": [
+          "Experiments"
+        ],
+        "operationId": "getExperimentLineage",
+        "summary": "Models a project's runs declared they produced",
+        "description": "Grouped by run, most-recently-updated dependent first. With `run` set, that run always gets an entry (even an empty one: \"produced nothing yet\" is a valid answer).",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "basicAuth": []
+          },
+          {
+            "cookieAuth": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/expNs"
+          },
+          {
+            "$ref": "#/components/parameters/expRepo"
+          },
+          {
+            "$ref": "#/components/parameters/expProject"
+          },
+          {
+            "name": "run",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Restrict to one run's produced models."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpLineageResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/experiments/{ns}/{repo}/{project}/log": {
+      "post": {
+        "tags": [
+          "Experiments"
+        ],
+        "operationId": "logExperimentPoints",
+        "summary": "Ingest a batch of live metric points",
+        "description": "The trackio-compatible shim's write path. Points are buffered (`exp_points`); the sync worker periodically flushes them into `{project}/metrics.parquet`, which is the eventual source of truth. `summary`/`summary_min`/`summary_max`/`metric_keys` are merged across batches, never replaced wholesale, so a batch naming only some metrics does not erase the others. A batch with `\"points\": []` is a liveness ping: it moves `updated_at` (clearing `stale`) without changing anything else.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/expNs"
+          },
+          {
+            "$ref": "#/components/parameters/expRepo"
+          },
+          {
+            "$ref": "#/components/parameters/expProject"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExpLogRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpIngestAck"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An invalid run/project/metric name, a non-finite metric value, more than 10000 points in one batch, an out-of-range `heartbeat_secs` (must be 1..3600, 0 keeps the current value), or a batch that would push the run's distinct metric-name count past 1000 (a lifetime cap on the run, checked on the merged set).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "No write access, or the repository is archived (`repository_archived`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/experiments/{ns}/{repo}/{project}/finish": {
+      "post": {
+        "tags": [
+          "Experiments"
+        ],
+        "operationId": "finishExperimentRun",
+        "summary": "Mark a run finished (or failed), creating it if it never logged a point",
+        "description": "`group`/`job_type` are handled exactly as in `log` (optional; empty or omitted keeps the current value). Fires the `run.finished`/`run.failed` webhook exactly on the transition into that terminal status, not on a retried call.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/expNs"
+          },
+          {
+            "$ref": "#/components/parameters/expRepo"
+          },
+          {
+            "$ref": "#/components/parameters/expProject"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExpFinishRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpFinishAck"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An invalid run/project name, or `status` not one of `running`/`finished`/`failed`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "No write access, or the repository is archived (`repository_archived`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "tf_...",
+        "description": "A personal access token minted by `POST /api/v1/tokens`, sent as `Authorization: Bearer tf_...`. The scheme programmatic clients (scripts, agents, CI) should use."
+      },
+      "basicAuth": {
+        "type": "http",
+        "scheme": "basic",
+        "description": "HTTP Basic. `git`/`git-lfs` send a token as the password (username ignored). A real account password is also accepted here on every route, subject to the same throttling as `/api/v1/auth/login`."
+      },
+      "cookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "tf_session",
+        "description": "The signed session cookie `POST /api/v1/auth/login` sets. Browser-only; not meant for programmatic clients."
+      }
+    },
+    "parameters": {
+      "expNs": {
+        "name": "ns",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "The experiment dataset repository's namespace."
+      },
+      "expRepo": {
+        "name": "repo",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "The experiment dataset repository's name."
+      },
+      "expProject": {
+        "name": "project",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "The project name (a directory inside the repository); percent-encoded when it contains `/`."
+      },
+      "expRun": {
+        "name": "run",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "The run name; percent-encoded when it contains `/`."
+      }
+    },
+    "schemas": {
+      "RepoKind": {
+        "type": "string",
+        "enum": [
+          "dataset",
+          "model"
+        ]
+      },
+      "NamespaceKind": {
+        "type": "string",
+        "enum": [
+          "user",
+          "org"
+        ]
+      },
+      "TokenScope": {
+        "type": "string",
+        "enum": [
+          "read",
+          "write"
+        ]
+      },
+      "RunStatus": {
+        "type": "string",
+        "enum": [
+          "running",
+          "finished",
+          "failed",
+          "stale"
+        ],
+        "description": "`stale` is derived on read, never stored: a `running` run whose `updated_at` is older than its staleness window (see `heartbeat_secs` on `ExpRun`) is reported as stale."
+      },
+      "MetricGoal": {
+        "type": "string",
+        "enum": [
+          "min",
+          "max"
+        ]
+      },
+      "PreviewKind": {
+        "type": "string",
+        "enum": [
+          "parquet",
+          "model",
+          "text",
+          "image",
+          "markdown",
+          "binary"
+        ]
+      },
+      "MetricPoint": {
+        "type": "array",
+        "items": {
+          "type": "number"
+        },
+        "minItems": 2,
+        "maxItems": 2,
+        "description": "[x, y] — x is the step or the Unix timestamp, per the `x` query parameter."
+      },
+      "RepoLocation": {
+        "type": "object",
+        "required": [
+          "namespace",
+          "name"
+        ],
+        "properties": {
+          "namespace": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ApiError": {
+        "type": "object",
+        "required": [
+          "message",
+          "type"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "A short machine-readable error code, e.g. `bad_request`, `forbidden`, `not_found`, `conflict`, `token_restricted`, `repository_archived`, `rate_limited`, `payload_too_large`, `internal_error`."
+          },
+          "moved_to": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RepoLocation"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set (with type `repo_moved`, status 404) when the requested repository name is a former name of one that has since been transferred or renamed."
+          }
+        }
+      },
+      "ApiErrorBody": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ApiError"
+          }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "username": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        }
+      },
+      "Namespace": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind",
+          "role"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/NamespaceKind"
+          },
+          "role": {
+            "type": "string",
+            "description": "The caller's role in this namespace (\"admin\"/\"write\"/\"read\"), or \"\" when membership carries no explicit role."
+          }
+        }
+      },
+      "User": {
+        "type": "object",
+        "required": [
+          "id",
+          "username",
+          "email",
+          "is_admin",
+          "display_name",
+          "avatar_url",
+          "namespaces"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "username": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "is_admin": {
+            "type": "boolean"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "avatar_url": {
+            "type": "string"
+          },
+          "namespaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Namespace"
+            }
+          }
+        }
+      },
+      "UserResponse": {
+        "type": "object",
+        "required": [
+          "user"
+        ],
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        }
+      },
+      "ServerInfo": {
+        "type": "object",
+        "required": [
+          "require_auth_for_read",
+          "allow_signup"
+        ],
+        "properties": {
+          "require_auth_for_read": {
+            "type": "boolean",
+            "description": "`TF_REQUIRE_AUTH_FOR_READ`: true when every read needs a signed-in caller."
+          },
+          "allow_signup": {
+            "type": "boolean",
+            "description": "`TF_ALLOW_SIGNUP`."
+          }
+        }
+      },
+      "WhoamiOrg": {
+        "type": "object",
+        "required": [
+          "type",
+          "id",
+          "name",
+          "fullname",
+          "email",
+          "canPay",
+          "periodEnd",
+          "avatarUrl",
+          "isEnterprise",
+          "roleInOrg"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "org"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "fullname": {
+            "type": "string"
+          },
+          "email": {
+            "type": "null"
+          },
+          "canPay": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "periodEnd": {
+            "type": "null"
+          },
+          "avatarUrl": {
+            "type": "string"
+          },
+          "isEnterprise": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "roleInOrg": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "write",
+              "read"
+            ]
+          }
+        }
+      },
+      "WhoamiV2Response": {
+        "type": "object",
+        "required": [
+          "type",
+          "id",
+          "name",
+          "fullname",
+          "email",
+          "emailVerified",
+          "canPay",
+          "isPro",
+          "periodEnd",
+          "avatarUrl",
+          "orgs",
+          "auth"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "user"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "fullname": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "emailVerified": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "canPay": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "isPro": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "periodEnd": {
+            "type": "null"
+          },
+          "avatarUrl": {
+            "type": "string"
+          },
+          "orgs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WhoamiOrg"
+            }
+          },
+          "auth": {
+            "type": "object",
+            "required": [
+              "type",
+              "accessToken"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "access_token"
+                ]
+              },
+              "accessToken": {
+                "type": "object",
+                "required": [
+                  "displayName",
+                  "role"
+                ],
+                "properties": {
+                  "displayName": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "read",
+                      "write"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "TokenCreateRequest": {
+        "type": "object",
+        "required": [
+          "scope"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Defaults to \"token\" if omitted or empty."
+          },
+          "scope": {
+            "$ref": "#/components/schemas/TokenScope"
+          },
+          "expires_in_days": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 365,
+            "description": "Omitted, null or 0 means the token never expires."
+          },
+          "repos": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "description": "Restrict a write token to these repositories, each spelled \"datasets/{ns}/{name}\" or \"models/{ns}/{name}\". Omitted, null or [] is an unrestricted token. Only valid on a `write`-scoped token; the caller must currently have write access to every entry (docs/dev/agent-features.md §3)."
+          }
+        }
+      },
+      "TokenItem": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "scope",
+          "created_at",
+          "last_used_at",
+          "expires_at",
+          "repos"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/TokenScope"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Null until the token authenticates a request."
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Null for a token that never expires."
+          },
+          "repos": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Always an array; empty means unrestricted."
+          }
+        }
+      },
+      "TokenListResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TokenItem"
+            }
+          }
+        }
+      },
+      "CreateTokenResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/TokenItem"
+          },
+          {
+            "type": "object",
+            "required": [
+              "token"
+            ],
+            "properties": {
+              "token": {
+                "type": "string",
+                "description": "The plaintext value, prefixed \"tf_\". Returned only here; a client that loses it must issue another token."
+              }
+            }
+          }
+        ]
+      },
+      "ParquetSummary": {
+        "type": "object",
+        "required": [
+          "path",
+          "num_rows",
+          "num_row_groups",
+          "num_columns",
+          "size"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "num_rows": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "num_row_groups": {
+            "type": "integer"
+          },
+          "num_columns": {
+            "type": "integer"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes."
+          }
+        }
+      },
+      "RepoSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "namespace",
+          "namespace_kind",
+          "name",
+          "full_name",
+          "description",
+          "tags",
+          "license",
+          "downloads",
+          "total_size",
+          "num_files",
+          "is_experiment",
+          "default_branch",
+          "head_sha",
+          "created_at",
+          "updated_at",
+          "archived",
+          "archived_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/RepoKind"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "namespace_kind": {
+            "$ref": "#/components/schemas/NamespaceKind"
+          },
+          "name": {
+            "type": "string"
+          },
+          "full_name": {
+            "type": "string",
+            "description": "\"namespace/name\"."
+          },
+          "description": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "license": {
+            "type": "string",
+            "description": "\"\" when the card names none."
+          },
+          "downloads": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total_size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes, sum of all file sizes."
+          },
+          "num_files": {
+            "type": "integer"
+          },
+          "is_experiment": {
+            "type": "boolean"
+          },
+          "default_branch": {
+            "type": "string"
+          },
+          "head_sha": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "archived": {
+            "type": "boolean"
+          },
+          "archived_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "RepoDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RepoSummary"
+          },
+          {
+            "type": "object",
+            "required": [
+              "card",
+              "readme",
+              "readme_too_large",
+              "clone_url",
+              "ssh_clone_url",
+              "branches",
+              "tags_refs",
+              "parquet_files",
+              "indexing",
+              "can_write",
+              "can_admin",
+              "downloads_last_30_days"
+            ],
+            "properties": {
+              "card": {
+                "type": "object",
+                "description": "Parsed README.md YAML front matter."
+              },
+              "readme": {
+                "type": "string",
+                "description": "README body (front matter stripped), 256 KiB max."
+              },
+              "readme_too_large": {
+                "type": "boolean"
+              },
+              "clone_url": {
+                "type": "string"
+              },
+              "ssh_clone_url": {
+                "type": "string",
+                "description": "\"\" when TF_SSH_ENABLED is off."
+              },
+              "branches": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "tags_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "parquet_files": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ParquetSummary"
+                }
+              },
+              "indexing": {
+                "type": "boolean"
+              },
+              "can_write": {
+                "type": "boolean"
+              },
+              "can_admin": {
+                "type": "boolean"
+              },
+              "downloads_last_30_days": {
+                "type": "integer",
+                "format": "int64"
+              }
+            }
+          }
+        ]
+      },
+      "RepoDetailResponse": {
+        "type": "object",
+        "required": [
+          "repo"
+        ],
+        "properties": {
+          "repo": {
+            "$ref": "#/components/schemas/RepoDetail"
+          }
+        }
+      },
+      "RepoFacetItem": {
+        "type": "object",
+        "required": [
+          "value",
+          "count"
+        ],
+        "properties": {
+          "value": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "RepoFacets": {
+        "type": "object",
+        "required": [
+          "tags",
+          "licenses",
+          "tasks",
+          "relations"
+        ],
+        "properties": {
+          "tags": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RepoFacetItem"
+            }
+          },
+          "licenses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RepoFacetItem"
+            }
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RepoFacetItem"
+            }
+          },
+          "relations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RepoFacetItem"
+            }
+          }
+        }
+      },
+      "RepoListResponse": {
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "facets"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RepoSummary"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "facets": {
+            "$ref": "#/components/schemas/RepoFacets"
+          }
+        }
+      },
+      "RepoCreateRequest": {
+        "type": "object",
+        "required": [
+          "kind",
+          "name"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/RepoKind"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "Defaults to the caller's own username."
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      },
+      "HFCreateRepoRequest": {
+        "type": "object",
+        "required": [
+          "type",
+          "name"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "dataset",
+              "model"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "Either a bare name or \"ns/name\"."
+          },
+          "organization": {
+            "type": "string"
+          },
+          "private": {
+            "type": "boolean",
+            "description": "Accepted and ignored (repositories have no visibility concept)."
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "description": "Accepted and ignored, same as `private`."
+          },
+          "sdk": {
+            "type": "string"
+          }
+        }
+      },
+      "HFCreateRepoResponse": {
+        "type": "object",
+        "required": [
+          "url",
+          "repo_id",
+          "name",
+          "type"
+        ],
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "repo_id": {
+            "type": "string",
+            "description": "\"ns/name\"."
+          },
+          "name": {
+            "type": "string",
+            "description": "Same as `repo_id`."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "dataset",
+              "model"
+            ]
+          },
+          "error": {
+            "type": "string",
+            "description": "Present only on the 409 form: \"You already created this {type} repo\"."
+          }
+        }
+      },
+      "ExpProjectListItem": {
+        "type": "object",
+        "required": [
+          "namespace",
+          "name",
+          "full_name",
+          "num_projects",
+          "updated_at",
+          "projects"
+        ],
+        "properties": {
+          "namespace": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "full_name": {
+            "type": "string"
+          },
+          "num_projects": {
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The repository's project names."
+          }
+        }
+      },
+      "ExpProjectListResponse": {
+        "type": "object",
+        "required": [
+          "items",
+          "total"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExpProjectListItem"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ExpProject": {
+        "type": "object",
+        "required": [
+          "name",
+          "num_runs",
+          "updated_at",
+          "metric_goals",
+          "status_counts",
+          "best"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "num_runs": {
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "metric_goals": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MetricGoal"
+            },
+            "description": "Metric name -> goal. A metric with no declared goal is absent, never null."
+          },
+          "status_counts": {
+            "type": "object",
+            "description": "Runs by derived status, archived runs excluded. Filled only by GET /api/v1/experiments/{ns}/{repo}; empty elsewhere.",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/RunStatus"
+            }
+          },
+          "best": {
+            "type": "array",
+            "description": "Best non-archived run per goal metric. Filled only by GET /api/v1/experiments/{ns}/{repo}; empty elsewhere.",
+            "items": {
+              "$ref": "#/components/schemas/ExpProjectBest"
+            }
+          }
+        }
+      },
+      "ExpProjectUpdateRequest": {
+        "type": "object",
+        "properties": {
+          "metric_goals": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "enum": [
+                "min",
+                "max",
+                ""
+              ]
+            },
+            "description": "Required and non-empty in practice (400 \"nothing to update\" otherwise), even though the field itself is optional on the wire. \"\" removes that metric's goal; a metric not mentioned keeps its current goal. At most 256 goals after the merge."
+          }
+        }
+      },
+      "ExpRepoResponse": {
+        "type": "object",
+        "required": [
+          "repo",
+          "projects"
+        ],
+        "properties": {
+          "repo": {
+            "$ref": "#/components/schemas/RepoSummary"
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExpProject"
+            }
+          }
+        }
+      },
+      "ExpRunModelRef": {
+        "type": "object",
+        "required": [
+          "repo_id",
+          "revision",
+          "exists"
+        ],
+        "properties": {
+          "repo_id": {
+            "type": "string",
+            "description": "\"ns/name\" of a model repository."
+          },
+          "revision": {
+            "type": "string",
+            "description": "\"\" when the shim could not resolve one. Recorded verbatim, never re-verified."
+          },
+          "exists": {
+            "type": "boolean",
+            "description": "False means render as plain text, not a link."
+          }
+        }
+      },
+      "ExpRunModelInput": {
+        "type": "object",
+        "required": [
+          "repo_id"
+        ],
+        "properties": {
+          "repo_id": {
+            "type": "string",
+            "description": "\"ns/name\"; 400 if it does not parse."
+          },
+          "revision": {
+            "type": "string",
+            "maxLength": 256
+          }
+        }
+      },
+      "ExpRun": {
+        "type": "object",
+        "required": [
+          "name",
+          "status",
+          "last_step",
+          "num_points",
+          "started_at",
+          "updated_at",
+          "config",
+          "metric_keys",
+          "summary",
+          "summary_min",
+          "summary_max",
+          "heartbeat_secs",
+          "group",
+          "job_type",
+          "tags",
+          "archived",
+          "is_baseline",
+          "note",
+          "models"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus"
+          },
+          "last_step": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "num_points": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Null for a run recovered from an export carrying no start time."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "config": {
+            "type": "object",
+            "description": "The run's hyperparameters as logged. `_meta`/`_args` are reserved keys (docs/dev/api-contract.md §7)."
+          },
+          "metric_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "summary": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            },
+            "description": "The last value seen for each metric."
+          },
+          "summary_min": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            },
+            "description": "The smallest value each metric has reached over the run."
+          },
+          "summary_max": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            },
+            "description": "The largest value each metric has reached over the run."
+          },
+          "heartbeat_secs": {
+            "type": "integer",
+            "description": "0 when the client never declared a heartbeat (docs/dev/agent-features.md §2.6)."
+          },
+          "group": {
+            "type": "string",
+            "description": "The sweep this run belongs to (`trackio.init(group=...)`); \"\" if unspecified."
+          },
+          "job_type": {
+            "type": "string",
+            "description": "Its role within the sweep (e.g. \"train\"/\"eval\"); \"\" if unspecified."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "archived": {
+            "type": "boolean",
+            "description": "Hidden from the default listing, not deleted."
+          },
+          "is_baseline": {
+            "type": "boolean",
+            "description": "At most one run per project."
+          },
+          "note": {
+            "type": "string",
+            "description": "Free-form Markdown, \"\" if unwritten."
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExpRunModelRef"
+            }
+          }
+        }
+      },
+      "ExpRunListResponse": {
+        "type": "object",
+        "required": [
+          "runs",
+          "metric_goals",
+          "best"
+        ],
+        "properties": {
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExpRun"
+            }
+          },
+          "metric_goals": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MetricGoal"
+            }
+          },
+          "best": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Metric name -> the best non-archived run's name among the runs listed."
+          }
+        }
+      },
+      "ExpRunResponse": {
+        "type": "object",
+        "required": [
+          "run"
+        ],
+        "properties": {
+          "run": {
+            "$ref": "#/components/schemas/ExpRun"
+          }
+        }
+      },
+      "ExpConfigDiffKey": {
+        "type": "object",
+        "required": [
+          "key",
+          "values"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "values": {
+            "type": "object",
+            "description": "run name -> value; a run lacking the key is absent."
+          }
+        }
+      },
+      "ExpConfigDiffResponse": {
+        "type": "object",
+        "required": [
+          "runs",
+          "keys"
+        ],
+        "properties": {
+          "runs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExpConfigDiffKey"
+            }
+          }
+        }
+      },
+      "ExpNotesResponse": {
+        "type": "object",
+        "required": [
+          "path",
+          "content",
+          "exists",
+          "blob_sha",
+          "commit_sha"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "\"{project}/NOTES.md\"."
+          },
+          "content": {
+            "type": "string"
+          },
+          "exists": {
+            "type": "boolean"
+          },
+          "blob_sha": {
+            "type": "string",
+            "description": "The git blob hash; \"\" when the file does not exist."
+          },
+          "commit_sha": {
+            "type": "string",
+            "description": "The default branch head it was read from; \"\" for an empty repository."
+          }
+        }
+      },
+      "ExpNotesUpdateRequest": {
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "maxLength": 262144
+          },
+          "base_sha": {
+            "type": "string",
+            "description": "Optimistic lock: present and equal to the current blob_sha proceeds; present and different (\"\" meaning \"must not exist yet\") is 409; absent overwrites unconditionally."
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "Single line. Default: \"docs(experiments): update notes for {project}\"."
+          }
+        }
+      },
+      "ExpArtifact": {
+        "type": "object",
+        "required": [
+          "name",
+          "path",
+          "size",
+          "lfs",
+          "preview"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Path relative to the run's artifact directory."
+          },
+          "path": {
+            "type": "string",
+            "description": "Full path within the repository."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "lfs": {
+            "type": "boolean"
+          },
+          "preview": {
+            "$ref": "#/components/schemas/PreviewKind"
+          }
+        }
+      },
+      "ExpArtifactListResponse": {
+        "type": "object",
+        "required": [
+          "path",
+          "rev",
+          "artifacts"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "\"{project}/artifacts/{run}\"."
+          },
+          "rev": {
+            "type": "string",
+            "description": "Always the repository's default branch."
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExpArtifact"
+            }
+          }
+        }
+      },
+      "ExpRunAnnotationRequest": {
+        "type": "object",
+        "description": "At least one field must be present; every field is optional and an omitted one is left unchanged.",
+        "properties": {
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "description": "Replaces the run's tag list wholesale; [] clears it. Each tag at most 64 bytes."
+          },
+          "archived": {
+            "type": "boolean"
+          },
+          "is_baseline": {
+            "type": "boolean"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 16384
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExpRunModelInput"
+            },
+            "maxItems": 32,
+            "description": "Replaces the run's produced-model list wholesale; [] clears it."
+          }
+        }
+      },
+      "ExpRunAnnotationResponse": {
+        "type": "object",
+        "required": [
+          "run"
+        ],
+        "properties": {
+          "run": {
+            "$ref": "#/components/schemas/ExpRun"
+          }
+        }
+      },
+      "ExpMetricSeries": {
+        "type": "object",
+        "required": [
+          "run",
+          "key",
+          "points"
+        ],
+        "properties": {
+          "run": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricPoint"
+            }
+          }
+        }
+      },
+      "ExpMetricsResponse": {
+        "type": "object",
+        "required": [
+          "series"
+        ],
+        "properties": {
+          "series": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExpMetricSeries"
+            }
+          }
+        }
+      },
+      "LineageEdgeKind": {
+        "type": "string",
+        "enum": [
+          "dataset",
+          "base_model",
+          "run",
+          "eval_dataset",
+          "new_version"
+        ]
+      },
+      "LineageDependent": {
+        "type": "object",
+        "required": [
+          "repo",
+          "kind",
+          "raw",
+          "rev",
+          "project",
+          "run",
+          "relation"
+        ],
+        "properties": {
+          "repo": {
+            "$ref": "#/components/schemas/RepoSummary"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/LineageEdgeKind"
+          },
+          "raw": {
+            "type": "string"
+          },
+          "rev": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "run": {
+            "type": "string"
+          },
+          "relation": {
+            "type": "string"
+          }
+        }
+      },
+      "ExpRunLineage": {
+        "type": "object",
+        "required": [
+          "run",
+          "models"
+        ],
+        "properties": {
+          "run": {
+            "type": "string"
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LineageDependent"
+            }
+          }
+        }
+      },
+      "ExpLineageResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExpRunLineage"
+            }
+          }
+        }
+      },
+      "IngestPoint": {
+        "type": "object",
+        "properties": {
+          "step": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC 3339. Defaults to the server's receive time when omitted or unparsable."
+          },
+          "metrics": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": "Metric name -> value. An explicit `null` means \"nothing logged for this metric at this step\" and is skipped, rather than being stored as 0.0. Names are 1-256 bytes, no control characters, and must not be one of the metrics parquet's structural columns (id, log_id, space_id, run_id, run_name, run, step, _step, global_step, timestamp, _timestamp, created_at, project, _ingest_id)."
+          }
+        }
+      },
+      "ExpLogRequest": {
+        "type": "object",
+        "required": [
+          "run"
+        ],
+        "properties": {
+          "run": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus",
+            "description": "Defaults to \"running\". Only running/finished/failed are accepted here (stale is derived, never sent)."
+          },
+          "config": {
+            "type": "object"
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IngestPoint"
+            },
+            "maxItems": 10000
+          },
+          "heartbeat_secs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3600,
+            "description": "1..3600, or 0/omitted to keep the run's current value."
+          },
+          "group": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "Omitted or \"\" keeps the run's current group."
+          },
+          "job_type": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "Omitted or \"\" keeps the run's current job_type."
+          }
+        }
+      },
+      "ExpIngestAck": {
+        "type": "object",
+        "required": [
+          "ok",
+          "run",
+          "accepted"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "run": {
+            "type": "string"
+          },
+          "accepted": {
+            "type": "integer",
+            "description": "The number of points in this batch that were stored."
+          }
+        }
+      },
+      "ExpFinishRequest": {
+        "type": "object",
+        "required": [
+          "run"
+        ],
+        "properties": {
+          "run": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus",
+            "description": "Defaults to \"finished\"."
+          },
+          "group": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "job_type": {
+            "type": "string",
+            "maxLength": 256
+          }
+        }
+      },
+      "ExpFinishAck": {
+        "type": "object",
+        "required": [
+          "ok",
+          "run",
+          "status"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "run": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus"
+          }
+        }
+      },
+      "ExpProjectBest": {
+        "type": "object",
+        "required": [
+          "metric",
+          "goal",
+          "run",
+          "value"
+        ],
+        "properties": {
+          "metric": {
+            "type": "string"
+          },
+          "goal": {
+            "$ref": "#/components/schemas/MetricGoal"
+          },
+          "run": {
+            "type": "string"
+          },
+          "value": {
+            "type": "number"
+          }
+        }
+      }
+    }
+  }
+}

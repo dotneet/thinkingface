@@ -301,6 +301,12 @@ func (g *authGuard) releaseBcrypt() {
 // operator sees in a log would not be the one the failure budget was charged
 // against, and a report of a guessing run would name the wrong host.
 func (s *Server) clientIP(r *http.Request) string {
+	// Behind the web UI's API proxy the peer is the web container; the
+	// browser's own address arrives in a header only the web tier is
+	// believed about (webproxy.go).
+	if ip, ok := s.webProxyClientIP(r); ok {
+		return ip
+	}
 	if hops := s.trustedProxyHops(); hops > 0 {
 		if ip, ok := forwardedClientIP(r.Header.Values("X-Forwarded-For"), hops); ok {
 			return ip

@@ -98,7 +98,7 @@ export function TabularPreview({
     setFetchFailure(null);
     (async () => {
       try {
-        // `credentials: "omit"`, deliberately. In production this URL answers
+        // Never `credentials: "include"`. In production this URL answers
         // 302 to a GCS signed URL, and fetch carries the credentials mode
         // across a redirect it follows -- so `include` makes the *bucket*
         // request credentialed too, and a credentialed cross-origin response
@@ -117,7 +117,16 @@ export function TabularPreview({
         // fetch cannot simply go back to `include`; it needs the signed URL
         // handed over as data and fetched in a second, uncredentialed
         // request.
-        const res = await fetch(downloadUrl, { credentials: "omit" });
+        //
+        // `same-origin` rather than `omit`: with the API on another origin
+        // (NEXT_PUBLIC_API_URL set) the two are the same thing, and with
+        // the browser reaching it through this app's own origin
+        // (app/api/[...path]/route.ts) the session cookie reaches the
+        // resolve proxy -- which a TF_REQUIRE_AUTH_FOR_READ server needs --
+        // while the redirect to the bucket still goes uncredentialed:
+        // `same-origin` stops sending credentials once a redirect leaves
+        // the origin.
+        const res = await fetch(downloadUrl, { credentials: "same-origin" });
         if (!res.ok) {
           // Only the status code is kept; the status line is server-authored
           // English and is translated at display time (fetchFailureReason).

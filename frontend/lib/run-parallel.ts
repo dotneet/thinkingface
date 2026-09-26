@@ -285,3 +285,25 @@ export function linePath(
     })
     .join(" ");
 }
+
+/**
+ * The axes the parallel plot opens on: the config axes that actually vary
+ * across the runs (a constant axis draws every line through one point and
+ * says nothing), then the primary goal metric — or the first metric — as the
+ * last axis, so every line ends at the result it led to. Falls back to the
+ * first `limit` axes when that leaves fewer than two.
+ */
+export function defaultParallelAxes(
+  axes: readonly ParallelAxis[],
+  primaryMetric?: string,
+  limit = 6,
+): string[] {
+  const varies = (axis: ParallelAxis) =>
+    axis.kind === "numeric" ? axis.min !== axis.max : axis.categories.length > 1;
+  const configs = axes.filter((a) => a.source === "config" && varies(a)).slice(0, limit - 1);
+  const metrics = axes.filter((a) => a.source === "metric");
+  const metric = (primaryMetric && metrics.find((a) => a.key === primaryMetric)) || metrics[0];
+  const picked = [...configs, ...(metric ? [metric] : [])];
+  if (picked.length < 2) return axes.slice(0, limit).map((a) => a.id);
+  return picked.map((a) => a.id);
+}

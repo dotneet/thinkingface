@@ -8,7 +8,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Checkbox, Select } from "@/components/ui/field";
 import { colorForRun } from "@/lib/chart-utils";
 import { useT } from "@/lib/i18n/client";
-import { axisLabel, scatterAxes, scatterPoints } from "@/lib/run-compare";
+import { axisLabel, defaultScatterAxes, scatterAxes, scatterPoints } from "@/lib/run-compare";
 import type { ExpRun } from "@/types/api";
 
 /**
@@ -25,10 +25,13 @@ export function RunScatter({
   runs,
   runOrder,
   baseline,
+  primaryMetric,
 }: {
   runs: ExpRun[];
   runOrder: string[];
   baseline?: string;
+  /** The project's primary goal metric: the default y axis when logged. */
+  primaryMetric?: string;
 }) {
   const t = useT();
   const axes = useMemo(() => scatterAxes(runs), [runs]);
@@ -47,14 +50,11 @@ export function RunScatter({
   // view — render with no axis chosen and flash the "no comparable runs"
   // EmptyState before the effect ever ran (DESIGN.md §9 — a state that is
   // right one tick later still reads as wrong on first paint).
-  const [xId, setXId] = useState(() => {
-    const config = axes.find((a) => a.source === "config");
-    return (config ?? axes[0])?.id ?? "";
-  });
-  const [yId, setYId] = useState(() => {
-    const metric = axes.find((a) => a.source === "metric");
-    return (metric ?? axes[axes.length - 1])?.id ?? "";
-  });
+  // x defaults to a config key that actually varies across the selected runs
+  // (one every run shares is a vertical line of dots), y to the goal metric —
+  // see `defaultScatterAxes`.
+  const [xId, setXId] = useState(() => defaultScatterAxes(runs, axes, primaryMetric).x);
+  const [yId, setYId] = useState(() => defaultScatterAxes(runs, axes, primaryMetric).y);
   const [logScale, setLogScale] = useState(false);
 
   // Repairs the axis choice as the selection changes after mount: a run
@@ -63,17 +63,10 @@ export function RunScatter({
   // match), so it only ever fires for a real change.
   useEffect(() => {
     if (axes.length === 0) return;
-    setXId((current) => {
-      if (axes.some((a) => a.id === current)) return current;
-      const config = axes.find((a) => a.source === "config");
-      return (config ?? axes[0])?.id ?? "";
-    });
-    setYId((current) => {
-      if (axes.some((a) => a.id === current)) return current;
-      const metric = axes.find((a) => a.source === "metric");
-      return (metric ?? axes[axes.length - 1])?.id ?? "";
-    });
-  }, [axes]);
+    const defaults = defaultScatterAxes(runs, axes, primaryMetric);
+    setXId((current) => (axes.some((a) => a.id === current) ? current : defaults.x));
+    setYId((current) => (axes.some((a) => a.id === current) ? current : defaults.y));
+  }, [axes, runs, primaryMetric]);
 
   const xAxis = axes.find((a) => a.id === xId);
   const yAxis = axes.find((a) => a.id === yId);

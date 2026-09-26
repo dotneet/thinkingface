@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -15,20 +16,30 @@ type ExpProject struct {
 	Name      string    `json:"name"`
 	NumRuns   int       `json:"num_runs"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// MetricGoals maps a metric to "min" or "max": the direction in which it
+	// improves (docs/dev/agent-features.md §2.2). Never nil after a read.
+	MetricGoals map[string]string `json:"metric_goals"`
 }
 
 type ExpRun struct {
-	ID         int64          `json:"-"`
-	ProjectID  int64          `json:"-"`
-	Name       string         `json:"name"`
-	Status     string         `json:"status"`
-	Config     map[string]any `json:"config"`
-	Summary    map[string]any `json:"summary"`
+	ID        int64          `json:"-"`
+	ProjectID int64          `json:"-"`
+	Name      string         `json:"name"`
+	Status    string         `json:"status"`
+	Config    map[string]any `json:"config"`
+	Summary   map[string]any `json:"summary"`
+	// SummaryMin and SummaryMax are the smallest and largest value seen per
+	// metric, maintained exactly like Summary (the last value).
+	SummaryMin map[string]any `json:"summary_min"`
+	SummaryMax map[string]any `json:"summary_max"`
 	MetricKeys []string       `json:"metric_keys"`
 	LastStep   int64          `json:"last_step"`
 	NumPoints  int64          `json:"num_points"`
 	StartedAt  *time.Time     `json:"started_at"`
 	UpdatedAt  time.Time      `json:"updated_at"`
+	// HeartbeatSecs is how often the logging client promised to check in, 0
+	// when it never declared one. It drives the staleness window.
+	HeartbeatSecs int `json:"heartbeat_secs"`
 	// Group is the sweep this run belongs to and JobType the role it played in
 	// it, as `trackio.init(group=..., job_type=...)` declared them. Unlike the
 	// annotations below they are written by ingest -- but with the same "an
@@ -117,7 +128,7 @@ func (s *Store) UpsertExpProject(ctx context.Context, repoID int64, name string)
 func (s *Store) ListExpProjects(ctx context.Context, repoID int64) ([]ExpProject, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT p.id, p.repo_id, p.name, p.updated_at,
-		        (SELECT count(*) FROM exp_runs r WHERE r.project_id = p.id)
+		        (SELECT count(*) FROM exp_runs r WHERE r.project_id = p.id), p.metric_goals
 		 FROM exp_projects p WHERE p.repo_id = $1 ORDER BY p.updated_at DESC, p.name`, repoID)
 	if err != nil {
 		return nil, err
@@ -127,20 +138,120 @@ func (s *Store) ListExpProjects(ctx context.Context, repoID int64) ([]ExpProject
 	out := []ExpProject{}
 	for rows.Next() {
 		var p ExpProject
-		if err := rows.Scan(&p.ID, &p.RepoID, &p.Name, &p.UpdatedAt, &p.NumRuns); err != nil {
+		var goalsRaw []byte
+		if err := rows.Scan(&p.ID, &p.RepoID, &p.Name, &p.UpdatedAt, &p.NumRuns, &goalsRaw); err != nil {
 			return nil, err
 		}
+		p.MetricGoals = decodeMetricGoals(goalsRaw)
 		out = append(out, p)
 	}
 	return out, rows.Err()
 }
 
 func (s *Store) GetExpProject(ctx context.Context, repoID int64, name string) (*ExpProject, error) {
+	return getExpProject(ctx, s.db, repoID, name)
+}
+
+// getExpProject reads one project, with its run count, through db or a
+// transaction.
+func getExpProject(ctx context.Context, q executor, repoID int64, name string) (*ExpProject, error) {
 	p := &ExpProject{}
-	err := s.db.QueryRow(ctx,
-		`SELECT id, repo_id, name, updated_at FROM exp_projects WHERE repo_id = $1 AND name = $2`,
-		repoID, name).Scan(&p.ID, &p.RepoID, &p.Name, &p.UpdatedAt)
-	return p, norm(err)
+	var goalsRaw []byte
+	err := q.QueryRow(ctx,
+		`SELECT p.id, p.repo_id, p.name, p.updated_at,
+		        (SELECT count(*) FROM exp_runs r WHERE r.project_id = p.id), p.metric_goals
+		 FROM exp_projects p WHERE p.repo_id = $1 AND p.name = $2`,
+		repoID, name).Scan(&p.ID, &p.RepoID, &p.Name, &p.UpdatedAt, &p.NumRuns, &goalsRaw)
+	if err != nil {
+		return p, norm(err)
+	}
+	p.MetricGoals = decodeMetricGoals(goalsRaw)
+	return p, nil
+}
+
+// decodeMetricGoals reads the metric_goals column, dropping anything that is
+// not a known direction so a hand-edited row cannot reach the API as garbage.
+func decodeMetricGoals(raw []byte) map[string]string {
+	decoded := map[string]any{}
+	_ = json.Unmarshal(raw, &decoded)
+	out := make(map[string]string, len(decoded))
+	for k, v := range decoded {
+		if g, ok := v.(string); ok && (g == "min" || g == "max") {
+			out[k] = g
+		}
+	}
+	return out
+}
+
+// ErrTooManyMetricGoals is MergeExpProjectGoals refusing a merge whose result
+// would exceed the caller's cap.
+var ErrTooManyMetricGoals = errors.New("too many metric goals")
+
+// MergeExpProjectGoals applies a partial update of a project's metric goals:
+// a metric mapped to "min" or "max" is set, one mapped to "" is removed, and
+// a metric the update does not mention keeps its goal. The project row is
+// created when it does not exist yet, so goals can be declared before the
+// first run is logged. Validation of the names and values is the caller's,
+// except for the size of the result: a merge that would leave more than
+// maxGoals goals is refused with ErrTooManyMetricGoals and changes nothing
+// (maxGoals <= 0 means no limit).
+//
+// The merge is a read-modify-write inside one transaction, serialised per
+// project by an advisory lock on Postgres (SQLite serialises writers
+// outright), so two concurrent PATCHes naming different metrics both land.
+func (s *Store) MergeExpProjectGoals(ctx context.Context, repoID int64, name string, update map[string]string, maxGoals int) (*ExpProject, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// DO UPDATE SET name = name rather than DO NOTHING so RETURNING yields the
+	// id on conflict too; it deliberately leaves updated_at alone, since
+	// declaring a goal is not activity in the project.
+	var projectID int64
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO exp_projects (repo_id, name) VALUES ($1, $2)
+		 ON CONFLICT (repo_id, name) DO UPDATE SET name = EXCLUDED.name
+		 RETURNING id`, repoID, name).Scan(&projectID); err != nil {
+		return nil, fmt.Errorf("upsert experiment project: %w", err)
+	}
+	if err := s.d.advisoryXactLock(ctx, tx, "exp-project-goals", projectID); err != nil {
+		return nil, fmt.Errorf("lock project goals: %w", err)
+	}
+	var goalsRaw []byte
+	if err := tx.QueryRow(ctx, `SELECT metric_goals FROM exp_projects WHERE id = $1`, projectID).Scan(&goalsRaw); err != nil {
+		return nil, norm(err)
+	}
+	goals := decodeMetricGoals(goalsRaw)
+	for metric, goal := range update {
+		if goal == "" {
+			delete(goals, metric)
+			continue
+		}
+		goals[metric] = goal
+	}
+	if maxGoals > 0 && len(goals) > maxGoals {
+		return nil, ErrTooManyMetricGoals
+	}
+	raw, err := json.Marshal(goals)
+	if err != nil {
+		return nil, err
+	}
+	// Bound as a string so SQLite stores TEXT like the rest of its JSON
+	// columns; Postgres infers jsonb from the column.
+	if _, err := tx.Exec(ctx, `UPDATE exp_projects SET metric_goals = $2 WHERE id = $1`,
+		projectID, string(sanitizeJSONRaw(raw))); err != nil {
+		return nil, fmt.Errorf("update metric goals: %w", err)
+	}
+	p, err := getExpProject(ctx, tx, repoID, name)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
 // ExpRunUpsert is everything a writer of runs -- the live ingest API or the
@@ -152,9 +263,13 @@ type ExpRunUpsert struct {
 	// Status is "" to keep the stored one (the indexer relies on this: a run
 	// the ingest API owns must not be flipped to "finished" mid-flight).
 	Status string
-	// Config, Summary and MetricKeys are nil to keep the stored value.
+	// Config, Summary, SummaryMin, SummaryMax and MetricKeys are nil to keep
+	// the stored value. The caller merges the min / max maps with what is
+	// stored (as it does Summary): the statement replaces the column.
 	Config     map[string]any
 	Summary    map[string]any
+	SummaryMin map[string]any
+	SummaryMax map[string]any
 	MetricKeys []string
 	// LastStep and NumPoints only ever grow (GREATEST / MAX in the statement),
 	// so 0 is "no news".
@@ -168,6 +283,21 @@ type ExpRunUpsert struct {
 	// project's parquet.
 	Group   *string
 	JobType *string
+	// HeartbeatSecs is 0 to keep the stored value.
+	HeartbeatSecs int
+	// Touch says this write is a sign of life from the run itself -- an
+	// ingest batch, a liveness ping, a finish call -- and moves updated_at.
+	//
+	// It exists because updated_at is what staleness is derived from
+	// (docs/dev/agent-features.md §2.6) and what a long-poll's `since`
+	// compares against, and the parquet indexer upserts every run of a
+	// repository on every flush, notes commit, artifact commit and push. When
+	// each of those writes moved updated_at, a crashed run was kept looking
+	// alive by its siblings' logging and never went stale, and every waiter
+	// woke on every re-index. The indexer passes false; a write whose
+	// LastStep is past the stored one still moves the stamp, so a batch-path
+	// run whose parquet grew is live either way.
+	Touch bool
 }
 
 // UpsertExpRun writes the run summary the UI lists. Passing nil for config,
@@ -177,13 +307,15 @@ type ExpRunUpsert struct {
 // It is the positional form of UpsertExpRunWith. The ingest path now builds
 // an ExpRunUpsert directly -- a call site that wants three of ten parameters
 // reads better naming them than counting nils -- so this remains only for the
-// tests that predate the struct form.
+// tests that predate the struct form. It always touches updated_at: every
+// such caller stands in for an ingest write.
 func (s *Store) UpsertExpRun(ctx context.Context, projectID int64, name, status string,
 	config, summary map[string]any, metricKeys []string, lastStep, numPoints int64, startedAt *time.Time) (int64, error) {
 
 	return s.UpsertExpRunWith(ctx, projectID, ExpRunUpsert{
 		Name: name, Status: status, Config: config, Summary: summary, MetricKeys: metricKeys,
 		LastStep: lastStep, NumPoints: numPoints, StartedAt: startedAt,
+		Touch: true,
 	})
 }
 
@@ -191,8 +323,18 @@ func (s *Store) UpsertExpRun(ctx context.Context, projectID int64, name, status 
 // grouping columns need: a positional signature with two more optional
 // strings on the end would be unreadable at the call sites that pass neither.
 func (s *Store) UpsertExpRunWith(ctx context.Context, projectID int64, u ExpRunUpsert) (int64, error) {
-	var configRaw, summaryRaw, keysRaw []byte
+	var configRaw, summaryRaw, minRaw, maxRaw, keysRaw []byte
 	var err error
+	if u.SummaryMin != nil {
+		if minRaw, err = json.Marshal(u.SummaryMin); err != nil {
+			return 0, err
+		}
+	}
+	if u.SummaryMax != nil {
+		if maxRaw, err = json.Marshal(u.SummaryMax); err != nil {
+			return 0, err
+		}
+	}
 	if u.Config != nil {
 		if configRaw, err = json.Marshal(u.Config); err != nil {
 			return 0, err
@@ -216,6 +358,8 @@ func (s *Store) UpsertExpRunWith(ctx context.Context, projectID int64, u ExpRunU
 	// nil stays nil, still meaning "leave the stored value alone".
 	configRaw = sanitizeJSONRaw(configRaw)
 	summaryRaw = sanitizeJSONRaw(summaryRaw)
+	minRaw = sanitizeJSONRaw(minRaw)
+	maxRaw = sanitizeJSONRaw(maxRaw)
 	keysRaw = sanitizeJSONRaw(keysRaw)
 
 	// The statement is per engine (jsonb casts and GREATEST on Postgres,
@@ -223,7 +367,8 @@ func (s *Store) UpsertExpRunWith(ctx context.Context, projectID int64, u ExpRunU
 	var id int64
 	err = s.db.QueryRow(ctx, s.d.queries().upsertExpRun,
 		projectID, u.Name, u.Status, configRaw, summaryRaw, keysRaw,
-		u.LastStep, u.NumPoints, u.StartedAt, u.Group, u.JobType).Scan(&id)
+		u.LastStep, u.NumPoints, u.StartedAt, u.Group, u.JobType,
+		minRaw, maxRaw, u.HeartbeatSecs, u.Touch).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("upsert experiment run: %w", err)
 	}
@@ -235,7 +380,7 @@ func (s *Store) UpsertExpRunWith(ctx context.Context, projectID int64, u ExpRunU
 // to ExpRun cannot be picked up by one query and missed by the next.
 const runColumns = `id, project_id, name, status, config, summary, metric_keys,
 	last_step, num_points, started_at, updated_at, group_name, job_type,
-	tags, archived, is_baseline, note`
+	tags, archived, is_baseline, note, summary_min, summary_max, heartbeat_secs`
 
 func (s *Store) ListExpRuns(ctx context.Context, projectID int64) ([]ExpRun, error) {
 	rows, err := s.db.Query(ctx,
@@ -428,20 +573,25 @@ func (s *Store) ListModelProducers(ctx context.Context, ns, name string) ([]ExpR
 
 func (s *Store) scanRun(row rowScanner) (*ExpRun, error) {
 	r := &ExpRun{}
-	var configRaw, summaryRaw, keysRaw []byte
+	var configRaw, summaryRaw, keysRaw, minRaw, maxRaw []byte
 	if err := row.Scan(&r.ID, &r.ProjectID, &r.Name, &r.Status, &configRaw, &summaryRaw, &keysRaw,
 		&r.LastStep, &r.NumPoints, &r.StartedAt, &r.UpdatedAt, &r.Group, &r.JobType,
-		s.d.stringArrayDest(&r.Tags), &r.Archived, &r.IsBaseline, &r.Note); err != nil {
+		s.d.stringArrayDest(&r.Tags), &r.Archived, &r.IsBaseline, &r.Note,
+		&minRaw, &maxRaw, &r.HeartbeatSecs); err != nil {
 		return nil, norm(err)
 	}
 	r.Config = map[string]any{}
 	r.Summary = map[string]any{}
+	r.SummaryMin = map[string]any{}
+	r.SummaryMax = map[string]any{}
 	r.MetricKeys = []string{}
 	if r.Tags == nil {
 		r.Tags = []string{}
 	}
 	_ = json.Unmarshal(configRaw, &r.Config)
 	_ = json.Unmarshal(summaryRaw, &r.Summary)
+	_ = json.Unmarshal(minRaw, &r.SummaryMin)
+	_ = json.Unmarshal(maxRaw, &r.SummaryMax)
 	_ = json.Unmarshal(keysRaw, &r.MetricKeys)
 	return r, nil
 }

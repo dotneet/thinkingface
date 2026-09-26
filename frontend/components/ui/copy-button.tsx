@@ -15,9 +15,9 @@ type CopyStatus = "idle" | "copied" | "failed";
  *
  * `navigator.clipboard` is `undefined` outside a secure context, and that is
  * exactly what a self-hosted deployment reached over plain HTTP looks like
- * from the browser's perspective (`lib/paths.ts`'s `publicApiBase()` even
- * defaults to `http://localhost:8080`, so this is an expected shape, not an
- * edge case). Calling `.writeText` on `undefined` throws before the promise
+ * from the browser's perspective (the default compose setup serves the UI on
+ * `http://localhost:3000`, and anything but `localhost` over plain HTTP is not
+ * a secure context, so this is an expected shape, not an edge case). Calling `.writeText` on `undefined` throws before the promise
  * chain even starts, which the old code swallowed silently. The
  * `execCommand` path needs no secure context and still works in that
  * situation.

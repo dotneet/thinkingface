@@ -21,14 +21,20 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # NEXT_PUBLIC_API_URL is read by frontend/lib/api.ts via process.env, which
-# Next.js inlines into the client bundle at build time -- setting it as a
-# *runtime* container env var (as docker-compose.yml and infra/main.tf both
-# do for the server-only API_URL) has no effect on browser code. It must be
-# supplied as a build arg here so it ends up baked into the bundle. When
-# unset, the build falls back to lib/api.ts's own default
-# (http://localhost:8080), which happens to match docker-compose's default
-# setup but is wrong for any other deployment -- see infra/README.md.
-ARG NEXT_PUBLIC_API_URL
+# Next.js inlines into the client bundle at build time -- a *runtime*
+# container env var has no effect on browser code, so it can only be set
+# here, as a build arg.
+#
+# Empty (the default) builds a generic image: the browser calls the API on the
+# web UI's own origin, and the Next.js server forwards /api/* (and file
+# downloads) to API_URL, read when the container *starts*
+# (app/api/[...path]/route.ts, docs/dev/agent-features.md §1.2). Nothing about
+# where the API lives is baked in, and no TF_ALLOWED_ORIGINS entry is needed.
+#
+# Non-empty keeps the old cross-origin behaviour: the browser calls that URL
+# directly, which then has to be reachable from the browser and listed in the
+# API's TF_ALLOWED_ORIGINS -- see infra/README.md for that deployment shape.
+ARG NEXT_PUBLIC_API_URL=""
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
 # The backend is not reachable during the image build; every route is
 # force-dynamic and no page fetches data at build time, so this never
@@ -47,6 +53,11 @@ COPY --from=builder --chown=bun:bun /app/.next ./.next
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/next.config.ts ./next.config.ts
+# The custom server that pins the browser's address for the API's rate limiter
+# (server.ts, lib/client-addr.ts; docs/dev/agent-features.md §1.2). Bun runs
+# the TypeScript directly, so these are copied as source.
+COPY --from=builder /app/server.ts ./server.ts
+COPY --from=builder /app/lib/client-addr.ts ./lib/client-addr.ts
 
 USER bun
 

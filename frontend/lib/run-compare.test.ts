@@ -6,6 +6,7 @@ import {
   axisLabel,
   axisValue,
   buildConfigDiff,
+  defaultScatterAxes,
   filterRuns,
   formatConfigValue,
   MISSING,
@@ -26,6 +27,9 @@ function run(name: string, overrides: Partial<ExpRun> = {}): ExpRun {
     config: {},
     metric_keys: [],
     summary: {},
+    summary_min: {},
+    summary_max: {},
+    heartbeat_secs: 0,
     group: "",
     job_type: "",
     tags: [],
@@ -234,5 +238,33 @@ describe("parseTagInput", () => {
 
   it("returns nothing for blank input", () => {
     expect(parseTagInput("   ")).toEqual([]);
+  });
+});
+
+describe("defaultScatterAxes", () => {
+  it("picks the first config key that varies and the primary metric", () => {
+    const runs = [
+      run("a", { config: { epochs: 10, lr: 0.001 }, summary: { loss: 1, "val/cer": 0.2 } }),
+      run("b", { config: { epochs: 10, lr: 0.0003 }, summary: { loss: 2, "val/cer": 0.1 } }),
+    ];
+    expect(defaultScatterAxes(runs, scatterAxes(runs), "val/cer")).toEqual({
+      x: "config:lr",
+      y: "metric:val/cer",
+    });
+  });
+
+  it("falls back to the first config key and first metric", () => {
+    const runs = [run("a", { config: { epochs: 10 }, summary: { loss: 1 } })];
+    expect(defaultScatterAxes(runs, scatterAxes(runs))).toEqual({
+      x: "config:epochs",
+      y: "metric:loss",
+    });
+  });
+
+  it("avoids x == y and survives no axes", () => {
+    const runs = [run("a", { summary: { loss: 1, acc: 2 } })];
+    const picked = defaultScatterAxes(runs, scatterAxes(runs));
+    expect(picked.x).not.toBe(picked.y);
+    expect(defaultScatterAxes([], [])).toEqual({ x: "", y: "" });
   });
 });

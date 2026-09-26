@@ -63,6 +63,7 @@ func (s *Server) handleListExperiments(w http.ResponseWriter, r *http.Request) {
 			FullName:    repo.FullName(),
 			NumProjects: len(projects),
 			UpdatedAt:   repo.UpdatedAt,
+			Projects:    projectNames(projects),
 		})
 	}
 	writeJSON(w, http.StatusOK, apitypes.ExpProjectListResponse{Items: items, Total: total})
@@ -83,11 +84,27 @@ func (s *Server) handleExperimentRepo(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "list experiment projects", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, apitypes.ExpRepoResponse{
-		Repo: toSummary(repo), Projects: toExpProjects(projects),
-	})
+	out := toExpProjects(projects)
+	// A repository holds a handful of projects, so one run listing each is
+	// cheap, and it is what lets the page answer "is anything running, and
+	// how good is the best run" without opening every project.
+	for i := range out {
+		runs, err := s.store.ListExpRuns(r.Context(), projects[i].ID)
+		if err != nil {
+			internalError(w, "list experiment runs", err)
+			return
+		}
+		summarizeProject(&out[i], toExpRuns(runs, nil))
+	}
+	writeJSON(w, http.StatusOK, apitypes.ExpRepoResponse{Repo: toSummary(repo), Projects: out})
 }
 
+// handleExperimentRuns lists one project's runs. The query parameters of
+// docs/dev/agent-features.md §2.3 (group, status, tag, archived, sort, order,
+// limit) are applied here, after loading: a project holds at most a few
+// thousand runs, and the filters mostly act on the derived status and on JSON
+// columns, which SQL on two engines would only make harder to keep identical.
+// See runQuery in experiments_query.go.
 func (s *Server) handleExperimentRuns(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.loadExperimentRepo(w, r)
 	if !ok {
@@ -97,13 +114,28 @@ func (s *Server) handleExperimentRuns(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	query, err := parseRunQuery(r.URL.Query())
+	if err != nil {
+		badRequest(w, err.Error())
+		return
+	}
 	project, err := s.store.GetExpProject(r.Context(), repo.ID, projectName)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			writeJSON(w, http.StatusOK, apitypes.ExpRunListResponse{Runs: []apitypes.ExpRun{}})
+			project = &store.ExpProject{Name: projectName}
+		} else {
+			internalError(w, "load experiment project", err)
 			return
 		}
-		internalError(w, "load experiment project", err)
+	}
+	if err := query.checkGoals(project.MetricGoals); err != nil {
+		badRequest(w, err.Error())
+		return
+	}
+	if project.ID == 0 {
+		writeJSON(w, http.StatusOK, apitypes.ExpRunListResponse{
+			Runs: []apitypes.ExpRun{}, MetricGoals: toMetricGoals(nil), Best: map[string]string{},
+		})
 		return
 	}
 	runs, err := s.store.ListExpRuns(r.Context(), project.ID)
@@ -118,7 +150,10 @@ func (s *Server) handleExperimentRuns(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "list run models", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, apitypes.ExpRunListResponse{Runs: toExpRuns(runs, models)})
+	listed, best := query.apply(toExpRuns(runs, models), project.MetricGoals)
+	writeJSON(w, http.StatusOK, apitypes.ExpRunListResponse{
+		Runs: listed, MetricGoals: toMetricGoals(project.MetricGoals), Best: best,
+	})
 }
 
 func (s *Server) handleExperimentMetrics(w http.ResponseWriter, r *http.Request) {
@@ -175,20 +210,40 @@ const (
 )
 
 // runStaleAfter is how long a run stored as "running" may go without an update
-// before this API reports it as apitypes.RunStatusStale.
+// before this API reports it as apitypes.RunStatusStale -- for a run whose
+// client never declared a heartbeat (heartbeat_secs = 0: an older shim, a
+// hand-rolled poster, or a run only the parquet indexer knows).
 //
-// 30 minutes. The number has to sit above the longest gap a *live* run leaves
-// between updates and below the point where "still running" stops being a
-// useful thing to read. The Python shim flushes its buffer on a timer and
-// pings even when a step logged nothing, so a healthy job checks in on the
-// order of seconds; the slowest realistic case is a large-model training loop
-// that only logs once per evaluation, which is minutes, not half an hour.
-// Below ten minutes such a job would flicker into "stale" and back; much above
-// half an hour a crashed job would sit in the list looking alive for most of a
-// working session. Deliberately not configurable: it is a presentation
-// threshold, and a knob here would only make two deployments disagree about
-// what the same row means.
+// 30 minutes. Without a heartbeat nothing promises that a live run checks in
+// between steps, so the number has to sit above the longest gap such a run
+// may leave -- a large-model loop that only logs once per evaluation, which is
+// minutes -- and below the point where "still running" stops being a useful
+// thing to read. Below ten minutes such a job would flicker into "stale" and
+// back; much above half an hour a crashed job would sit in the list looking
+// alive for most of a working session.
+//
+// A client that does declare one (the Python shim sends heartbeat_secs on
+// every batch and posts an empty batch as a liveness ping when a run has sent
+// nothing for that long) gets the much shorter heartbeatStaleWindow instead.
+// Deliberately not configurable: it is a presentation threshold, and a knob
+// here would only make two deployments disagree about what the same row means.
 const runStaleAfter = 30 * time.Minute
+
+// minHeartbeatStaleAfter is the floor of the heartbeat-derived window, so a
+// client declaring a one-second heartbeat does not flicker into "stale" on an
+// ordinary network hiccup or a slow checkpoint write.
+const minHeartbeatStaleAfter = 2 * time.Minute
+
+// runStaleWindow is how long a "running" run may stay silent before it reads
+// as stale: max(4 x heartbeat, 2 min) when the client declared a heartbeat
+// (docs/dev/agent-features.md §2.6), runStaleAfter otherwise. Four missed
+// heartbeats is past any single delayed ping.
+func runStaleWindow(heartbeatSecs int) time.Duration {
+	if heartbeatSecs <= 0 {
+		return runStaleAfter
+	}
+	return max(4*time.Duration(heartbeatSecs)*time.Second, minHeartbeatStaleAfter)
+}
 
 // deriveRunStatus is the whole of the stale-run feature: a status is computed
 // on read from the row's own updated_at and never written back, so there is no
@@ -199,10 +254,11 @@ const runStaleAfter = 30 * time.Minute
 // whose age says nothing -- a job that finished last year is still finished --
 // and an unknown status is passed through rather than reinterpreted.
 //
-// The comparison is strictly greater, so a run whose last update is exactly
-// runStaleAfter old still reads as running: the boundary belongs to the
-// optimistic side, where a job that is merely slow to check in lives.
-func deriveRunStatus(stored string, updatedAt, now time.Time) apitypes.RunStatus {
+// The window is runStaleWindow(heartbeatSecs). The comparison is strictly
+// greater, so a run whose last update is exactly the window old still reads as
+// running: the boundary belongs to the optimistic side, where a job that is
+// merely slow to check in lives.
+func deriveRunStatus(stored string, updatedAt time.Time, heartbeatSecs int, now time.Time) apitypes.RunStatus {
 	status := apitypes.RunStatus(stored)
 	if status != apitypes.RunStatusRunning {
 		return status
@@ -212,7 +268,7 @@ func deriveRunStatus(stored string, updatedAt, now time.Time) apitypes.RunStatus
 	if updatedAt.IsZero() {
 		return status
 	}
-	if now.Sub(updatedAt) > runStaleAfter {
+	if now.Sub(updatedAt) > runStaleWindow(heartbeatSecs) {
 		return apitypes.RunStatusStale
 	}
 	return status
@@ -564,7 +620,81 @@ func (s *Server) handleDeleteExperimentRun(w http.ResponseWriter, r *http.Reques
 func toExpProjects(rows []store.ExpProject) []apitypes.ExpProject {
 	out := make([]apitypes.ExpProject, 0, len(rows))
 	for _, p := range rows {
-		out = append(out, apitypes.ExpProject{Name: p.Name, NumRuns: p.NumRuns, UpdatedAt: p.UpdatedAt})
+		out = append(out, toExpProject(p))
+	}
+	return out
+}
+
+// toExpProject is one project on the wire, goals included (never nil).
+func toExpProject(p store.ExpProject) apitypes.ExpProject {
+	return apitypes.ExpProject{
+		Name: p.Name, NumRuns: p.NumRuns, UpdatedAt: p.UpdatedAt,
+		MetricGoals:  toMetricGoals(p.MetricGoals),
+		StatusCounts: map[apitypes.RunStatus]int{},
+		Best:         []apitypes.ExpProjectBest{},
+	}
+}
+
+// projectNames lists project names in the store's order.
+func projectNames(projects []store.ExpProject) []string {
+	out := make([]string, 0, len(projects))
+	for _, p := range projects {
+		out = append(out, p.Name)
+	}
+	return out
+}
+
+// summarizeProject fills the per-project run overview the repository page
+// shows: counts by derived status and the best run per goal metric, both over
+// non-archived runs.
+func summarizeProject(p *apitypes.ExpProject, runs []apitypes.ExpRun) {
+	for _, r := range runs {
+		if !r.Archived {
+			p.StatusCounts[r.Status]++
+		}
+	}
+	goals := make(map[string]string, len(p.MetricGoals))
+	for k, v := range p.MetricGoals {
+		goals[k] = string(v)
+	}
+	best := bestRuns(runs, goals)
+	metrics := make([]string, 0, len(best))
+	for m := range best {
+		metrics = append(metrics, m)
+	}
+	sort.Strings(metrics)
+	byName := make(map[string]apitypes.ExpRun, len(runs))
+	for _, r := range runs {
+		byName[r.Name] = r
+	}
+	for _, m := range metrics {
+		run := byName[best[m]]
+		goal := p.MetricGoals[m]
+		value := run.SummaryMin[m]
+		if goal == apitypes.MetricGoalMax {
+			value = run.SummaryMax[m]
+		}
+		p.Best = append(p.Best, apitypes.ExpProjectBest{Metric: m, Goal: goal, Run: run.Name, Value: value})
+	}
+}
+
+// toMetricGoals converts stored goals to the wire type; the store has already
+// dropped anything that is not "min" or "max".
+func toMetricGoals(goals map[string]string) map[string]apitypes.MetricGoal {
+	out := make(map[string]apitypes.MetricGoal, len(goals))
+	for k, v := range goals {
+		out[k] = apitypes.MetricGoal(v)
+	}
+	return out
+}
+
+// numericSummary narrows a stored summary map to the numbers in it.
+func numericSummary(in map[string]any) map[string]float64 {
+	out := make(map[string]float64, len(in))
+	for k, v := range in {
+		if f, ok := numeric(v); ok {
+			out[k] = f
+		}
 	}
 	return out
 }
@@ -593,22 +723,17 @@ func toExpRuns(rows []store.ExpRun, modelsByRun map[string][]store.ExpRunModel) 
 				RepoID: m.FullName(), Revision: m.Revision, Exists: m.Exists,
 			})
 		}
-		summary := make(map[string]float64, len(r.Summary))
-		for k, v := range r.Summary {
-			if f, ok := numeric(v); ok {
-				summary[k] = f
-			}
-		}
 		tags := r.Tags
 		if tags == nil {
 			tags = []string{}
 		}
 		out = append(out, apitypes.ExpRun{
-			Name: r.Name, Status: deriveRunStatus(r.Status, r.UpdatedAt, now),
+			Name: r.Name, Status: deriveRunStatus(r.Status, r.UpdatedAt, r.HeartbeatSecs, now),
 			LastStep: r.LastStep, NumPoints: r.NumPoints,
 			StartedAt: r.StartedAt, UpdatedAt: r.UpdatedAt,
-			Config: r.Config, MetricKeys: r.MetricKeys, Summary: summary,
-			Group: r.Group, JobType: r.JobType,
+			Config: r.Config, MetricKeys: r.MetricKeys, Summary: numericSummary(r.Summary),
+			SummaryMin: numericSummary(r.SummaryMin), SummaryMax: numericSummary(r.SummaryMax),
+			Group: r.Group, JobType: r.JobType, HeartbeatSecs: r.HeartbeatSecs,
 			Tags: tags, Archived: r.Archived, IsBaseline: r.IsBaseline,
 			Note: r.Note, Models: models,
 		})

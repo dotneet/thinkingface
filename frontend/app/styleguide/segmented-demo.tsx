@@ -7,7 +7,7 @@ import { SegmentedControl } from "@/components/ui/segmented-control";
 
 const OPTIONS = [
   { value: "table" as const, label: "Table", icon: Table2 },
-  { value: "raw" as const, label: "Raw", icon: FileText },
+  { value: "raw" as const, label: "Raw", icon: FileText, indicator: "has content" },
 ];
 
 export function StyleguideSegmentedDemo() {

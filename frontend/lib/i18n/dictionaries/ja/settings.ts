@@ -87,6 +87,14 @@ export const settings = {
       noExpiration: "無期限",
       expiredBadge: "期限切れ",
     },
+    repos: {
+      label: "対象リポジトリを限定（任意）",
+      placeholder: "datasets/alice/experiments\nmodels/alice/ocr",
+      hint: "1 行に 1 つ、datasets/NAMESPACE/NAME または models/NAMESPACE/NAME の形式で入力します。トークンはこれらのリポジトリだけを変更でき、リポジトリの作成・削除、設定の変更、トークンの発行はできなくなります。空欄なら制限なしのトークンになります。",
+      column: "リポジトリ",
+      unrestricted: "すべて",
+      noneWritable: "—",
+    },
   },
   sshKeys: {
     title: "SSH キー",

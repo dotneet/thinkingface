@@ -5,10 +5,9 @@ import { useState } from "react";
 
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
 import { Markdown } from "@/components/ui/markdown";
 import { MarkdownEditor } from "@/components/ui/markdown-editor";
-import { Spinner } from "@/components/ui/spinner";
+import { SpinnerSlot } from "@/components/ui/spinner";
 import { useT } from "@/lib/i18n/client";
 
 /**
@@ -56,15 +55,37 @@ export function RunNoteCard({
     if (ok) setEditing(false);
   }
 
+  const header = (
+    <div className="flex min-h-8 items-center justify-between gap-2">
+      <h2 className="text-sm font-semibold" title={t("experiments.note.description")}>
+        {t("experiments.note.title")}
+      </h2>
+      {/* Always rendered once there is a note, so a save's spinner or the
+          Edit button never shifts the note below (DESIGN.md §8.3). */}
+      {!editing && note.trim() !== "" && (canWrite || saving) && (
+        <div className="flex items-center gap-2">
+          <SpinnerSlot active={saving} size={14} label={t("experiments.note.saving")} />
+          {canWrite && (
+            <Button size="sm" variant="secondary" onClick={startEditing} disabled={saving}>
+              <NotebookPen size={14} />
+              {t("experiments.note.edit")}
+            </Button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
   if (editing) {
     return (
       <form
-        className="flex flex-col gap-3"
+        className="flex flex-col gap-2"
         onSubmit={(e) => {
           e.preventDefault();
           void save();
         }}
       >
+        {header}
         <MarkdownEditor
           value={draft}
           onChange={setDraft}
@@ -99,46 +120,33 @@ export function RunNoteCard({
   }
 
   return (
-    <div className="flex flex-col gap-3">
+    <section className="flex min-w-0 flex-col gap-2">
+      {header}
       {note.trim() === "" ? (
-        <EmptyState
-          icon={NotebookPen}
-          title={t("experiments.note.emptyTitle")}
-          description={
-            canWrite
-              ? t("experiments.note.emptyDescription")
-              : t("experiments.note.emptyReadOnlyDescription")
-          }
-          action={
-            canWrite ? (
-              <Button variant="secondary" onClick={startEditing}>
-                <NotebookPen size={16} />
-                {t("experiments.note.add")}
-              </Button>
-            ) : undefined
-          }
-        />
-      ) : (
-        <div className="rounded-lg border border-border bg-bg-raised p-4">
-          <Markdown source={note} />
-        </div>
-      )}
-
-      {(canWrite || saving) && note.trim() !== "" && (
-        <div className="flex items-center justify-end gap-2">
-          {saving && <Spinner size={14} label={t("experiments.note.saving")} />}
+        // One quiet line, not a full EmptyState: an absent note is the
+        // common case and must not outweigh the config beside it.
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-dashed border-border px-3 py-2.5">
+          <span className="text-sm text-fg-subtle">
+            {canWrite
+              ? t("experiments.runPage.noteEmpty")
+              : t("experiments.runPage.noteEmptyReadOnly")}
+          </span>
           {canWrite && (
             <Button size="sm" variant="secondary" onClick={startEditing} disabled={saving}>
               <NotebookPen size={14} />
-              {t("experiments.note.edit")}
+              {t("experiments.runPage.noteAdd")}
             </Button>
           )}
+        </div>
+      ) : (
+        <div className="max-h-[32rem] overflow-y-auto rounded-lg border border-border bg-bg-raised px-4 py-3">
+          <Markdown source={note} />
         </div>
       )}
 
       {/* Below the content and the Edit/Add button, not above — a failed
           save must never push either of them down (DESIGN.md §8). */}
       {error && <Alert tone="negative">{error}</Alert>}
-    </div>
+    </section>
   );
 }

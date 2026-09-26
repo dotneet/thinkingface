@@ -1,8 +1,39 @@
 import type { RepoKind } from "@/types/api";
 
-/** Public API origin as seen from the browser (resolve URLs, images, downloads). */
+/**
+ * Public API origin as seen from the browser (resolve URLs, images, downloads).
+ *
+ * `""` — build a root-relative URL — when `NEXT_PUBLIC_API_URL` is empty or
+ * unset: the browser then reaches the API through this app's own origin
+ * (`app/api/[...path]/route.ts`), and a Server Component rendering the URL
+ * cannot know what that origin is, so it must not guess. Callers concatenate
+ * a path onto the result, which works for both forms. Anything that needs an
+ * *absolute* URL for a non-browser client (the `HF_ENDPOINT` snippet) uses
+ * {@link hubEndpoint} instead.
+ */
 export function publicApiBase(): string {
-  return process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+  return process.env.NEXT_PUBLIC_API_URL?.trim() ?? "";
+}
+
+/**
+ * The URL huggingface_hub should use as `HF_ENDPOINT`: the configured
+ * `NEXT_PUBLIC_API_URL` when there is one (unchanged from before), otherwise
+ * the API's own `TF_PUBLIC_URL`, recovered from the repository's `clone_url`
+ * (`{TF_PUBLIC_URL}/{kind}s/{ns}/{name}.git`, built by `cloneURL` in
+ * backend/internal/api/repos.go). Never this app's origin: the web UI proxies
+ * `/api/*` and `resolve`, not the rest of the HF surface, so huggingface_hub
+ * pointed here would fail on its first non-`/api` request.
+ */
+export function hubEndpoint(cloneUrl: string, kind: RepoKind, ns: string, name: string): string {
+  const configured = publicApiBase();
+  if (configured) return configured;
+  const suffix = `/${kind}s/${ns}/${name}.git`;
+  if (cloneUrl.endsWith(suffix)) return cloneUrl.slice(0, -suffix.length);
+  try {
+    return new URL(cloneUrl).origin;
+  } catch {
+    return cloneUrl;
+  }
 }
 
 /** Encode each path segment but keep slashes as directory separators. */

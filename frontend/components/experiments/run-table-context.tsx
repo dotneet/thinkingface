@@ -2,6 +2,7 @@
 
 import { createContext, useContext } from "react";
 
+import type { BestRuns, MetricGoals } from "@/lib/exp-goals";
 import type { RunModels } from "@/lib/lineage";
 import { metricSortColumn, type RunSortColumn } from "@/lib/run-grouping";
 import type { ExpRun } from "@/types/api";
@@ -73,6 +74,10 @@ type RunTableContextValue = {
    */
   runModels?: RunModels;
   actions: RunTableActions;
+  /** The project's metric goals (metric → "min" | "max"). */
+  goals: MetricGoals;
+  /** Metric → the server's best non-archived run for it. */
+  best: BestRuns;
 };
 
 /**

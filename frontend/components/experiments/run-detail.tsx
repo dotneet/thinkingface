@@ -5,7 +5,6 @@ import { LineChart } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 
-import { ConfigEntryTable } from "@/components/experiments/config-entry-table";
 import {
   isLiveRun,
   LIVE_REFRESH_INTERVAL_MS,
@@ -16,12 +15,15 @@ import { MetricsChartsSkeleton } from "@/components/experiments/metrics-charts-s
 import { MetricsToolbar } from "@/components/experiments/metrics-toolbar";
 import { RunArtifactsCard } from "@/components/experiments/run-artifacts-card";
 import { csvFilename, metricSeriesCsv } from "@/components/experiments/run-csv";
-import { RunDangerZone } from "@/components/experiments/run-danger-zone";
 import { RunDeleteDialog } from "@/components/experiments/run-delete-dialog";
 import { RunEnvCard } from "@/components/experiments/run-env-card";
 import { RunHeader } from "@/components/experiments/run-header";
 import { RunModelsCard } from "@/components/experiments/run-models-card";
 import { RunNoteCard } from "@/components/experiments/run-note-card";
+import { RunPageActions } from "@/components/experiments/run-page-actions";
+import { RunPageBreadcrumb } from "@/components/experiments/run-page-breadcrumb";
+import { RunPageConfig } from "@/components/experiments/run-page-config";
+import { RunPageNav } from "@/components/experiments/run-page-nav";
 import { Section } from "@/components/experiments/run-section";
 import { RunSummaryCards } from "@/components/experiments/run-summary-cards";
 import { RunTagsDialog } from "@/components/experiments/run-tags-dialog";
@@ -31,6 +33,8 @@ import { ErrorState } from "@/components/ui/error-state";
 import { useChartOptions } from "@/hooks/use-chart-options";
 import { ApiResultError, queryErrorMessage } from "@/lib/api-error-message";
 import { runColorIndex } from "@/lib/chart-utils";
+import { type BestRuns, type MetricGoals, runListBest, runListGoals } from "@/lib/exp-goals";
+import { projectHref, runPageOrder, runPagePrimaryMetric } from "@/lib/exp-runpage-order";
 import {
   annotationClosesTagEditor,
   deleteRun,
@@ -44,17 +48,23 @@ import { splitRunConfig } from "@/lib/run-config";
 import type { ExpRun, ExpRunAnnotationRequest } from "@/types/api";
 
 /**
- * Everything about one run: its annotations, its final metric values, its own
- * charts, the hyperparameters and TrainingArguments it was given, the
- * environment it ran in, the note someone left on it, and the delete button.
+ * Everything about one run, in the order a reader reaches for it:
  *
- * This component owns the queries, the two mutations and the two dialogs; each
- * section of the page is its own component below `Section`, so the shape of
- * the page reads as the list of sections it is.
+ * 1. where it is and how to move on — breadcrumb back to the project, and
+ *    previous / next / "jump to run" in the project's order (RunPageNav);
+ * 2. the header — status and facts on one line, the toolbar (compare, tags,
+ *    baseline, archive, delete);
+ * 3. the summary cards, goal metrics first;
+ * 4. the config beside the note — "what was this run?";
+ * 5. the charts;
+ * 6. outputs and environment, each one line when empty.
+ *
+ * This component owns the queries, the two mutations and the two dialogs.
  *
  * The whole project's run list is passed in rather than just this run: the run
  * keeps the colour it has on the dashboard (which is assigned from the
- * project's run order), and the annotation mutations can invalidate the same
+ * project's run order), the switcher needs its neighbours, the config diff
+ * needs the baseline, and the annotation mutations can invalidate the same
  * query key the dashboard uses.
  */
 export function RunDetail({
@@ -63,6 +73,8 @@ export function RunDetail({
   project,
   runName,
   runs: initialRuns,
+  metricGoals: initialGoals,
+  best: initialBest,
   canWrite,
 }: {
   ns: string;
@@ -70,6 +82,10 @@ export function RunDetail({
   project: string;
   runName: string;
   runs: ExpRun[];
+  /** The project's metric goals, from the same run listing. */
+  metricGoals: MetricGoals;
+  /** Metric → best non-archived run, from the same run listing. */
+  best: BestRuns;
   /** Viewer has write access to the backing dataset repository. */
   canWrite: boolean;
 }) {
@@ -88,7 +104,7 @@ export function RunDetail({
       if (!result.ok) throw new ApiResultError(result);
       return result.data;
     },
-    initialData: { runs: initialRuns },
+    initialData: { runs: initialRuns, metric_goals: { ...initialGoals }, best: { ...initialBest } },
     // Polls only while *this* run is live. The page shows one run, so a sweep
     // sibling still training next door is no reason to keep re-reading here —
     // and a run that finished, failed or went stale stops the timer outright.
@@ -99,10 +115,25 @@ export function RunDetail({
   });
   const runs = runsData.runs;
   const run = runs.find((r) => r.name === runName);
+  const goals = useMemo(() => runListGoals(runsData), [runsData]);
+  const best = useMemo(() => runListBest(runsData), [runsData]);
 
   const runOrder = useMemo(() => runs.map((r) => r.name), [runs]);
   const colorIndex = useMemo(() => runColorIndex(runOrder), [runOrder]);
   const baseline = useMemo(() => runs.find((r) => r.is_baseline)?.name, [runs]);
+  // The baseline as a run to compare against — only when it is another run.
+  const baselineRun = useMemo(
+    () => runs.find((r) => r.is_baseline && r.name !== runName),
+    [runs, runName],
+  );
+
+  // Previous / next and the picker walk the project in the project page's
+  // default order (lib/exp-runpage-order.ts documents the rule).
+  const orderedRuns = useMemo(() => {
+    const byName = new Map(runs.map((r) => [r.name, r]));
+    return runPageOrder(runs, goals, runName).flatMap((name) => byName.get(name) ?? []);
+  }, [runs, goals, runName]);
+  const primaryMetric = useMemo(() => runPagePrimaryMetric(runs, goals), [runs, goals]);
 
   const { options, setOptions } = useChartOptions();
   const [tagsOpen, setTagsOpen] = useState(false);
@@ -134,9 +165,7 @@ export function RunDetail({
       // Nothing on this route can render any more, so leave for the project
       // dashboard rather than refreshing a page that would now 404.
       void queryClient.invalidateQueries({ queryKey: runsKey });
-      router.push(
-        `/experiments/${encodeURIComponent(ns)}/${encodeURIComponent(repo)}/${encodeURIComponent(project)}`,
-      );
+      router.push(projectHref(ns, repo, project));
       router.refresh();
     },
   });
@@ -179,17 +208,21 @@ export function RunDetail({
   });
 
   const config = useMemo(() => splitRunConfig(run?.config), [run]);
-  const summaryEntries = useMemo(() => {
-    const summary = run?.summary ?? {};
-    return Object.entries(summary).sort(([a], [b]) => a.localeCompare(b));
-  }, [run]);
 
   if (!run) {
     return (
-      <ErrorState
-        title={t("experiments.run.notFoundTitle")}
-        message={t("experiments.run.notFoundDescription", { name: runName })}
-      />
+      <div className="flex flex-col gap-6">
+        <RunPageBreadcrumb
+          ns={ns}
+          repo={repo}
+          project={project}
+          projectHref={projectHref(ns, repo, project)}
+        />
+        <ErrorState
+          title={t("experiments.run.notFoundTitle")}
+          message={t("experiments.run.notFoundDescription", { name: runName })}
+        />
+      </div>
     );
   }
 
@@ -216,42 +249,103 @@ export function RunDetail({
     : undefined;
 
   return (
-    <div className="flex flex-col gap-8">
-      {/* Suppressed while the tags dialog is up: it renders the same failure in
-          its own footer, and two copies read as two failures (the danger zone
-          below does the same with the delete error). A note-save failure is
-          never shown here at all — RunNoteCard renders its own copy right
-          below the note it belongs to. */}
-      {bannerAnnotateError && !tagsOpen && (
-        <Alert tone="negative" title={t("experiments.dashboard.annotateErrorTitle")}>
-          {bannerAnnotateError}{" "}
-          {t("experiments.dashboard.writeAccessRequired", { repo: `${ns}/${repo}` })}
-        </Alert>
-      )}
-      {runsFailed && (
-        <Alert tone="warning" title={t("experiments.dashboard.staleTitle")}>
-          {t("experiments.dashboard.staleBody")}
-        </Alert>
-      )}
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between gap-3">
+          <RunPageBreadcrumb
+            ns={ns}
+            repo={repo}
+            project={project}
+            projectHref={projectHref(ns, repo, project, [runName])}
+          />
+          <RunPageNav
+            ns={ns}
+            repo={repo}
+            project={project}
+            current={runName}
+            orderedRuns={orderedRuns}
+            primaryMetric={primaryMetric}
+            goals={goals}
+            colorIndex={colorIndex}
+          />
+        </div>
 
-      <RunHeader
-        run={run}
-        colorIndex={colorIndex}
-        canWrite={canWrite}
-        saving={annotate.isPending}
-        onToggleBaseline={() => annotate.mutate({ is_baseline: !run.is_baseline })}
-        onEditTags={() => {
-          // Drop a failure left over from a baseline/archive click so the
-          // dialog does not open already showing someone else's error.
-          annotate.reset();
-          setTagsOpen(true);
-        }}
-        onToggleArchived={() => annotate.mutate({ archived: !run.archived })}
-      />
+        <RunHeader
+          run={run}
+          colorIndex={colorIndex}
+          actions={
+            <RunPageActions
+              run={run}
+              compareHref={projectHref(
+                ns,
+                repo,
+                project,
+                baselineRun ? [runName, baselineRun.name] : [runName],
+              )}
+              baseline={baselineRun?.name}
+              canWrite={canWrite}
+              saving={annotate.isPending}
+              onToggleBaseline={() => annotate.mutate({ is_baseline: !run.is_baseline })}
+              onEditTags={() => {
+                // Drop a failure left over from a baseline/archive click so the
+                // dialog does not open already showing someone else's error.
+                annotate.reset();
+                setTagsOpen(true);
+              }}
+              onToggleArchived={() => annotate.mutate({ archived: !run.archived })}
+              onDelete={() => {
+                remove.reset();
+                setDeleteOpen(true);
+              }}
+            />
+          }
+        />
 
-      <Section title={t("experiments.run.summaryTitle")}>
-        <RunSummaryCards entries={summaryEntries} />
-      </Section>
+        {/* Below the header and its toolbar, never above them, so a failed
+            write does not move the buttons that caused it (DESIGN.md §8.1).
+            Suppressed while a dialog is up: the dialog renders the same
+            failure in its own footer, and two copies read as two failures. A
+            note-save failure is never shown here at all — RunNoteCard renders
+            its own copy right below the note it belongs to. */}
+        {bannerAnnotateError && !tagsOpen && (
+          <Alert tone="negative" title={t("experiments.dashboard.annotateErrorTitle")}>
+            {bannerAnnotateError}{" "}
+            {t("experiments.dashboard.writeAccessRequired", { repo: `${ns}/${repo}` })}
+          </Alert>
+        )}
+        {deleteError && !deleteOpen && <Alert tone="negative">{deleteError}</Alert>}
+        {runsFailed && (
+          <Alert tone="warning" title={t("experiments.dashboard.staleTitle")}>
+            {t("experiments.dashboard.staleBody")}
+          </Alert>
+        )}
+      </div>
+
+      <RunSummaryCards run={run} goals={goals} best={best} />
+
+      {/* Config and note side by side on a wide screen: both are "what was
+          this run?", and neither is long enough to deserve the full width. */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <RunPageConfig run={run} baseline={baselineRun} />
+        <RunNoteCard
+          note={run.note}
+          canWrite={canWrite}
+          saving={noteSaving}
+          error={noteError}
+          onSave={async (note) => {
+            // mutateAsync rather than mutate: the note card needs to know
+            // whether the save landed before it leaves edit mode, or a
+            // failed save would silently drop the draft (the bug this
+            // fixes) — see the contract on RunNoteCard's onSave prop.
+            try {
+              await annotate.mutateAsync({ note });
+              return true;
+            } catch {
+              return false;
+            }
+          }}
+        />
+      </div>
 
       <Section title={t("experiments.run.metricsTitle")}>
         <MetricsToolbar
@@ -294,79 +388,19 @@ export function RunDetail({
         )}
       </Section>
 
-      <Section
-        title={t("experiments.artifacts.title")}
-        description={t("experiments.artifacts.description")}
-      >
-        <RunArtifactsCard
-          ns={ns}
-          repo={repo}
-          project={project}
-          runName={runName}
-          live={isLiveRun(run)}
-        />
+      <Section title={t("experiments.runPage.outputsTitle")}>
+        <div className="flex flex-col divide-y divide-border rounded-lg border border-border bg-bg-raised">
+          <RunArtifactsCard
+            ns={ns}
+            repo={repo}
+            project={project}
+            runName={runName}
+            live={isLiveRun(run)}
+          />
+          <RunModelsCard models={run.models} />
+          <RunEnvCard meta={config.meta} />
+        </div>
       </Section>
-
-      <Section
-        title={t("experiments.models.title")}
-        description={t("experiments.models.description")}
-      >
-        <RunModelsCard models={run.models} />
-      </Section>
-
-      <Section title={t("experiments.note.title")} description={t("experiments.note.description")}>
-        <RunNoteCard
-          note={run.note}
-          canWrite={canWrite}
-          saving={noteSaving}
-          error={noteError}
-          onSave={async (note) => {
-            // mutateAsync rather than mutate: the note card needs to know
-            // whether the save landed before it leaves edit mode, or a
-            // failed save would silently drop the draft (the bug this
-            // fixes) — see the contract on RunNoteCard's onSave prop.
-            try {
-              await annotate.mutateAsync({ note });
-              return true;
-            } catch {
-              return false;
-            }
-          }}
-        />
-      </Section>
-
-      <Section title={t("experiments.run.paramsTitle")}>
-        <ConfigEntryTable
-          entries={config.params}
-          emptyTitle={t("experiments.run.paramsEmptyTitle")}
-          emptyDescription={t("experiments.run.paramsEmptyDescription")}
-        />
-      </Section>
-
-      {config.args.length > 0 && (
-        <Section
-          title={t("experiments.run.argsTitle")}
-          description={t("experiments.run.argsDescription")}
-        >
-          <ConfigEntryTable entries={config.args} emptyTitle={t("experiments.run.argsTitle")} />
-        </Section>
-      )}
-
-      <Section title={t("experiments.env.title")} description={t("experiments.env.description")}>
-        <RunEnvCard meta={config.meta} />
-      </Section>
-
-      {canWrite && (
-        <RunDangerZone
-          // Hidden while the dialog is up: the dialog renders the same failure
-          // in its own footer, and two copies of it read as two failures.
-          error={deleteOpen ? undefined : deleteError}
-          onRequestDelete={() => {
-            remove.reset();
-            setDeleteOpen(true);
-          }}
-        />
-      )}
 
       <RunTagsDialog
         run={run}

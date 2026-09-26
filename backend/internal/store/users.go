@@ -104,6 +104,11 @@ type AccessToken struct {
 	// ExpiresAt is nil for a token that never expires.
 	ExpiresAt *time.Time `json:"expires_at"`
 	CreatedAt time.Time  `json:"created_at"`
+	// Repos is the repository restriction (store/token_repos.go), empty for
+	// an unrestricted token. Filled by ListTokens and CreateTokenWithRepos;
+	// LookupToken leaves it empty -- authentication reads the restriction
+	// through LookupTokenRestriction instead.
+	Repos []TokenRepo `json:"-"`
 }
 
 // CreateUser inserts the user and their personal namespace in one transaction,
@@ -532,16 +537,7 @@ func (s *Store) DeleteAllSSHKeys(ctx context.Context, userID int64) (int64, erro
 // PostgreSQL/SQLite dialects it runs against) never has to do date
 // arithmetic itself.
 func (s *Store) CreateToken(ctx context.Context, userID int64, name, scope, tokenHash string, expiresAt *time.Time) (*AccessToken, error) {
-	t := &AccessToken{}
-	err := s.db.QueryRow(ctx,
-		`INSERT INTO access_tokens (user_id, name, token_hash, scope, expires_at) VALUES ($1, $2, $3, $4, $5)
-		 RETURNING id, user_id, name, scope, last_used_at, expires_at, created_at`,
-		userID, name, tokenHash, scope, expiresAt,
-	).Scan(&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.ExpiresAt, &t.CreatedAt)
-	if err != nil {
-		return nil, fmt.Errorf("insert token: %w", err)
-	}
-	return t, nil
+	return s.CreateTokenWithRepos(ctx, userID, name, scope, tokenHash, expiresAt, nil)
 }
 
 // LookupToken resolves a hashed token to its owner, rejecting expired ones
@@ -597,7 +593,21 @@ func (s *Store) ListTokens(ctx context.Context, userID int64) ([]AccessToken, er
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	// A second query rather than a join, so a token with several
+	// repositories is still one AccessToken. Failing it fails the listing:
+	// showing a restricted token as unrestricted would misstate its power.
+	repos, err := s.tokenReposFor(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list token repositories: %w", err)
+	}
+	for i := range out {
+		out[i].Repos = repos[out[i].ID]
+	}
+	return out, nil
 }
 
 // DeleteToken revokes a token regardless of whether it has already expired --

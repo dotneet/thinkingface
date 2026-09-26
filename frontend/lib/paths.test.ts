@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   encodePathSegments,
+  hubEndpoint,
   publicApiBase,
   repoBase,
   repoBlobHref,
@@ -16,14 +17,52 @@ describe("publicApiBase", () => {
     vi.unstubAllEnvs();
   });
 
-  it("falls back to the local dev backend", () => {
+  // Same-origin mode: callers build root-relative URLs that the web UI proxies.
+  it("is empty when unset, so URLs stay on the web UI's origin", () => {
     vi.stubEnv("NEXT_PUBLIC_API_URL", undefined as unknown as string);
-    expect(publicApiBase()).toBe("http://localhost:8080");
+    expect(publicApiBase()).toBe("");
+  });
+
+  it("is empty when set to an empty or blank value (the default image build)", () => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "");
+    expect(publicApiBase()).toBe("");
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "  ");
+    expect(publicApiBase()).toBe("");
   });
 
   it("prefers the configured public URL", () => {
     vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
     expect(publicApiBase()).toBe("https://api.example.com");
+  });
+});
+
+describe("hubEndpoint", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("keeps a configured NEXT_PUBLIC_API_URL", () => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
+    expect(
+      hubEndpoint("https://git.example.com/models/acme/bert.git", "model", "acme", "bert"),
+    ).toBe("https://api.example.com");
+  });
+
+  it("recovers TF_PUBLIC_URL from the clone URL in same-origin mode", () => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "");
+    expect(hubEndpoint("http://localhost:8080/models/acme/bert.git", "model", "acme", "bert")).toBe(
+      "http://localhost:8080",
+    );
+    expect(
+      hubEndpoint("https://hub.example.com/tf/datasets/acme/squad.git", "dataset", "acme", "squad"),
+    ).toBe("https://hub.example.com/tf");
+  });
+
+  it("falls back to the clone URL's origin when its shape is unexpected", () => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "");
+    expect(hubEndpoint("https://hub.example.com/x/y.git", "model", "acme", "bert")).toBe(
+      "https://hub.example.com",
+    );
   });
 });
 

@@ -26,6 +26,14 @@ Environment variables:
     THINKINGFACE_SYSTEM_METRICS: Set to ``off`` to disable the periodic
         GPU/CPU/memory telemetry sampled in the background by every active
         run (see below).
+    THINKINGFACE_MODE: ``online`` (default) or ``offline`` -- see below.
+    THINKINGFACE_OFFLINE_DIR: Where offline runs and spilled points are
+        written (default ``./thinkingface-offline``).
+    THINKINGFACE_HEARTBEAT_SECS: Liveness interval declared to the server
+        (default 30, at most 3600; ``0`` disables heartbeats).
+    THINKINGFACE_ARTIFACT_INTERVAL: Seconds between background commits of
+        staged artifacts and media (default 60; ``0`` holds them until
+        ``save()`` / ``finish()``).
 
 ``init()`` also merges a best-effort snapshot of the run's environment into
 ``config`` under the reserved ``_meta`` key (git commit/branch/dirty state,
@@ -44,14 +52,30 @@ best-effort and never raises: a machine with no GPU and no ``psutil``
 installed simply logs nothing under ``system/``. Set
 ``THINKINGFACE_SYSTEM_METRICS=off`` to disable it entirely.
 
+``config`` may be a mapping, an ``argparse.Namespace`` or a dataclass, and
+values JSON has no spelling for are converted when sent rather than costing
+the run its whole config: ``Path`` -> str, ``Enum`` -> its value, dataclass /
+namespace -> fields, numpy scalar / small array -> number / list, datetime ->
+ISO 8601, set / tuple -> list, NaN / inf -> ``"nan"`` / ``"inf"``, and
+anything else -> ``str(value)`` with one warning per run naming the keys
+(see ``thinkingface.trackio._sanitize``).
+
 ``log_artifact(path, name=None)`` attaches a file (or a directory) to the
 run. It goes into the same dataset repository as the metrics, under
 ``{project}/artifacts/{run}/{name}``, through the ordinary
 preupload/commit endpoints -- so an artifact is git-versioned content,
 reachable by ``git clone`` and, at its content-addressed bucket key, by
 ``gcloud storage cp`` (see the repository's ``GET .../gcs/{rev}`` API), with
-large files routed to LFS by ``.gitattributes``. Everything a run logs is
-committed once, at ``finish()``.
+large files routed to LFS by ``.gitattributes``. Staged artifacts are
+committed together in the background every ``THINKINGFACE_ARTIFACT_INTERVAL``
+seconds while anything is pending, immediately by ``save()``, and finally by
+``finish()``.
+
+``trackio.Image`` and ``trackio.Table`` values passed to ``log()`` are not
+metrics: they are written to a PNG / parquet file and committed as the
+artifacts ``media/{key}/step_{step:08d}.png`` and
+``tables/{key}/step_{step:08d}.parquet`` (Pillow is optional -- needed only to
+encode arrays and PIL images; a table needs pyarrow or pandas).
 
 ``log_model("ns/name", revision=None)`` records that the run produced that
 model (resolving the repository's current HEAD when no revision is given).
@@ -67,8 +91,9 @@ axis by axis; a run that declares neither is listed flat, exactly as before.
 ``init(resume=...)`` decides what happens when the project already has a
 run of that name -- ``"never"`` (the default) renames, ``"allow"`` continues
 it, ``"must"`` continues it or raises. Continuing means steps carry on from
-the server's ``last_step``, the status goes back to ``running``, and the
-configs are merged; see ``init`` for the full contract.
+the server's ``last_step`` (online only -- see the offline mode below), the
+status goes back to ``running``, and the configs are merged; see ``init`` for
+the full contract.
 
 A network failure never raises into the caller: points are logged as a
 warning and kept for the next flush attempt, so a flaky connection or a
@@ -85,27 +110,63 @@ It also never posts ``/finish`` while a ``/log`` for the same run could still
 be in flight, so a finished run's status can't be flipped back to running by
 a stray late point.
 
+Points the online mode gives up on -- evicted from a full retry buffer, or
+left over when ``finish()`` runs out of retries against an unreachable or
+failing server -- are not dropped any more but written to a *spill* run
+directory under ``THINKINGFACE_OFFLINE_DIR`` (as are artifacts ``finish()``
+could not commit), and the warning names the directory and the
+``tf experiments sync`` command that delivers them. Points the server
+*rejected* (a 4xx) are still dropped: they are bad data, not late data.
+A spill record leaves the config out once the server already has it (so a
+sync cannot roll a newer config back), and names no repository when
+``THINKINGFACE_REPO`` was unset and the user could not be looked up (the sync
+resolves ``{user}/trackio-metrics`` itself).
+Only when the disk refuses them too are points dropped with a warning.
+
+Every ``/log`` carries ``heartbeat_secs``, and a run that has posted nothing
+for that long sends a point-less batch as a liveness ping from the flush
+timer, so a long training step is not mistaken for a dead process
+(docs/dev/agent-features.md §2.6).
+
+``init(mode="offline")`` (or ``THINKINGFACE_MODE=offline``) makes no network
+request at all: the run is written to
+``{THINKINGFACE_OFFLINE_DIR}/{UTC time}-{project}-{run}-{hex}/`` -- points,
+config, artifacts (copied), models and the final status, in the format of
+docs/dev/agent-features.md §2.9 -- and ``tf experiments sync DIR`` uploads it
+later, or follows it live with ``--watch``. Where the directory is, and the
+command to sync it, is printed to stderr once when the run starts. An offline
+``resume="allow"`` / ``"must"`` run does not continue the existing run's step
+numbering -- the server's ``last_step`` is unknown offline, so auto-numbered
+steps start at 0 (with a one-time warning); pass explicit ``step=`` if an
+offline run continues an existing one.
+
 .. _trackio: https://github.com/gradio-app/trackio
 """
 
 from __future__ import annotations
 
 import atexit
-import copy
+import json
 import math
 import numbers
 import os
+import shutil
+import sys
+import tempfile
 import threading
 import time
 import warnings
+from collections.abc import Mapping
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import requests
 
 from thinkingface import _env_meta, _system_metrics
-from thinkingface.trackio import _artifacts
+from thinkingface.trackio import _artifacts, _media, _offline, _sanitize
+from thinkingface.trackio._media import Image, Table
 
 _DEFAULT_ENDPOINT = "http://localhost:8080"
 _FLUSH_INTERVAL_SECONDS = 5.0
@@ -147,8 +208,28 @@ _ENCODE_ERRORS = (requests.exceptions.InvalidJSONError, TypeError, ValueError)
 _FINISH_FLUSH_ATTEMPTS = 4
 _FINISH_FLUSH_BACKOFF_SECONDS = 0.5
 _FINISH_FLUSH_MAX_BACKOFF_SECONDS = 2.0
+# Liveness pings (docs/dev/agent-features.md §2.6). Every /log carries
+# heartbeat_secs, and a run that has posted nothing for that long sends a
+# point-less batch so the server can tell "quiet" from "dead". The server
+# accepts 1..3600; 0 (THINKINGFACE_HEARTBEAT_SECS=0) disables both.
+_DEFAULT_HEARTBEAT_SECS = 30
+_MAX_HEARTBEAT_SECS = 3600
+# How often staged artifacts and media are committed while the run is still
+# going (THINKINGFACE_ARTIFACT_INTERVAL). 0 or less holds them until save() /
+# finish(), which is how every artifact used to be handled.
+_DEFAULT_ARTIFACT_INTERVAL_SECONDS = 60.0
+_MODES = ("online", "offline")
 
-__all__ = ["init", "log", "log_artifact", "log_model", "finish"]
+__all__ = [
+    "Image",
+    "Table",
+    "finish",
+    "init",
+    "log",
+    "log_artifact",
+    "log_model",
+    "save",
+]
 
 
 def _utc_now_iso() -> str:
@@ -229,6 +310,86 @@ def _project_url(endpoint: str, namespace: str, repo_name: str, project: str) ->
     )
 
 
+def _env_number(name: str, default: float) -> float:
+    """A numeric environment variable; a malformed one warns and uses ``default``."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        warnings.warn(
+            f"thinkingface.trackio: ignoring {name}={raw!r} (not a number); using {default}."
+        )
+        return default
+    if not math.isfinite(value):
+        return default
+    return value
+
+
+def _heartbeat_secs() -> int:
+    """THINKINGFACE_HEARTBEAT_SECS, clamped to what the server accepts; 0 = off."""
+    value = int(_env_number("THINKINGFACE_HEARTBEAT_SECS", _DEFAULT_HEARTBEAT_SECS))
+    if value <= 0:
+        return 0
+    return min(value, _MAX_HEARTBEAT_SECS)
+
+
+def _artifact_interval() -> float:
+    """THINKINGFACE_ARTIFACT_INTERVAL in seconds; 0 or less = only save()/finish()."""
+    return _env_number("THINKINGFACE_ARTIFACT_INTERVAL", _DEFAULT_ARTIFACT_INTERVAL_SECONDS)
+
+
+def _normalize_mode(mode: Any) -> str:
+    """``init(mode=...)``, else THINKINGFACE_MODE, else ``"online"``."""
+    if mode is None:
+        mode = os.environ.get("THINKINGFACE_MODE") or "online"
+    text = str(mode).strip().lower()
+    if text not in _MODES:
+        raise ValueError(f'mode must be "online" or "offline", got {mode!r}')
+    return text
+
+
+def _sync_hint(path: Any) -> str:
+    return f"upload with `tf experiments sync {path}`"
+
+
+def _encodable_points(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The points that strict JSON can encode (no NaN, no foreign types)."""
+    kept = []
+    for point in points:
+        try:
+            json.dumps(point, allow_nan=False)
+        except (TypeError, ValueError):
+            continue
+        kept.append(point)
+    return kept
+
+
+def _append_log_record(
+    run_dir: _offline.RunDir, points: list[dict[str, Any]], config: dict[str, Any] | None
+) -> int:
+    """Append one ``log`` record; returns how many points had to be left out
+    because they cannot be encoded. Raises ``OSError`` when the disk does."""
+    record: dict[str, Any] = {"type": "log", "points": points}
+    if config is not None:
+        record["config"] = config
+    try:
+        run_dir.append(record)
+        return 0
+    except (TypeError, ValueError):
+        kept = _encodable_points(points)
+        record["points"] = kept
+        if config is not None:
+            try:
+                json.dumps(config, allow_nan=False)
+            except (TypeError, ValueError):
+                del record["config"]
+        if kept or "config" in record:
+            run_dir.append(record)
+        return len(points) - len(kept)
+
+
 class _Run:
     """A single active run: buffers points and flushes them periodically."""
 
@@ -236,7 +397,7 @@ class _Run:
         self,
         endpoint: str,
         token: str | None,
-        repo: str,
+        repo: str | None,
         project: str,
         name: str,
         config: dict[str, Any] | None,
@@ -244,13 +405,29 @@ class _Run:
         resumed: bool = False,
         group: str = "",
         job_type: str = "",
+        mode: str = "online",
+        resume_mode: str = "never",
+        repo_resolved: bool = True,
     ) -> None:
         self.endpoint = endpoint.rstrip("/")
         self.token = token
         self.repo = repo
+        # False when THINKINGFACE_REPO was unset and GET /api/v1/me failed, so
+        # `repo` is only the _FALLBACK_REPO placeholder. A spill directory
+        # then says `"repo": null` and lets `tf experiments sync` resolve
+        # "{user}/trackio-metrics" itself, instead of pointing the sync at a
+        # repository that was never anybody's choice.
+        self.repo_resolved = repo_resolved
         self.project = project
         self.name = name
         self.config = config or {}
+        # "offline" writes the run to a directory for `tf experiments sync`
+        # instead of the network (docs/dev/agent-features.md §2.9); "online"
+        # talks to the server and only uses the disk for points it would
+        # otherwise have had to drop (the "spill" directory, below).
+        self.mode = mode
+        self.offline = mode == "offline"
+        self.resume_mode = resume_mode
         # The sweep this run belongs to and the role it played in it, as
         # wandb/trackio spell them. Sent with every batch rather than only
         # with the config: the server keeps the stored value when a batch
@@ -294,15 +471,54 @@ class _Run:
         # not re-posted on every tick. See flush().
         self._config_sent = False
         self._last_sent_config: dict[str, Any] = {}
+        # Warn once per run when a config value had to go through the
+        # generic str() fallback of _sanitize (see _config_to_send).
+        self._config_fallback_warned = False
         self._timer: threading.Timer | None = None
+        # Set as soon as finish() starts, before _finished: from that moment
+        # no heartbeat and no background artifact commit may begin.
+        self._finishing = False
 
-        # Artifacts and produced models are gathered during the run and sent
-        # once, from finish(): every artifact is a git commit, and the model
-        # list is a wholesale replace, so batching keeps a run that logs
-        # twenty files to one commit and one PATCH.
+        # Liveness pings: see _maybe_heartbeat(). Counted from the run's
+        # start, so a run that logs nothing for heartbeat_secs still shows up.
+        self.heartbeat_secs = _heartbeat_secs()
+        self._last_post_at = time.monotonic()
+        self._last_heartbeat_attempt_at = self._last_post_at
+
+        # Artifacts are gathered as they are logged and committed in batches:
+        # in the background every _artifact_interval seconds while anything is
+        # pending, on save(), and finally from finish(). Every commit is a git
+        # commit, so batching keeps a run that saves twenty plots a minute to
+        # one commit a minute. The model list is a wholesale replace and is
+        # still sent once, from finish().
         self._artifacts: list[tuple[Any, str]] = []
         self._models: list[dict[str, str]] = []
         self._models_dirty = False
+        self._artifact_interval = _artifact_interval()
+        # Held for the whole of one commit, so the background uploader,
+        # save() and finish() never commit at the same time. Never taken
+        # while holding _send_lock or _lock (it takes _lock briefly itself).
+        self._upload_lock = threading.Lock()
+        self._upload_thread: threading.Thread | None = None
+        self._upload_stop = threading.Event()
+        # Media (trackio.Image / trackio.Table) is written to a temporary
+        # directory this run owns, and each file is deleted once committed.
+        self._media_dir: Path | None = None
+        self._owned_sources: set[Path] = set()
+        self._missing_media_deps_warned: set[str] = set()
+
+        # On-disk run directories. _run_dir is the offline mode's run; _spill
+        # is created lazily by the online mode the first time it would
+        # otherwise drop points (or artifacts). _spill_lock serialises
+        # creating it and writing to it. Lock order, all told:
+        # _send_lock -> _spill_lock -> _lock, and _upload_lock -> _spill_lock
+        # -> _lock; _upload_lock and _send_lock are never held together.
+        self._run_dir: _offline.RunDir | None = None
+        self._spill: _offline.RunDir | None = None
+        self._spill_unavailable = False
+        self._spill_lock = threading.Lock()
+        self._spill_config_written = False
+        self._spill_last_config: Any = None
 
         # System metrics (GPU/CPU/memory) piggyback on the flush timer
         # below rather than running a second background thread; see
@@ -310,10 +526,165 @@ class _Run:
         self._system_metrics_enabled = not _system_metrics.is_disabled()
         self._last_system_metrics_at: float | None = None
 
-        self.namespace, self.repo_name = _split_repo(repo)
+        if repo is not None:
+            self.namespace, self.repo_name = _split_repo(repo)
+        elif not self.offline:
+            raise ValueError("an online run needs a repository")
+        else:
+            # Resolved as "{user}/trackio-metrics" by `tf experiments sync`.
+            self.namespace = self.repo_name = ""
         _check_path_segment("project", project)
 
+        # One warning per run: an offline run that continues an existing one
+        # cannot know the server's last_step, so auto-numbered steps restart
+        # at 0 (see init()).
+        self._offline_resume_step_warned = False
+        # Set by finish()'s final artifact commit once it has taken the staged
+        # list: anything staged after that would sit in a list nobody commits.
+        self._artifacts_closed = False
+
+        if self.offline:
+            self._open_offline_dir()
+
         self._schedule_flush()
+
+    # -- on-disk run directories ---------------------------------------------
+
+    def _init_record(self, resume: str, spill: bool = False) -> dict[str, Any]:
+        """The ``init`` record of a run directory.
+
+        For a ``spill`` directory (the online mode's), ``config`` is null when
+        the current config already reached the server: replaying it would
+        only roll back a newer config the run may be given later, so the
+        syncer sends a config only when a record carries one. Likewise
+        ``repo`` is null when the repository was never resolved.
+        """
+        with self._lock:
+            config, _ = _sanitize.sanitize(self.config)
+            if spill and self._config_delivered_locked(config):
+                config = None
+        repo = self.repo if (self.repo_resolved or not spill) else None
+        return {
+            "type": "init",
+            "time": _utc_now_iso(),
+            "repo": repo,
+            "project": self.project,
+            "run": self.name,
+            "resume": resume,
+            "group": self.group,
+            "job_type": self.job_type,
+            "config": config,
+        }
+
+    def _open_offline_dir(self) -> None:
+        """Create the offline run's directory and write its ``init`` record.
+
+        A directory that cannot be created is a warning, not an exception --
+        the run then records nothing, and says so once, here.
+        """
+        try:
+            run_dir = _offline.RunDir.create(self.project, self.name)
+            run_dir.append(self._init_record(self.resume_mode))
+        except Exception as exc:  # noqa: BLE001 - never abort the training script
+            warnings.warn(
+                f"thinkingface.trackio: offline mode could not create a run directory under "
+                f"{_offline.base_dir()} ({exc!r}); nothing from run {self.name!r} will be "
+                "recorded. Set THINKINGFACE_OFFLINE_DIR to a writable directory."
+            )
+            return
+        self._run_dir = run_dir
+        print(
+            f"thinkingface.trackio: offline mode -- run {self.name!r} is being written to "
+            f"{run_dir.path}; {_sync_hint(run_dir.path)}.",
+            file=sys.stderr,
+        )
+
+    def _ensure_spill_locked(self) -> _offline.RunDir | None:
+        """The online run's spill directory, created on first use.
+
+        The caller holds _spill_lock. The ``init`` record says
+        ``resume: "allow"``: the directory continues a run the server already
+        has, so syncing it must append to that run rather than rename.
+        """
+        if self._spill is not None:
+            return self._spill
+        if self._spill_unavailable:
+            return None
+        try:
+            spill = _offline.RunDir.create(self.project, self.name)
+            spill.append(self._init_record("allow", spill=True))
+        except Exception:  # noqa: BLE001 - the caller falls back to dropping
+            self._spill_unavailable = True
+            return None
+        self._spill = spill
+        return spill
+
+    def _spill_points(self, points: list[dict[str, Any]]) -> Path | None:
+        """Write points the online mode is giving up on to the spill directory.
+
+        Returns the directory on success and None when the disk could not
+        take them, in which case the caller drops them with a warning as it
+        always did. Never raises.
+        """
+        if not points:
+            return None
+        try:
+            with self._lock:
+                config, _ = _sanitize.sanitize(self.config)
+                # Already on the server: leave it out, so replaying this
+                # record cannot put an older config back (see _init_record).
+                if self._config_delivered_locked(config):
+                    config = None
+        except Exception:  # noqa: BLE001
+            config = None
+        with self._spill_lock:
+            spill = self._ensure_spill_locked()
+            if spill is None:
+                return None
+            send_config = None
+            if config is not None and (
+                not self._spill_config_written or config != self._spill_last_config
+            ):
+                send_config = config
+            try:
+                _append_log_record(spill, points, send_config)
+            except Exception:  # noqa: BLE001
+                return None
+            if send_config is not None:
+                self._spill_config_written = True
+                self._spill_last_config = send_config
+            return spill.path
+
+    def _config_delivered_locked(self, config: Any) -> bool:
+        """Whether ``config`` (sanitised) is exactly what the server last
+        accepted for this run. The caller holds _lock."""
+        return self._config_sent and config == self._last_sent_config
+
+    def _spill_artifacts(self, staged: list[tuple[Any, str]]) -> Path | None:
+        """Copy artifacts that could not be committed into the spill directory."""
+        with self._spill_lock:
+            spill = self._ensure_spill_locked()
+            if spill is None:
+                return None
+            try:
+                for source, name in staged:
+                    spill.add_artifact(Path(source), name)
+            except Exception:  # noqa: BLE001
+                return None
+            return spill.path
+
+    def _close_spill(self, status: str) -> None:
+        with self._spill_lock:
+            if self._spill is None:
+                return
+            try:
+                self._spill.append({"type": "finish", "time": _utc_now_iso(), "status": status})
+            except Exception as exc:  # noqa: BLE001
+                warnings.warn(
+                    f"thinkingface.trackio: could not close the spill directory "
+                    f"{self._spill.path} ({exc!r}); syncing it will leave run "
+                    f"{self.name!r} running."
+                )
 
     # -- HTTP -------------------------------------------------------------
 
@@ -358,8 +729,66 @@ class _Run:
         # no duplicated point.
         self._maybe_collect_system_metrics()
         self.flush()
+        try:
+            self._maybe_heartbeat()
+        except Exception:  # noqa: BLE001 - must never stop the timer
+            pass
         if not self._finished:
             self._schedule_flush()
+
+    # -- liveness ------------------------------------------------------------
+
+    def _maybe_heartbeat(self) -> None:
+        """Post a point-less batch if the run has been quiet for heartbeat_secs.
+
+        The server derives "stale" from how long a running run has gone
+        without an update (docs/dev/agent-features.md §2.6), so a training
+        step that takes ten minutes must not read as a dead process. A ping is
+        ``{"run", "status": "running", "points": []}`` plus the heartbeat and
+        grouping fields -- no config, which stays with the real batches.
+
+        Under _send_lock like every other request, so it can never land after
+        finish()'s /finish; and never once finish() has started. A failed
+        ping is silent (the next real flush says everything worth saying) and
+        is not retried until another heartbeat_secs has passed, so an
+        unreachable server is not polled every tick.
+        """
+        if self.offline or self.heartbeat_secs <= 0 or self._finishing or self._finished:
+            return
+        now = time.monotonic()
+        if (
+            now - self._last_post_at < self.heartbeat_secs
+            or now - self._last_heartbeat_attempt_at < self.heartbeat_secs
+        ):
+            return
+        with self._send_lock:
+            if self._finishing or self._finished:
+                return
+            now = time.monotonic()
+            if now - self._last_post_at < self.heartbeat_secs:
+                return  # a flush got there first
+            self._last_heartbeat_attempt_at = now
+            payload: dict[str, Any] = {
+                "run": self.name,
+                "status": "running",
+                "points": [],
+                "heartbeat_secs": self.heartbeat_secs,
+            }
+            if self.group:
+                payload["group"] = self.group
+            if self.job_type:
+                payload["job_type"] = self.job_type
+            try:
+                resp = requests.post(
+                    self._log_url,
+                    json=payload,
+                    headers=self._headers(),
+                    timeout=_REQUEST_TIMEOUT_SECONDS,
+                )
+            except Exception:  # noqa: BLE001 - a ping must never raise
+                return
+            if getattr(resp, "ok", False):
+                self._last_post_at = time.monotonic()
 
     # -- background system-metrics sampling --------------------------------
 
@@ -372,7 +801,7 @@ class _Run:
         second timer of its own, so the 10s system-metrics cadence is
         approximated by skipping every other tick.
         """
-        if not self._system_metrics_enabled or self._finished:
+        if not self._system_metrics_enabled or self._finished or self._finishing:
             return
         now = time.monotonic()
         if (
@@ -396,7 +825,10 @@ class _Run:
         if not sendable:
             return
         with self._lock:
-            if self._finished:
+            # _finishing too: finish() has drained (or is draining) the buffer
+            # for the last time, so a point added now would never be sent --
+            # or, offline, would land after the finish record.
+            if self._finished or self._finishing:
                 return
             self._buffer.append(
                 {
@@ -413,29 +845,62 @@ class _Run:
     # -- public API ---------------------------------------------------------
 
     def log(self, metrics: dict[str, Any], step: int | None = None) -> None:
-        if self._finished:
-            warnings.warn("thinkingface.trackio: log() called after finish(); ignoring.")
+        if self._finished or self._finishing:
+            self._warn_log_after_finish()
             return
+        media, metrics = _split_media(metrics)
         sendable, nonfinite = _finite_metrics(metrics)
         with self._lock:
-            if step is None:
-                step = self.step
-            self.step = max(self.step, step) + 1
-            # A point whose every value was non-finite carries nothing; the
-            # step still advances, so the next log() lands where it would have.
-            if sendable or not nonfinite:
-                self._buffer.append(
-                    {
-                        "step": step,
-                        "timestamp": _utc_now_iso(),
-                        "metrics": sendable,
-                    }
+            # Checked again under _lock, which finish() sets _finishing under:
+            # once finish() has started, its final drain may already have run,
+            # so a point added now would never be sent (or could post
+            # "running" after /finish, or -- offline -- land after the finish
+            # record). It is refused with a warning rather than silently
+            # lost, and so is its media.
+            refused = self._finished or self._finishing
+            if not refused:
+                auto_step = step is None
+                if step is None:
+                    step = self.step
+                self.step = max(self.step, step) + 1
+                # A point whose every value was non-finite carries nothing; the
+                # step still advances, so the next log() lands where it would
+                # have. Likewise a point that held only media: those values
+                # become artifacts, and an empty point would only be noise.
+                if sendable or not (nonfinite or media):
+                    self._buffer.append(
+                        {
+                            "step": step,
+                            "timestamp": _utc_now_iso(),
+                            "metrics": sendable,
+                        }
+                    )
+                should_flush = len(self._buffer) >= _FLUSH_MAX_POINTS
+                over_key_limit = self._note_metric_keys(sendable)
+                warn_nonfinite = bool(nonfinite) and not self._nonfinite_warned
+                if warn_nonfinite:
+                    self._nonfinite_warned = True
+                # Offline, a continued run cannot learn the server's last_step,
+                # so auto-numbered steps start where init() put them (0).
+                warn_offline_resume = (
+                    auto_step
+                    and self.offline
+                    and self.resume_mode != "never"
+                    and not self._offline_resume_step_warned
                 )
-            should_flush = len(self._buffer) >= _FLUSH_MAX_POINTS
-            over_key_limit = self._note_metric_keys(sendable)
-            warn_nonfinite = bool(nonfinite) and not self._nonfinite_warned
-            if warn_nonfinite:
-                self._nonfinite_warned = True
+                if warn_offline_resume:
+                    self._offline_resume_step_warned = True
+        if refused:
+            self._warn_log_after_finish()
+            return
+        if warn_offline_resume:
+            warnings.warn(
+                f"thinkingface.trackio: offline run {self.name!r} was started with "
+                f'resume="{self.resume_mode}", but its steps are numbered from {step} '
+                "without regard to the server: an offline run cannot know the existing "
+                "run's last_step, and `tf experiments sync` does not shift the steps. "
+                "Pass step= explicitly to log() if this run continues an existing one."
+            )
         if warn_nonfinite:
             warnings.warn(
                 f"thinkingface.trackio: dropping non-finite value(s) for "
@@ -454,8 +919,14 @@ class _Run:
                 "from a step number, an id or a filename, move that part into the "
                 "value or the run name."
             )
+        if media:
+            self._stage_media(media, step)
         if should_flush:
             self.flush()
+
+    @staticmethod
+    def _warn_log_after_finish() -> None:
+        warnings.warn("thinkingface.trackio: log() called after finish(); ignoring.")
 
     def _note_metric_keys(self, metrics: Any) -> bool:
         """Record the batch's metric names; True the first time the run goes
@@ -496,7 +967,36 @@ class _Run:
                 # in _buffer and not yet requeued.
                 config = self._config_to_send()
                 points, self._buffer = self._buffer, []
-            self._send(points, config)
+            if self.offline:
+                self._write_offline(points, config)
+            else:
+                self._send(points, config)
+
+    def _write_offline(self, points: list[dict[str, Any]], config: dict[str, Any] | None) -> None:
+        """The offline mode's flush: one ``log`` record in run.jsonl.
+
+        The caller holds _send_lock, which is what keeps records in step
+        order across the timer thread and an inline flush from log().
+        """
+        if self._run_dir is None:
+            return  # init() already warned that nothing is being recorded
+        try:
+            left_out = _append_log_record(self._run_dir, points, config)
+        except Exception as exc:  # noqa: BLE001 - never raise into training
+            warnings.warn(
+                f"thinkingface.trackio: dropping {len(points)} point(s) for run "
+                f"{self.name!r}: could not write to {self._run_dir.run_file} ({exc!r})."
+            )
+            return
+        if left_out:
+            warnings.warn(
+                f"thinkingface.trackio: dropping {left_out} point(s) for run {self.name!r}: "
+                "they cannot be encoded as JSON."
+            )
+        if config is not None:
+            with self._lock:
+                self._config_sent = True
+                self._last_sent_config = config
 
     def _send(self, points: list[dict[str, Any]], config: dict[str, Any] | None) -> None:
         """POST ``points`` in batches the server will accept.
@@ -539,6 +1039,8 @@ class _Run:
         }
         if config is not None:
             payload["config"] = config
+        if self.heartbeat_secs > 0:
+            payload["heartbeat_secs"] = self.heartbeat_secs
         if self.group:
             payload["group"] = self.group
         if self.job_type:
@@ -595,6 +1097,7 @@ class _Run:
             return "retry"
 
         if resp.ok:
+            self._last_post_at = time.monotonic()
             with self._lock:
                 self._config_sent = True
                 if config is not None:
@@ -628,45 +1131,79 @@ class _Run:
         updated in place, or a hyperparameter logged once training has started)
         still reaches the server instead of being dropped forever.
 
-        The caller holds _lock. Both the comparison and the copy run over
-        values the caller put in config, so either can raise: a value with its
-        own __eq__, or one deepcopy refuses, such as an open file or a module.
-        Neither is worth failing a flush over -- the points are the part that
-        cannot be reconstructed, and an exception out of flush() on the timer
-        thread would also stop _schedule_flush from ever running again -- so a
-        config that cannot be prepared is reported and skipped.
+        What is sent is a JSON-safe copy made by ``_sanitize.sanitize``: a
+        ``Path`` becomes its string, an ``Enum`` its value, a dataclass or an
+        ``argparse.Namespace`` its fields, a numpy scalar its Python number,
+        NaN the string ``"nan"`` -- and anything unrecognised ``str(value)``,
+        which is warned about once per run with the keys it affected. Comparing
+        sanitised copies (rather than the caller's objects) is also what makes
+        "unchanged" well defined for values without a useful ``__eq__``.
+
+        The caller holds _lock. Sanitising runs over values the caller put in
+        config and so could still raise in some exotic case; that is not worth
+        failing a flush over -- the points are the part that cannot be
+        reconstructed, and an exception out of flush() on the timer thread
+        would also stop _schedule_flush from ever running again -- so a config
+        that cannot be prepared is reported and skipped.
         """
         try:
-            if self._config_sent and self.config == self._last_sent_config:
+            config, stringified = _sanitize.sanitize(self.config)
+            if self._config_sent and config == self._last_sent_config:
                 return None
-            return copy.deepcopy(self.config)
         except Exception as exc:  # noqa: BLE001 - metrics matter more
             warnings.warn(
                 f"thinkingface.trackio: could not prepare the config for run "
                 f"{self.name!r} ({exc!r}); sending metrics without it."
             )
             return None
+        if stringified and not self._config_fallback_warned:
+            self._config_fallback_warned = True
+            shown = ", ".join(repr(key) for key in stringified[:10])
+            more = f" and {len(stringified) - 10} more" if len(stringified) > 10 else ""
+            warnings.warn(
+                f"thinkingface.trackio: config value(s) {shown}{more} of run {self.name!r} "
+                "are not JSON types and were recorded as their str(); convert them "
+                "yourself if that is not what you want to see on the run page."
+            )
+        return config
 
     def _requeue(self, points: list[dict[str, Any]]) -> None:
         """Put unsent points back at the front, capped at _BUFFER_MAX_POINTS."""
+        evicted: list[dict[str, Any]] = []
         with self._lock:
             self._buffer = points + self._buffer
             overflow = len(self._buffer) - _BUFFER_MAX_POINTS
             if overflow > 0:
-                # Drop the oldest: the recent tail of a training curve is the
-                # part still worth delivering.
+                # Evict the oldest: the recent tail of a training curve is the
+                # part still worth delivering live.
+                evicted = self._buffer[:overflow]
                 del self._buffer[:overflow]
         if overflow > 0:
-            warnings.warn(
-                f"thinkingface.trackio: retry buffer full, dropped {overflow} "
-                f"oldest point(s) for run {self.name!r}."
-            )
+            # Out of memory is not out of disk: the evicted points go to the
+            # spill directory, which `tf experiments sync` delivers later.
+            where = self._spill_points(evicted)
+            if where is not None:
+                warnings.warn(
+                    f"thinkingface.trackio: retry buffer full; wrote the {overflow} oldest "
+                    f"point(s) for run {self.name!r} to {where} instead -- "
+                    f"{_sync_hint(where)} once the server is reachable."
+                )
+            else:
+                warnings.warn(
+                    f"thinkingface.trackio: retry buffer full, dropped {overflow} "
+                    f"oldest point(s) for run {self.name!r}."
+                )
 
     # -- artifacts and produced models -------------------------------------
 
     def log_artifact(self, path: Any, name: str | None = None) -> None:
-        """Stage a file (or a whole directory) for upload at finish()."""
-        if self._finished:
+        """Stage a file (or a whole directory) for the next artifact commit.
+
+        Offline, the files are copied into the run directory right away (the
+        commit happens at sync time); online they are committed by the
+        background uploader, save() or finish(), whichever comes first.
+        """
+        if self._finished or self._finishing:
             warnings.warn("thinkingface.trackio: log_artifact() called after finish(); ignoring.")
             return
         try:
@@ -679,18 +1216,160 @@ class _Run:
             # over the per-call file limit -- uploads nothing at all.
             warnings.warn(f"thinkingface.trackio: log_artifact({path!r}) uploaded nothing: {exc}")
             return
+        if self.offline:
+            if self._run_dir is None:
+                return
+            try:
+                for source, artifact_name in staged:
+                    self._run_dir.add_artifact(source, artifact_name)
+            except Exception as exc:  # noqa: BLE001 - never raise into training
+                warnings.warn(
+                    f"thinkingface.trackio: log_artifact({path!r}) could not be copied into "
+                    f"{self._run_dir.path} ({exc!r})."
+                )
+            return
         with self._lock:
-            self._artifacts.extend(staged)
+            closed = self._artifacts_closed
+            if not closed:
+                self._artifacts.extend(staged)
+        if closed:
+            warnings.warn("thinkingface.trackio: log_artifact() called after finish(); ignoring.")
+            return
+        self._ensure_uploader()
+
+    def _media_staging_dir(self) -> Path:
+        with self._lock:
+            if self._media_dir is None:
+                self._media_dir = Path(tempfile.mkdtemp(prefix="thinkingface-media-"))
+            return self._media_dir
+
+    def _stage_media(self, media: dict[str, Any], step: Any) -> None:
+        """Write each Image / Table value to a file and stage it as an artifact
+        named ``media/{key}/step_{step:08d}.png`` / ``tables/{key}/step_{step:08d}.parquet``.
+        Every failure is a warning; a missing optional library is warned about
+        once per run."""
+        for key, value in media.items():
+            directory, extension = _media.kind(value) or ("media", "bin")
+            try:
+                name = _artifacts.normalize_artifact_name(
+                    f"{directory}/{key}/step_{int(step):08d}.{extension}"
+                )
+            except (TypeError, ValueError) as exc:
+                warnings.warn(f"thinkingface.trackio: not logging {key!r} at step {step!r}: {exc}")
+                continue
+            try:
+                if self.offline:
+                    if self._run_dir is None:
+                        continue
+                    target = self._run_dir.artifact_target(name)
+                else:
+                    target = self._media_staging_dir() / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                written = _media.write(value, target)
+                if written != target:
+                    name = name[: -len(target.suffix)] + written.suffix
+                if self.offline:
+                    self._run_dir.record_artifact(name)
+                    continue
+                with self._lock:
+                    closed = self._artifacts_closed
+                    if not closed:
+                        self._artifacts.append((written, name))
+                        self._owned_sources.add(written)
+                if closed:
+                    # finish() committed the last batch while this was being
+                    # written; nothing would ever commit it now.
+                    written.unlink(missing_ok=True)
+                    warnings.warn(
+                        f"thinkingface.trackio: not logging {key!r} at step {step}: "
+                        "the run finished while it was being written."
+                    )
+                    continue
+            except _media.MediaError as exc:
+                dependency = exc.missing_dependency
+                if dependency is not None:
+                    if dependency in self._missing_media_deps_warned:
+                        continue
+                    self._missing_media_deps_warned.add(dependency)
+                warnings.warn(f"thinkingface.trackio: not logging {key!r} at step {step}: {exc}")
+                continue
+            except Exception as exc:  # noqa: BLE001 - never raise into training
+                warnings.warn(
+                    f"thinkingface.trackio: not logging {key!r} at step {step}: "
+                    f"could not write it ({exc!r})."
+                )
+                continue
+        if not self.offline:
+            self._ensure_uploader()
+
+    def _ensure_uploader(self) -> None:
+        """Start the background artifact committer on first need.
+
+        A thread of its own rather than the flush timer's: a commit of a large
+        file can take minutes, and the flush timer is what delivers metrics
+        and heartbeats -- neither may wait behind an upload.
+        """
+        if self._artifact_interval <= 0 or self._upload_thread is not None:
+            return
+        with self._lock:
+            if self._upload_thread is not None or self._finishing or self._finished:
+                return
+            thread = threading.Thread(
+                target=self._upload_loop, name="thinkingface-artifacts", daemon=True
+            )
+            self._upload_thread = thread
+        thread.start()
+
+    def _upload_loop(self) -> None:
+        while not self._upload_stop.wait(self._artifact_interval):
+            if self._finishing or self._finished:
+                return
+            try:
+                self._upload_artifacts(final=False)
+            except Exception:  # noqa: BLE001 - the loop must survive anything
+                pass
+
+    def save(self) -> None:
+        """Commit every pending artifact now instead of at the next interval.
+
+        Offline there is nothing to commit (files are copied as they are
+        logged), so this writes out the buffered points instead.
+        """
+        if self._finished or self._finishing:
+            return
+        if self.offline:
+            self.flush()
+            return
+        self._upload_artifacts(final=False)
 
     def log_model(self, repo_id: str, revision: str | None = None) -> None:
         """Record that this run produced ``repo_id`` at ``revision``."""
-        if self._finished:
+        if self._finished or self._finishing:
             warnings.warn("thinkingface.trackio: log_model() called after finish(); ignoring.")
             return
         try:
             namespace, model_name = _split_repo(repo_id)
         except ValueError as exc:
             warnings.warn(f"thinkingface.trackio: log_model({repo_id!r}) ignored: {exc}")
+            return
+        if self.offline:
+            # No network: the revision is recorded as given, and "" means
+            # "whatever HEAD is" to the syncer, which cannot know better.
+            if self._run_dir is None:
+                return
+            try:
+                self._run_dir.append(
+                    {
+                        "type": "model",
+                        "repo_id": f"{namespace}/{model_name}",
+                        "revision": revision or "",
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                warnings.warn(
+                    f"thinkingface.trackio: log_model({repo_id!r}) could not be recorded "
+                    f"in {self._run_dir.run_file} ({exc!r})."
+                )
             return
         resolved = revision if revision is not None else self._resolve_model_head(repo_id)
         with self._lock:
@@ -723,39 +1402,93 @@ class _Run:
             )
             return ""
 
-    def _upload_artifacts(self) -> None:
+    def _upload_artifacts(self, final: bool = True) -> None:
         """Commit every staged artifact in one go.
 
         Uploading goes through ``huggingface_hub``, i.e. through the same
         preupload/commit endpoints any other client uses: large files are
         routed to LFS by the repository's ``.gitattributes``, and the result
         is ordinary git content rather than an opaque blob store.
-        """
-        with self._lock:
-            staged, self._artifacts = self._artifacts, []
-        if not staged:
-            return
-        try:
-            from huggingface_hub import CommitOperationAdd, HfApi
 
-            operations = [
-                CommitOperationAdd(
-                    path_in_repo=_artifacts.artifact_path(self.project, self.name, name),
-                    path_or_fileobj=str(source),
+        _upload_lock makes this the only commit in progress for the run. A
+        failed background commit (``final=False``) puts the files back for
+        the next attempt; finish()'s (``final=True``) is the last one, so its
+        files go to the spill directory instead -- or, failing that, are
+        reported as not committed.
+        """
+        with self._upload_lock:
+            with self._lock:
+                staged, self._artifacts = self._artifacts, []
+                if final:
+                    # The last commit: media a log() already in progress
+                    # stages from now on is refused instead of left behind.
+                    self._artifacts_closed = True
+            if not staged:
+                return
+            # The same name staged twice (a media key logged twice at one
+            # step, a file re-logged) is one file in the commit: the last.
+            latest: dict[str, tuple[Any, str]] = {}
+            for source, name in staged:
+                latest.pop(name, None)
+                latest[name] = (source, name)
+            staged = list(latest.values())
+            try:
+                from huggingface_hub import CommitOperationAdd, HfApi
+
+                operations = [
+                    CommitOperationAdd(
+                        path_in_repo=_artifacts.artifact_path(self.project, self.name, name),
+                        path_or_fileobj=str(source),
+                    )
+                    for source, name in staged
+                ]
+                HfApi(endpoint=self.endpoint, token=self.token).create_commit(
+                    repo_id=self.repo,
+                    repo_type="dataset",
+                    operations=operations,
+                    commit_message=f"chore(trackio): artifacts for {self.project}/{self.name}",
                 )
-                for source, name in staged
-            ]
-            HfApi(endpoint=self.endpoint, token=self.token).create_commit(
-                repo_id=self.repo,
-                repo_type="dataset",
-                operations=operations,
-                commit_message=f"chore(trackio): artifacts for {self.project}/{self.name}",
-            )
-        except Exception as exc:  # uploads must never abort a training script
-            warnings.warn(
-                f"thinkingface.trackio: failed to upload {len(staged)} artifact(s) for "
-                f"run {self.name!r} ({exc!r}); they were not committed."
-            )
+            except Exception as exc:  # uploads must never abort a training script
+                if not final:
+                    with self._lock:
+                        self._artifacts = staged + self._artifacts
+                    warnings.warn(
+                        f"thinkingface.trackio: failed to upload {len(staged)} artifact(s) for "
+                        f"run {self.name!r} ({exc!r}); will retry."
+                    )
+                    return
+                where = self._spill_artifacts(staged)
+                if where is not None:
+                    warnings.warn(
+                        f"thinkingface.trackio: failed to upload {len(staged)} artifact(s) for "
+                        f"run {self.name!r} ({exc!r}); copies were written to {where} -- "
+                        f"{_sync_hint(where)}."
+                    )
+                else:
+                    warnings.warn(
+                        f"thinkingface.trackio: failed to upload {len(staged)} artifact(s) for "
+                        f"run {self.name!r} ({exc!r}); they were not committed."
+                    )
+                return
+            self._release_owned(staged)
+
+    def _release_owned(self, staged: list[tuple[Any, str]]) -> None:
+        """Delete committed media files this run wrote itself (never the
+        caller's own files from log_artifact)."""
+        for source, _ in staged:
+            path = Path(source)
+            with self._lock:
+                # Staged again since (the same media key logged at the same
+                # step once more): the pending copy still needs the file.
+                still_pending = any(Path(pending) == path for pending, _ in self._artifacts)
+                owned = path in self._owned_sources and not still_pending
+                if owned:
+                    self._owned_sources.discard(path)
+            if owned:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
 
     def _sync_models(self) -> None:
         """Write the produced-model list onto the run.
@@ -785,8 +1518,8 @@ class _Run:
         with self._lock:
             return bool(self._buffer)
 
-    def _give_up_and_drop_buffer(self) -> int:
-        """Clear the buffer and report how many points were left in it.
+    def _give_up_and_drop_buffer(self) -> list[dict[str, Any]]:
+        """Clear the buffer and return the points that were left in it.
 
         Called only once finish()'s retry budget (_drain_for_finish) is
         exhausted. Clearing rather than leaving the points in place keeps the
@@ -796,8 +1529,7 @@ class _Run:
         "dropped" a lie for whichever points that tick happened to catch.
         """
         with self._lock:
-            dropped = len(self._buffer)
-            self._buffer = []
+            dropped, self._buffer = self._buffer, []
         return dropped
 
     def _drain_for_finish(self) -> None:
@@ -814,7 +1546,9 @@ class _Run:
 
         Bounded to a handful of attempts a little further apart each time
         (_FINISH_FLUSH_ATTEMPTS), not an unbounded loop: finish() is a call a
-        training script is blocked on and must still return.
+        training script is blocked on and must still return. What is still
+        unsent after that goes to the spill directory for `tf experiments
+        sync`, and is only dropped if the disk refuses it too.
         """
         self.flush()
         attempt = 1
@@ -825,22 +1559,51 @@ class _Run:
             self.flush()
             attempt += 1
         if self._has_buffered_points():
-            dropped = self._give_up_and_drop_buffer()
-            warnings.warn(
-                f"thinkingface.trackio: giving up after {attempt} attempt(s) to "
-                f"flush run {self.name!r}: {dropped} point(s) were never "
-                "delivered to the server and are being dropped now that the run "
-                "is finishing."
-            )
+            points = self._give_up_and_drop_buffer()
+            where = self._spill_points(points)
+            if where is not None:
+                warnings.warn(
+                    f"thinkingface.trackio: giving up after {attempt} attempt(s) to "
+                    f"flush run {self.name!r}: {len(points)} point(s) were never "
+                    f"delivered to the server; they were written to {where} instead -- "
+                    f"{_sync_hint(where)} once the server is reachable."
+                )
+            else:
+                warnings.warn(
+                    f"thinkingface.trackio: giving up after {attempt} attempt(s) to "
+                    f"flush run {self.name!r}: {len(points)} point(s) were never "
+                    "delivered to the server and are being dropped now that the run "
+                    "is finishing."
+                )
 
-    def finish(self, status: str = "finished") -> None:
-        if self._finished:
-            return
-        self._drain_for_finish()
+    def _stop_background(self) -> None:
         self._finished = True
         if self._timer is not None:
             self._timer.cancel()
-        self._upload_artifacts()
+        self._upload_stop.set()
+
+    def _cleanup_media_dir(self) -> None:
+        with self._lock:
+            media_dir, self._media_dir = self._media_dir, None
+            self._owned_sources.clear()
+        if media_dir is not None:
+            shutil.rmtree(media_dir, ignore_errors=True)
+
+    def finish(self, status: str = "finished") -> None:
+        # Under _lock, like log()'s own check: a log() that got into the
+        # buffer before this has its point drained below, and one that comes
+        # after is refused -- none falls in between.
+        with self._lock:
+            if self._finished or self._finishing:
+                return
+            self._finishing = True
+        if self.offline:
+            self._finish_offline(status)
+            return
+        self._drain_for_finish()
+        self._stop_background()
+        self._upload_artifacts(final=True)
+        self._cleanup_media_dir()
         finish_payload: dict[str, Any] = {"run": self.name, "status": status}
         # Also on finish: a run that logged no points at all is created by
         # this call, so without it such a run would fall out of its sweep.
@@ -869,13 +1632,45 @@ class _Run:
         # After the finish call: that is what guarantees the run row exists,
         # since a run that logged no points at all is created there.
         self._sync_models()
+        # A spill directory, if this run needed one, ends the way the run did,
+        # so syncing it leaves the server's status where finish() put it.
+        self._close_spill(status)
+
+    def _finish_offline(self, status: str) -> None:
+        self.flush()
+        self._stop_background()
+        if self._run_dir is None:
+            return
+        try:
+            self._run_dir.append({"type": "finish", "time": _utc_now_iso(), "status": status})
+        except Exception as exc:  # noqa: BLE001
+            warnings.warn(
+                f"thinkingface.trackio: could not record the end of run {self.name!r} in "
+                f"{self._run_dir.run_file} ({exc!r}); syncing it will leave the run running."
+            )
+
+
+def _split_media(metrics: Any) -> tuple[dict[str, Any], Any]:
+    """Separate ``trackio.Image`` / ``trackio.Table`` values from the metrics."""
+    if not isinstance(metrics, Mapping):
+        return {}, metrics
+    media = {key: value for key, value in metrics.items() if _media.kind(value) is not None}
+    if not media:
+        return {}, metrics
+    return media, {key: value for key, value in metrics.items() if key not in media}
 
 
 _current_run: _Run | None = None
 
+# What an online run logs to when THINKINGFACE_REPO is unset and the current
+# user could not be looked up. It is a placeholder, not a choice: a spill
+# directory of such a run records `"repo": null` instead (see _Run.repo_resolved).
+_FALLBACK_REPO = "unknown/trackio-metrics"
 
-def _resolve_default_repo(endpoint: str, token: str | None) -> str:
-    """Default THINKINGFACE_REPO: "{user}/trackio-metrics"."""
+
+def _resolve_default_repo(endpoint: str, token: str | None) -> str | None:
+    """Default THINKINGFACE_REPO: "{user}/trackio-metrics", or None (with a
+    warning) when the current user cannot be looked up."""
     try:
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         resp = requests.get(
@@ -890,7 +1685,7 @@ def _resolve_default_repo(endpoint: str, token: str | None) -> str:
             f"build the default repo ({exc!r}); set THINKINGFACE_REPO "
             "explicitly, or the run will fail to log."
         )
-        return "unknown/trackio-metrics"
+        return None
 
 
 # ---------------------------------------------------------------- resuming
@@ -971,8 +1766,15 @@ def _merge_resumed_config(
     merged = dict(previous or {})
     changes: dict[str, Any] = {}
     for key, value in current.items():
-        if key not in _RESERVED_CONFIG_KEYS and key in merged and merged[key] != value:
-            changes[key] = {"from": merged[key], "to": value}
+        # Compared as it will be stored: the previous config came back from
+        # the server already sanitised, so a Path("out") must equal "out".
+        if key not in _RESERVED_CONFIG_KEYS and key in merged:
+            try:
+                changed = merged[key] != _sanitize.sanitize(value)[0]
+            except Exception:  # noqa: BLE001
+                changed = merged[key] != value
+            if changed:
+                changes[key] = {"from": merged[key], "to": value}
         merged[key] = value
 
     history = merged.get("_resume")
@@ -1016,10 +1818,11 @@ def _normalize_grouping(label: str, value: Any) -> str:
 def init(
     project: str,
     name: str | None = None,
-    config: dict[str, Any] | None = None,
+    config: Any = None,
     resume: Any = "never",
     group: str | None = None,
     job_type: str | None = None,
+    mode: str | None = None,
     **kwargs: Any,
 ) -> _Run:
     """Start (or continue) a run. Mirrors ``trackio.init`` / ``wandb.init``.
@@ -1046,9 +1849,27 @@ def init(
         exist (or cannot be looked up).
 
     Continuing a run means: steps carry on from the server's ``last_step``
-    rather than restarting at 0, the run's status goes back to ``running`` on
+    rather than restarting at 0 (online only; see ``mode`` below), the run's
+    status goes back to ``running`` on
     the first flush, and ``config`` is merged with the previous attempt's
     (new values win; the differences are recorded under ``_resume``).
+
+    ``config`` is a mapping, an ``argparse.Namespace`` or a dataclass
+    instance. Values JSON cannot carry are converted when sent (a ``Path`` to
+    its string, an ``Enum`` to its value, a numpy scalar to a number, NaN to
+    ``"nan"``, ...; anything unrecognised to ``str(value)``, with one warning
+    naming the keys), so one odd value never costs the run its whole config.
+
+    ``mode`` is ``"online"`` (the default) or ``"offline"``; it defaults to
+    ``THINKINGFACE_MODE``. An offline run makes no network request at all: it
+    is written to a directory under ``THINKINGFACE_OFFLINE_DIR`` (default
+    ``./thinkingface-offline``) that ``tf experiments sync`` uploads later,
+    and the repository is ``THINKINGFACE_REPO`` or, when unset, resolved at
+    sync time. ``resume`` is recorded and applied by the sync -- but step
+    numbering is not continued: offline there is no server to ask for the
+    run's ``last_step``, so auto-numbered steps start at 0 and the sync does
+    not shift them. Pass explicit ``step=`` to ``log()`` if an offline run
+    continues an existing one (a warning says so once per run otherwise).
 
     Extra keyword arguments are accepted and ignored -- so a call site written
     against trackio/wandb (e.g. passing ``tags=``) keeps working -- but each
@@ -1064,12 +1885,23 @@ def init(
             "compatibility but have no effect here."
         )
 
-    mode = _normalize_resume(resume)
+    resume_mode = _normalize_resume(resume)
+    run_mode = _normalize_mode(mode)
+    offline = run_mode == "offline"
     group_name = _normalize_grouping("group", group)
     job_type_name = _normalize_grouping("job_type", job_type)
+    config_dict = _sanitize.to_config_dict(config)
     endpoint = os.environ.get("THINKINGFACE_ENDPOINT", _DEFAULT_ENDPOINT).rstrip("/")
     token = os.environ.get("THINKINGFACE_TOKEN")
-    repo = os.environ.get("THINKINGFACE_REPO") or _resolve_default_repo(endpoint, token)
+    repo: str | None = os.environ.get("THINKINGFACE_REPO") or None
+    repo_resolved = True
+    if offline:
+        # No /me lookup: the syncer resolves "{user}/trackio-metrics" itself.
+        pass
+    elif repo is None:
+        repo = _resolve_default_repo(endpoint, token)
+        if repo is None:
+            repo, repo_resolved = _FALLBACK_REPO, False
     run_name = name or f"run-{int(time.time())}"
 
     if _current_run is not None and not _current_run._finished:
@@ -1079,7 +1911,7 @@ def init(
         )
         _current_run.finish()
 
-    merged_config = dict(config or {})
+    merged_config = config_dict
     if not _env_meta.is_disabled():
         try:
             meta = _env_meta.collect()
@@ -1090,17 +1922,22 @@ def init(
 
     # An auto-generated name cannot collide, so the default path stays exactly
     # as offline-friendly as it was: no request, no warning when the server is
-    # unreachable.
+    # unreachable. The offline mode never looks: `tf experiments sync`
+    # applies the same resume rules when it uploads the run.
     existing: dict[str, Any] | None = None
     taken: set[str] = set()
     lookup_error: Exception | None = None
-    if mode != "never" or name is not None:
+    if offline:
+        pass
+    elif resume_mode != "never" or name is not None:
         try:
             existing, taken = _fetch_run(endpoint, token, repo, project, run_name)
         except Exception as exc:
             lookup_error = exc
 
-    if mode == "must":
+    if offline:
+        pass
+    elif resume_mode == "must":
         if lookup_error is not None:
             raise RuntimeError(
                 f'thinkingface.trackio: resume="must" but run {run_name!r} in project '
@@ -1111,7 +1948,7 @@ def init(
                 f'thinkingface.trackio: resume="must" but run {run_name!r} does not '
                 f"exist in project {project!r}."
             )
-    elif mode == "never" and existing is not None:
+    elif resume_mode == "never" and existing is not None:
         run_name = _unique_run_name(run_name, taken)
         warnings.warn(
             f"thinkingface.trackio: run {name!r} already exists in project {project!r} "
@@ -1119,7 +1956,7 @@ def init(
             'resume="allow" to continue the existing run.'
         )
         existing = None
-    elif mode != "never" and lookup_error is not None:
+    elif resume_mode != "never" and lookup_error is not None:
         # "allow" degrades to "start fresh under this name", which is what the
         # ingest API does anyway: it appends to whatever run the name resolves
         # to. Only the step continuation is lost, hence the warning.
@@ -1147,6 +1984,9 @@ def init(
         resumed=existing is not None,
         group=group_name,
         job_type=job_type_name,
+        mode=run_mode,
+        resume_mode=resume_mode,
+        repo_resolved=repo_resolved,
     )
     return _current_run
 
@@ -1156,6 +1996,11 @@ def log(metrics: dict[str, Any], step: int | None = None) -> None:
 
     Buffered in-process and flushed every 5 seconds or every 100 points,
     whichever comes first.
+
+    A ``trackio.Image`` or ``trackio.Table`` value is not a metric: it is
+    written to a file and committed as the artifact
+    ``media/{key}/step_{step:08d}.png`` / ``tables/{key}/step_{step:08d}.parquet``,
+    and the point itself carries no value for that key.
     """
     if _current_run is None:
         warnings.warn("thinkingface.trackio: log() called before init(); ignoring.")
@@ -1175,16 +2020,32 @@ def log_artifact(path: Any, name: str | None = None) -> None:
     else in the repository. Files large enough for the repository's
     ``.gitattributes`` go over LFS automatically.
 
-    Nothing is uploaded here: every artifact logged by a run is committed
-    together when ``finish()`` runs, so a run that saves twenty plots makes
-    one commit rather than twenty. A bad path or a name that cannot be used
-    (``..``, or the reserved ``metrics.parquet``) is a warning, never an
-    exception.
+    Nothing is uploaded here: staged artifacts are committed together in the
+    background every ``THINKINGFACE_ARTIFACT_INTERVAL`` seconds (60 by
+    default) while anything is pending, by ``save()``, and finally by
+    ``finish()`` -- so a run that saves twenty plots a minute makes one
+    commit a minute rather than twenty. A bad path or a name that cannot be
+    used (``..``, or the reserved ``metrics.parquet``) is a warning, never an
+    exception. In offline mode the file is copied into the run directory
+    right away, and committed when the directory is synced.
     """
     if _current_run is None:
         warnings.warn("thinkingface.trackio: log_artifact() called before init(); ignoring.")
         return
     _current_run.log_artifact(path, name=name)
+
+
+def save() -> None:
+    """Commit the current run's pending artifacts and media now.
+
+    Without it they go out on the next background interval
+    (``THINKINGFACE_ARTIFACT_INTERVAL``) or at ``finish()``. Never raises; a
+    failed commit is retried later.
+    """
+    if _current_run is None:
+        warnings.warn("thinkingface.trackio: save() called before init(); ignoring.")
+        return
+    _current_run.save()
 
 
 def log_model(repo_id: str, revision: str | None = None) -> None:

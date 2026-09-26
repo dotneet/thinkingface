@@ -45,7 +45,11 @@ import type { NextConfig } from "next";
  *   Pinning a guess would break every fetch on a deployment whose API is on
  *   another host, which is a far worse outcome than a permissive
  *   `connect-src`. Left open on purpose (`ws:`/`wss:` additionally cover
- *   `next dev`'s HMR socket).
+ *   `next dev`'s HMR socket). An image built with `NEXT_PUBLIC_API_URL` empty
+ *   calls the API on its own origin (`app/api/[...path]/route.ts`), which
+ *   `'self'` covers, but it still cannot be narrowed to that: a resolve of an
+ *   LFS file answers 302 to a GCS signed URL, and the SQL console and the
+ *   tabular preview `fetch` it, following the redirect to the bucket's host.
  * - `img-src` / `media-src`: README images, avatars and the Parquet viewer's
  *   image columns all resolve to that same unknown API origin, and cell values
  *   can be inlined `data:` URLs. Same reasoning, same conclusion.

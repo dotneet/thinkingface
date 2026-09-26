@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -108,6 +109,12 @@ type Config struct {
 	ViewerCacheDir string
 	SyncWorkers    int
 	AllowSignup    bool
+	// RequireAuthForRead (TF_REQUIRE_AUTH_FOR_READ) makes every route but a
+	// short allowlist answer 401 to a caller with no identity, so an
+	// instance exposed by mistake does not also publish every repository and
+	// run (docs/dev/agent-features.md §1.5). Off by default: the hub's
+	// public-read model is unchanged unless the operator asks.
+	RequireAuthForRead bool
 	// SignupEmailDomains restricts self-service sign-up to these email
 	// domains (TF_SIGNUP_EMAIL_DOMAINS, comma separated). Empty means no
 	// restriction, which is the default.
@@ -164,6 +171,24 @@ type Config struct {
 	// TrustProxyIPs meant on its own. Ignored entirely when TrustProxyIPs is
 	// false.
 	TrustedProxyHops int
+	// TrustedWebProxies (TF_TRUSTED_WEB_PROXIES, comma separated) lists the
+	// connection peers allowed to name the browser's address in
+	// X-TF-Client-Addr: IP addresses, CIDR prefixes, or host names that are
+	// resolved (and re-resolved every half minute) to the addresses of the web
+	// UI's same-origin API proxy. Behind that proxy every browser request
+	// reaches the API from the web container, so without this the password
+	// rate limiter would put every browser user in one bucket
+	// (docs/dev/agent-features.md §1.2). The compose file sets it to "web".
+	// Unlike TrustProxyIPs this is decided per connection, so a direct caller
+	// of the API port cannot forge the header: it does not arrive from one of
+	// these peers.
+	TrustedWebProxies []string
+	// WebProxySecret (TF_WEB_PROXY_SECRET) is the other way to vouch for
+	// X-TF-Client-Addr: a request carrying it in X-TF-Proxy-Secret is trusted
+	// whatever its peer. It exists for deployments where the web UI reaches
+	// the API through a load balancer, so the peer says nothing (Cloud Run).
+	// The web container must be given the same value. Empty disables it.
+	WebProxySecret string
 
 	// ExpFlushInterval is how long the native ingest API's points may stay
 	// database-only before the sync worker writes them into the dataset
@@ -248,6 +273,7 @@ func Load() (*Config, error) {
 		ViewerCacheDir:           env("TF_VIEWER_CACHE_DIR", "/data/cache"),
 		SyncWorkers:              e.int("TF_SYNC_WORKERS", 2),
 		AllowSignup:              e.bool("TF_ALLOW_SIGNUP", true),
+		RequireAuthForRead:       e.bool("TF_REQUIRE_AUTH_FOR_READ", false),
 		SignupEmailDomains:       parseSignupEmailDomains(env("TF_SIGNUP_EMAIL_DOMAINS", "")),
 		SignupRequireApproval:    e.bool("TF_SIGNUP_REQUIRE_APPROVAL", false),
 		ExpFlushInterval:         e.duration("TF_EXP_FLUSH_INTERVAL", time.Minute),
@@ -267,6 +293,8 @@ func Load() (*Config, error) {
 		AuthRateLimitPerMinute: e.int("TF_AUTH_RATE_LIMIT_PER_MIN", 10),
 		TrustProxyIPs:          e.bool("TF_TRUST_PROXY_IPS", false),
 		TrustedProxyHops:       e.int("TF_TRUSTED_PROXY_HOPS", 1),
+		TrustedWebProxies:      splitNonEmpty(env("TF_TRUSTED_WEB_PROXIES", "")),
+		WebProxySecret:         env("TF_WEB_PROXY_SECRET", ""),
 	}
 	c.AllowedOrigins = parseOrigins(env("TF_ALLOWED_ORIGINS", ""), c.PublicURL)
 
@@ -406,6 +434,16 @@ func Load() (*Config, error) {
 	}
 	if c.AuthRateLimitPerMinute < 0 {
 		return nil, fmt.Errorf("TF_AUTH_RATE_LIMIT_PER_MIN must not be negative")
+	}
+	// Anyone who knows it picks their own rate-limit bucket, so it has to be
+	// as hard to guess as the session secret.
+	if c.WebProxySecret != "" && len(c.WebProxySecret) < MinSessionSecretLen {
+		return nil, fmt.Errorf("TF_WEB_PROXY_SECRET must be at least %d bytes, got %d; generate one with `openssl rand -hex 32`", MinSessionSecretLen, len(c.WebProxySecret))
+	}
+	for _, entry := range c.TrustedWebProxies {
+		if err := ValidateTrustedPeer(entry); err != nil {
+			return nil, fmt.Errorf("TF_TRUSTED_WEB_PROXIES: %w", err)
+		}
 	}
 	if c.SSHEnabled {
 		if c.SSHAddr == "" {
@@ -644,4 +682,43 @@ func parseSignupEmailDomains(raw string) []string {
 		}
 	}
 	return out
+}
+
+// splitNonEmpty splits a comma-separated list, trimming each entry and
+// dropping empty ones.
+func splitNonEmpty(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// ValidateTrustedPeer checks one TF_TRUSTED_WEB_PROXIES entry: an IP address,
+// a CIDR prefix, or a host name (resolved at request time). A port or a
+// scheme is a mistake worth refusing at startup rather than an entry that
+// silently never matches.
+func ValidateTrustedPeer(entry string) error {
+	if _, err := netip.ParsePrefix(entry); err == nil {
+		return nil
+	}
+	if _, err := netip.ParseAddr(entry); err == nil {
+		return nil
+	}
+	if strings.ContainsAny(entry, ":/@ ") {
+		return fmt.Errorf("%q is not an IP address, a CIDR prefix or a host name", entry)
+	}
+	for _, label := range strings.Split(entry, ".") {
+		if label == "" || len(label) > 63 {
+			return fmt.Errorf("%q is not a valid host name", entry)
+		}
+		for _, r := range label {
+			if !(r == '-' || r == '_' || ('0' <= r && r <= '9') || ('a' <= r && r <= 'z') || ('A' <= r && r <= 'Z')) {
+				return fmt.Errorf("%q is not a valid host name", entry)
+			}
+		}
+	}
+	return nil
 }

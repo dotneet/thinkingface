@@ -33,6 +33,8 @@ Flags:
   --password-stdin       read the password from stdin (one line) instead of
                           prompting with echo disabled
   --name NAME            name for the minted token (default tf-cli@<hostname>)
+  --json                 print {"endpoint", "username", "scope", "token_id",
+                         "minted", "config_path"} on stdout (never the token)
   --verbose              print credential resolution to stderr
 `
 
@@ -45,6 +47,8 @@ func runLogin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.StringVar(&username, "username", "", "username for password login")
 	fs.BoolVar(&passwordStdin, "password-stdin", false, "read password from stdin")
 	fs.StringVar(&tokenName, "name", "", "name for the minted token")
+	var jsonOut bool
+	fs.BoolVar(&jsonOut, "json", false, "print the result as JSON")
 
 	if hasHelpFlag(args) {
 		fmt.Fprint(stdout, loginUsage)
@@ -260,9 +264,28 @@ func runLogin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		path = "(unknown path)"
 	}
 
+	if jsonOut {
+		return writeJSONLine(stdout, stderr, &loginJSON{
+			Endpoint: endpoint, Username: user.Name, Scope: user.Role,
+			TokenID: cred.TokenID, Minted: cred.TokenID != 0, ConfigPath: path,
+		})
+	}
 	fmt.Fprintf(stdout, "Logged in to %s as %s (%s)\n", endpoint, user.Name, user.Role)
 	fmt.Fprintf(stdout, "Credentials saved to %s\n", path)
 	return exitOK
+}
+
+// loginJSON is the shape written by `tf login --json`. It deliberately has
+// no token field: stdout of a login is easily captured into a log.
+type loginJSON struct {
+	Endpoint string `json:"endpoint"`
+	Username string `json:"username"`
+	Scope    string `json:"scope"`
+	// TokenID is the server-side id of a token this login minted; 0 for a
+	// token passed with --token.
+	TokenID    int64  `json:"token_id"`
+	Minted     bool   `json:"minted"`
+	ConfigPath string `json:"config_path"`
 }
 
 // revokeMinted best-effort revokes a token this run of `tf login` minted

@@ -10,3 +10,19 @@
 export function tokenCreateFormAfterContextSwitch(): { createError: null } {
   return { createError: null };
 }
+
+/**
+ * The create form's "restrict to repositories" textarea, one
+ * `datasets/ns/name` or `models/ns/name` per line, as the list the API takes.
+ * Blank lines and surrounding whitespace are dropped and repeats collapse;
+ * the spelling itself is left for the server to judge, so there is one set of
+ * rules and one error message for a malformed entry.
+ */
+export function parseTokenRepos(text: string): string[] {
+  const out: string[] = [];
+  for (const line of text.split("\n")) {
+    const entry = line.trim();
+    if (entry !== "" && !out.includes(entry)) out.push(entry);
+  }
+  return out;
+}

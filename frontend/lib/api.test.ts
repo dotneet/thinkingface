@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { apiFetch, isRepoMoved, isRevisionNotFound } from "@/lib/api";
+import { apiBaseUrl, apiFetch, isRepoMoved, isRevisionNotFound } from "@/lib/api";
 
 // buildUrl is not exported, so it is exercised indirectly through apiFetch,
 // with global fetch mocked to capture the URL it was actually called with.
@@ -206,5 +206,58 @@ describe("apiFetch RevisionNotFound handling", () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected a failure result");
     expect(isRevisionNotFound(result)).toBe(false);
+  });
+});
+
+describe("apiBaseUrl", () => {
+  describe("on the server", () => {
+    it("prefers API_URL, read at runtime", () => {
+      vi.stubEnv("API_URL", "http://api:8080");
+      vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
+      expect(apiBaseUrl()).toBe("http://api:8080");
+    });
+
+    it("treats an empty API_URL as unset rather than as an empty base", () => {
+      vi.stubEnv("API_URL", "");
+      vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
+      expect(apiBaseUrl()).toBe("https://api.example.com");
+    });
+
+    // The Dockerfile defines NEXT_PUBLIC_API_URL as "" when the build arg is
+    // left out; `??` used to keep that and produce an unusable base.
+    it("falls back to localhost when both are empty", () => {
+      vi.stubEnv("API_URL", "");
+      vi.stubEnv("NEXT_PUBLIC_API_URL", "");
+      expect(apiBaseUrl()).toBe("http://localhost:8080");
+    });
+  });
+
+  describe("in the browser", () => {
+    beforeEach(() => {
+      vi.stubGlobal("window", { location: { origin: "http://localhost:3111" } });
+    });
+
+    it("uses a configured NEXT_PUBLIC_API_URL cross-origin, as before", () => {
+      vi.stubEnv("NEXT_PUBLIC_API_URL", "http://localhost:8080");
+      expect(apiBaseUrl()).toBe("http://localhost:8080");
+    });
+
+    it("calls its own origin when NEXT_PUBLIC_API_URL is empty", () => {
+      vi.stubEnv("NEXT_PUBLIC_API_URL", "");
+      expect(apiBaseUrl()).toBe("http://localhost:3111");
+    });
+
+    it("calls its own origin when NEXT_PUBLIC_API_URL is unset, ignoring API_URL", () => {
+      vi.stubEnv("NEXT_PUBLIC_API_URL", undefined as unknown as string);
+      vi.stubEnv("API_URL", "http://api:8080");
+      expect(apiBaseUrl()).toBe("http://localhost:3111");
+    });
+
+    it("builds same-origin request URLs through apiFetch", async () => {
+      vi.stubEnv("NEXT_PUBLIC_API_URL", "");
+      const { calls } = mockFetchOnce();
+      await apiFetch("/api/v1/stats", { query: { a: "1" } });
+      expect(calls[0]).toBe("http://localhost:3111/api/v1/stats?a=1");
+    });
   });
 });

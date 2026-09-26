@@ -46,6 +46,13 @@ func main() {
 		return
 	}
 
+	// `admin` talks to a person, and `admin token create` writes the token --
+	// and nothing else -- to stdout, so a log line (a migration, an
+	// insecure-default warning) must not land there with it.
+	if command == "admin" {
+		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	}
+
 	if err := run(command); err != nil {
 		// -h is not a failure. Every subcommand parses with
 		// flag.ContinueOnError so that the deferred cleanups in run() still
@@ -108,11 +115,12 @@ func run(command string) error {
 			return seedAdmin(ctx, db, cfg)
 		})
 	case "admin":
-		// The break-glass path (admincli.go). Nothing but the database is
-		// needed, so it runs here rather than after the storage driver, the
-		// git manager and the sync worker are built -- an instance that
-		// cannot reach its bucket must still be able to reset a password.
-		return runAdmin(ctx, db, os.Args[2:], os.Stdout)
+		// The break-glass path (admincli.go): `admin passwd`, `admin promote`
+		// and `admin token create`. Nothing but the database is needed, so it
+		// runs here rather than after the storage driver, the git manager and
+		// the sync worker are built -- an instance that cannot reach its
+		// bucket must still be able to reset a password.
+		return runAdmin(ctx, db, os.Args[2:], os.Stdout, os.Stderr)
 	case "gc":
 		return withStorage(ctx, cfg, func(obj storage.Storage) error {
 			return runGC(ctx, db, obj, cfg.SignedURLMaxTTL, os.Args[2:])

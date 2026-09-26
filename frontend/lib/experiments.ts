@@ -4,11 +4,14 @@ import type {
   ExpArtifact,
   ExpArtifactListResponse,
   ExpMetricsResponse,
+  ExpNotesResponse,
+  ExpNotesUpdateRequest,
   ExpProject,
   ExpProjectListResponse,
-  ExpRun,
+  ExpProjectUpdateRequest,
   ExpRunAnnotationRequest,
   ExpRunAnnotationResponse,
+  ExpRunListResponse,
   ExpRunModelRef,
   RepoSummary,
 } from "@/types/api";
@@ -90,14 +93,67 @@ export function getExperimentRepo(
   });
 }
 
+/**
+ * Every run of a project, plus the project's metric goals and — for each
+ * metric with a goal — the name of the best non-archived run
+ * (docs/dev/api-contract.md §7 "Querying runs"). A server that predates goals
+ * omits `metric_goals` / `best`; read them through `runListGoals` /
+ * `runListBest` rather than directly.
+ */
 export function listRuns(
   ns: string,
   repo: string,
   project: string,
   opts?: FetchOpts,
-): Promise<ApiResult<{ runs: ExpRun[] }>> {
-  return apiFetch<{ runs: ExpRun[] }>(expApiPath(ns, repo, project, "/runs"), {
+): Promise<ApiResult<ExpRunListResponse>> {
+  return apiFetch<ExpRunListResponse>(expApiPath(ns, repo, project, "/runs"), {
     headers: opts?.headers,
+  });
+}
+
+/**
+ * Set, change or clear metric goals. A key mapped to `""` drops that metric's
+ * goal; keys not mentioned keep theirs (a merge, not a replace). Requires
+ * write access to the backing dataset repository.
+ */
+export function updateProjectGoals(
+  ns: string,
+  repo: string,
+  project: string,
+  body: ExpProjectUpdateRequest,
+): Promise<ApiResult<ExpProject>> {
+  return apiFetch<ExpProject>(expApiPath(ns, repo, project), { method: "PATCH", body });
+}
+
+/**
+ * The project's experiment notebook, `{project}/NOTES.md` on the default
+ * branch. A project without one answers `exists: false`, not an error.
+ */
+export function getProjectNotes(
+  ns: string,
+  repo: string,
+  project: string,
+  opts?: FetchOpts,
+): Promise<ApiResult<ExpNotesResponse>> {
+  return apiFetch<ExpNotesResponse>(expApiPath(ns, repo, project, "/notes"), {
+    headers: opts?.headers,
+  });
+}
+
+/**
+ * Commit a new version of the notebook. Pass the `blob_sha` of the version
+ * the edit started from as `base_sha` (`""` when there was none): the server
+ * answers 409 instead of overwriting when someone else saved in between.
+ */
+export function saveProjectNotes(
+  ns: string,
+  repo: string,
+  project: string,
+  body: ExpNotesUpdateRequest,
+): Promise<ApiResult<ExpNotesResponse>> {
+  return apiFetch<ExpNotesResponse>(expApiPath(ns, repo, project, "/notes"), {
+    method: "PUT",
+    body,
   });
 }
 

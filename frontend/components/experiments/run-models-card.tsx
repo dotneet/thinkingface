@@ -3,9 +3,10 @@
 import { Boxes, Link2Off } from "lucide-react";
 import Link from "next/link";
 
+import { RunPageOutputRow } from "@/components/experiments/run-page-output-row";
 import { Badge } from "@/components/ui/badge";
-import { EmptyState } from "@/components/ui/empty-state";
 import { expRunModelHref } from "@/lib/experiments";
+import { formatNumber } from "@/lib/format";
 import { useT } from "@/lib/i18n/client";
 import type { ExpRunModelRef } from "@/types/api";
 
@@ -26,33 +27,35 @@ import type { ExpRunModelRef } from "@/types/api";
 export function RunModelsCard({ models }: { models: ExpRunModelRef[] }) {
   const t = useT();
 
+  const row = {
+    icon: Boxes,
+    title: t("experiments.models.title"),
+    description: t("experiments.models.description"),
+  };
+
   if (models.length === 0) {
-    return (
-      <EmptyState
-        icon={Boxes}
-        title={t("experiments.models.emptyTitle")}
-        description={t("experiments.models.emptyDescription")}
-      />
-    );
+    return <RunPageOutputRow {...row} empty={t("experiments.runPage.modelsNone")} />;
   }
 
   return (
-    <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-lg border border-border">
-      {models.map((model) => (
-        <li
-          key={`${model.repo_id}@${model.revision}`}
-          className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-sm"
-        >
-          <Boxes size={15} strokeWidth={1.5} className="shrink-0 text-fg-subtle" />
-          <ModelLink model={model} notFound={t("experiments.models.notFound")} />
-          {model.revision && (
-            <Badge>
-              <span className="font-mono">{model.revision.slice(0, 12)}</span>
-            </Badge>
-          )}
-        </li>
-      ))}
-    </ul>
+    <RunPageOutputRow {...row} count={formatNumber(models.length)}>
+      <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-lg border border-border">
+        {models.map((model) => (
+          <li
+            key={`${model.repo_id}@${model.revision}`}
+            className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-sm"
+          >
+            <Boxes size={15} strokeWidth={1.5} className="shrink-0 text-fg-subtle" />
+            <ModelLink model={model} notFound={t("experiments.models.notFound")} />
+            {model.revision && (
+              <Badge>
+                <span className="font-mono">{model.revision.slice(0, 12)}</span>
+              </Badge>
+            )}
+          </li>
+        ))}
+      </ul>
+    </RunPageOutputRow>
   );
 }
 

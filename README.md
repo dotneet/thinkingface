@@ -54,6 +54,8 @@ It runs as a single Go binary plus a Next.js web UI, on PostgreSQL or SQLite, wi
 - **Experiment tracking built in.** Log metrics from your training loop through the
   trackio-compatible shim, compare runs and charts in the UI — the source of truth is Parquet
   inside a dataset repository you own.
+- **Agent-ready.** An MCP server (`tf mcp`), `--json` on every `tf` command, an OpenAPI document,
+  and repository-restricted tokens let an AI agent run and compare experiments on its own.
 - **Built for teams.** Organizations with `admin` / `write` / `read` roles, access tokens, SSH
   keys, repository transfer, and an audit log.
 - **Small to operate.** Pure-Go backend (no CGo), PostgreSQL or SQLite selected by

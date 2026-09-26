@@ -13,6 +13,7 @@ import {
   axisTicks,
   axisX,
   axisY,
+  defaultParallelAxes,
   linePath,
   type ParallelAxis,
   parallelAxes,
@@ -52,11 +53,14 @@ export function ParallelCoordinates({
   runs,
   runOrder,
   baseline,
+  primaryMetric,
 }: {
   runs: ExpRun[];
   /** Full project run order, so a run keeps its table colour here too. */
   runOrder: string[];
   baseline?: string;
+  /** The project's primary goal metric: the last axis when logged. */
+  primaryMetric?: string;
 }) {
   const t = useT();
   const axes = useMemo(() => parallelAxes(runs), [runs]);
@@ -68,8 +72,9 @@ export function ParallelCoordinates({
   // view — render `shown.length === 0` and flash the "pick two axes"
   // EmptyState before the effect ever ran (DESIGN.md §9 — a state that is
   // right one tick later still reads as wrong on first paint).
+  // The hyperparameters that vary, then the goal metric (defaultParallelAxes).
   const [selectedIds, setSelectedIds] = useState<string[]>(() =>
-    axes.slice(0, DEFAULT_AXES).map((a) => a.id),
+    defaultParallelAxes(axes, primaryMetric, DEFAULT_AXES),
   );
   const [highlight, setHighlight] = useState<string | null>(null);
   const [pinned, setPinned] = useState<string | null>(null);
@@ -82,9 +87,9 @@ export function ParallelCoordinates({
     setSelectedIds((current) => {
       const kept = current.filter((id) => axes.some((a) => a.id === id));
       if (kept.length >= 2) return kept.length === current.length ? current : kept;
-      return axes.slice(0, DEFAULT_AXES).map((a) => a.id);
+      return defaultParallelAxes(axes, primaryMetric, DEFAULT_AXES);
     });
-  }, [axes]);
+  }, [axes, primaryMetric]);
 
   // Selected axes keep the left-to-right order of the axis list (config first,
   // then metrics) rather than the order they happened to be ticked in.

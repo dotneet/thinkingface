@@ -7,6 +7,7 @@ package tfcli
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -39,6 +40,8 @@ Commands:
   whoami   Show the identity behind the current token
   status   Show the resolved endpoint/token and whether you are logged in
   up       Create (if needed) and push a directory to a repository
+  experiments  Query, wait on, annotate, import and sync experiment runs
+  mcp      Serve the experiment tools over MCP (stdio) for AI agents
   version  Print the tf version
   help     Show help for tf or for one command
 
@@ -75,6 +78,10 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runUp(rest, stdin, stdout, stderr)
 	case "version":
 		return runVersion(rest, stdout, stderr)
+	case "experiments", "exp":
+		return runExperiments(rest, stdin, stdout, stderr)
+	case "mcp":
+		return runMCP(rest, stdin, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "tf: unknown command %q\n", cmd)
 		fmt.Fprint(stderr, topUsage)
@@ -113,6 +120,10 @@ func commandUsage(name string) (string, bool) {
 		return upUsage, true
 	case "version":
 		return versionUsage, true
+	case "experiments", "exp":
+		return experimentsUsage, true
+	case "mcp":
+		return mcpUsage, true
 	case "help":
 		return topUsage, true
 	}
@@ -220,6 +231,16 @@ func resolveEndpoint(flagEndpoint string, file *config.File, verbose bool, stder
 		fmt.Fprintf(stderr, "tf: endpoint %s (from %s)\n", resolved.Endpoint, resolved.EndpointSource)
 	}
 	return resolved.Endpoint, nil
+}
+
+// writeJSONLine writes v to stdout as one line of JSON -- the --json output
+// of every command -- and returns the exit code.
+func writeJSONLine(stdout, stderr io.Writer, v any) int {
+	if err := json.NewEncoder(stdout).Encode(v); err != nil {
+		fmt.Fprintf(stderr, "tf: %s\n", err)
+		return exitError
+	}
+	return exitOK
 }
 
 // userAgent is the User-Agent every hub.Client this CLI builds sends.
