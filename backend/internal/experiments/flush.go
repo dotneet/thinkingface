@@ -654,6 +654,16 @@ func mergePoints(existing *existingTable, points []store.PendingPoint) ([]flushC
 			if value >= math.MinInt64 && value <= math.MaxInt64 && float64(int64(value)) == value {
 				return
 			}
+		case colUint64:
+			// Mirrors the colInt64 case above, just unsigned: a value that
+			// cannot survive round-tripping through uint64 widens the column
+			// to DOUBLE instead of being silently truncated or dropped.
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				return
+			}
+			if value >= 0 && value <= math.MaxUint64 && float64(uint64(value)) == value {
+				return
+			}
 		case colBool:
 			if value == 0 || value == 1 {
 				return
@@ -666,11 +676,32 @@ func mergePoints(existing *existingTable, points []store.PendingPoint) ([]flushC
 	for _, c := range existing.columns {
 		add(c)
 	}
+	// A file keyed by another exporter's names (`run`, `_step`, `created_at`,
+	// ...) gets the new points in those same columns rather than in a second
+	// set beside them: the readers here resolve a row across all the
+	// candidates (rowRun and friends), but anything else that opens the file
+	// -- pandas, datasets, trackio itself -- picks one column, and would see
+	// half the rows with no run. Adding ours is the fallback for a file that
+	// has none of them, or only ones the value cannot be stored in faithfully
+	// (a run name in an INT64 `run_id`, say).
+	runCol := structuralTarget(byName, runColumns, func(c flushColumn) bool {
+		return c.kind == colString
+	})
+	stepCol := structuralTarget(byName, stepColumns, func(c flushColumn) bool {
+		// Not INT32: encode would wrap a step past 2^31 without a word.
+		return c.kind == colInt64 || c.kind == colUint64 || c.kind == colDouble
+	})
+	timeCol := structuralTarget(byName, timeColumns, func(c flushColumn) bool {
+		// A numeric epoch column is left alone: which unit it counts in is
+		// the exporter's convention, not something the schema records.
+		return c.kind == colTimestamp || c.kind == colString
+	})
 	// run_name is the only column every reader requires (layout.go), so it is
 	// the only one written as required when this package creates the file.
-	add(stringColumn("run_name", false))
-	add(int64Column("step"))
-	add(timestampColumn("timestamp"))
+	// Each add is a no-op when structuralTarget chose a column the file has.
+	add(stringColumn(runCol, false))
+	add(int64Column(stepCol))
+	add(timestampColumn(timeCol))
 	add(int64Column(IngestIDColumn))
 
 	rows := existing.rows
@@ -680,9 +711,9 @@ func mergePoints(existing *existingTable, points []store.PendingPoint) ([]flushC
 			continue
 		}
 		row := map[string]any{
-			"run_name":     p.RunName,
-			"step":         p.Step,
-			"timestamp":    p.TS.UTC(),
+			runCol:         p.RunName,
+			stepCol:        p.Step,
+			timeCol:        p.TS.UTC(),
 			IngestIDColumn: p.ID,
 		}
 		for key, value := range p.Metrics {
@@ -711,6 +742,22 @@ func mergePoints(existing *existingTable, points []store.PendingPoint) ([]flushC
 		columns = append(columns, byName[name])
 	}
 	return columns, rows, appended
+}
+
+// structuralTarget picks the column a new point's run, step or timestamp is
+// written to: the first of candidates the file already has whose type holds
+// the value faithfully, or candidates[0] -- this package's own name -- when
+// none does. candidates[0] is taken whenever the file has it, whatever its
+// type, because adding it again is not possible and writing elsewhere would
+// split the file's rows across two columns.
+func structuralTarget(existing map[string]flushColumn, candidates []string, fits func(flushColumn) bool) string {
+	for i, name := range candidates {
+		c, ok := existing[name]
+		if ok && (i == 0 || fits(c)) {
+			return name
+		}
+	}
+	return candidates[0]
 }
 
 // emptyMetricsBlob renders a metrics parquet with this package's structural
@@ -810,7 +857,7 @@ func (f *Flusher) commit(ctx context.Context, repo *store.Repo, req gitrepo.Comm
 		}
 		// A ref the WAL never accepted must not survive locally, or readers
 		// would be served a commit the index does not know about.
-		if rerr := gitRepo.ResetBranch(req.Branch, oldHash); rerr != nil {
+		if rerr := gitRepo.ResetBranch(req.Branch, newHash, oldHash); rerr != nil {
 			slog.Error("roll back local ref after failed WAL write",
 				"repo", repo.FullName(), "branch", req.Branch, "error", rerr)
 		}

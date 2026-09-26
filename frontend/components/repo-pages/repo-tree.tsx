@@ -13,7 +13,7 @@ import { RepoTabs } from "@/components/repo/repo-tabs";
 import { buttonClass } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
-import { isNotFound } from "@/lib/api";
+import { isNotFound, isRevisionNotFound } from "@/lib/api";
 import { errorMessage } from "@/lib/api-error-message";
 import { getT } from "@/lib/i18n/server";
 import { publicApiBase, repoBlobHref, repoCommitsHref, repoTreeHref } from "@/lib/paths";
@@ -55,23 +55,19 @@ export async function RepoTree({
   if (isNotFound(repoResult)) {
     return <RepoNotFoundOrLogin currentPath={repoTreeHref(kind, ns, name, rev, path.join("/"))} />;
   }
-  if (isNotFound(treeResult)) notFound();
+  // A missing path within a revision that resolves fine is a genuine 404 --
+  // notFound() is right for that. A revision that does not resolve at all
+  // (X-Error-Code: RevisionNotFound, see lib/api.ts's isRevisionNotFound) gets
+  // its own dedicated state below instead, with a way back to the default
+  // branch -- that used to be unreachable here because the backend folded an
+  // unresolvable revision into an empty listing rather than a 404, so
+  // treeResult.ok was true and this generic 404 gate never fired for it.
+  if (isNotFound(treeResult) && !isRevisionNotFound(treeResult)) notFound();
 
   if (!repoResult.ok) {
     return <ErrorState title={t("ui.errorStateTitle")} message={errorMessage(t, repoResult)} />;
   }
   const repo = repoResult.data.repo;
-
-  // The backend answers an unresolvable revision with an empty tree rather
-  // than a 404, so "branch does not exist" and "directory is empty" arrive
-  // looking identical. Tell them apart from the ref listing: a revision that
-  // is neither a known branch or tag nor a commit id never resolved. A
-  // repository with no branches at all is simply empty, not misaddressed.
-  const knownRefs = refsResult.ok
-    ? [...refsResult.data.branches, ...refsResult.data.tags].map((r) => r.name)
-    : [];
-  const unknownRevision =
-    knownRefs.length > 0 && !knownRefs.includes(rev) && !/^[0-9a-f]{7,40}$/i.test(rev);
 
   return (
     <div className="flex flex-col gap-4">
@@ -108,13 +104,7 @@ export async function RepoTree({
         )}
       </div>
 
-      {!treeResult.ok ? (
-        <ErrorState
-          title={t("ui.errorStateTitle")}
-          message={errorMessage(t, treeResult)}
-          hint={t("repo.tree.errorHint")}
-        />
-      ) : treeResult.data.entries.length === 0 && unknownRevision ? (
+      {isRevisionNotFound(treeResult) ? (
         <ErrorState
           title={t("repo.tree.unknownRevTitle")}
           message={t("repo.tree.unknownRev", { rev })}
@@ -134,6 +124,12 @@ export async function RepoTree({
               {t("repo.tree.unknownRevAction")}
             </Link>
           }
+        />
+      ) : !treeResult.ok ? (
+        <ErrorState
+          title={t("ui.errorStateTitle")}
+          message={errorMessage(t, treeResult)}
+          hint={t("repo.tree.errorHint")}
         />
       ) : treeResult.data.entries.length === 0 ? (
         <EmptyState icon={FolderOpen} title={t("repo.tree.emptyDir")} />

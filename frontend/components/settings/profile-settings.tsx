@@ -2,6 +2,7 @@
 
 import { ExternalLink, Lock } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { LoginRequiredState } from "@/components/settings/login-required-state";
@@ -24,6 +25,7 @@ import type { NamespaceProfile } from "@/types/api";
  */
 export function ProfileSettings() {
   const t = useT();
+  const router = useRouter();
   const [profile, setProfile] = useState<NamespaceProfile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
@@ -91,6 +93,10 @@ export function ProfileSettings() {
     }
     setProfile(result.data.namespace);
     setSaved(true);
+    // The header's user menu (SiteHeader/UserMenu, Server Components) reads
+    // the display name from the same session — without this it keeps
+    // showing the old one until the next full navigation.
+    router.refresh();
   }
 
   if (profile === null && !error) return <SkeletonLines lines={6} />;

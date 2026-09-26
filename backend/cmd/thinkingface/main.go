@@ -77,6 +77,9 @@ func run(command string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// See releaseSignalsOnDone: without this, a second Ctrl-C during `serve`'s
+	// shutdown drain (up to ~30s) does nothing instead of killing the process.
+	releaseSignalsOnDone(ctx, stop)
 
 	db, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -133,6 +136,28 @@ func run(command string) error {
 	default:
 		return fmt.Errorf("unknown command %q (expected serve, migrate, seed, admin, gc, resync, compact, wal-seed, wal-verify or hook)", command)
 	}
+}
+
+// releaseSignalsOnDone calls stop the moment ctx is done, instead of leaving
+// it to a defer that only runs once the whole call tree returns.
+//
+// signal.NotifyContext keeps intercepting SIGINT/SIGTERM until stop is
+// called -- its own doc comment says to call it "as soon as the operations
+// running in this context complete" precisely so a second signal falls
+// through to the default disposition (kill the process) rather than being
+// silently absorbed. A plain `defer stop()` in run doesn't satisfy that: for
+// `serve`, ctx.Done() fires on the first signal, but run doesn't return until
+// drain() finishes its up to ~30s of shutdown grace (shutdownGrace +
+// workerDrainGrace) -- so a second Ctrl-C anywhere in that window used to do
+// nothing. Calling stop() here, right when ctx.Done() fires, releases the
+// handler immediately without touching drain's own ordering at all; run's own
+// `defer stop()` is still there as the (now usually redundant) cleanup for an
+// exit path that never cancels ctx in the first place.
+func releaseSignalsOnDone(ctx context.Context, stop context.CancelFunc) {
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 }
 
 // withStorage builds the object store driver and hands it to fn. The five

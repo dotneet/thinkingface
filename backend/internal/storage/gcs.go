@@ -267,9 +267,43 @@ func (g *GCS) Stat(ctx context.Context, key string) (ObjectInfo, error) {
 }
 
 func (g *GCS) Copy(ctx context.Context, srcKey, dstKey string) error {
-	src := g.obj(srcKey)
-	dst := g.obj(dstKey)
-	if _, err := dst.CopierFrom(src).Run(ctx); err != nil {
+	return g.copy(ctx, g.obj(srcKey), srcKey, dstKey)
+}
+
+var _ Versioned = (*GCS)(nil)
+
+// GetGeneration reads one generation of key. The generation goes on the
+// request itself (not as an ifGenerationMatch precondition), so what comes back
+// is that version's bytes or a 404, never a newer object that happens to be
+// live now -- and on a bucket with object versioning a superseded generation
+// stays readable, which is still exactly the version the caller asked for.
+func (g *GCS) GetGeneration(ctx context.Context, key string, generation int64) (io.ReadCloser, error) {
+	if generation <= 0 {
+		// The client library treats a negative generation as "latest", which
+		// is exactly the unpinned read a caller of this method is avoiding.
+		return nil, fmt.Errorf("read %s: generation %d does not name a stored version", key, generation)
+	}
+	r, err := g.obj(key).Generation(generation).NewReader(ctx)
+	if errors.Is(err, storage.ErrObjectNotExist) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s#%d: %w", key, generation, err)
+	}
+	return r, nil
+}
+
+// CopyGeneration copies one generation of srcKey (the rewrite call's
+// sourceGeneration), for the same reason GetGeneration reads one.
+func (g *GCS) CopyGeneration(ctx context.Context, srcKey string, generation int64, dstKey string) error {
+	if generation <= 0 {
+		return fmt.Errorf("copy %s -> %s: generation %d does not name a stored version", srcKey, dstKey, generation)
+	}
+	return g.copy(ctx, g.obj(srcKey).Generation(generation), srcKey, dstKey)
+}
+
+func (g *GCS) copy(ctx context.Context, src *storage.ObjectHandle, srcKey, dstKey string) error {
+	if _, err := g.obj(dstKey).CopierFrom(src).Run(ctx); err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			return ErrNotFound
 		}

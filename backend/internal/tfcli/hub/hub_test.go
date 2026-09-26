@@ -846,6 +846,43 @@ func TestPutLFSObjectErrorHidesSignedQuery(t *testing.T) {
 	}
 }
 
+// TestTransferForbiddenIsDistinctFromAPIForbidden is the regression test for
+// IsForbidden/IsTransferForbidden telling apart a 403 the hub API itself
+// returned (a real repository-permission problem) from one that came back
+// from PutLFSObject or VerifyLFSObject (a rejected or expired signed URL,
+// which says nothing about permissions). Before Error.Transfer existed, both
+// looked identical to a caller and cli.go's describeHubError worded a stale
+// signed URL as "you do not have write access to <ns>".
+func TestTransferForbiddenIsDistinctFromAPIForbidden(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"forbidden"}`)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tf_token", WithHTTPClient(srv.Client()))
+
+	putErr := c.PutLFSObject(context.Background(), LFSAction{Href: srv.URL + "/o/x"}, openBytes([]byte("x")), 1)
+	if !IsTransferForbidden(putErr) {
+		t.Errorf("IsTransferForbidden(PutLFSObject 403) = false, want true: %v", putErr)
+	}
+	if IsForbidden(putErr) {
+		t.Errorf("IsForbidden(PutLFSObject 403) = true, want false (it is a transfer error, not a hub API one): %v", putErr)
+	}
+
+	verifyErr := c.VerifyLFSObject(context.Background(), LFSAction{Href: srv.URL + "/verify"}, LFSObject{OID: "x", Size: 1})
+	if !IsTransferForbidden(verifyErr) {
+		t.Errorf("IsTransferForbidden(VerifyLFSObject 403) = false, want true: %v", verifyErr)
+	}
+
+	_, apiErr := c.Whoami(context.Background())
+	if !IsForbidden(apiErr) {
+		t.Errorf("IsForbidden(Whoami 403) = false, want true: %v", apiErr)
+	}
+	if IsTransferForbidden(apiErr) {
+		t.Errorf("IsTransferForbidden(Whoami 403) = true, want false (it is a hub API error, not a transfer one): %v", apiErr)
+	}
+}
+
 // TestRedirectDropsCredentialsAcrossOrigins pins the redirect policy: the
 // write-scoped token must not follow a redirect to another origin. net/http's
 // own rule only compares host names, so a redirect to a different port on the

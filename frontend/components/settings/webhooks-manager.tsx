@@ -17,7 +17,7 @@ import { isUnauthorized } from "@/lib/api";
 import { errorMessage } from "@/lib/api-error-message";
 import { getMe } from "@/lib/auth";
 import { useT } from "@/lib/i18n/client";
-import { listRepos } from "@/lib/repos";
+import { listAllRepos } from "@/lib/repos";
 import {
   webhookCreateFormAfterEventsChange,
   webhookCreateFormAfterNamespaceSwitch,
@@ -103,6 +103,7 @@ export function WebhooksManager({
     if (!namespace) return;
     let cancelled = false;
     setWebhooks(null);
+    setError(null);
     setRepos(null);
     setReposError(false);
     // A scope like `model/foo` selected under namespace A must not survive
@@ -118,10 +119,10 @@ export function WebhooksManager({
     // the DOM long after the person who created it had walked away.
     setJustCreated(undefined);
     refreshWebhooks(namespace, () => cancelled);
-    listRepos({ author: namespace, limit: 100 }).then((result) => {
+    listAllRepos({ author: namespace }).then((result) => {
       if (cancelled) return;
       if (result.ok) {
-        setRepos(result.data.items);
+        setRepos(result.data);
         setReposError(false);
       } else {
         // Failed, not empty: keep `repos` at null so the Select's "no

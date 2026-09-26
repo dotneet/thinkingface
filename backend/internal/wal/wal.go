@@ -178,6 +178,26 @@ func PutIndex(ctx context.Context, st storage.Storage, storagePath string, gener
 // Success means the update is durable and linearised: this is the only moment
 // at which a push may be acknowledged to the client (invariant 4).
 func UpdateIndex(ctx context.Context, st storage.Storage, storagePath string, refUpdates []RefUpdate, entryKey string) error {
+	return updateIndex(ctx, st, storagePath, refUpdates, entryKey, nil)
+}
+
+// errBasisGone reports that the index no longer holds objects the entry pack
+// (or a ref update with no pack at all) relied on it to hold. The pack was
+// built against an older index and left out whatever that index could already
+// reach; a compaction in between may have dropped some of it — `repack -a -d`
+// keeps only what the refs of its generation reach — and publishing the
+// update anyway would name objects no pack in the WAL contains. The only fix
+// is to rebuild the pack against the index as it is now, which pushToIndex
+// does.
+var errBasisGone = errors.New("wal: index no longer holds the objects the pack excluded")
+
+// updateIndex is UpdateIndex plus one more precondition: when basisHolds is
+// non-nil, every attempt — like the ref check, not just after a 412 — asks it
+// whether the index about to be replaced still contains everything the update
+// assumed was already in the WAL, and returns errBasisGone when it does not.
+func updateIndex(ctx context.Context, st storage.Storage, storagePath string, refUpdates []RefUpdate, entryKey string,
+	basisHolds func(*Index) bool,
+) error {
 	var lastErr error
 	for attempt := 0; attempt < maxCASAttempts; attempt++ {
 		ix, gen, err := ReadIndex(ctx, st, storagePath)
@@ -191,6 +211,9 @@ func UpdateIndex(ctx context.Context, st storage.Storage, storagePath string, re
 		// in this package.
 		if err := checkPreconditions(ix, refUpdates); err != nil {
 			return err
+		}
+		if basisHolds != nil && !basisHolds(ix) {
+			return errBasisGone
 		}
 
 		next := ix.clone()

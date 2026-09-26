@@ -34,3 +34,23 @@ export function metricsQueryKey(
 ): string[] {
   return ["exp-metrics", ns, repo, project, JSON.stringify(runs), xMode];
 }
+
+/**
+ * The `xMode` segment of a key built by `metricsQueryKey`, read back out of a
+ * `Query`'s own `queryKey` (as seen from a `placeholderData` callback's
+ * `previousQuery`).
+ *
+ * Both metrics queries (the dashboard's and the single-run page's) use
+ * `placeholderData: keepPreviousData` so a run toggle or a live refetch
+ * doesn't unmount the charts — but `keepPreviousData` keeps the previous
+ * *key's* series regardless of what changed, including the x-mode itself.
+ * Switching step/time changes `xIsTime` (and the CSV header) immediately
+ * while the old mode's series stay on screen until the new response lands,
+ * plotting step values on a time axis or vice versa. Comparing this against
+ * the current `xMode` lets a query keep the placeholder only when the mode
+ * actually matches.
+ */
+export function metricsQueryKeyXMode(queryKey: readonly unknown[]): string | undefined {
+  const xMode = queryKey[5];
+  return typeof xMode === "string" ? xMode : undefined;
+}

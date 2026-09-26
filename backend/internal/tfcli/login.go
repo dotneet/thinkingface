@@ -191,6 +191,10 @@ func runLogin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		verifyClient := hub.New(endpoint, minted.Token, hub.WithUserAgent(userAgent()))
 		u, werr := verifyClient.Whoami(ctx)
 		if werr != nil {
+			// The token is minted server-side already; failing to verify it
+			// here must not leave it live and unreachable by any saved
+			// credential. Best-effort: this is already the failure path.
+			revokeMinted(ctx, endpoint, minted, stderr)
 			fmt.Fprintf(stderr, "tf: %s\n", describeHubError(werr, endpoint, ""))
 			return exitError
 		}
@@ -208,11 +212,47 @@ func runLogin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tf: warning: this token has read-only scope; `tf up` needs a write-scoped token")
 	}
 
+	// The credential this login is about to replace, if any -- captured
+	// before Set overwrites it, so a token `tf login` itself minted earlier
+	// can be revoked once (and only once) the new one is safely saved.
+	prevCred, hadPrevCred := file.Get(endpoint)
+
 	file.Set(cred)
 	if err := file.Save(); err != nil {
+		// The new token is minted (or, for --token, already lived server-side)
+		// but nothing on disk points at it any more: revoke it rather than
+		// leave it live and orphaned. A pasted --token (TokenID == 0) was not
+		// minted by this run and is left alone -- it may still be saved
+		// elsewhere or simply reused later.
+		if cred.TokenID != 0 {
+			revokeMinted(ctx, endpoint, &hub.Token{ID: cred.TokenID, Token: cred.Token}, stderr)
+		}
 		fmt.Fprintf(stderr, "tf: saving config: %s\n", err)
 		return exitError
 	}
+
+	// Best-effort revoke of the credential this login just replaced: a token
+	// `tf login` minted for this same endpoint on an earlier run has no saved
+	// credential pointing at it any more, so left alone it stays live forever.
+	// A pasted --token (TokenID == 0) is never revoked here -- the user
+	// brought it, so only `tf logout` (or the user themselves) takes it away.
+	//
+	// Guard against revoking the credential just saved above: `tf login
+	// --token T` where T happens to be the very token an earlier `tf login`
+	// minted saves a new credential (TokenID == 0, Token == T) that is
+	// byte-for-byte the same live token as prevCred (TokenID == X, Token ==
+	// T). Revoking X there would immediately kill the token this run just
+	// saved. Compare token strings (covers that case) and TokenIDs (covers
+	// the same check when both sides happen to know the ID) before revoking.
+	samePrevToken := prevCred.Token == cred.Token ||
+		(cred.TokenID != 0 && cred.TokenID == prevCred.TokenID)
+	if hadPrevCred && prevCred.TokenID != 0 && !samePrevToken {
+		revokeClient := hub.New(endpoint, prevCred.Token, hub.WithUserAgent(userAgent()))
+		if err := revokeClient.RevokeToken(ctx, prevCred.TokenID); err != nil {
+			fmt.Fprintf(stderr, "tf: warning: could not revoke previous token: %s\n", err)
+		}
+	}
+
 	path, perr := config.Path()
 	if perr != nil {
 		path = "(unknown path)"
@@ -221,4 +261,15 @@ func runLogin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Logged in to %s as %s (%s)\n", endpoint, user.Name, user.Role)
 	fmt.Fprintf(stdout, "Credentials saved to %s\n", path)
 	return exitOK
+}
+
+// revokeMinted best-effort revokes a token this run of `tf login` minted
+// moments earlier -- verifying it or saving it failed, so nothing will ever
+// point at it again unless this cleans it up. Errors are reported but not
+// fatal: the caller is already on its own failure path.
+func revokeMinted(ctx context.Context, endpoint string, minted *hub.Token, stderr io.Writer) {
+	client := hub.New(endpoint, minted.Token, hub.WithUserAgent(userAgent()))
+	if err := client.RevokeToken(ctx, minted.ID); err != nil {
+		fmt.Fprintf(stderr, "tf: warning: could not revoke unsaved token: %s\n", err)
+	}
 }

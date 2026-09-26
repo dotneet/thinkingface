@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -176,6 +177,47 @@ func TestMatch(t *testing.T) {
 		{"a/b.txt", "x/a/b.txt", false}, // pattern with "/" must not match basename-only
 		{"a/b.txt", "a/b.txt", true},
 		{"", "a.txt", false},
+		// Bracket expressions (character classes), shell-glob style.
+		{"[ab].csv", "a.csv", true},
+		{"[ab].csv", "b.csv", true},
+		{"[ab].csv", "c.csv", false},
+		{"[a-z]*.csv", "m.csv", true},
+		{"[a-z]*.csv", "M.csv", false},
+		{"[!ab].csv", "c.csv", true},
+		{"[!ab].csv", "a.csv", false},
+		{"[^ab].csv", "c.csv", true}, // "^" negates too, not just "!"
+		{"[]ab].csv", "].csv", true}, // a leading "]" is a literal member
+		{"[ab.csv", "a.csv", false},  // unterminated "[" is a literal character
+		{"[ab.csv", "[ab.csv", true},
+		// Regression: a reversed range would previously reach
+		// regexp.MustCompile("[z-a]") and panic ("invalid character class
+		// range"). It now falls back to matching "z", "-" or "a" literally
+		// instead of a range.
+		{"[z-a].csv", "z.csv", true},
+		{"[z-a].csv", "-.csv", true},
+		{"[z-a].csv", "a.csv", true},
+		{"[z-a].csv", "m.csv", false},
+		// Regression: an unescaped "[" inside the class made
+		// "[[:foo:]]*" look like the POSIX class "[:foo:]" to Go's regexp
+		// parser (not a shell-glob feature this package implements), which
+		// also panicked. "[", ":", "f" and "o" are now literal members of
+		// the class.
+		{"[[:foo:]]*", "f].csv", true},
+		{"[[:foo:]]*", "x].csv", false},
+		// A lone backslash is not an escape character inside a shell-glob
+		// bracket expression, so "[\]" is a class containing exactly one
+		// literal backslash.
+		{`[\].csv`, `\.csv`, true},
+		{`[\].csv`, "a.csv", false},
+		// A trailing "-" right before the closing "]" is a literal member,
+		// not a range (nothing follows it to range to).
+		{"[a-].csv", "a.csv", true},
+		{"[a-].csv", "-.csv", true},
+		{"[a-].csv", "b.csv", false},
+		// A leading "]" right after "[" is a literal member too.
+		{"[]a].csv", "].csv", true},
+		{"[]a].csv", "a.csv", true},
+		{"[]a].csv", "b.csv", false},
 	}
 	for _, tt := range tests {
 		if got := Match(tt.pattern, tt.repoPath); got != tt.want {
@@ -248,6 +290,12 @@ func TestRepoNameFromPath(t *testing.T) {
 	dataSetDir := mustMkdir("My Data Set")
 	gitDir := mustMkdir("foo.git")
 	parquetFile := mustFile("x.parquet")
+	// A name whose first 96 characters happen to end in ".git" only because
+	// truncation lands there -- the untruncated name does not end in ".git"
+	// at all (it has one more character, "X", after it). The old
+	// strip-then-truncate order never re-checked after cutting to 96 bytes,
+	// so this used to come back ending in ".git", which the server rejects.
+	truncatedIntoGit := mustMkdir(strings.Repeat("a", 92) + ".git" + "X")
 
 	tests := []struct {
 		name    string
@@ -259,6 +307,7 @@ func TestRepoNameFromPath(t *testing.T) {
 		{name: "single file strips extension", path: parquetFile, want: "x"},
 		{name: "git clone dir strips .git suffix", path: gitDir, want: "foo"},
 		{name: "root is an error", path: "/", wantErr: true},
+		{name: "truncation must not newly expose .git", path: truncatedIntoGit, want: strings.Repeat("a", 92)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

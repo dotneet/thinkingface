@@ -178,6 +178,9 @@ POST /git-receive-pack
   │    exit≠0 → receive-pack rejects it. quarantine is discarded. nothing is left on disk
   │
   └─ 4. Enqueue a sync job from the before/after ref diff (unchanged)
+         * runs even when the transport reported an error: a client that disconnects while
+           the status report is going out has still pushed. `after` is re-read from the
+           repository (materialised from the index), so a rejected push diffs to nothing
 ```
 
 **Ack timing**: receive-pack only returns `ok` to the client after pre-receive exits 0 — that is,
@@ -200,6 +203,28 @@ Read the new index (generation G2, refs R2)
 The retry cap is around 5. Beyond that, exit 1.
 **Skipping this check causes non-fast-forward overwrites.** This is the single most important
 branch in the design.
+
+**The pack has a precondition too.** Step a excludes everything reachable from the refs of the
+index read at the start (G), so the entry pack is only complete relative to an index that still
+holds those objects. Re-checking the pushed refs does not cover that: another instance can delete
+an unrelated branch and a compaction (§10, `repack -a -d`) can then drop the objects only that
+branch reached — objects our pack left out because G had them. The CAS would still succeed and
+publish an index naming a pack whose base objects exist nowhere, and every instance would then
+fail to materialise it (`index-pack … did not receive expected object`). The same holds for an
+empty pack (a ref moved onto an existing commit relies on the index for every object it names).
+So every CAS attempt also checks that the index it would replace still holds the excluded
+objects, which is true when either
+
+- G's `base` and `entries` are all still named (entries are only ever appended, so nothing G held
+  is gone, even if its ref was since deleted), or
+- every excluded tip is still a ref value (every published index holds the full closure of its
+  own refs, so a compaction that left the refs alone — the usual case — costs nothing).
+
+Otherwise the push re-plans against the newer index and **rebuilds and re-uploads its pack**
+(the first one becomes an orphan for GC), up to the same cap of 5 rounds before failing with the
+retryable `ErrRetryExhausted`. This needs a compaction inside one push's window, so it is rare.
+It is implemented once, in `wal.pushToIndex`, which every write path (git push, the HF commit
+API, API ref creation, the experiments flusher) goes through.
 
 ### 6.2 Where the Hook Script Lives
 
@@ -303,6 +328,12 @@ reverse order produces a broken repository.
 
 `writeRefs` also **deletes** refs that aren't in the index, using `git update-ref --stdin`'s
 `delete`. Without this, branches deleted by another instance would stick around.
+
+The deletions run as their own `update-ref --stdin` transaction **before** the updates. git
+refuses to create `refs/heads/a/b` while `refs/heads/a` exists (and vice versa) even when the
+same transaction deletes the blocker, so a single batch would wedge a copy holding `a` once the
+index has `a/b` instead: every materialize would retry the same failing batch. A crash between
+the two transactions only leaves the copy stale — the state file is written after both.
 
 ### Validating the Pack
 

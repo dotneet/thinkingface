@@ -95,10 +95,13 @@ func (s *Server) revKnownToGit(repo *store.Repo, rev string) bool {
 	if _, err := gitRepo.Resolve(rev); err == nil {
 		return true
 	}
-	// Resolve reports ErrEmptyRepo for any unresolvable name, so ask HEAD
-	// directly rather than trusting that error to mean the repository is
-	// empty.
-	return gitRepo.IsEmpty()
+	// Resolve reports ErrEmptyRepo for any unresolvable name, and IsEmpty now
+	// means "no branches or tags at all" (refs.go's revisionOrEmpty), which
+	// misses a repository whose only history is on a non-default branch: its
+	// default branch is unborn but the repository itself is not empty. Ask
+	// namesDefaultBranch first, the same tie-breaker revisionOrEmpty uses, so
+	// this panel doesn't 404 on a ref the HF endpoints answer 200 empty for.
+	return namesDefaultBranch(repo, rev) || gitRepo.IsEmpty()
 }
 
 // ------------------------------------------------------------------ snippets

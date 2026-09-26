@@ -84,21 +84,33 @@ func (sqliteDialect) jsonArrayContainsAll(column, key string, bind func(any) str
 	// `tags` never contains a list.
 	parts := []string{`json_type(` + column + `, ` + jsonPath(key) + `) = 'array'`}
 	for _, v := range vals {
-		parts = append(parts, `EXISTS (SELECT 1 FROM json_each(`+column+`, `+jsonPath(key)+`) WHERE value = `+bind(v)+`)`)
+		parts = append(parts, `EXISTS (SELECT 1 FROM json_each(`+column+`, `+jsonPath(key)+`) e WHERE `+jsonEachText("e")+` = `+bind(v)+`)`)
 	}
 	return `(` + strings.Join(parts, " AND ") + `)`
 }
 
 func (sqliteDialect) jsonArrayHas(column, key, placeholder string) string {
 	// A scalar at the key is one row with that value, which matches the
-	// Postgres `@> to_jsonb(text)` behaviour for string-typed fields.
-	return `EXISTS (SELECT 1 FROM json_each(` + column + `, ` + jsonPath(key) + `) WHERE value = ` + placeholder + `)`
+	// Postgres behaviour for string-typed fields.
+	return `EXISTS (SELECT 1 FROM json_each(` + column + `, ` + jsonPath(key) + `) e WHERE ` + jsonEachText("e") + ` = ` + placeholder + `)`
 }
 
 func (sqliteDialect) jsonArrayElements(column, key string) (string, string) {
 	return `JOIN json_each(
 			CASE WHEN json_type(` + column + `, ` + jsonPath(key) + `) = 'array' THEN ` + column + `->'` + key + `' ELSE '[]' END
-		) elem`, `elem.value`
+		) elem`, jsonEachText("elem")
+}
+
+// jsonEachText is jsonScalarText for one json_each row: the element as the
+// text jsonb_array_elements_text gives on Postgres. The facets group by it
+// and the filters compare against it, and the two have to agree -- `tags:
+// [2024, bert]` listed "2024 (1)" in the tag facet while the filter compared
+// the integer 2024 against the text '2024' and found nothing.
+func jsonEachText(alias string) string {
+	return `(CASE ` + alias + `.type
+			WHEN 'true' THEN 'true'
+			WHEN 'false' THEN 'false'
+			ELSE CAST(` + alias + `.value AS TEXT) END)`
 }
 
 // jsonScalarText restores the Postgres answer. SQLite's `->>` yields the

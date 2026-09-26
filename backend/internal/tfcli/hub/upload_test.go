@@ -31,7 +31,13 @@ type fakeHub struct {
 	objects map[string][]byte    // lfs oid -> bytes, content-addressed and shared
 	puts    int
 	commits int
+	batches int            // number of LFS batch requests received
 	lines   [][]commitLine // one entry per commit
+	// rejectOnce, when set for an oid, makes that object's *first* upload
+	// action a 403 (simulating an expired/rejected signed URL): the handler
+	// serves a request through it exactly once and then forgets it, so a
+	// re-requested action for the same oid works normally. Guarded by mu.
+	rejectOnce map[string]bool
 }
 
 type fakeEntry struct {
@@ -45,9 +51,10 @@ const fakeProxyToken = "Bearer proxy-token"
 func newFakeHub(t *testing.T) *fakeHub {
 	t.Helper()
 	h := &fakeHub{
-		t:       t,
-		files:   map[string]fakeEntry{},
-		objects: map[string][]byte{},
+		t:          t,
+		files:      map[string]fakeEntry{},
+		objects:    map[string][]byte{},
+		rejectOnce: map[string]bool{},
 	}
 
 	mux := http.NewServeMux()
@@ -56,6 +63,7 @@ func newFakeHub(t *testing.T) *fakeHub {
 	mux.HandleFunc("POST /api/datasets/{ns}/{name}/commit/{rev}", h.commit)
 	mux.HandleFunc("POST /datasets/{ns}/{name}/info/lfs/objects/batch", h.batch)
 	mux.HandleFunc("PUT /lfs/{oid}", h.put)
+	mux.HandleFunc("PUT /lfs-expired/{oid}", h.putExpired)
 	mux.HandleFunc("POST /lfs/verify", h.verify)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -165,14 +173,23 @@ func (h *fakeHub) batch(w http.ResponseWriter, r *http.Request) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.batches++
 
 	objs := make([]map[string]any, 0, len(req.Objects))
 	for _, o := range req.Objects {
 		item := map[string]any{"oid": o.OID, "size": o.Size, "authenticated": true}
 		if _, stored := h.objects[o.OID]; !stored {
+			// rejectOnce is consumed here, at answer time, so the *next*
+			// batch request for the same oid (the refresh transferOne issues
+			// after a rejected PUT) gets the ordinary working href.
+			href := h.srv.URL + "/lfs/" + o.OID
+			if h.rejectOnce[o.OID] {
+				href = h.srv.URL + "/lfs-expired/" + o.OID
+				delete(h.rejectOnce, o.OID)
+			}
 			item["actions"] = map[string]any{
 				"upload": map[string]any{
-					"href":   h.srv.URL + "/lfs/" + o.OID,
+					"href":   href,
 					"header": map[string]string{"Authorization": fakeProxyToken},
 				},
 				"verify": map[string]any{
@@ -185,6 +202,17 @@ func (h *fakeHub) batch(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", contentTypeLFS)
 	writeTestJSON(h.t, w, map[string]any{"transfer": "basic", "hash_algo": "sha256", "objects": objs})
+}
+
+// putExpired simulates a signed URL that storage has rejected -- typically
+// because it expired mid-upload. transferOne is expected to recover by
+// re-requesting the action (see rejectOnce), which lands on the ordinary put
+// handler the second time around.
+func (h *fakeHub) putExpired(w http.ResponseWriter, r *http.Request) {
+	_, _ = io.ReadAll(r.Body) // drain so the client's write doesn't fail
+	w.Header().Set("Content-Type", contentTypeLFS)
+	w.WriteHeader(http.StatusForbidden)
+	writeTestJSON(h.t, w, map[string]string{"message": "signed url expired"})
 }
 
 func (h *fakeHub) put(w http.ResponseWriter, r *http.Request) {
@@ -307,6 +335,19 @@ func (h *fakeHub) counts() (puts, commits int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.puts, h.commits
+}
+
+func (h *fakeHub) batchCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.batches
+}
+
+// setRejectOnce arms rejectOnce for oid (see its field doc).
+func (h *fakeHub) setRejectOnce(oid string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.rejectOnce[oid] = true
 }
 
 // collector records the events an upload reports.
@@ -619,6 +660,80 @@ func TestUploadDeduplicatesByOID(t *testing.T) {
 	}
 	if got := events.paths(EventDeduplicated); !equalStrings(got, []string{"c.bin"}) {
 		t.Errorf("deduplicated = %v", got)
+	}
+}
+
+// TestUploadLFSBatchesActionsLazilyPerChunk regression-tests the fix for
+// requesting every LFS batch's actions up front: with more objects than fit
+// in one lfsRequestBatch-sized chunk, the actions for the second chunk must
+// come from a second /objects/batch call issued only once the first chunk's
+// transfers are underway, not from one giant request for everything before
+// any transfer starts. That distinction is what keeps a later chunk's signed
+// URLs from expiring while earlier chunks are still transferring (see
+// lfsRequestBatch's doc comment) -- this test only asserts the chunk count
+// and that every object still lands, since simulating a real TTL race
+// belongs to TestUploadLFSRecoversFromRejectedSignedURL below.
+func TestUploadLFSBatchesActionsLazilyPerChunk(t *testing.T) {
+	hub := newFakeHub(t)
+	c := hub.client()
+	ctx := context.Background()
+
+	const numFiles = lfsRequestBatch + 1 // spans two chunks
+	files := make([]LocalFile, numFiles)
+	wantPaths := make([]string, numFiles)
+	for i := range numFiles {
+		path := fmt.Sprintf("data/f%03d.bin", i)
+		files[i] = localFile(path, fmt.Appendf(nil, "payload-%d", i))
+		wantPaths[i] = path
+	}
+
+	res, err := Upload(ctx, c, Plan{Ref: testRef(), Rev: "main", Files: files, Workers: 8}, nil)
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	wantBatches := (numFiles + lfsRequestBatch - 1) / lfsRequestBatch
+	if got := hub.batchCount(); got != wantBatches {
+		t.Errorf("batch requests = %d, want %d (one per %d-object chunk)", got, wantBatches, lfsRequestBatch)
+	}
+	if puts, _ := hub.counts(); puts != numFiles {
+		t.Errorf("puts = %d, want %d", puts, numFiles)
+	}
+	sort.Strings(wantPaths)
+	if !equalStrings(res.LFSUploaded, wantPaths) {
+		t.Errorf("LFSUploaded has %d entries, want %d", len(res.LFSUploaded), len(wantPaths))
+	}
+}
+
+// TestUploadLFSRecoversFromRejectedSignedURL regression-tests transferOne's
+// retry: a PUT rejected with 403 (an expired or otherwise invalid signed URL)
+// must be recovered by re-requesting the action once and trying again, rather
+// than failing the whole upload the way it used to (retryablePut never
+// retries a 4xx, and nothing else asked the server for a fresh URL).
+func TestUploadLFSRecoversFromRejectedSignedURL(t *testing.T) {
+	hub := newFakeHub(t)
+	c := hub.client()
+	ctx := context.Background()
+
+	content := bytes.Repeat([]byte("y"), 2048)
+	oid, _, err := SHA256Hex(bytes.NewReader(content))
+	if err != nil {
+		t.Fatalf("SHA256Hex: %v", err)
+	}
+	hub.setRejectOnce(oid)
+
+	files := []LocalFile{localFile("model.bin", content)}
+	res, err := Upload(ctx, c, Plan{Ref: testRef(), Rev: "main", Files: files}, nil)
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if !equalStrings(res.LFSUploaded, []string{"model.bin"}) {
+		t.Errorf("LFSUploaded = %v", res.LFSUploaded)
+	}
+	if hub.batchCount() != 2 {
+		t.Errorf("batch requests = %d, want 2 (initial + one refresh)", hub.batchCount())
+	}
+	if puts, _ := hub.counts(); puts != 1 {
+		t.Errorf("puts = %d; only the retried PUT should have landed bytes", puts)
 	}
 }
 

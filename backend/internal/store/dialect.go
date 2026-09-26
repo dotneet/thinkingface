@@ -43,10 +43,13 @@ type dialect interface {
 
 	// jsonArrayContainsAll renders "every value in vals is an element of
 	// the array at column.key" (the `@>` containment check). bind appends
-	// a value and returns its placeholder.
+	// a value and returns its placeholder. Elements match by their text, as
+	// jsonArrayElements yields it, so a number or boolean the facet lists is
+	// one the filter finds.
 	jsonArrayContainsAll(column, key string, bind func(any) string, vals []string) string
 	// jsonArrayHas renders "the value bound at placeholder is an element
-	// of the array (or equal to the scalar) at column.key".
+	// of the array (or equal to the scalar) at column.key", compared as
+	// text like jsonArrayContainsAll.
 	jsonArrayHas(column, key, placeholder string) string
 	// jsonArrayElements returns a FROM-clause fragment that joins one row
 	// per element of the array at column.key (nothing when it is not an

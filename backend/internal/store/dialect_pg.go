@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -34,13 +35,85 @@ func (pgDialect) stringArrayArg(v []string) any {
 
 func (pgDialect) stringArrayDest(p *[]string) any { return p }
 
+// jsonArrayContainsAll has to find what the facet lists, and the facet
+// (jsonArrayElements) lists each element as text: `tags: [2024, bert]` shows
+// up as "2024". A plain `@> '["2024"]'` compares JSON types and misses the
+// number, so a value the sidebar offered returned nothing when clicked.
+//
+// It stays a containment test rather than becoming a text comparison over
+// jsonb_array_elements_text because idx_repositories_card_tags is a GIN index
+// on card->'tags', and `@>` is what it serves. A value whose text is also a
+// JSON number or boolean literal gets a second containment against that
+// literal -- `@> '[2024]'` -- which the index serves just as well, so the
+// OR costs a BitmapOr rather than a scan. Numeric containment compares by
+// value, so it finds every element whose text is v -- and, harmlessly, a
+// numerically equal spelling too ("2024.0" finds 2024).
 func (pgDialect) jsonArrayContainsAll(column, key string, bind func(any) string, vals []string) string {
-	raw, _ := json.Marshal(vals)
-	return column + `->'` + key + `' @> ` + bind(string(raw)) + `::jsonb`
+	col := column + `->'` + key + `'`
+	strs := []string{}
+	var parts []string
+	for _, v := range vals {
+		lit, ok := jsonNonStringScalar(v)
+		if !ok {
+			strs = append(strs, v)
+			continue
+		}
+		raw, _ := json.Marshal([]string{v})
+		parts = append(parts, `(`+col+` @> `+bind(string(raw))+`::jsonb OR `+
+			col+` @> `+bind(`[`+lit+`]`)+`::jsonb)`)
+	}
+	// With no values at all this is `@> '[]'`, "is an array", as before.
+	if len(strs) > 0 || len(parts) == 0 {
+		raw, _ := json.Marshal(strs)
+		parts = append([]string{col + ` @> ` + bind(string(raw)) + `::jsonb`}, parts...)
+	}
+	return `(` + strings.Join(parts, " AND ") + `)`
 }
 
+// jsonNonStringScalarNumberRe matches a plain decimal literal: no exponent,
+// no leading zeros other than a lone "0", and an optional fractional part.
+// This is deliberately narrower than JSON's own number grammar (which allows
+// e.g. "1e999999") -- see jsonNonStringScalar for why.
+var jsonNonStringScalarNumberRe = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?$`)
+
+// jsonNonStringScalarMaxLen caps how long a numeric literal can be before
+// jsonNonStringScalar treats it as a plain string instead. A repo card tag
+// is never a bare number of meaningful magnitude, and the cap keeps
+// pathologically long digit strings from reaching the ::jsonb / numeric
+// literal built in jsonArrayContainsAll.
+const jsonNonStringScalarMaxLen = 32
+
+// jsonNonStringScalar reports whether v, taken as JSON source, is a number or
+// a boolean exactly as written -- no surrounding whitespace, which would make
+// it a different string from the facet's -- and returns it as a literal.
+//
+// The number case only accepts a plain decimal literal (jsonNonStringScalarNumberRe),
+// not full JSON number syntax: json.Number happily parses exponent forms like
+// "1e999999", which this function used to accept and hand to jsonArrayContainsAll
+// as a `[1e999999]::jsonb` bind -- valid JSON, but a value PostgreSQL's numeric
+// type rejects outright ("value overflows numeric format"), turning an
+// unauthenticated `GET /api/models?filter=1e999999` into a 500. A repo card
+// tag is realistically a short plain number (a year, a parameter count), never
+// scientific notation, so exponents are simply treated as a string instead.
+func jsonNonStringScalar(v string) (string, bool) {
+	if v == "true" || v == "false" {
+		return v, true
+	}
+	if len(v) > jsonNonStringScalarMaxLen || !jsonNonStringScalarNumberRe.MatchString(v) {
+		return "", false
+	}
+	return v, true
+}
+
+// jsonArrayHas compares text for the same reason jsonArrayContainsAll has to
+// find numbers: the task facet lists task_categories elements as text. There
+// is no index on task_categories to preserve, so this is the plain form --
+// an element (or the scalar itself) whose text is the bound value.
 func (pgDialect) jsonArrayHas(column, key, placeholder string) string {
-	return column + `->'` + key + `' @> to_jsonb(` + placeholder + `::text)`
+	col := column + `->'` + key + `'`
+	return `(CASE WHEN jsonb_typeof(` + col + `) = 'array'
+			THEN EXISTS (SELECT 1 FROM jsonb_array_elements_text(` + col + `) e WHERE e = ` + placeholder + `::text)
+			ELSE ` + column + `->>'` + key + `' = ` + placeholder + `::text END)`
 }
 
 func (pgDialect) jsonArrayElements(column, key string) (string, string) {

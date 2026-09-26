@@ -129,7 +129,7 @@ func (s *Server) squashThroughWAL(ctx context.Context, repo *store.Repo, branch,
 	}
 	update := wal.RefUpdate{Ref: gitrepo.BranchRef(branch), Old: oldHash.String(), New: newHash.String()}
 	if err := s.recordRefUpdate(ctx, repo, update, func() error {
-		return gitRepo.ResetBranch(branch, oldHash)
+		return gitRepo.ResetBranch(branch, newHash, oldHash)
 	}); err != nil {
 		return plumbing.ZeroHash, oldHash, err
 	}

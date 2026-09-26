@@ -1,6 +1,6 @@
 "use client";
 
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FlaskConical } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -39,7 +39,7 @@ import {
   tagEditorTargetAfterRunsChange,
   updateRunAnnotations,
 } from "@/lib/experiments";
-import { metricsQueryKey } from "@/lib/experiments-query-keys";
+import { metricsQueryKey, metricsQueryKeyXMode } from "@/lib/experiments-query-keys";
 import type { MessageKey } from "@/lib/i18n";
 import { useT } from "@/lib/i18n/client";
 import type { RunModels } from "@/lib/lineage";
@@ -263,15 +263,34 @@ export function ExperimentDashboard({
     refetchInterval: hasLiveRun(selectedRuns) ? LIVE_REFRESH_INTERVAL_MS : false,
     refetchIntervalInBackground: false,
     // Keep the previous key's series on screen while the new one loads:
-    // toggling a run's checkbox, flipping step/time, or unhiding archived
-    // runs all change this query's key, and every one of those used to
-    // unmount every chart and drop to MetricsChartsSkeleton until the new
-    // response came back — losing the zoom, the tab and the sync state on
-    // what was already on screen for a change that isn't a first load
-    // (DESIGN.md §4: Skeleton is for first paint, not for refreshing content
-    // that's already there — the toolbar's own spinner, `fetching={isFetching}`
-    // below, already covers "this is updating").
-    placeholderData: keepPreviousData,
+    // toggling a run's checkbox or unhiding archived runs changes this
+    // query's key, and every one of those used to unmount every chart and
+    // drop to MetricsChartsSkeleton until the new response came back —
+    // losing the zoom, the tab and the sync state on what was already on
+    // screen for a change that isn't a first load (DESIGN.md §4: Skeleton is
+    // for first paint, not for refreshing content that's already there —
+    // the toolbar's own spinner, `fetching={isFetching}` below, already
+    // covers "this is updating").
+    //
+    // Two cases must NOT keep the placeholder, though both survive a plain
+    // `keepPreviousData`:
+    // - No runs selected: the query is `enabled: false` and never fetches
+    //   this key, so its data has to read as absent. Otherwise the chart
+    //   said "select runs" (driven by `selectedRuns.length`) while the CSV
+    //   export below (driven by `data`) still handed out the deselected
+    //   run's series (DESIGN.md §9 — never let a stale success stand in for
+    //   the current, unfetched state).
+    // - Flipping step/time: `xIsTime` below switches immediately with
+    //   `chartOptions.xMode`, but a kept series from the other mode would
+    //   plot step numbers on a time axis (or vice versa) until the new
+    //   response lands. Only keep a placeholder fetched under the same mode.
+    placeholderData: (previousData, previousQuery) => {
+      if (selectedNames.length === 0) return undefined;
+      if (!previousQuery) return previousData;
+      return metricsQueryKeyXMode(previousQuery.queryKey) === chartOptions.xMode
+        ? previousData
+        : undefined;
+    },
   });
 
   if (runs.length === 0) {

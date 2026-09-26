@@ -837,15 +837,23 @@ func readCard(gitRepo *gitrepo.Repo, repo *store.Repo, ref string, entries []git
 }
 
 // frontMatterUnclosed reports whether b opens a YAML front matter block and
-// does not close it. It mirrors repocard.Parse's own delimiters, including the
-// CRLF normalisation, because the question being asked is precisely "would
-// Parse find the end of the block in these bytes".
+// does not close it. It mirrors repocard.SplitFrontMatter's own delimiters,
+// including the CRLF normalisation and the leading-BOM/blank-line tolerance,
+// because the question being asked is precisely "would Parse find the end of
+// the block in these bytes" -- and the closing-line search is delegated to
+// repocard.ClosingFence itself rather than reimplemented, so the two can't
+// drift apart again. (They already had: ClosingFence accepts "---\n---", an
+// explicitly empty block, as closed on its very first line, which a bare
+// `strings.Contains(rest, "\n---")` here never could, since that line has no
+// leading "\n" of its own within rest.)
 func frontMatterUnclosed(b []byte) bool {
 	text := strings.ReplaceAll(string(b), "\r\n", "\n")
-	if !strings.HasPrefix(text, "---\n") {
+	scan := strings.TrimPrefix(text, "\uFEFF")
+	scan = strings.TrimLeft(scan, " \t\n")
+	if !strings.HasPrefix(scan, "---\n") {
 		return false
 	}
-	return !strings.Contains(text[len("---\n"):], "\n---")
+	return repocard.ClosingFence(scan[len("---\n"):]) < 0
 }
 
 // pruneLFSLinks releases the repository's links to LFS objects that were

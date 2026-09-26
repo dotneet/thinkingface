@@ -456,6 +456,7 @@ export const repo = {
   viewer: {
     errorHint:
       "このパスがこのリビジョンに存在する Parquet ファイルを指しているか確認してください。",
+    otherFilesNote: "デフォルトブランチ（{branch}）の Parquet ファイル",
   },
   settings: {
     noPermissionTitle: "アクセス権がありません",

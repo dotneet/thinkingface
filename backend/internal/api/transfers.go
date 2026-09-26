@@ -433,10 +433,26 @@ func (s *Server) handleDecideTransfer(w http.ResponseWriter, r *http.Request, ac
 		return
 	}
 
+	// The store re-checks the *requester's* side under the same locks as the
+	// move: still an active account with admin on the source namespace, and a
+	// repository that has not been archived since. A request whose requester
+	// has lost that authority is voided and answers transfer_not_pending,
+	// exactly like one whose repository moved away underneath it -- it is no
+	// longer a request anybody may accept.
 	repo, err := s.store.AcceptRepoTransfer(r.Context(), id, user.ID)
 	if err != nil {
 		if errors.Is(err, store.ErrTransferNotPending) {
 			writeTransferNotPending(w)
+			return
+		}
+		if errors.Is(err, store.ErrTransferRepoArchived) {
+			// The same answer loadRepoForWrite gives every other write to an
+			// archive, so a client already handling repository_archived needs
+			// nothing new. The accepter can already see the names in the
+			// transfer, so naming the repository leaks nothing.
+			writeError(w, http.StatusForbidden, "repository_archived",
+				t.FromNamespace+"/"+t.FromName+" is archived and read-only; "+
+					"it must be unarchived before this transfer can be accepted")
 			return
 		}
 		if errors.Is(err, store.ErrConflict) {

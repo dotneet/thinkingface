@@ -11,6 +11,7 @@ import { errorMessage } from "@/lib/api-error-message";
 import { deleteFile } from "@/lib/edit";
 import { useT } from "@/lib/i18n/client";
 import { repoTreeHref } from "@/lib/paths";
+import { nearestExistingDir } from "@/lib/repos";
 import type { RepoKind } from "@/types/api";
 
 /**
@@ -52,15 +53,21 @@ export function DeleteFileButton({
     setError(null);
     setDeleting(true);
     const result = await deleteFile(kind, ns, name, rev, path, { base_oid: baseOid });
-    setDeleting(false);
     if (!result.ok) {
+      setDeleting(false);
       setError(errorMessage(t, result));
       return;
     }
+    // deleting stays true from here on: the page is about to be left, and
+    // while nearestExistingDir is still looking for where to go, the button
+    // must not offer to delete the (already deleted) file a second time.
     setOpen(false);
     // The file is gone, so this page no longer exists: go to the directory
-    // that held it.
-    router.push(repoTreeHref(kind, ns, name, rev, path.slice(0, -1).join("/")));
+    // that held it -- or, since a directory that becomes empty is dropped
+    // from the tree entirely (and that can cascade up through its own now-empty
+    // parents), the nearest ancestor that is still actually there.
+    const dest = await nearestExistingDir(kind, ns, name, rev, path.slice(0, -1));
+    router.push(repoTreeHref(kind, ns, name, rev, dest.join("/")));
     router.refresh();
   }
 

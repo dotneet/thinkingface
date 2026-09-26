@@ -601,6 +601,162 @@ func TestMergePoints_MetricsCannotOverwriteStructuralColumns(t *testing.T) {
 	}
 }
 
+// stepsByRun flattens series into run -> the x values of its "loss" trace.
+func stepsByRun(series []Series) map[string][]float64 {
+	out := map[string][]float64{}
+	for _, s := range series {
+		if s.Key != "loss" {
+			continue
+		}
+		for _, p := range s.Points {
+			out[s.Run] = append(out[s.Run], p[0])
+		}
+	}
+	return out
+}
+
+// TestFlush_AppendsToAFileKeyedByAlternativeColumnNames is the flush that used
+// to erase a project's history. The file names its rows' run and step `run`
+// and `_step`, which every reader accepts; the flush added `run_name` and
+// `step` beside them, and because the readers chose one column per file, the
+// older rows then read as run "" (skipped, so the re-index deleted the run and
+// everything hanging off it) and step "missing" (charted by position).
+func TestFlush_AppendsToAFileKeyedByAlternativeColumnNames(t *testing.T) {
+	h := newExpHarness(t)
+	h.commitParquet("metrics.parquet",
+		[]flushColumn{
+			stringColumn("run", false),
+			int64Column("_step"),
+			doubleColumn("loss"),
+		},
+		[]map[string]any{
+			{"run": "batch-run", "_step": int64(10), "loss": 1.0},
+			{"run": "batch-run", "_step": int64(20), "loss": 0.5},
+		})
+	const project = "trackio-metrics"
+	before := h.run(project, "batch-run")
+
+	projectID := h.ingest(project, "live-run", "running", []int64{1, 2, 3}, "loss")
+	result := h.flush(projectID, project)
+	if result.Path != "metrics.parquet" {
+		t.Fatalf("flush path = %q, want the existing metrics.parquet", result.Path)
+	}
+	h.reindex()
+	// Deleted, so what the chart shows can only have come out of the parquet.
+	if err := h.st.DeletePoints(h.ctx, result.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	after := h.run(project, "batch-run")
+	if after.ID != before.ID {
+		t.Errorf("batch-run id %d -> %d, want the same row (a re-index deleted it)", before.ID, after.ID)
+	}
+	if after.LastStep != 20 || after.NumPoints != 2 {
+		t.Errorf("batch-run last_step=%d num_points=%d, want 20 and 2", after.LastStep, after.NumPoints)
+	}
+	got := stepsByRun(h.series(project))
+	want := map[string][]float64{"batch-run": {10, 20}, "live-run": {1, 2, 3}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("steps per run = %v, want %v", got, want)
+	}
+
+	// The new points went into the file's own columns, so a reader that picks
+	// one column per file -- pandas, datasets, trackio -- still sees every row.
+	gitRepo, err := h.git.Open(h.repo.StoragePath)
+	if err != nil {
+		t.Fatalf("open git repo: %v", err)
+	}
+	existing, _, err := h.flusher.readExisting(h.ctx, h.repo, gitRepo, h.repo.DefaultBranch, "metrics.parquet")
+	if err != nil {
+		t.Fatalf("read flushed file: %v", err)
+	}
+	for _, c := range existing.columns {
+		if c.name == "run_name" || c.name == "step" {
+			t.Errorf("flush added a %q column beside the file's own", c.name)
+		}
+	}
+	for _, row := range existing.rows {
+		if row["run"] == nil || row["run"] == "" || row["_step"] == nil {
+			t.Errorf("row %v has no run or _step", row)
+		}
+	}
+}
+
+// TestMergePoints_FallsBackWhenTheFileColumnCannotHoldTheValue: a run name
+// cannot be written into an INT64 `run_id`, nor a step into an INT32 `_step`
+// without wrapping, so those files get this package's own columns instead --
+// which the per-row readers resolve alongside the old ones.
+func TestMergePoints_FallsBackWhenTheFileColumnCannotHoldTheValue(t *testing.T) {
+	existing := &existingTable{
+		ingestIDs: map[int64]bool{},
+		columns: []flushColumn{
+			{name: "run_id", kind: colInt64, node: parquet.Leaf(parquet.Int64Type)},
+			{name: "_step", kind: colInt32, node: parquet.Leaf(parquet.Int32Type)},
+			stringColumn("created_at", true),
+		},
+	}
+	ts := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	_, rows, _ := mergePoints(existing, []store.PendingPoint{{
+		ID: 1, RunName: "run-1", Step: 3, TS: ts, Metrics: map[string]float64{"loss": 0.1},
+	}})
+	row := rows[len(rows)-1]
+	if row["run_name"] != "run-1" || row["step"] != int64(3) {
+		t.Errorf("row = %v, want run_name and step added for the incompatible columns", row)
+	}
+	// A text timestamp column holds the value faithfully, so it is reused.
+	if row["created_at"] != ts || row["timestamp"] != nil {
+		t.Errorf("row = %v, want the time in the existing created_at column", row)
+	}
+}
+
+// TestIndexer_ReadsAFileAnEarlierFlushSplitAcrossColumnNames is the repair
+// half: files already rewritten by the old flush carry both sets of columns,
+// the older rows with run_name "" and step null. Every reader has to resolve a
+// row's run and step across the candidates -- including the chart's run
+// filter, whose row-group pruning on run_name alone would throw away the
+// groups that hold only old rows.
+func TestIndexer_ReadsAFileAnEarlierFlushSplitAcrossColumnNames(t *testing.T) {
+	h := newExpHarness(t)
+	// One row group per run, so the pruning has a group it could wrongly skip.
+	data, err := writeMetricsParquetLaidOut(
+		[]flushColumn{
+			stringColumn("run_name", false),
+			stringColumn("run", true),
+			int64Column("_step"),
+			int64Column("step"),
+			doubleColumn("loss"),
+		},
+		[]map[string]any{
+			{"run": "batch-run", "_step": int64(10), "loss": 1.0},
+			{"run": "batch-run", "_step": int64(20), "loss": 0.5},
+			{"run_name": "live-run", "step": int64(1), "loss": 0.1},
+			{"run_name": "live-run", "step": int64(2), "loss": 0.2},
+		},
+		rowGroupLayout{groupByRun: true, minRows: 1})
+	if err != nil {
+		t.Fatalf("build damaged file: %v", err)
+	}
+	h.commitParquetData("metrics.parquet", data)
+	const project = "trackio-metrics"
+
+	if run := h.run(project, "batch-run"); run.LastStep != 20 || run.NumPoints != 2 {
+		t.Errorf("batch-run last_step=%d num_points=%d, want 20 and 2", run.LastStep, run.NumPoints)
+	}
+	got := stepsByRun(h.series(project))
+	want := map[string][]float64{"batch-run": {10, 20}, "live-run": {1, 2}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("steps per run = %v, want %v", got, want)
+	}
+
+	filtered, err := h.indexer.Series(h.ctx, h.repo, SeriesRequest{Project: project, Runs: []string{"batch-run"}})
+	if err != nil {
+		t.Fatalf("series: %v", err)
+	}
+	if got := stepsByRun(filtered); !reflect.DeepEqual(got, map[string][]float64{"batch-run": {10, 20}}) {
+		t.Errorf("steps for runs=[batch-run] = %v, want batch-run: [10 20]", got)
+	}
+}
+
 // TestFlush_BlocksAProjectThatCanNeverBeCommitted covers the rows an older
 // build accepted before the ingest API rejected the name: `.git/metrics.parquet`
 // is a path Commit always refuses, so without this the project would sit in
@@ -1259,5 +1415,75 @@ func TestFlush_FractionalValueSurvivesAnIntegerTypedColumn(t *testing.T) {
 	}
 	if run := h.run("demo", "run-1"); run.Summary["epoch"] != 0.3 {
 		t.Errorf("summary epoch = %v, want 0.3", run.Summary["epoch"])
+	}
+}
+
+// TestFlush_PreservesAUint64Column is the regression test for viewer/convert.go
+// now returning INT(64,false) columns as Go uint64 (a deliberate fix, since a
+// uint64 can exceed math.MaxInt64). toInt and toFloat used to only accept the
+// signed shapes the parquet reader used to emit, so a UINT64 step or metric
+// column charted as if the value did not exist, and a flush that had to
+// rewrite the file -- columnFromSchema mapped it onto a plain signed INT64,
+// and encode's toInt rejected the uint64 cell -- wrote every one of its values
+// as null.
+func TestFlush_PreservesAUint64Column(t *testing.T) {
+	h := newExpHarness(t)
+	// A power of two comfortably past math.MaxInt64, so the round trip through
+	// float64 (the chart's value type) is exact rather than merely close.
+	const bigMetric = uint64(1) << 63
+	h.commitParquet("demo.parquet",
+		[]flushColumn{
+			stringColumn("run_name", false),
+			{name: "step", kind: colUint64, node: parquet.Uint(64), optional: true},
+			stringColumn("timestamp", true),
+			{name: "loss", kind: colUint64, node: parquet.Uint(64), optional: true},
+		},
+		[]map[string]any{
+			{"run_name": "run-1", "step": uint64(1), "timestamp": "2026-08-22T00:00:00Z", "loss": bigMetric},
+		})
+
+	// Read straight off the parquet, no flush involved: the toInt/toFloat half
+	// of the regression (the UINT64 step and metric columns).
+	got := h.series("demo")
+	if len(got) != 1 || len(got[0].Points) != 1 {
+		t.Fatalf("series before any flush = %#v, want one trace of 1 point", got)
+	}
+	if x := got[0].Points[0][0]; x != 1 {
+		t.Errorf("x (from the UINT64 step column) = %v, want 1", x)
+	}
+	if y := got[0].Points[0][1]; y != float64(bigMetric) {
+		t.Errorf("y (from the UINT64 loss column) = %v, want %v", y, float64(bigMetric))
+	}
+
+	// Now force a rewrite of the same file: the columnFromSchema/encode half.
+	// The harness logs {epoch: step/10} for an unrelated run, so the merge
+	// both reads back run-1's existing UINT64 cells and writes a fresh row
+	// into the UINT64 step column.
+	projectID := h.ingest("demo", "run-2", "running", []int64{20}, "epoch")
+	result := h.flush(projectID, "demo")
+	if result.Path != "demo.parquet" {
+		t.Fatalf("flush wrote %q, want the file route A created", result.Path)
+	}
+	h.reindex()
+	if err := h.st.DeletePoints(h.ctx, result.PointIDs); err != nil {
+		t.Fatalf("delete points: %v", err)
+	}
+
+	last := map[string]map[string]float64{}
+	for _, s := range h.series("demo") {
+		if len(s.Points) == 0 {
+			continue
+		}
+		if last[s.Run] == nil {
+			last[s.Run] = map[string]float64{}
+		}
+		last[s.Run][s.Key] = s.Points[len(s.Points)-1][1]
+	}
+	if v, ok := last["run-1"]["loss"]; !ok || v != float64(bigMetric) {
+		t.Errorf("run-1's loss after the rewrite = %v (present=%v), want %v unchanged -- "+
+			"a UINT64 cell must not turn into null when the file is rewritten", v, ok, float64(bigMetric))
+	}
+	if v, ok := last["run-2"]["epoch"]; !ok || v != 2.0 {
+		t.Errorf("run-2's epoch after the rewrite = %v (present=%v), want 2 (step 20 logged into the shared UINT64 step column)", v, ok)
 	}
 }

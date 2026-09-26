@@ -148,6 +148,14 @@ func convertLeafValue(typ parquet.Type, v parquet.Value) any {
 			return uuidToString(v.ByteArray())
 		case *format.StringType, *format.EnumType, *format.JsonType:
 			return byteArrayToStringOrBase64(v.ByteArray())
+		case *format.IntType:
+			// INT(32,false)/INT(64,false) -- and the legacy UINT_8/16/32/64
+			// converted types, which parquet-go maps onto this same logical
+			// type on read. A signed IntType (INT(8/16/32/64,true)) falls
+			// through to the physical-type switch below unchanged.
+			if !lv.IsSigned {
+				return unsignedIntValue(typ.Kind(), v)
+			}
 		}
 	}
 
@@ -166,6 +174,26 @@ func convertLeafValue(typ parquet.Type, v parquet.Value) any {
 		return safeFloat(v.Double())
 	case parquet.ByteArray, parquet.FixedLenByteArray:
 		return base64.StdEncoding.EncodeToString(v.ByteArray())
+	default:
+		return nil
+	}
+}
+
+// unsignedIntValue reinterprets a physical INT32/INT64 value as unsigned, for
+// the INT(n,false) logical type (bit widths 8/16/32 all use the INT32
+// physical type per the parquet spec; only 64 uses INT64). A uint32 always
+// fits in an int64 without loss; a uint64 can exceed math.MaxInt64, so it is
+// returned as a Go uint64 -- encoding/json marshals that as the correct
+// (positive) numeral, just as it already does for the occasional int64 whose
+// magnitude exceeds JS's safe-integer range. This mirrors baseType() in
+// parquet-go's intType, which is what decides Kind() for this same
+// annotation.
+func unsignedIntValue(kind parquet.Kind, v parquet.Value) any {
+	switch kind {
+	case parquet.Int32:
+		return int64(uint32(v.Int32()))
+	case parquet.Int64:
+		return uint64(v.Int64())
 	default:
 		return nil
 	}
@@ -403,7 +431,12 @@ func normalizeGeneric(v any) any {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return rv.Int()
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return int64(rv.Uint())
+		// reflect.Value.Uint already widens the actual value to uint64
+		// without reinterpreting sign bits, so this is correct for every
+		// width up front; the bug was the int64(...) cast that used to sit
+		// here, which wrapped a uint64 above math.MaxInt64 negative. Returned
+		// as uint64, encoding/json marshals it as the correct numeral.
+		return rv.Uint()
 	case reflect.Slice, reflect.Array:
 		n := rv.Len()
 		out := make([]any, n)

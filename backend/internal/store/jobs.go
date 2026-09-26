@@ -253,6 +253,12 @@ func (s *Store) HeartbeatSyncJob(ctx context.Context, job *SyncJob, leaseDuratio
 // queue in this package. It still fences on attempts, and soundly: nothing
 // resets a delivery's counter -- the claim is the only writer of it, and it
 // only increments -- so there attempts *is* a monotonic per-claim token.
+//
+// The error text is sanitised before it is stored (text.go). It routinely
+// quotes a raw git path, and a path that is not UTF-8 made PostgreSQL refuse
+// the write (SQLSTATE 22021) -- which left the job 'running' until its lease
+// lapsed, when the sweeper handed it straight back out to fail the same way.
+// A job that could never record its own failure could never park either.
 func (s *Store) FinishSyncJob(ctx context.Context, job *SyncJob, jobErr error) error {
 	if jobErr == nil {
 		_, err := s.db.Exec(ctx,
@@ -266,7 +272,7 @@ func (s *Store) FinishSyncJob(ctx context.Context, job *SyncJob, jobErr error) e
 			`UPDATE sync_jobs
 			 SET status = 'failed', last_error = $3, lease_expires_at = NULL, updated_at = now()
 			 WHERE id = $1 AND status = 'running' AND claim_seq = $2`,
-			job.ID, job.ClaimSeq, jobErr.Error())
+			job.ID, job.ClaimSeq, sanitizeText(jobErr.Error()))
 		return err
 	}
 	_, err := s.db.Exec(ctx,
@@ -274,7 +280,7 @@ func (s *Store) FinishSyncJob(ctx context.Context, job *SyncJob, jobErr error) e
 		 SET status = 'pending', last_error = $3, lease_expires_at = NULL, updated_at = now(),
 		     next_attempt_at = `+s.d.nowPlusSeconds("$4")+`
 		 WHERE id = $1 AND status = 'running' AND claim_seq = $2`,
-		job.ID, job.ClaimSeq, jobErr.Error(), retryDelay(job.Attempts).Seconds())
+		job.ID, job.ClaimSeq, sanitizeText(jobErr.Error()), retryDelay(job.Attempts).Seconds())
 	return err
 }
 
@@ -295,13 +301,32 @@ func (s *Store) FinishSyncJob(ctx context.Context, job *SyncJob, jobErr error) e
 // It leaves claim_seq alone. The next claim raises it, which is what fences
 // out the worker whose lease this sweep just took away: a straggler still
 // finishing the previous claim presents a token the row has moved past.
+//
+// A job whose budget is already spent is parked as 'failed' instead of
+// requeued. The claim charged the attempt when it handed the job out, so an
+// expired lease has been counted all along; what was missing is the verdict
+// FinishSyncJob would have delivered had the worker lived to call it. Without
+// it a job that takes its worker down with it -- or one whose outcome the
+// database refused to record -- was requeued, reclaimed and lost again
+// without end, and never reached ListFailedSyncJobs for an operator to see.
+// The previous error, if one was recorded, is kept after the explanation.
+// The returned count covers both: every row a vanished worker left behind.
 func (s *Store) RequeueExpiredSyncJobs(ctx context.Context) (int64, error) {
 	return s.db.Exec(ctx,
 		`UPDATE sync_jobs
-		 SET status = 'pending', lease_expires_at = NULL, updated_at = now()
+		 SET status = CASE WHEN attempts >= $1 THEN 'failed' ELSE 'pending' END,
+		     last_error = CASE WHEN attempts < $1 THEN last_error
+		                       WHEN last_error = '' THEN CAST($2 AS TEXT)
+		                       ELSE CAST($2 AS TEXT) || '; last reported error: ' || last_error END,
+		     lease_expires_at = NULL, updated_at = now()
 		 WHERE status = 'running'
-		   AND (lease_expires_at IS NULL OR lease_expires_at <= now())`)
+		   AND (lease_expires_at IS NULL OR lease_expires_at <= now())`,
+		SyncMaxAttempts, syncLeaseExpiredError)
 }
+
+// syncLeaseExpiredError is the last_error of a job RequeueExpiredSyncJobs
+// parked: nothing reported a failure, the worker simply stopped answering.
+const syncLeaseExpiredError = "the worker holding this job stopped before finishing it (lease expired) on its last attempt"
 
 const (
 	defaultSyncJobPageSize = 50

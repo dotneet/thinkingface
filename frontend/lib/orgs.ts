@@ -7,8 +7,8 @@
  * can be forwarded with `authHeaders()` (invariant 2).
  */
 import { type ApiResult, apiFetch } from "@/lib/api";
-import type { FailedApiResult } from "@/lib/api-error-message";
-import type { MessageKey } from "@/lib/i18n";
+import { errorMessage, type FailedApiResult } from "@/lib/api-error-message";
+import type { MessageKey, Translator } from "@/lib/i18n";
 import type { FetchOpts } from "@/lib/repos";
 import type {
   Org,
@@ -197,6 +197,33 @@ export function orgErrorKey(
   if (result.status === 403) return fallbacks[403] ?? "org.errors.permissionDenied";
   if (result.status === 404) return fallbacks[404] ?? "errors.notFound";
   return "errors.internalError";
+}
+
+/**
+ * Translated message for a failed organisation call — the same lookup as
+ * {@link orgErrorKey}, except a `conflict` or `bad_request` `error.type` with
+ * no dedicated entry in {@link ERROR_KEYS} goes through
+ * {@link errorMessage} instead of degrading to `errors.internalError`.
+ *
+ * Both types carry a server-written detail worth showing (lib/api-error-message.ts's
+ * `DETAIL_KEYS`): a 409 name collision ("the name acme is already taken",
+ * raced by the async availability check landing after submit) and a 400 field
+ * validation failure ("website must be a valid http(s) URL"). `orgErrorKey`
+ * can't express that itself — it returns a bare `MessageKey` for `t(key)`,
+ * with no way to carry the `{detail}` interpolation those two keys need — so
+ * callers that can surface a raw 409/400 (create-org-form.tsx,
+ * org-profile-form.tsx) use this instead of `t(orgErrorKey(result))`.
+ */
+export function orgErrorMessage(
+  t: Translator,
+  result: FailedApiResult,
+  fallbacks: Partial<Record<401 | 403 | 404, MessageKey>> = {},
+): string {
+  const hasOrgSpecificKey = result.type !== undefined && ERROR_KEYS[result.type] !== undefined;
+  if (!hasOrgSpecificKey && (result.type === "conflict" || result.type === "bad_request")) {
+    return errorMessage(t, result);
+  }
+  return t(orgErrorKey(result, fallbacks));
 }
 
 /**

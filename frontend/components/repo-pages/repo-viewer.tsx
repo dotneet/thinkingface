@@ -78,24 +78,36 @@ export async function RepoViewer({
       {repo.indexing && <IndexingBanner />}
 
       {repo.parquet_files.length > 1 && (
-        <div className="flex flex-wrap gap-1.5">
-          {repo.parquet_files.map((file) => {
-            const selected = file.path === currentPath;
-            return (
-              <Link
-                key={file.path}
-                href={repoViewerHref(kind, ns, name, rev, file.path)}
-                className={badgeClass({
-                  tone: selected ? "accent" : "neutral",
-                  className: selected
-                    ? "border-accent font-mono"
-                    : "bg-transparent font-mono hover:border-border-strong hover:text-fg",
-                })}
-              >
-                {file.path}
-              </Link>
-            );
-          })}
+        <div className="flex flex-col gap-1.5">
+          {/* repo.parquet_files is always indexed off the default branch
+              (apitypes.RepoDetail.ParquetFiles) -- browsing any other
+              revision, the list still names the default branch's files, so
+              the chips link there too instead of 404ing at `rev`, and the
+              note above them says why. */}
+          {rev !== repo.default_branch && (
+            <p className="text-xs font-medium text-fg-subtle">
+              {t("repo.viewer.otherFilesNote", { branch: repo.default_branch })}
+            </p>
+          )}
+          <div className="flex flex-wrap gap-1.5">
+            {repo.parquet_files.map((file) => {
+              const selected = rev === repo.default_branch && file.path === currentPath;
+              return (
+                <Link
+                  key={file.path}
+                  href={repoViewerHref(kind, ns, name, repo.default_branch, file.path)}
+                  className={badgeClass({
+                    tone: selected ? "accent" : "neutral",
+                    className: selected
+                      ? "border-accent font-mono"
+                      : "bg-transparent font-mono hover:border-border-strong hover:text-fg",
+                  })}
+                >
+                  {file.path}
+                </Link>
+              );
+            })}
+          </div>
         </div>
       )}
 

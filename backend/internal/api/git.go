@@ -94,22 +94,51 @@ func (s *Server) handleReceivePack(w http.ResponseWriter, r *http.Request, kind 
 	}
 
 	if err := s.gitHTTP.Serve(w, r, repo.StoragePath, gitserver.ReceivePack); err != nil {
+		// Logged, not returned: see finishPush for why a failed transport is
+		// no evidence that the push did not land.
 		slog.Error("receive-pack", "repo", repo.FullName(), "error", err)
-		return
 	}
+	// The response is already written (or the client is gone), so failures
+	// from here on can only be logged.
+	s.finishPush(context.WithoutCancel(r.Context()), repo, before, "push")
+}
 
+// finishPush is everything after the service ran, shared by the HTTP and SSH
+// transports: adopt the pushed state, re-read the branch tips, and schedule
+// the follow-up work for whatever changed.
+//
+// It runs whether or not the transport reported success, because the
+// transport's verdict is about the conversation with the client, not about
+// the refs. receive-pack updates the refs (and, with the WAL authoritative,
+// the pre-receive hook has already won the index CAS) before it writes the
+// status report, so a client that disconnects while that report is going out
+// fails Serve for a push that is fully committed. Skipping the follow-up then
+// meant no sync job and no repo.push webhook, and repo_files stayed stale
+// until some later push happened to move the same branch.
+//
+// That is safe for a push that really failed, because nothing here trusts the
+// transport: `after` is read from the repository itself — HeadsAfterPush
+// re-opens it, which materialises from the WAL index when that is the
+// authority — and schedulePostPush acts only on the difference from `before`.
+// A rejected or no-op push leaves the refs as they were, so there is no
+// difference and nothing is scheduled. adoptAfterPush checks that disk and
+// index agree before it stamps anything, so it is equally safe to run.
+//
+// One case is out of reach: a cancelled request kills receive-pack, but its
+// pre-receive hook may still finish the CAS after this has already read the
+// tips. That push is committed without follow-up until the branch next moves.
+func (s *Server) finishPush(ctx context.Context, repo *store.Repo, before map[string]string, what string) {
 	// Before HeadsAfterPush: that call re-opens the repository, and without
 	// the adopted state the materialisation would re-download the very entry
 	// pack this push just uploaded.
-	s.adoptAfterPush(context.WithoutCancel(r.Context()), repo)
+	s.adoptAfterPush(ctx, repo)
 
 	after, err := s.gitHTTP.HeadsAfterPush(repo.StoragePath)
 	if err != nil {
-		slog.Error("read refs after push", "repo", repo.FullName(), "error", err)
+		slog.Error("read refs after "+what, "repo", repo.FullName(), "error", err)
 		return
 	}
-	// The response is already written, so failures here can only be logged.
-	s.schedulePostPush(context.WithoutCancel(r.Context()), repo, before, after, "push")
+	s.schedulePostPush(ctx, repo, before, after, what)
 }
 
 // schedulePostPush turns one push's before/after branch tips into the two

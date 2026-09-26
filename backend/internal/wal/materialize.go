@@ -332,9 +332,18 @@ func applyPack(ctx context.Context, st storage.Storage, gitDir, key string) erro
 	return nil
 }
 
-// writeRefs projects the index refs onto the local copy in one batch, including
-// deletions: a ref another instance removed must disappear here too, or clones
-// served from this copy would resurrect it (§9).
+// writeRefs projects the index refs onto the local copy, including deletions:
+// a ref another instance removed must disappear here too, or clones served
+// from this copy would resurrect it (§9).
+//
+// Deletions and updates go in two separate update-ref transactions, deletions
+// first. git refuses to lock refs/heads/a/b while refs/heads/a exists (and the
+// reverse) even when the same transaction deletes the blocker, so a single
+// batch turns "the index renamed a to a/b" into a permanent failure: the copy
+// keeps a, every Materialize retries the same doomed batch, and the repository
+// is unservable on this instance until its cache is evicted. A crash between
+// the two leaves some refs deleted and none updated, which is merely stale —
+// the state file is only written after both, so the next call converges.
 //
 // No old-value assertions are used. The index is the authority; whatever the
 // local copy believed is irrelevant (invariant 5 of §5).
@@ -344,18 +353,6 @@ func writeRefs(ctx context.Context, gitDir string, refs map[string]string, defau
 		return err
 	}
 
-	var stdin bytes.Buffer
-	names := make([]string, 0, len(refs))
-	for ref := range refs {
-		names = append(names, ref)
-	}
-	sort.Strings(names)
-	for _, ref := range names {
-		if current[ref] == refs[ref] {
-			continue
-		}
-		fmt.Fprintf(&stdin, "update %s %s\n", ref, refs[ref])
-	}
 	stale := make([]string, 0)
 	for ref := range current {
 		if _, ok := refs[ref]; !ok {
@@ -363,20 +360,46 @@ func writeRefs(ctx context.Context, gitDir string, refs map[string]string, defau
 		}
 	}
 	sort.Strings(stale)
+	var deletes bytes.Buffer
 	for _, ref := range stale {
-		fmt.Fprintf(&stdin, "delete %s\n", ref)
+		fmt.Fprintf(&deletes, "delete %s\n", ref)
+	}
+	if err := updateRefs(ctx, gitDir, &deletes); err != nil {
+		return err
 	}
 
-	if stdin.Len() > 0 {
-		cmd := gitCommand(ctx, gitDir, "update-ref", "--stdin")
-		cmd.Stdin = &stdin
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("update-ref --stdin: %w: %s", err, strings.TrimSpace(stderr.String()))
+	names := make([]string, 0, len(refs))
+	for ref := range refs {
+		names = append(names, ref)
+	}
+	sort.Strings(names)
+	var updates bytes.Buffer
+	for _, ref := range names {
+		if current[ref] == refs[ref] {
+			continue
 		}
+		fmt.Fprintf(&updates, "update %s %s\n", ref, refs[ref])
+	}
+	if err := updateRefs(ctx, gitDir, &updates); err != nil {
+		return err
 	}
 	return alignHEAD(ctx, gitDir, refs, defaultBranch)
+}
+
+// updateRefs runs one `git update-ref --stdin` transaction; an empty batch is
+// a no-op rather than a git invocation.
+func updateRefs(ctx context.Context, gitDir string, batch *bytes.Buffer) error {
+	if batch.Len() == 0 {
+		return nil
+	}
+	cmd := gitCommand(ctx, gitDir, "update-ref", "--stdin")
+	cmd.Stdin = batch
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("update-ref --stdin: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 func listRefs(ctx context.Context, gitDir string) (map[string]string, error) {

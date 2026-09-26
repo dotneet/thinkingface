@@ -66,6 +66,59 @@ func TestBuildRepoWhereTagsIsSingleContainmentCheck(t *testing.T) {
 	}
 }
 
+// A tag whose text is also a JSON number gets a second containment against
+// the number, so the facet's "2024" finds `tags: [2024]` -- while both arms
+// stay `@>`, which the GIN index on card->'tags' can serve.
+func TestBuildRepoWhereNumericTagAlsoMatchesTheNumber(t *testing.T) {
+	f := RepoFilter{Tags: []string{"nlp", "2024"}}
+	clause, args := buildRepoWhere(pgDialect{}, f, repoFilterScopeAll)
+	want := `(r.card->'tags' @> $3::jsonb AND (r.card->'tags' @> $1::jsonb OR r.card->'tags' @> $2::jsonb))`
+	if !strings.Contains(clause, want) {
+		t.Fatalf("clause = %q, want %q", clause, want)
+	}
+	wantArgs := []any{`["2024"]`, `[2024]`, `["nlp"]`}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", args, wantArgs)
+	}
+}
+
+func TestJSONNonStringScalar(t *testing.T) {
+	for in, want := range map[string]bool{
+		"2024": true, "-1.5": true, "true": true, "false": true,
+		"bert": false, "": false, "null": false, `"2024"`: false, " 2024": false,
+		"2024 ": false, "01": false, "1.": false, "True": false,
+		// Exponent forms are JSON numbers but not plain decimals: accepting
+		// them let a value like "1e999999" reach a `::jsonb` / numeric bind
+		// that PostgreSQL rejects with "value overflows numeric format",
+		// turning an unauthenticated filter query into a 500.
+		"1e3": false, "1e999999": false, "1E3": false, "1e-3": false,
+		// A digit string long past anything a repo card tag would realistically
+		// hold on its own -- the length cap treats it as a plain string too.
+		strings.Repeat("9", 40): false,
+	} {
+		if _, got := jsonNonStringScalar(in); got != want {
+			t.Errorf("jsonNonStringScalar(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// A tag whose text looks like a JSON number but carries an exponent (or is
+// simply too long) must fall back to the plain-string containment check --
+// binding it as a jsonb/numeric literal is what produced the regression.
+func TestBuildRepoWhereHugeExponentTagIsPlainString(t *testing.T) {
+	f := RepoFilter{Tags: []string{"1e999999"}}
+	clause, args := buildRepoWhere(pgDialect{}, f, repoFilterScopeAll)
+	want := `r.card->'tags' @> $1::jsonb`
+	if !strings.Contains(clause, want) {
+		t.Fatalf("clause = %q, want %q", clause, want)
+	}
+	// Only the string-containment arg -- no second, numeric-literal arm.
+	wantArgs := []any{`["1e999999"]`}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", args, wantArgs)
+	}
+}
+
 func TestBuildRepoWhereLicenseAndTask(t *testing.T) {
 	f := RepoFilter{License: "mit", Task: "text-classification"}
 	clause, args := buildRepoWhere(pgDialect{}, f, repoFilterScopeAll)
@@ -73,7 +126,7 @@ func TestBuildRepoWhereLicenseAndTask(t *testing.T) {
 		t.Errorf("clause = %q, missing license filter", clause)
 	}
 	if !strings.Contains(clause, `(r.card->>'pipeline_tag') = $2`) ||
-		!strings.Contains(clause, `r.card->'task_categories' @> to_jsonb($2::text)`) {
+		!strings.Contains(clause, `jsonb_array_elements_text(r.card->'task_categories') e WHERE e = $2::text`) {
 		t.Errorf("clause = %q, missing task filter across pipeline_tag/task_categories", clause)
 	}
 	wantArgs := []any{"mit", "text-classification"}

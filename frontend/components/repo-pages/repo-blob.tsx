@@ -11,8 +11,9 @@ import { RepoBreadcrumb } from "@/components/repo/repo-breadcrumb";
 import { RepoNotFoundOrLogin } from "@/components/repo/repo-not-found";
 import { RepoTabs } from "@/components/repo/repo-tabs";
 import { Badge } from "@/components/ui/badge";
+import { buttonClass } from "@/components/ui/button";
 import { ErrorState } from "@/components/ui/error-state";
-import { isNotFound } from "@/lib/api";
+import { isNotFound, isRevisionNotFound } from "@/lib/api";
 import { errorMessage } from "@/lib/api-error-message";
 import { formatBytes } from "@/lib/format";
 import { getT } from "@/lib/i18n/server";
@@ -21,6 +22,7 @@ import {
   repoBlobHref,
   repoCommitsHref,
   repoEditHref,
+  repoTreeHref,
   repoViewerHref,
 } from "@/lib/paths";
 import { redirectIfRepoMoved } from "@/lib/repo-redirect";
@@ -97,7 +99,32 @@ export async function RepoBlob({
         target="blob"
       />
 
-      {!dirResult.ok ? (
+      {isRevisionNotFound(dirResult) ? (
+        // Same dedicated state as RepoTree: the parent directory listing
+        // 404s with X-Error-Code: RevisionNotFound when `rev` itself doesn't
+        // resolve, and a generic "something went wrong" reads as a bug for
+        // what is really just a stale link to a deleted branch.
+        <ErrorState
+          title={t("repo.tree.unknownRevTitle")}
+          message={t("repo.tree.unknownRev", { rev })}
+          hint={t("repo.tree.unknownRevHint", {
+            branch: refsResult.ok ? refsResult.data.default_branch : repo.default_branch,
+          })}
+          action={
+            <Link
+              href={repoTreeHref(
+                kind,
+                ns,
+                name,
+                refsResult.ok ? refsResult.data.default_branch : repo.default_branch,
+              )}
+              className={buttonClass({ variant: "secondary" })}
+            >
+              {t("repo.tree.unknownRevAction")}
+            </Link>
+          }
+        />
+      ) : !dirResult.ok ? (
         <ErrorState title={t("ui.errorStateTitle")} message={errorMessage(t, dirResult)} />
       ) : !entry ? (
         <ErrorState title={t("ui.errorStateTitle")} message={t("repo.blob.fileNotFound")} />

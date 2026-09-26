@@ -2,6 +2,8 @@ package sshserver
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"sync"
 	"testing"
@@ -286,6 +288,95 @@ func TestAdmit_ReleasesTheSlotOnceAuthenticationSucceeds(t *testing.T) {
 		if _, _, status := run(t, client, "git-upload-pack 'acme/widgets'", nil); status != 0 {
 			t.Fatalf("exit status = %d, want 0", status)
 		}
+	}
+}
+
+// blockingSigner offers a public key it does not hold: PublicKey is somebody
+// else's registered key, and Sign never produces a signature — it parks until
+// the test lets go, then fails. That is exactly a client that has read a
+// victim's public key off github.com/<user>.keys: it can send the
+// signature-less "would you accept this key?" query and nothing more.
+type blockingSigner struct {
+	pub     gossh.PublicKey
+	queried chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingSigner) PublicKey() gossh.PublicKey { return s.pub }
+
+func (s *blockingSigner) Sign(io.Reader, []byte) (*gossh.Signature, error) {
+	// x/crypto's client signs only after the server answered the query with
+	// "key OK", so reaching Sign means the query succeeded server-side.
+	s.once.Do(func() { close(s.queried) })
+	<-s.release
+	return nil, errors.New("no private key")
+}
+
+// The finding: x/crypto calls PublicKeyCallback for signature-less key queries
+// too, and authenticate used to release the gate slot and reset the address's
+// failure budget right there. Offering any registered public key — which is
+// public — was then enough to leave the pre-authentication phase for free, so
+// one host could hold unlimited unauthenticated connections and wipe its own
+// failure record at will. Both now wait for a verified signature.
+func TestAuthenticate_AKeyQueryAloneReleasesNothing(t *testing.T) {
+	h := newHarnessWith(t, Options{
+		IdleTimeout:                    30 * time.Second,
+		AuthRateLimitPerMinute:         10,
+		MaxUnauthenticatedConns:        1,
+		MaxUnauthenticatedConnsPerAddr: 1,
+	})
+	victim, authorized, fingerprint := clientKey(t)
+	h.keys.register(1, "alice", 7, fingerprint, authorized)
+
+	// A failure on record for the address, which a query must not forgive.
+	h.srv.budget.penalize("127.0.0.1")
+
+	impostor := &blockingSigner{
+		pub:     victim.PublicKey(),
+		queried: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	dialed := make(chan error, 1)
+	go func() {
+		client, err := h.dial(t, impostor)
+		if client != nil {
+			_ = client.Close()
+		}
+		dialed <- err
+	}()
+	t.Cleanup(func() { close(impostor.release); <-dialed })
+
+	select {
+	case <-impostor.queried:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the client never got past the key query")
+	}
+
+	// The impostor's connection is parked mid-authentication with the query
+	// answered. It has proved nothing, so it must still hold its slot...
+	h.srv.gate.mu.Lock()
+	held := h.srv.gate.total
+	h.srv.gate.mu.Unlock()
+	if held != 1 {
+		t.Errorf("gate slots held = %d, want 1: a signature-less key query released the "+
+			"pre-authentication slot", held)
+	}
+	// ...which, on a one-slot gate, keeps everyone else from that address out.
+	if _, err := h.dial(t, victim); err == nil {
+		t.Error("a second connection was admitted past a one-slot gate while the first " +
+			"had only queried a key")
+	}
+
+	// And the address's failure is still on the books.
+	h.srv.budget.mu.Lock()
+	_, stillCharged := h.srv.budget.buckets["127.0.0.1"]
+	h.srv.budget.mu.Unlock()
+	if !stillCharged {
+		t.Error("a signature-less key query reset the address's failure budget")
+	}
+	if got := h.git.recorded(); len(got) != 0 {
+		t.Errorf("git ran %v for a client that never signed", got)
 	}
 }
 

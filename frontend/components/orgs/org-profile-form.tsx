@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, Input, Select, Textarea } from "@/components/ui/field";
 import { useT } from "@/lib/i18n/client";
-import { orgErrorKey, updateOrg } from "@/lib/orgs";
+import { orgErrorMessage, updateOrg } from "@/lib/orgs";
 import type { MembersVisibility, Org } from "@/types/api";
 
 /**
@@ -55,7 +55,7 @@ export function OrgProfileForm({ org }: { org: Org }) {
     });
     setSaving(false);
     if (!result.ok) {
-      setError(t(orgErrorKey(result)));
+      setError(orgErrorMessage(t, result));
       return;
     }
     setSaved(true);

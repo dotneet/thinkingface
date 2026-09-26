@@ -1,6 +1,7 @@
 "use client";
 
 import { ArrowLeftRight } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 import { LoginRequiredState } from "@/components/settings/login-required-state";
@@ -61,6 +62,7 @@ function TransferRow({
 
 export function TransfersManager() {
   const t = useT();
+  const router = useRouter();
   const [incoming, setIncoming] = useState<RepoTransfer[] | null>(null);
   const [outgoing, setOutgoing] = useState<RepoTransfer[] | null>(null);
   // The failure the list-load error is rendered from, so a locale change
@@ -114,6 +116,10 @@ export function TransfersManager() {
     }
     setConfirmAccept(null);
     await refresh();
+    // The header's pending-transfer badge (SiteHeader) is a Server Component
+    // reading the same incoming list; without this it keeps counting a
+    // transfer this page just accepted until the next full navigation.
+    router.refresh();
   }
 
   async function handleReject(transfer: RepoTransfer) {
@@ -127,6 +133,9 @@ export function TransfersManager() {
     }
     setConfirmReject(null);
     await refresh();
+    // Same reason as handleAccept: rejecting also drops it out of the
+    // incoming count the header badge shows.
+    router.refresh();
   }
 
   async function handleCancel(transfer: RepoTransfer) {

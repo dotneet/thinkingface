@@ -185,7 +185,13 @@ func (s *Store) DeleteWebhook(ctx context.Context, id int64) error {
 // -------------------------------------------------------------- deliveries
 
 // CreateWebhookDelivery enqueues one delivery attempt, immediately claimable.
+//
+// The payload is JSONB, and it describes things users named -- a run, a
+// branch, a repository card's fields -- so it goes through sanitizeJSONRaw
+// first: one NUL in any of those strings would otherwise make PostgreSQL
+// refuse the event outright (see text.go).
 func (s *Store) CreateWebhookDelivery(ctx context.Context, webhookID int64, event string, payload []byte) (int64, error) {
+	payload = sanitizeJSONRaw(payload)
 	var id int64
 	err := s.db.QueryRow(ctx,
 		`INSERT INTO webhook_deliveries (webhook_id, event, payload) VALUES ($1, $2, $3) RETURNING id`,
@@ -331,7 +337,18 @@ func (s *Store) ClaimWebhookDelivery(ctx context.Context, leaseDuration time.Dur
 //
 // A no-op update therefore means the claim was lost, which is not an error:
 // whoever holds it now is responsible for the outcome.
+//
+// respBody is whatever the endpoint answered, cut at a byte limit, so it can
+// end inside a multibyte character and can be Latin-1, binary, or carry NUL.
+// PostgreSQL refuses all of those (SQLSTATE 22021), and a refused write here
+// is worse than a lost body: the row stays 'pending' with the claim's lease
+// as its next_attempt_at, so once the lease lapses the delivery is claimed
+// and POSTed again -- every lease period, forever, since no finish ever
+// lands to count it against maxAttempts. The body is only shown in the
+// delivery history, so it is sanitised the way every other free-text column
+// from outside is (text.go).
 func (s *Store) FinishWebhookDelivery(ctx context.Context, deliveryID int64, success bool, attempts, maxAttempts int, respStatus *int, respBody string, backoff time.Duration) error {
+	respBody = sanitizeText(respBody)
 	if success {
 		_, err := s.db.Exec(ctx,
 			`UPDATE webhook_deliveries

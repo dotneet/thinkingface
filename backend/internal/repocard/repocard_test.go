@@ -303,7 +303,11 @@ func TestIsExperiment(t *testing.T) {
 // sides read one README the same way. These are the cases the two rules it
 // replaced each got wrong: a substring search for "\n---" ended the block on a
 // longer horizontal rule, and an exact `line == "---"` refused the trailing
-// whitespace editors leave behind and dropped the card entirely.
+// whitespace editors leave behind and dropped the card entirely. A third bug
+// lived here too: the scan used to skip rest's own first line so that
+// "---\n" (an explicitly empty front-matter block, "---\n---\n" in the whole
+// file) was never recognised as closed, even though HuggingFace's own loader
+// accepts it as a card with no fields.
 func TestClosingFence(t *testing.T) {
 	tests := []struct {
 		name string
@@ -318,7 +322,7 @@ func TestClosingFence(t *testing.T) {
 		{"dashes with content is not a fence", "license: mit\n---foo\nbody", false},
 		{"leading space is not a fence", "license: mit\n ---\nbody", false},
 		{"no fence at all", "license: mit\nbody", false},
-		{"the block's own first line does not close it", "---\n", false},
+		{"the block's own first line closes it (an explicitly empty block)", "---\n", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -353,5 +357,33 @@ func TestParse_LongerHorizontalRuleDoesNotCloseTheBlock(t *testing.T) {
 	card := Parse([]byte("---\nnot really yaml front matter\n----\nbody\n"))
 	if len(card.Data) != 0 {
 		t.Fatalf("Data = %v, want empty: ---- is a horizontal rule, not a closing fence", card.Data)
+	}
+}
+
+// "---\n---\n" -- no blank line between the fences -- is HuggingFace's
+// representation of an explicitly empty front-matter block, and
+// huggingface_hub reads it as a card with zero fields rather than as no card
+// at all. This used to come back indistinguishable from a plain README with a
+// horizontal rule: Data empty either way, but Body kept both "---" lines
+// (and the fence's own closing "\n---") that a real card would have stripped.
+func TestParse_EmptyFrontMatterBlockIsRecognised(t *testing.T) {
+	card := Parse([]byte("---\n---\n# Title\n"))
+	if len(card.Data) != 0 {
+		t.Fatalf("Data = %v, want empty", card.Data)
+	}
+	if card.Body != "# Title\n" {
+		t.Fatalf("Body = %q, want %q (the empty fence pair stripped, not left in the body)", card.Body, "# Title\n")
+	}
+}
+
+// The same block preceded by a BOM and a blank line: both forms of leading
+// noise, and the empty-block rule, all have to hold at once.
+func TestParse_EmptyFrontMatterBlockWithLeadingBOM(t *testing.T) {
+	card := Parse([]byte("\uFEFF\n---\n---\n# Title\n"))
+	if len(card.Data) != 0 {
+		t.Fatalf("Data = %v, want empty", card.Data)
+	}
+	if card.Body != "# Title\n" {
+		t.Fatalf("Body = %q, want %q", card.Body, "# Title\n")
 	}
 }

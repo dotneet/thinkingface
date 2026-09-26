@@ -15,6 +15,7 @@ import { errorMessage } from "@/lib/api-error-message";
 import { formatNumber } from "@/lib/format";
 import { getT } from "@/lib/i18n/server";
 import { listOrgs } from "@/lib/orgs";
+import { parseOffset } from "@/lib/pagination";
 import { authHeaders } from "@/lib/server-auth";
 
 export const dynamic = "force-dynamic";
@@ -35,7 +36,7 @@ export default async function OrgsDirectoryPage({
 }) {
   const [sp, t] = await Promise.all([searchParams, getT()]);
   const search = sp.search ?? "";
-  const offset = Number(sp.offset ?? 0) || 0;
+  const offset = parseOffset(sp.offset);
 
   // Forwarded so each row can carry the viewer's own role (lib/server-auth.ts).
   const result = await listOrgs(

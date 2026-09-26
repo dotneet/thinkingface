@@ -8,9 +8,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ClosingFence returns the offset of the newline that begins the line closing
-// a front-matter block, or -1 when there is none. rest is everything after the
-// opening "---\n".
+// ClosingFence returns the offset where the line closing a front-matter block
+// starts, or -1 when there is none. rest is everything after the opening
+// "---\n". Everything before the returned offset is the front matter's raw
+// YAML text (including each line's own trailing newline); callers skip
+// len("---") bytes from the offset to land just past the closing line's three
+// dashes.
 //
 // A closing fence is a line that is exactly "---" once trailing spaces and
 // tabs are removed. Both halves of that matter, and the substring search this
@@ -19,19 +22,52 @@ import (
 // ended the front matter early; requiring an exact "---" instead rejects the
 // trailing whitespace editors leave behind, which drops the whole card.
 //
-// The scan starts at rest's *second* line, so a "---" on the first one -- an
-// empty block, "---\n---" -- does not close the fence it just opened. That is
-// the documented behaviour of BuildReadme in the tf CLI, which shares this
-// rule so the CLI and the server never read one README two ways.
+// The very first line of rest can close the fence too: "---\n---" is HuggingFace's
+// representation of an explicitly empty front-matter block, and huggingface_hub
+// reads it as a card with no fields rather than as no card at all. BuildReadme
+// in the tf CLI avoids ever emitting that shape (it omits the block entirely
+// when there is nothing to put in it), but a block written by another tool, or
+// by hand, is still owed the same reading here that HF itself gives it.
 func ClosingFence(rest string) int {
 	offset := 0
-	for i, line := range strings.Split(rest, "\n") {
-		if i > 0 && strings.TrimRight(line, " \t") == "---" {
-			return offset - 1
+	for _, line := range strings.Split(rest, "\n") {
+		if strings.TrimRight(line, " \t") == "---" {
+			return offset
 		}
 		offset += len(line) + 1
 	}
 	return -1
+}
+
+// SplitFrontMatter locates text's front-matter block, if it has one, applying
+// the same leading-BOM/blank-line tolerance Parse does (huggingface_hub's own
+// card-loading regex is `^\s*---`) and ClosingFence's rule for the closing
+// line. ok reports whether an opening and a matching closing fence were both
+// found. front is the block's raw YAML text; body is everything after the
+// closing fence's line, with at most one leading newline (the fence line's
+// own terminator) trimmed. When ok is false, front is "" and body is text
+// unchanged, so a caller with no card to read can fall back to treating the
+// whole input as body.
+//
+// This is shared by repocard.Parse and the tf CLI's tfcli/local.MergeReadme
+// so that a README one side reads as carrying front matter is the exact same
+// one the other reads that way -- otherwise a sync round-trip (`tf up
+// --license`, then the server's own parse) can silently disagree about where
+// the card ends and lose or duplicate fields.
+func SplitFrontMatter(text string) (front, body string, ok bool) {
+	scan := strings.TrimPrefix(text, "\uFEFF")
+	scan = strings.TrimLeft(scan, " \t\n")
+	if !strings.HasPrefix(scan, "---\n") {
+		return "", text, false
+	}
+	rest := scan[len("---\n"):]
+	end := ClosingFence(rest)
+	if end < 0 {
+		return "", text, false
+	}
+	front = rest[:end]
+	body = strings.TrimPrefix(rest[end+len("---"):], "\n")
+	return front, body, true
 }
 
 // Card is the parsed front matter plus the markdown body that follows it.
@@ -46,31 +82,21 @@ func Parse(readme []byte) Card {
 	text := strings.ReplaceAll(string(readme), "\r\n", "\n")
 	card := Card{Data: map[string]any{}, Body: text}
 
-	// huggingface_hub's own card-loading regex is `^\s*---`, which tolerates
-	// a leading UTF-8 BOM and leading blank lines before the opening fence.
-	// A README that HF reads correctly must not lose its front matter here
-	// just because an editor's newline normalization left a blank line (or a
-	// BOM) at the very top of the file -- that would silently drop license,
-	// tags, and lineage on the next sync. Skip both before looking for the
-	// fence; neither is part of the front matter or the body either way.
-	scan := strings.TrimPrefix(text, "\uFEFF")
-	scan = strings.TrimLeft(scan, " \t\n")
-
-	if !strings.HasPrefix(scan, "---\n") {
+	front, body, ok := SplitFrontMatter(text)
+	if !ok {
 		return card
 	}
-	rest := scan[len("---\n"):]
-	end := ClosingFence(rest)
-	if end < 0 {
-		return card
-	}
-	front := rest[:end]
-
-	body := rest[end+len("\n---"):]
-	body = strings.TrimPrefix(body, "\n")
 
 	var data map[string]any
-	if err := yaml.Unmarshal([]byte(front), &data); err != nil || data == nil {
+	// A missing err here does not imply data != nil: front matter that is
+	// empty (or just whitespace/comments) unmarshals to a nil map, not an
+	// error -- and that is a *valid* card, HuggingFace's own representation
+	// of "no fields", not the malformed-input case below. Treating it as
+	// malformed used to throw away the fence split entirely and show the
+	// dashes themselves as part of Body. normalize(nil) already returns an
+	// empty map, same as a genuinely empty `front`, so there is nothing more
+	// to special-case here.
+	if err := yaml.Unmarshal([]byte(front), &data); err != nil {
 		// Malformed front matter is not worth failing an upload over; show the
 		// README as-is and leave the card empty.
 		return card

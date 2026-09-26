@@ -10,7 +10,7 @@ import { buttonClass } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { TimeText } from "@/components/ui/time-text";
-import { isNotFound } from "@/lib/api";
+import { isNotFound, isRevisionNotFound } from "@/lib/api";
 import { errorMessage } from "@/lib/api-error-message";
 import { getT } from "@/lib/i18n/server";
 import { repoCommitHref, repoCommitsHref, repoTreeHref } from "@/lib/paths";
@@ -114,7 +114,32 @@ export async function RepoCommits({
         </div>
       )}
 
-      {!commitsResult.ok ? (
+      {isRevisionNotFound(commitsResult) ? (
+        // Same dedicated state as RepoTree: handleUICommits also resolves
+        // through revisionOrEmpty, so a deleted/typo'd branch 404s with
+        // X-Error-Code: RevisionNotFound instead of reading as a generic
+        // failure.
+        <ErrorState
+          title={t("repo.tree.unknownRevTitle")}
+          message={t("repo.tree.unknownRev", { rev })}
+          hint={t("repo.tree.unknownRevHint", {
+            branch: refsResult.ok ? refsResult.data.default_branch : repo.default_branch,
+          })}
+          action={
+            <Link
+              href={repoTreeHref(
+                kind,
+                ns,
+                name,
+                refsResult.ok ? refsResult.data.default_branch : repo.default_branch,
+              )}
+              className={buttonClass({ variant: "secondary" })}
+            >
+              {t("repo.tree.unknownRevAction")}
+            </Link>
+          }
+        />
+      ) : !commitsResult.ok ? (
         <ErrorState
           title={t("ui.errorStateTitle")}
           message={errorMessage(t, commitsResult)}

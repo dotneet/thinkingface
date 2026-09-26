@@ -258,18 +258,29 @@ export function repairParallelEmphasis(
   return null;
 }
 
-/** The `d` of one run's polyline, in the same units as axisX / axisY. */
+/**
+ * The `d` of one run's polyline, in the same units as axisX / axisY.
+ *
+ * Takes `padX` / `padY` separately rather than one shared `pad`: the caller's
+ * horizontal padding (room for the first/last axis' tick labels) and vertical
+ * padding (room for the axis title and low tick) are different constants, and
+ * passing one `pad` for both used to draw lines against a Y padding that did
+ * not match the axis ticks' own `axisY` calls — a max value would land above
+ * the axis top, and on a categorical axis a run would sit next to the wrong
+ * category.
+ */
 export function linePath(
   line: ParallelLine,
   axisCount: number,
   width: number,
   height: number,
-  pad: number,
+  padX: number,
+  padY: number,
 ): string {
   return line.points
     .map((p, i) => {
-      const x = axisX(p.axis, axisCount, width, pad);
-      const y = axisY(p.t, height, pad);
+      const x = axisX(p.axis, axisCount, width, padX);
+      const y = axisY(p.t, height, padY);
       return `${i === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`;
     })
     .join(" ");

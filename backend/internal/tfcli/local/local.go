@@ -311,11 +311,13 @@ func matchFilters(repoPath string, opts Options) bool {
 	return true
 }
 
-// Match reports whether pattern matches repoPath. Patterns are shell globs
-// with "**" matching any number of path segments (so "**/*.parquet" and
-// "data/**" work); a pattern with no "/" is also tried against the base name
-// ("*.parquet" matches "data/train.parquet"). A pattern that names a
-// directory ("data" or "data/") matches everything beneath it.
+// Match reports whether pattern matches repoPath. Patterns are shell globs:
+// "*" and "?" are wildcards, "[...]" is a bracket expression ("[ab].csv",
+// "[a-z]*", "[!0-9]*" -- "!" or "^" negates it), and "**" matches any number
+// of path segments (so "**/*.parquet" and "data/**" work); a pattern with no
+// "/" is also tried against the base name ("*.parquet" matches
+// "data/train.parquet"). A pattern that names a directory ("data" or
+// "data/") matches everything beneath it.
 func Match(pattern, repoPath string) bool {
 	trimmed := strings.TrimSuffix(pattern, "/")
 	if trimmed == "" {
@@ -346,7 +348,17 @@ func globRegexp(pattern string) *regexp.Regexp {
 	if v, ok := globRegexpCache.Load(pattern); ok {
 		return v.(*regexp.Regexp)
 	}
-	re := regexp.MustCompile(globToRegexpSource(pattern))
+	re, err := regexp.Compile(globToRegexpSource(pattern))
+	if err != nil {
+		// globToRegexpSource is built to always emit syntactically valid
+		// regexp source for any glob text (see segmentToRegexpSource /
+		// parseBracketClass). This is a last-resort guard in case some glob
+		// this function did not anticipate still slips through: degrade to
+		// a literal, exact-path match rather than let regexp.MustCompile
+		// panic and take down the whole `tf` invocation over a malformed
+		// --include/--exclude pattern.
+		re = regexp.MustCompile("^" + regexp.QuoteMeta(pattern) + "$")
+	}
 	globRegexpCache.Store(pattern, re)
 	return re
 }
@@ -405,15 +417,29 @@ func globToRegexpSource(pattern string) string {
 	return b.String()
 }
 
+// segmentToRegexpSource converts one "/"-free glob segment into a regexp
+// source fragment: "*" and "?" are wildcards, "[...]" is a shell-style
+// bracket expression (a character class, "!" or "^" negating it, e.g.
+// "[ab].csv" or "[!0-9]*"), and everything else -- including a "[" that never
+// finds a matching "]" -- is a literal, with regexp metacharacters escaped.
 func segmentToRegexpSource(seg string) string {
 	var b strings.Builder
-	for _, r := range seg {
+	runes := []rune(seg)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
 		switch r {
 		case '*':
 			b.WriteString("[^/]*")
 		case '?':
 			b.WriteString("[^/]")
-		case '.', '+', '(', ')', '|', '[', ']', '{', '}', '^', '$', '\\':
+		case '[':
+			if class, end, ok := parseBracketClass(runes, i); ok {
+				b.WriteString(class)
+				i = end
+				continue
+			}
+			b.WriteString(`\[`)
+		case '.', '+', '(', ')', '|', ']', '{', '}', '^', '$', '\\':
 			b.WriteByte('\\')
 			b.WriteRune(r)
 		default:
@@ -421,6 +447,74 @@ func segmentToRegexpSource(seg string) string {
 		}
 	}
 	return b.String()
+}
+
+// parseBracketClass reads a shell-style bracket expression starting at
+// runes[i] (which must be '['), following the usual glob conventions: "!" or
+// "^" right after "[" negates the class, and a "]" that would otherwise close
+// an empty class is instead its first literal member (so "[]ab]" matches "]",
+// "a" or "b"). ok is false when there is no matching "]" at all, in which
+// case "[" is not a class and the caller must treat it as a literal
+// character. On success, class is a regexp "[...]" fragment and end is the
+// index of the closing "]" in runes.
+func parseBracketClass(runes []rune, i int) (class string, end int, ok bool) {
+	n := len(runes)
+	j := i + 1
+	var negate bool
+	if j < n && (runes[j] == '!' || runes[j] == '^') {
+		negate = true
+		j++
+	}
+	start := j
+	if j < n && runes[j] == ']' {
+		j++ // a leading "]" is a literal member, not the closing delimiter
+	}
+	for j < n && runes[j] != ']' {
+		j++
+	}
+	if j >= n {
+		return "", 0, false
+	}
+
+	content := runes[start:j]
+	var b strings.Builder
+	b.WriteByte('[')
+	if negate {
+		b.WriteByte('^')
+	}
+	for k, r := range content {
+		// A "-" strictly between two members denotes a range in both glob
+		// and Go regexp syntax. Keep it as a range only when it is
+		// well-formed (low <= high); a reversed range such as "z-a" is not
+		// rejected by the glob syntax itself, but regexp.MustCompile would
+		// panic on it ("invalid character class range"), so fall back to
+		// treating the "-" as a literal member instead of a range.
+		if r == '-' && k > 0 && k+1 < len(content) {
+			if content[k-1] <= content[k+1] {
+				b.WriteByte('-')
+			} else {
+				b.WriteString(`\-`)
+			}
+			continue
+		}
+		// "^" is only special as the first rune of a Go regexp class
+		// (already spoken for by negate above), so any further one is
+		// escaped to stay literal the way a glob would treat it. "\\" is
+		// escaped so it cannot be read as the start of a regexp escape the
+		// glob syntax never offered. "[" is escaped too: left bare, a
+		// sequence like "[:foo:]" inside the class would be parsed by Go's
+		// regexp engine as an (invalid) POSIX character class and panic,
+		// even though shell globs give "[" and ":" no such meaning here.
+		switch r {
+		case '^', '\\', '[':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte(']')
+	return b.String(), j, true
 }
 
 // Kind is the inferred repository type, spelled like hub.Kind.
@@ -488,10 +582,11 @@ var (
 // RepoNameFromPath derives a repository name from a path: the base name of
 // the cleaned absolute path (for a single file, the base name without its
 // extension), with characters outside [A-Za-z0-9._-] replaced by "-", runs of
-// "-" collapsed, leading/trailing "-" and "." trimmed, a ".git" suffix
-// removed, and truncated to 96 characters. An empty result (e.g. "/") is an
-// error. The server's rule is: 1-96 chars of letters, digits, dot, dash or
-// underscore, starting with a letter or digit, not ending in ".git".
+// "-" collapsed, leading/trailing "-" and "." trimmed, truncated to 96
+// characters, and a trailing ".git" (plus any "-"/"." this newly exposes)
+// stripped repeatedly. An empty result (e.g. "/") is an error. The server's
+// rule is: 1-96 chars of letters, digits, dot, dash or underscore, starting
+// with a letter or digit, not ending in ".git".
 func RepoNameFromPath(p string) (string, error) {
 	abs, err := filepath.Abs(p)
 	if err != nil {
@@ -509,10 +604,23 @@ func RepoNameFromPath(p string) (string, error) {
 	name := invalidNameChars.ReplaceAllString(base, "-")
 	name = dashRun.ReplaceAllString(name, "-")
 	name = strings.Trim(name, "-.")
-	name = strings.TrimSuffix(name, ".git")
-	name = strings.Trim(name, "-.")
 	if len(name) > 96 {
-		name = strings.TrimRight(name[:96], "-.")
+		name = name[:96]
+	}
+	// Truncating to 96 bytes can land the cut exactly on a literal ".git"
+	// that was never a suffix of the original name (just four characters
+	// that happened to end up last), or expose a "-"/"." that an earlier trim
+	// already removed once. Stripping only before truncation -- as this used
+	// to do -- misses that case entirely, so the server's "not ending in
+	// .git" rule still rejected the derived name. Repeat until a pass changes
+	// nothing: removing ".git" can reveal a "-." to trim and vice versa.
+	for {
+		trimmed := strings.TrimSuffix(name, ".git")
+		trimmed = strings.Trim(trimmed, "-.")
+		if trimmed == name {
+			break
+		}
+		name = trimmed
 	}
 
 	if name == "" || !isAlnumByte(name[0]) {

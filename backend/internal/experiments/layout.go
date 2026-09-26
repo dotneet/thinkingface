@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // SystemMetricPrefix namespaces machine telemetry (GPU / CPU / memory) so it
@@ -338,31 +339,74 @@ var structuralColumns = map[string]bool{
 // would otherwise overwrite the run's own name with a number.
 func IsStructuralColumn(name string) bool { return structuralColumns[name] }
 
-func runColumn(columns map[string]bool) string {
-	for _, c := range []string{"run_name", "run", "run_id"} {
-		if columns[c] {
-			return c
+// The candidate names for a row's run, step and timestamp, in order of
+// preference. trackio writes the first of each; the others are what other
+// exporters (and older trackio versions) call the same thing.
+var (
+	runColumns  = []string{"run_name", "run", "run_id"}
+	stepColumns = []string{"step", "_step", "global_step"}
+	timeColumns = []string{"timestamp", "_timestamp", "created_at"}
+)
+
+// The row readers below resolve run, step and timestamp per row, taking the
+// first candidate column that holds a usable value, rather than picking one
+// column per file. A file can legitimately carry more than one: a flush into a
+// file keyed by `run` / `_step` used to add `run_name` / `step` beside them, and
+// the viewer hands back every schema column in every row -- nil (or, for the
+// required run_name, "") where a row has no value. Choosing one column for the
+// whole file read the older rows' run as "" (dropping them, and a re-index then
+// deleted their run) and their step as missing (charting them by position).
+// Resolving per row reads files written either way, including ones already
+// damaged by that flush.
+
+// rowRun is the run a row belongs to, or "" when none of the run columns names
+// one.
+func rowRun(row map[string]any) string {
+	for _, c := range runColumns {
+		if run := toString(row[c]); run != "" {
+			return run
 		}
 	}
 	return ""
 }
 
-func stepColumn(columns map[string]bool) string {
-	for _, c := range []string{"step", "_step", "global_step"} {
-		if columns[c] {
-			return c
+// rowStep is the step a row was logged at, if any step column holds one.
+func rowStep(row map[string]any) (int64, bool) {
+	for _, c := range stepColumns {
+		if step, ok := toInt(row[c]); ok {
+			return step, true
 		}
 	}
-	return ""
+	return 0, false
 }
 
-func timeColumn(columns map[string]bool) string {
-	for _, c := range []string{"timestamp", "_timestamp", "created_at"} {
-		if columns[c] {
-			return c
+// rowTime is the time a row was logged at, if any timestamp column holds one.
+func rowTime(row map[string]any) (time.Time, bool) {
+	for _, c := range timeColumns {
+		if ts, ok := toTime(row[c]); ok {
+			return ts, true
 		}
 	}
-	return ""
+	return time.Time{}, false
+}
+
+// soleRunColumn names the file's run column when it has exactly one run
+// candidate, and "" otherwise. A row-group predicate on the run is only sound
+// then: with two, a row's run may live in the other column, and statistics on
+// this one (all "" or null for those rows) would prune groups that do hold the
+// requested runs.
+func soleRunColumn(columns map[string]bool) string {
+	found := ""
+	for _, c := range runColumns {
+		if !columns[c] {
+			continue
+		}
+		if found != "" {
+			return ""
+		}
+		found = c
+	}
+	return found
 }
 
 // hasArtifactSegment reports whether p has an "artifacts" path segment, which

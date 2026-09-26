@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dotneet/thinkingface/backend/internal/tfcli/config"
 )
@@ -203,6 +205,223 @@ func TestLoginPasswordFlowMintsAndSavesToken(t *testing.T) {
 	}
 	if cred.TokenID != 42 {
 		t.Errorf("saved token id = %d, want 42", cred.TokenID)
+	}
+}
+
+// TestLoginRevokesPreviousMintedToken is the regression test for repeated
+// `tf login` orphaning a live write token: an earlier login minted and saved
+// token id 7 for this endpoint; logging in again must revoke it (once the new
+// one is safely saved) the same way `tf logout` would, since nothing will
+// ever point at it again.
+func TestLoginRevokesPreviousMintedToken(t *testing.T) {
+	isolateEnv(t)
+
+	var revokedID string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/whoami-v2", whoamiHandler(t, "alice", "write"))
+	mux.HandleFunc("DELETE /api/v1/tokens/7", func(w http.ResponseWriter, r *http.Request) {
+		revokedID = "7"
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	normalized, err := config.NormalizeEndpoint(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveCredential(t, config.Credential{Endpoint: normalized, Token: "old-token", TokenID: 7, CreatedAt: time.Now()})
+
+	code, _, errOut := runMain(t, []string{"login", srv.URL, "--token", "new-token"}, "")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut)
+	}
+	if revokedID != "7" {
+		t.Error("the previous login's minted token (id 7) was never revoked")
+	}
+
+	f, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, ok := f.Get(normalized)
+	if !ok || cred.Token != "new-token" {
+		t.Errorf("saved credential = %+v, want the new token", cred)
+	}
+}
+
+// TestLoginDoesNotRevokeAPastedPreviousToken mirrors `tf logout`'s own rule:
+// a credential with TokenID == 0 was pasted in with --token, not minted by
+// `tf login`, so a later login replacing it must leave it alone -- it is not
+// this program's token to revoke.
+func TestLoginDoesNotRevokeAPastedPreviousToken(t *testing.T) {
+	isolateEnv(t)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/whoami-v2", whoamiHandler(t, "alice", "write"))
+	mux.HandleFunc("DELETE /api/v1/tokens/", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("a pasted previous token must never be revoked, got %s %s", r.Method, r.URL.Path)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	normalized, err := config.NormalizeEndpoint(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveCredential(t, config.Credential{Endpoint: normalized, Token: "old-token", TokenID: 0, CreatedAt: time.Now()})
+
+	code, _, errOut := runMain(t, []string{"login", srv.URL, "--token", "new-token"}, "")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut)
+	}
+}
+
+// TestLoginDoesNotRevokeWhenNewTokenEqualsPreviousToken is the regression test
+// for `tf login --token T` where T is exactly the token an earlier `tf login`
+// minted and saved (TokenID 7). The pasted --token flow always saves the new
+// credential with TokenID 0, so naively revoking "the previous credential's
+// TokenID whenever it is non-zero" would authenticate with T itself and
+// revoke token id 7 -- deleting the very token this run just saved as the new
+// credential, leaving the user logged out immediately after a successful
+// `tf login`.
+func TestLoginDoesNotRevokeWhenNewTokenEqualsPreviousToken(t *testing.T) {
+	isolateEnv(t)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/whoami-v2", whoamiHandler(t, "alice", "write"))
+	mux.HandleFunc("DELETE /api/v1/tokens/", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("logging in again with the same still-live token must never revoke it, got %s %s", r.Method, r.URL.Path)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	normalized, err := config.NormalizeEndpoint(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveCredential(t, config.Credential{Endpoint: normalized, Token: "reused-token", TokenID: 7, CreatedAt: time.Now()})
+
+	code, _, errOut := runMain(t, []string{"login", srv.URL, "--token", "reused-token"}, "")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errOut)
+	}
+
+	f, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, ok := f.Get(normalized)
+	if !ok || cred.Token != "reused-token" {
+		t.Errorf("saved credential = %+v, want the still-live reused-token", cred)
+	}
+}
+
+// TestLoginRevokesMintedTokenWhenVerifyFails is the regression test for
+// MintToken succeeding and the follow-up whoami verification failing: the
+// token already lives server-side at that point, and nothing saves it, so it
+// used to stay live and unreachable by any saved credential. login must
+// revoke it on that failure path, the same way it does when it never got
+// saved for any other reason.
+func TestLoginRevokesMintedTokenWhenVerifyFails(t *testing.T) {
+	isolateEnv(t)
+
+	var revokedID string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "session", Value: "s"})
+		writeJSON(t, w, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/v1/tokens", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, map[string]any{"id": 99, "name": "tf-cli", "scope": "write", "token": "minted-99"})
+	})
+	mux.HandleFunc("GET /api/whoami-v2", func(w http.ResponseWriter, r *http.Request) {
+		// The freshly minted token is rejected -- an edge the server could hit
+		// (e.g. a race with an admin action), which must not leave the token
+		// live with nothing pointing at it.
+		w.WriteHeader(http.StatusUnauthorized)
+		writeJSON(t, w, map[string]any{"error": map[string]string{"type": "unauthorized", "message": "token rejected"}})
+	})
+	mux.HandleFunc("DELETE /api/v1/tokens/99", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer minted-99" {
+			t.Errorf("revoke Authorization = %q, want the minted token itself", got)
+		}
+		revokedID = "99"
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	code, _, errOut := runMain(t, []string{
+		"login", srv.URL, "--username", "alice", "--password-stdin",
+	}, "hunter2\n")
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stderr=%s", code, errOut)
+	}
+	if revokedID != "99" {
+		t.Error("the token minted moments before the failed whoami was never revoked")
+	}
+
+	normalized, err := config.NormalizeEndpoint(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.Get(normalized); ok {
+		t.Error("a login that failed verification must not save any credential")
+	}
+}
+
+// TestLoginRevokesMintedTokenWhenSaveFails is the regression test for the
+// other failure-after-minting path: whoami succeeds, but writing the config
+// file does not, so the newly minted token would otherwise stay live with no
+// saved credential ever pointing at it. Save is made to fail by pointing
+// TF_CONFIG at a path whose parent directory exists but denies write access,
+// which lets Load (read-only) succeed while Save's temp-file creation cannot.
+func TestLoginRevokesMintedTokenWhenSaveFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions are not enforced")
+	}
+	isolateEnv(t)
+
+	readonlyDir := filepath.Join(t.TempDir(), "readonly")
+	if err := os.Mkdir(readonlyDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(readonlyDir, 0o700) }) // let TempDir's own cleanup remove it
+	t.Setenv("TF_CONFIG", filepath.Join(readonlyDir, "config.json"))
+
+	var revokedID string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "session", Value: "s"})
+		writeJSON(t, w, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/v1/tokens", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, map[string]any{"id": 99, "name": "tf-cli", "scope": "write", "token": "minted-99"})
+	})
+	mux.HandleFunc("GET /api/whoami-v2", whoamiHandler(t, "alice", "write"))
+	mux.HandleFunc("DELETE /api/v1/tokens/99", func(w http.ResponseWriter, r *http.Request) {
+		revokedID = "99"
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	code, _, errOut := runMain(t, []string{
+		"login", srv.URL, "--username", "alice", "--password-stdin",
+	}, "hunter2\n")
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stderr=%s", code, errOut)
+	}
+	if !strings.Contains(errOut, "saving config") {
+		t.Errorf("stderr = %q, want it to mention the save failure", errOut)
+	}
+	if revokedID != "99" {
+		t.Error("the token minted moments before the failed save was never revoked")
 	}
 }
 

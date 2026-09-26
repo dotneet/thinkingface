@@ -270,14 +270,14 @@ func checkOpPath(w http.ResponseWriter, what, path string) bool {
 
 // ensureBranchRev refuses a write whose {rev} names something in this
 // repository that is not a branch. Every write path commits to
-// refs/heads/{rev}, while every read resolves {rev} through go-git's
-// RefRevParseRules, which tries refs/tags/%s *before* refs/heads/%s. Writing
-// to a rev that is a tag would therefore read one ref and write another: the
+// refs/heads/{rev}, while a read resolves {rev} through gitrepo.Resolve, which
+// falls back to refs/tags/%s when no branch of that name exists. Writing to a
+// rev that is only a tag would therefore read one ref and write another: the
 // branch would be created out of nothing, as a parentless root commit, and the
-// tag would keep winning every subsequent read -- so the caller would be told
-// the write succeeded and then never see it again. The same goes for anything
-// else that resolves without being a branch (an abbreviated SHA, "HEAD",
-// "main~1"): there is no branch there to extend.
+// caller would be told the write went to the revision it named when it went
+// somewhere else. The same goes for anything else that resolves without being
+// a branch (a full or 7+ digit abbreviated SHA, "HEAD"): there is no branch
+// there to extend.
 //
 // A rev that resolves to nothing at all is still allowed through. That is the
 // first commit on a new branch, which these endpoints are expected to create.

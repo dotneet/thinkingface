@@ -344,12 +344,12 @@ func (ix *Indexer) scanSeriesFile(ctx context.Context, gitRepo *gitrepo.Repo, re
 	// requested runs is in it.
 	counters := map[string]int64{}
 	return ix.scanMetricRows(ctx, repo, gitRepo, repo.DefaultBranch, filePath, scan,
-		func(run string, row map[string]any, cols map[string]bool) error {
+		func(run string, row map[string]any) error {
 			if id, ok := toInt(row[IngestIDColumn]); ok {
 				flushed[id] = true
 			}
 
-			x, ok := xValue(row, cols, req.XAxis)
+			x, ok := xValue(row, req.XAxis)
 			if !ok {
 				x = float64(counters[run])
 			}
@@ -387,7 +387,8 @@ func seriesScanRequest(schema *viewer.Schema, keyPrefix string, req SeriesReques
 	if len(req.Runs) > 0 {
 		// A file with no run column at all charts nothing (scanMetricRows
 		// drops every one of its rows), so there is nothing to prune either.
-		if runCol := runColumn(present); runCol != "" {
+		// One with several is read unpruned -- see soleRunColumn.
+		if runCol := soleRunColumn(present); runCol != "" {
 			scan.Predicates = []viewer.Predicate{{Column: runCol, AnyOf: req.Runs}}
 		}
 	}
@@ -475,19 +476,15 @@ func (ix *Indexer) scanLiveSeries(ctx context.Context, repo *store.Repo, req Ser
 	return nil
 }
 
-func xValue(row map[string]any, cols map[string]bool, axis string) (float64, bool) {
+func xValue(row map[string]any, axis string) (float64, bool) {
 	if axis == "time" {
-		if tsCol := timeColumn(cols); tsCol != "" {
-			if ts, ok := toTime(row[tsCol]); ok {
-				return float64(ts.UnixMilli()) / 1000, true
-			}
+		if ts, ok := rowTime(row); ok {
+			return float64(ts.UnixMilli()) / 1000, true
 		}
 		return 0, false
 	}
-	if stepCol := stepColumn(cols); stepCol != "" {
-		if step, ok := toInt(row[stepCol]); ok {
-			return float64(step), true
-		}
+	if step, ok := rowStep(row); ok {
+		return float64(step), true
 	}
 	return 0, false
 }

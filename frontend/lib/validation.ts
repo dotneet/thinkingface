@@ -71,6 +71,10 @@ export const RESERVED_NAMESPACE_NAMES: readonly string[] = [
   "favicon.ico",
   "robots.txt",
   "sitemap.xml",
+  // app/icon.svg is a Next.js file convention -- it serves /icon.svg the same
+  // way app/favicon.ico above serves /favicon.ico. check-ui.mjs's
+  // top-level-app-convention scan is what would have caught this one missing.
+  "icon.svg",
   "duckdb",
   "public",
   "users",

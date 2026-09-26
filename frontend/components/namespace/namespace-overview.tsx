@@ -23,6 +23,7 @@ import {
   namespaceTabHref,
   parseNamespaceTab,
 } from "@/lib/namespace";
+import { parseOffset } from "@/lib/pagination";
 import type { RepoListSearch } from "@/lib/repos";
 import { authHeaders } from "@/lib/server-auth";
 import { getCurrentUser } from "@/lib/session";
@@ -154,7 +155,7 @@ export async function NamespaceOverview({
         (counts.experiments === 0 ? (
           emptyTab("experiments")
         ) : (
-          <NamespaceExperiments ns={ns} offset={Number(sp.offset ?? 0) || 0} />
+          <NamespaceExperiments ns={ns} offset={parseOffset(sp.offset)} />
         ))}
 
       {tab === "members" && (

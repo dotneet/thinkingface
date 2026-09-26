@@ -9,7 +9,6 @@ package api
 import (
 	"context"
 	"errors"
-	"log/slog"
 
 	"github.com/dotneet/thinkingface/backend/internal/gitserver"
 	"github.com/dotneet/thinkingface/backend/internal/store"
@@ -90,10 +89,9 @@ func (s *Server) ServeGit(ctx context.Context, user *store.User, service gitserv
 }
 
 // sshReceivePack mirrors handleReceivePack: snapshot the branch tips, run the
-// service, adopt the pushed state before anything re-opens the repository,
-// then schedule the same post-push indexing an HTTP push schedules. A push
-// that lands over SSH has to reach the sync worker, or its files, card and
-// experiment index would silently never update.
+// service, then hand off to finishPush for the same adoption and post-push
+// indexing an HTTP push gets. A push that lands over SSH has to reach the sync
+// worker, or its files, card and experiment index would silently never update.
 func (s *Server) sshReceivePack(ctx context.Context, repo *store.Repo, gitProtocol string, streams gitserver.Streams) error {
 	if err := s.ensureRepoLocal(ctx, repo); err != nil {
 		return err
@@ -103,28 +101,12 @@ func (s *Server) sshReceivePack(ctx context.Context, repo *store.Repo, gitProtoc
 		return err
 	}
 
-	if err := s.gitHTTP.ServeSSH(ctx, repo.StoragePath, gitserver.ReceivePack, gitProtocol, streams); err != nil {
-		return err
-	}
-
-	// Before HeadsAfterPush, for the same reason as the HTTP path: that call
-	// re-opens the repository, and without the adopted state the
-	// materialisation would re-download the pack this push just uploaded.
-	detached := context.WithoutCancel(ctx)
-	s.adoptAfterPush(detached, repo)
-
-	after, err := s.gitHTTP.HeadsAfterPush(repo.StoragePath)
-	if err != nil {
-		// The push itself succeeded and the client has already been told so;
-		// only the follow-up indexing is lost.
-		slog.Error("read refs after ssh push", "repo", repo.FullName(), "error", err)
-		return nil
-	}
-	// Shared with the HTTP path (schedulePostPush in git.go): the same sync
-	// jobs, and the same repo.ref_deleted webhook for a branch this push
-	// removed.
-	s.schedulePostPush(detached, repo, before, after, "ssh push")
-	return nil
+	serveErr := s.gitHTTP.ServeSSH(ctx, repo.StoragePath, gitserver.ReceivePack, gitProtocol, streams)
+	// Even when ServeSSH failed: a session that dropped while the status
+	// report was going out still pushed (finishPush explains why this is safe
+	// for a push that did not). The error is still the session's answer.
+	s.finishPush(context.WithoutCancel(ctx), repo, before, "ssh push")
+	return serveErr
 }
 
 func gitNotFoundMessage(ns, name string) string {

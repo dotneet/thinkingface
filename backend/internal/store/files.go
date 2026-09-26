@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/dotneet/thinkingface/backend/internal/storage"
@@ -60,6 +61,7 @@ func (s *Store) ReplaceRepoFiles(ctx context.Context, repoID int64, ref string, 
 	}
 	if len(files) > 0 {
 		rows := make([][]any, 0, len(files))
+		seen := make(map[string]struct{}, len(files))
 		for _, f := range files {
 			// A git path is any byte string without NUL or '/', so it can be
 			// Latin-1, Shift_JIS or anything else an old workstation wrote.
@@ -67,7 +69,23 @@ func (s *Store) ReplaceRepoFiles(ctx context.Context, repoID int64, ref string, 
 			// 22021) and the refusal parks the sync job, freezing the whole
 			// repository's index -- see text.go. Blob shas and LFS oids are
 			// hex by construction and need nothing.
-			rows = append(rows, []any{repoID, ref, sanitizeText(f.Path), f.Size, f.BlobSHA, f.LFSOID})
+			path := sanitizeText(f.Path)
+			// The fold is lossy, so two paths git keeps apart can arrive
+			// here as one (`Gr\xf6\xdfe.csv` and `Gr\xfc\xdfe.csv` both
+			// become `Gr�e.csv`), and a second row under the same
+			// (repo_id, ref, path) key failed the insert on both engines --
+			// on every retry, so the job parked and the index froze exactly
+			// as it did before the fold existed. The first one wins: git
+			// lists a tree in byte order, so which one that is does not
+			// change from sync to sync, and the file skipped is still in git
+			// for every path that serves content.
+			if _, dup := seen[path]; dup {
+				slog.Warn("repo_files: path collides with another after UTF-8 sanitising; skipping it",
+					"repo_id", repoID, "ref", ref, "path", path)
+				continue
+			}
+			seen[path] = struct{}{}
+			rows = append(rows, []any{repoID, ref, path, f.Size, f.BlobSHA, f.LFSOID})
 		}
 		if err := tx.BulkInsert(ctx, "repo_files",
 			[]string{"repo_id", "ref", "path", "size", "blob_sha", "lfs_oid"}, rows); err != nil {
@@ -474,6 +492,11 @@ func (s *Store) UpsertParquetFile(ctx context.Context, repoID int64, ref, path s
 	// to repo_files on `f.path = p.path` -- with only one side folded the join
 	// misses and the viewer reports a zero-byte file.
 	path = sanitizeText(path)
+	// The schema is built from the file's own column names, which are
+	// whatever the writer put there: a NUL in one ("a\u0000b") is valid JSON
+	// and refused by JSONB, which failed this upsert -- and with it the
+	// sync -- on every push of that repository.
+	schema = sanitizeJSONRaw(schema)
 	// Same parent-row-first ordering as ReplaceRepoFiles (see lockRepoRow):
 	// the ON CONFLICT update would otherwise lock the parquet_files row
 	// before the foreign-key check reaches repositories. ErrNotFound when the

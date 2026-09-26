@@ -37,6 +37,17 @@ export type ApiResult<T> =
        * instead of rendering a generic not-found page.
        */
       movedTo?: RepoLocation;
+      /**
+       * The `X-Error-Code` response header, when the backend set one. This is
+       * the huggingface_hub compatibility signal (backend/internal/api/refs.go
+       * `revisionNotFound`) that tells a 404 caused by an unresolvable
+       * revision apart from any other 404 — both carry the same JSON
+       * `error.type` ("not_found"), since `revisionOrEmpty`'s read handlers
+       * (the UI-facing tree/commits endpoints included) answer a bad revision
+       * with 404 rather than folding it into an empty listing. Callers use
+       * `isRevisionNotFound()` rather than reading this directly.
+       */
+      code?: string;
     };
 
 export type ApiFetchOptions = {
@@ -133,6 +144,7 @@ export async function apiFetch<T>(
         message,
         type: errBody?.error?.type,
         movedTo: errBody?.error?.moved_to,
+        code: res.headers.get("X-Error-Code") ?? undefined,
       };
     }
 
@@ -162,4 +174,19 @@ export function isRepoMoved(
   result: ApiResult<unknown>,
 ): result is { ok: false; status: number; message: string; movedTo: RepoLocation } {
   return !result.ok && result.status === 404 && result.movedTo !== undefined;
+}
+
+/**
+ * True when `result` failed because the revision itself doesn't resolve to
+ * anything (an unknown branch/tag/commit, or `git push --delete` racing a
+ * viewer) rather than because the requested path is missing at a revision
+ * that *does* resolve. Both are plain 404s with `error.type: "not_found"` —
+ * the JSON body alone can't tell them apart — so the distinction rides the
+ * `X-Error-Code: RevisionNotFound` header (backend/internal/api/refs.go),
+ * surfaced here as `result.code`. Pages route this case to a dedicated
+ * "this revision doesn't exist, try the default branch" state instead of the
+ * generic not-found page (see RepoTree / RepoBlob / RepoCommits).
+ */
+export function isRevisionNotFound(result: ApiResult<unknown>): boolean {
+  return !result.ok && result.status === 404 && result.code === "RevisionNotFound";
 }

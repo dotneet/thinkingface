@@ -14,6 +14,14 @@ import (
 // found past its expires_at (which flips it to "expired" as a side effect).
 var ErrTransferNotPending = errors.New("store: transfer is not pending")
 
+// ErrTransferRepoArchived is returned by AcceptRepoTransfer when the
+// repository was archived after the request was filed. Archiving is the
+// switch that stops every write to a repository, transfers included, so the
+// request cannot complete -- but it stays pending rather than being voided:
+// archiving is reversible, and the settings page keeps a pending request
+// visible and cancellable on an archive for exactly that reason.
+var ErrTransferRepoArchived = errors.New("store: repository is archived")
+
 // RepoTransfer is one row of the transfer/rename audit trail
 // (docs/dev/repo-transfer-design.md §4, §7): either a completed immediate move
 // (status "accepted" from the moment it is created) or a request awaiting
@@ -453,7 +461,9 @@ func (s *Store) queryRepoTransfers(ctx context.Context, where string, args ...an
 // and flips the row to 'accepted' (docs/dev/repo-transfer-design.md §7.2). A
 // request whose from-location no longer matches the repository (it was moved
 // or renamed in the meantime) is voided -- status 'cancelled' -- and reported
-// as ErrTransferNotPending instead of being executed.
+// as ErrTransferNotPending instead of being executed. So is a request whose
+// requester could no longer file it (requesterMayStillTransfer), and a
+// repository archived since the request was filed is ErrTransferRepoArchived.
 func (s *Store) AcceptRepoTransfer(ctx context.Context, id, actorID int64) (*Repo, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -471,19 +481,20 @@ func (s *Store) AcceptRepoTransfer(ctx context.Context, id, actorID int64) (*Rep
 	}
 	var curNSID int64
 	var curName string
+	var archivedAt *time.Time
 	if err := tx.QueryRow(ctx,
-		`SELECT namespace_id, name FROM repositories WHERE id = $1`+s.d.forUpdate(""), repoID,
-	).Scan(&curNSID, &curName); err != nil {
+		`SELECT namespace_id, name, archived_at FROM repositories WHERE id = $1`+s.d.forUpdate(""), repoID,
+	).Scan(&curNSID, &curName, &archivedAt); err != nil {
 		return nil, norm(err)
 	}
 
-	var fromNSID, toNamespaceID int64
+	var fromNSID, toNamespaceID, requestedBy int64
 	var fromName, toName, status string
 	var expiresAt time.Time
 	err = tx.QueryRow(ctx,
-		`SELECT from_namespace_id, from_name, to_namespace_id, to_name, status, expires_at
+		`SELECT from_namespace_id, from_name, to_namespace_id, to_name, requested_by, status, expires_at
 		 FROM repo_transfers WHERE id = $1`+s.d.forUpdate(""), id,
-	).Scan(&fromNSID, &fromName, &toNamespaceID, &toName, &status, &expiresAt)
+	).Scan(&fromNSID, &fromName, &toNamespaceID, &toName, &requestedBy, &status, &expiresAt)
 	if err != nil {
 		return nil, norm(err)
 	}
@@ -499,11 +510,7 @@ func (s *Store) AcceptRepoTransfer(ctx context.Context, id, actorID int64) (*Rep
 		return nil, ErrTransferNotPending
 	}
 
-	// The request described a move *from* a specific location. If the
-	// repository has since been moved or renamed by its owner, the request
-	// no longer means what the destination is agreeing to: void it instead
-	// of pulling the repository out of wherever it lives now.
-	if curNSID != fromNSID || curName != fromName {
+	voidRequest := func() (*Repo, error) {
 		if _, err := tx.Exec(ctx,
 			`UPDATE repo_transfers SET status = 'cancelled', decided_by = $2, decided_at = $3 WHERE id = $1`,
 			id, actorID, now); err != nil {
@@ -513,6 +520,38 @@ func (s *Store) AcceptRepoTransfer(ctx context.Context, id, actorID int64) (*Rep
 			return nil, err
 		}
 		return nil, ErrTransferNotPending
+	}
+
+	// The request described a move *from* a specific location. If the
+	// repository has since been moved or renamed by its owner, the request
+	// no longer means what the destination is agreeing to: void it instead
+	// of pulling the repository out of wherever it lives now.
+	if curNSID != fromNSID || curName != fromName {
+		return voidRequest()
+	}
+
+	// A pending request is the requester's authority, frozen at filing time
+	// and exercised by somebody else up to a week later. Only the destination
+	// side is checked by the caller, so without this an admin removed from
+	// the source organisation -- or suspended outright -- could file a request
+	// on the way out and have an accomplice at the destination complete it
+	// afterwards. Void it rather than leave it pending: nothing the requester
+	// does later can make this request legitimate again, and a fresh one from
+	// a current admin is one click away.
+	ok, err := requesterMayStillTransfer(ctx, tx, s.d, requestedBy, fromNSID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return voidRequest()
+	}
+
+	// Archiving stops every write to a repository, transfers included (the
+	// API's loadRepoForWrite refuses to *file* one on an archive). Read under
+	// the repository lock above, so an archive cannot land between this check
+	// and the move.
+	if archivedAt != nil {
+		return nil, ErrTransferRepoArchived
 	}
 
 	repo, _, _, err := s.transferMove(ctx, tx, TransferSpec{RepoID: repoID, ToNamespaceID: toNamespaceID, ToName: toName, ActorID: actorID}, id, now)
@@ -530,6 +569,58 @@ func (s *Store) AcceptRepoTransfer(ctx context.Context, id, actorID int64) (*Rep
 		return nil, err
 	}
 	return repo, nil
+}
+
+// requesterMayStillTransfer reports whether the user who filed a transfer
+// could still file it now: an account that is neither suspended nor waiting
+// for approval, holding admin in the source namespace. It is the store's
+// reading of the rule api.startTransfer applies at filing time (roleIn >=
+// RoleAdmin): a site administrator is admin everywhere, a personal
+// namespace's only admin is its owner, and an organisation's admins are its
+// org_members with role 'admin'.
+//
+// The source namespace row is locked, which is the lock every org membership
+// change takes (lockOrgForMembershipChange), and so is the requester's user
+// row, which suspension updates. A removal or suspension racing an accept is
+// therefore ordered strictly before it (and seen here) or strictly after it
+// (and the transfer really did complete while the requester held the role).
+func requesterMayStillTransfer(ctx context.Context, ex executor, d dialect, requesterID, fromNamespaceID int64) (bool, error) {
+	var ownerID *int64
+	if err := ex.QueryRow(ctx,
+		`SELECT owner_user_id FROM namespaces WHERE id = $1`+d.forUpdate(""), fromNamespaceID,
+	).Scan(&ownerID); err != nil {
+		return false, norm(err)
+	}
+
+	var isAdmin bool
+	var disabledAt, pendingAt *time.Time
+	err := ex.QueryRow(ctx,
+		`SELECT is_admin, disabled_at, approval_pending_at FROM users WHERE id = $1`+d.forUpdate(""), requesterID,
+	).Scan(&isAdmin, &disabledAt, &pendingAt)
+	if isNoRows(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if disabledAt != nil || pendingAt != nil {
+		return false, nil
+	}
+	if isAdmin || (ownerID != nil && *ownerID == requesterID) {
+		return true, nil
+	}
+
+	var role string
+	err = ex.QueryRow(ctx,
+		`SELECT role FROM org_members WHERE namespace_id = $1 AND user_id = $2`, fromNamespaceID, requesterID,
+	).Scan(&role)
+	if isNoRows(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return role == "admin", nil
 }
 
 // RejectRepoTransfer marks a pending transfer as rejected.
