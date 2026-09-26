@@ -109,6 +109,16 @@ tf login [ENDPOINT]
   terminal, or, when piped, passed as one line on stdin via `--password-stdin`.
 - A warning is shown if the issued token's scope turns out to be `read` (`tf up` needs
   write scope).
+- Logging in again against an endpoint that already has a saved credential revokes the
+  token the previous `tf login` minted for it (`backend/internal/tfcli/login.go` ~215-254),
+  once the new credential is safely saved to disk — mirrors `tf logout`'s own revoke rule.
+  The credential to revoke is captured (`prevCred`) before `file.Set` overwrites it; a
+  credential with `TokenID == 0` (pasted in via `--token`, never minted by `tf login`) is
+  never revoked here, and neither is a previous credential whose token is byte-for-byte the
+  new one being saved (covers `tf login --token T` where `T` is exactly what an earlier
+  login minted). On success, a note goes to stderr:
+  `revoked the token saved by the previous tf login (id N)`; on failure, a
+  `could not revoke previous token` warning, non-fatal either way.
 
 ### `tf logout [ENDPOINT]`
 

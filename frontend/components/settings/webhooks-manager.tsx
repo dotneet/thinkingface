@@ -119,7 +119,10 @@ export function WebhooksManager({
     // the DOM long after the person who created it had walked away.
     setJustCreated(undefined);
     refreshWebhooks(namespace, () => cancelled);
-    listAllRepos({ author: namespace }).then((result) => {
+    // Sorted by name, not the default last-updated order: a push between two
+    // pages would move a repository from a later page onto an earlier one and
+    // it would never be fetched at all. Name order is also what a picker wants.
+    listAllRepos({ author: namespace, sort: "name" }).then((result) => {
       if (cancelled) return;
       if (result.ok) {
         setRepos(result.data);

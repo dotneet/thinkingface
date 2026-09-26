@@ -400,6 +400,28 @@ func baseModelClause(bind func(any) string, target, relation string) string {
 // plus its positional args, in the order the placeholders were allocated.
 // It touches no I/O, so it is covered directly by repos_test.go rather than
 // through a live database.
+//
+// Every value bound as text, or bound into a jsonb literal for
+// jsonArrayContainsAll, is passed through sanitizeText first -- for the same
+// reason UpdateRepoIndex sanitizes a pushed card before it is stored (see
+// text.go): a NUL reaches PostgreSQL either as a raw byte in a text bind
+// (SQLSTATE 22021, e.g. ?q=%00, ?license=%00, ?author=%00) or, once
+// json.Marshal has escaped it to \u0000 for that ::jsonb cast, as an
+// "unsupported Unicode escape sequence" (22P05, e.g. ?tags=%00) -- either way
+// an unauthenticated listing request turns into a 500 rather than a result.
+// Sanitizing here rather than rejecting the request keeps every caller (the
+// Web UI listing, the HF-compatible list_models/list_datasets mapping in
+// api/repolist.go) covered without each needing its own check.
+//
+// Whether a field filters at all is still decided from f's original value,
+// not the sanitized one: a value that is nothing but NUL is non-empty and so
+// still turns its filter on, exactly as any other value would, and the
+// filter is bound as the empty string -- which no stored card's sanitized
+// text can equal either, so it simply matches nothing. Sanitizing before the
+// presence check instead would have turned a request like
+// ?license=%00 into an *unfiltered* listing, which is the wrong direction to
+// fail in on a filter endpoint: a value nobody's card can match should narrow
+// the results to nothing, never widen them to everything.
 func buildRepoWhere(d dialect, f RepoFilter, scope repoFilterScope) (string, []any) {
 	where := []string{}
 	args := []any{}
@@ -416,27 +438,31 @@ func buildRepoWhere(d dialect, f RepoFilter, scope repoFilterScope) (string, []a
 	if f.Author != "" {
 		// Case-insensitive, like every other namespace lookup: /Alice and
 		// /alice are one profile, so the facet behind them has to agree.
-		where = append(where, `LOWER(n.name) = LOWER(`+bind(f.Author)+`)`)
+		where = append(where, `LOWER(n.name) = LOWER(`+bind(sanitizeText(f.Author))+`)`)
 	}
 	if f.Query != "" {
 		// A plain substring, escaped to a literal so a "%" or "_" a user
 		// typed narrows the listing instead of widening it (see like.go).
-		q := bind(likeContains(f.Query))
+		q := bind(likeContains(sanitizeText(f.Query)))
 		where = append(where, likeAnyOf(q, "r.name", "n.name", "r.description"))
 	}
 	if f.Search != "" {
-		if pred := d.searchPredicate(bind, f.Search); pred != "" {
+		if pred := d.searchPredicate(bind, sanitizeText(f.Search)); pred != "" {
 			where = append(where, pred)
 		}
 	}
 	if scope.tags && len(f.Tags) > 0 {
-		where = append(where, d.jsonArrayContainsAll("r.card", "tags", bind, f.Tags))
+		tags := make([]string, len(f.Tags))
+		for i, tag := range f.Tags {
+			tags[i] = sanitizeText(tag)
+		}
+		where = append(where, d.jsonArrayContainsAll("r.card", "tags", bind, tags))
 	}
 	if scope.license && f.License != "" {
-		where = append(where, `(`+d.jsonScalarText("r.card", "license")+`) = `+bind(f.License))
+		where = append(where, `(`+d.jsonScalarText("r.card", "license")+`) = `+bind(sanitizeText(f.License)))
 	}
 	if scope.task && f.Task != "" {
-		task := bind(f.Task)
+		task := bind(sanitizeText(f.Task))
 		where = append(where, `((`+d.jsonScalarText("r.card", "pipeline_tag")+`) = `+task+` OR `+d.jsonArrayHas("r.card", "task_categories", task)+`)`)
 	}
 	// Relation is a facet dimension and drops out of its own facet; BaseModel
@@ -447,10 +473,10 @@ func buildRepoWhere(d dialect, f RepoFilter, scope repoFilterScope) (string, []a
 		relation = f.Relation
 	}
 	if f.BaseModel != "" || relation != "" {
-		where = append(where, baseModelClause(bind, f.BaseModel, relation))
+		where = append(where, baseModelClause(bind, sanitizeText(f.BaseModel), sanitizeText(relation)))
 	}
 	if f.Dataset != "" {
-		if ns, name, ok := splitRepoRef(f.Dataset); ok {
+		if ns, name, ok := splitRepoRef(sanitizeText(f.Dataset)); ok {
 			where = append(where, lineageEdgeExists(LineageKindDataset,
 				`LOWER(l.target_namespace) = LOWER(`+bind(ns)+`)`, `l.target_name = `+bind(name)))
 		} else {

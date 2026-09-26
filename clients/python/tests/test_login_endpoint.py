@@ -47,6 +47,22 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
             getattr(mod, "ENDPOINT", None), str
         ):
             monkeypatch.setattr(mod, "ENDPOINT", mod.ENDPOINT)
+    # Same idea for datasets: login() also retargets datasets.config's
+    # HF_ENDPOINT/HUB_DATASETS_URL (and any other datasets.* module holding
+    # its own HF_ENDPOINT copy) when datasets is already imported. This
+    # process does not depend on the real `datasets` package -- it is not a
+    # dependency of this project -- so in practice this only restores what
+    # individual tests stub into sys.modules themselves, but it follows the
+    # same belt-and-suspenders pattern as the huggingface_hub loop above.
+    for name, mod in list(sys.modules.items()):
+        if (
+            (name == "datasets" or name.startswith("datasets."))
+            and mod is not None
+            and isinstance(getattr(mod, "HF_ENDPOINT", None), str)
+        ):
+            monkeypatch.setattr(mod, "HF_ENDPOINT", mod.HF_ENDPOINT)
+            if isinstance(getattr(mod, "HUB_DATASETS_URL", None), str):
+                monkeypatch.setattr(mod, "HUB_DATASETS_URL", mod.HUB_DATASETS_URL)
 
 
 def _fake_hf_hub_modules(*, endpoint: str = "https://huggingface.co") -> tuple[Any, Any]:
@@ -58,6 +74,17 @@ def _fake_hf_hub_modules(*, endpoint: str = "https://huggingface.co") -> tuple[A
     api = types.SimpleNamespace(endpoint=endpoint)
     hf_api_mod = types.SimpleNamespace(api=api)
     return constants, hf_api_mod
+
+
+def _fake_datasets_config_module(*, endpoint: str = "https://huggingface.co") -> Any:
+    """Stub replacement for ``datasets.config``, mirroring the real module's
+    shape: ``HUB_DATASETS_URL`` is derived from ``HF_ENDPOINT`` at "import"
+    time, exactly like ``datasets/config.py`` does."""
+    return types.SimpleNamespace(
+        HF_ENDPOINT=endpoint,
+        HUB_DATASETS_URL=endpoint + "/datasets/{repo_id}/resolve/{revision}/{path}",
+        HUB_DATASETS_HFFS_URL="hf://datasets/{repo_id}@{revision}/{path}",
+    )
 
 
 def test_login_calls_hf_login_when_hub_not_yet_imported(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,10 +156,14 @@ def test_login_never_calls_hf_login_when_retarget_cannot_be_verified(
         thinkingface.login("http://localhost:8080", token="tf_xxx")
 
     fake_login.assert_not_called()
-    # The environment is still configured for this process even though the
-    # already-built huggingface_hub singleton could not be fixed up.
+    # HF_ENDPOINT is still configured for this process even though the
+    # already-built huggingface_hub singleton could not be fixed up, but
+    # HF_TOKEN must NOT be set: a surviving object in this process (e.g. a
+    # notebook kernel that catches the exception) would otherwise pick up the
+    # token via get_token() on its next call and send it to whatever endpoint
+    # that stuck singleton still holds.
     assert os.environ["HF_ENDPOINT"] == "http://localhost:8080"
-    assert os.environ["HF_TOKEN"] == "tf_xxx"
+    assert "HF_TOKEN" not in os.environ
 
 
 def test_login_without_token_never_touches_hf_login(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -200,3 +231,86 @@ def test_login_refuses_when_a_frozen_endpoint_copy_cannot_be_retargeted(
         thinkingface.login("http://localhost:8080", token="tf_xxx", add_to_git_credential=True)
 
     fake_login.assert_not_called()
+
+
+def test_login_retargets_already_imported_datasets_config_and_calls_hf_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``datasets`` freezes its own copy of the endpoint independently of
+    ``huggingface_hub`` (``datasets/config.py``: ``HF_ENDPOINT`` is read once
+    at import time, and ``HUB_DATASETS_URL`` is derived from it in that same
+    statement). Left unpatched, ``import datasets`` followed by
+    ``thinkingface.login(url, token=...)`` would leave a later
+    ``load_dataset("me/ds")`` sending the thinkingface token to
+    huggingface.co -- this is the leak the fix closes."""
+    monkeypatch.delitem(sys.modules, "huggingface_hub.constants", raising=False)
+    monkeypatch.delitem(sys.modules, "huggingface_hub.hf_api", raising=False)
+    datasets_config = _fake_datasets_config_module(endpoint="https://huggingface.co")
+    monkeypatch.setitem(sys.modules, "datasets.config", datasets_config)
+    fake_login = Mock()
+    monkeypatch.setattr("huggingface_hub.login", fake_login, raising=False)
+
+    thinkingface.login("http://localhost:8080", token="tf_xxx")
+
+    fake_login.assert_called_once_with(token="tf_xxx", add_to_git_credential=False)
+    assert datasets_config.HF_ENDPOINT == "http://localhost:8080"
+    assert datasets_config.HUB_DATASETS_URL.startswith("http://localhost:8080/datasets/")
+    # Not derived from HF_ENDPOINT (it's a fixed hf:// URI template) and must
+    # be left untouched.
+    assert datasets_config.HUB_DATASETS_HFFS_URL == "hf://datasets/{repo_id}@{revision}/{path}"
+
+
+def test_login_refuses_when_datasets_config_cannot_be_retargeted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """huggingface_hub retargets fine, but datasets.config's HF_ENDPOINT
+    cannot be changed (e.g. an unrecognised internal shape on some other
+    datasets version): login() must still refuse to call
+    huggingface_hub.login(), since load_dataset()/push_to_hub() would keep
+    sending the token to whatever endpoint datasets.config still holds. The
+    token must not end up in the environment either."""
+    monkeypatch.delitem(sys.modules, "huggingface_hub.constants", raising=False)
+    monkeypatch.delitem(sys.modules, "huggingface_hub.hf_api", raising=False)
+
+    class _StuckConfig:
+        @property
+        def HF_ENDPOINT(self) -> str:  # noqa: N802 - mirrors the module attribute
+            return "https://huggingface.co"
+
+        @HF_ENDPOINT.setter
+        def HF_ENDPOINT(self, value: str) -> None:  # noqa: N802
+            pass  # silently ignored, like a stale cached property would be
+
+    monkeypatch.setitem(sys.modules, "datasets.config", _StuckConfig())
+    fake_login = Mock()
+    monkeypatch.setattr("huggingface_hub.login", fake_login, raising=False)
+
+    with pytest.raises(RuntimeError, match="already imported"):
+        thinkingface.login("http://localhost:8080", token="tf_xxx")
+
+    fake_login.assert_not_called()
+    assert os.environ["HF_ENDPOINT"] == "http://localhost:8080"
+    assert "HF_TOKEN" not in os.environ
+
+
+def test_login_retargets_frozen_endpoint_copies_in_datasets_submodules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive, mirroring huggingface_hub.utils._git_credential's handling:
+    if some datasets submodule ever does `from .config import HF_ENDPOINT`
+    and keeps its own copy (none currently do in the installed version, but
+    nothing here should depend on that staying true), login() retargets it
+    too."""
+    monkeypatch.delitem(sys.modules, "huggingface_hub.constants", raising=False)
+    monkeypatch.delitem(sys.modules, "huggingface_hub.hf_api", raising=False)
+    datasets_config = _fake_datasets_config_module(endpoint="https://huggingface.co")
+    other_copy = types.SimpleNamespace(HF_ENDPOINT="https://huggingface.co")
+    monkeypatch.setitem(sys.modules, "datasets.config", datasets_config)
+    monkeypatch.setitem(sys.modules, "datasets.some_module", other_copy)
+    fake_login = Mock()
+    monkeypatch.setattr("huggingface_hub.login", fake_login, raising=False)
+
+    thinkingface.login("http://localhost:8080", token="tf_xxx")
+
+    assert other_copy.HF_ENDPOINT == "http://localhost:8080"
+    fake_login.assert_called_once_with(token="tf_xxx", add_to_git_credential=False)

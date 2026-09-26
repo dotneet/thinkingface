@@ -6,6 +6,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -459,6 +460,122 @@ func TestIntegrationAcceptRechecksTheRequestersAuthority(t *testing.T) {
 		}
 		if moved.Namespace != "bob" {
 			t.Fatalf("moved to %q, want bob", moved.Namespace)
+		}
+	})
+}
+
+// Two accepts that cross between the same two namespaces -- X moves a
+// repository alice -> bob while Y moves one bob -> alice -- must both
+// complete. The authority re-check used to lock the source namespace FOR
+// UPDATE, and each move's foreign-key check on repositories.namespace_id takes
+// FOR KEY SHARE on its destination, which is the other accept's source: a lock
+// cycle Postgres broke by failing one side with 40P01. Row locks only exist on
+// Postgres (SQLite serialises writers), so this is a Postgres-only case.
+//
+// X is driven by hand and parked right after its authority check, holding
+// whatever that check locks; Y then has to run to completion past it. Under
+// the old FOR UPDATE, Y blocks on X's row and the deadline below fires.
+func TestIntegrationCrossingAcceptsDoNotDeadlock(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		if _, ok := s.d.(pgDialect); !ok {
+			t.Skip("row locks are Postgres-only; SQLite serialises write transactions")
+		}
+		f := newFixture(t, s)
+		ctx := f.ctx
+		aliceNS, bobNS := f.ns(t, "alice"), f.ns(t, "bob")
+
+		rX := f.repo(t, "alice", "outbound", "model", nil)
+		tX, err := s.CreateRepoTransfer(ctx, TransferSpec{RepoID: rX.ID, ToNamespaceID: bobNS.ID, ActorID: f.alice.ID}, time.Hour)
+		if err != nil {
+			t.Fatalf("CreateRepoTransfer(X): %v", err)
+		}
+		rY := f.repo(t, "bob", "inbound", "model", nil)
+		tY, err := s.CreateRepoTransfer(ctx, TransferSpec{RepoID: rY.ID, ToNamespaceID: aliceNS.ID, ActorID: f.bob.ID}, time.Hour)
+		if err != nil {
+			t.Fatalf("CreateRepoTransfer(Y): %v", err)
+		}
+
+		txX, err := s.db.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin X: %v", err)
+		}
+		defer txX.Rollback(ctx) //nolint:errcheck
+		if ok, err := requesterMayStillTransfer(ctx, txX, s.d, f.alice.ID, aliceNS.ID); err != nil || !ok {
+			t.Fatalf("X authority check = %v, %v; want true", ok, err)
+		}
+
+		yctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		moved, err := s.AcceptRepoTransfer(yctx, tY.ID, f.alice.ID)
+		if err != nil {
+			t.Fatalf("AcceptRepoTransfer(Y) while X holds its authority check = %v; want it to complete", err)
+		}
+		if moved.Namespace != "alice" {
+			t.Fatalf("Y moved to %q, want alice", moved.Namespace)
+		}
+
+		// X's own move now needs FOR KEY SHARE on bob's namespace, which Y
+		// share-locked and has since released.
+		if _, _, _, err := s.transferMove(ctx, txX, TransferSpec{RepoID: rX.ID, ToNamespaceID: bobNS.ID, ActorID: f.bob.ID}, tX.ID, time.Now()); err != nil {
+			t.Fatalf("X move: %v", err)
+		}
+		if err := txX.Commit(ctx); err != nil {
+			t.Fatalf("commit X: %v", err)
+		}
+		if back, err := s.GetRepoByID(ctx, rX.ID); err != nil || back.Namespace != "bob" {
+			t.Fatalf("X repository = %+v, %v; want it in bob", back, err)
+		}
+	})
+}
+
+// The shared lock the authority re-check takes must still hold off what would
+// change its answer: an org membership change (which locks the namespace row
+// FOR UPDATE) and a suspension (an UPDATE of the requester's users row). Both
+// have to wait for an accept that has already checked, so that the accept is
+// ordered strictly before them. Postgres-only for the same reason as above.
+func TestIntegrationAuthorityCheckHoldsOffRemovalAndSuspension(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		if _, ok := s.d.(pgDialect); !ok {
+			t.Skip("row locks are Postgres-only; SQLite serialises write transactions")
+		}
+		f := newFixture(t, s)
+		ctx := f.ctx
+		// Two admins, so removing alice is not refused as ErrLastAdmin -- a
+		// quick refusal must not pass for "it waited".
+		acme, err := s.CreateOrg(ctx, "acme", f.admin.ID, OrgUpdate{})
+		if err != nil {
+			t.Fatalf("CreateOrg: %v", err)
+		}
+		if _, err := s.AddOrgMember(ctx, acme.ID, f.alice.ID, "admin", f.admin.ID); err != nil {
+			t.Fatalf("AddOrgMember: %v", err)
+		}
+
+		held, err := s.db.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer held.Rollback(ctx) //nolint:errcheck
+		if ok, err := requesterMayStillTransfer(ctx, held, s.d, f.alice.ID, acme.ID); err != nil || !ok {
+			t.Fatalf("authority check = %v, %v; want true", ok, err)
+		}
+
+		mustWait := func(what string, op func(context.Context) error) {
+			t.Helper()
+			wctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+			defer cancel()
+			err := op(wctx)
+			if err == nil || wctx.Err() == nil {
+				t.Fatalf("%s while an accept holds the authority check = %v; want it to wait until the deadline", what, err)
+			}
+		}
+		mustWait("RemoveOrgMember", func(c context.Context) error { return s.RemoveOrgMember(c, acme.ID, f.alice.ID) })
+		mustWait("SetUserDisabled", func(c context.Context) error { return s.SetUserDisabled(c, "alice", true, f.admin.ID) })
+
+		if err := held.Rollback(ctx); err != nil {
+			t.Fatalf("rollback: %v", err)
+		}
+		if err := s.RemoveOrgMember(ctx, acme.ID, f.alice.ID); err != nil {
+			t.Fatalf("RemoveOrgMember once released: %v", err)
 		}
 	})
 }

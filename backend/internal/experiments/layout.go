@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // SystemMetricPrefix namespaces machine telemetry (GPU / CPU / memory) so it
@@ -359,11 +360,36 @@ var (
 // Resolving per row reads files written either way, including ones already
 // damaged by that flush.
 
+// hasInvalidIngestChars reports whether s carries a control character or is
+// not valid UTF-8: the same shape validateIngestName (api/experiments_ingest.go)
+// refuses at the ingest API. A batch export's parquet columns never go through
+// that check, so a run name (or, via groupingFromConfig, a "group" /
+// "job_type" config value) can carry a NUL or other control byte straight
+// through to a TEXT column. Postgres then rejects the write outright
+// (22021, invalid byte sequence for encoding "UTF8"), which is worse than
+// ingest's validation error: indexProject's upsert loop aborts mid-run,
+// leaving every other run in the project stale and skipping the
+// DeleteProjectRunsNotIn cleanup that runs after it.
+func hasInvalidIngestChars(s string) bool {
+	if !utf8.ValidString(s) {
+		return true
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 // rowRun is the run a row belongs to, or "" when none of the run columns names
-// one.
+// one. A candidate that would fail Postgres's TEXT encoding (see
+// hasInvalidIngestChars) is treated as absent -- the same as an empty column
+// -- rather than handed to the store, so one bad row from a batch export
+// drops out of the index instead of aborting the whole project's scan.
 func rowRun(row map[string]any) string {
 	for _, c := range runColumns {
-		if run := toString(row[c]); run != "" {
+		if run := toString(row[c]); run != "" && !hasInvalidIngestChars(run) {
 			return run
 		}
 	}

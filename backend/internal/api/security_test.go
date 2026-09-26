@@ -578,6 +578,115 @@ func TestLogin_DistributedGuessingHitsTheUsernameCeiling(t *testing.T) {
 	}
 }
 
+// Rotating through addresses inside one IPv6 /64 is one caller, not many:
+// before the limiter keyed IPv6 by /64, ten addresses from a single host's
+// own block were enough to empty alice's cross-address ceiling and keep her
+// out from everywhere.
+func TestBasicAuth_OneIPv6NetworkCannotLockOutAnother(t *testing.T) {
+	f := newSecFixture(t)
+	f.user("alice", "correct horse battery")
+	frozen := time.Now()
+	f.s.authGuard.now = func() time.Time { return frozen }
+
+	for a := 0; a < 12; a++ {
+		for i := 0; i < 5; i++ {
+			r := httptest.NewRequest("GET", "/healthz", bytes.NewReader(nil))
+			r.RemoteAddr = fmt.Sprintf("[2001:db8:66:1::%x]:4444", a+1)
+			r.SetBasicAuth("alice", "wrong")
+			f.s.Handler().ServeHTTP(httptest.NewRecorder(), r)
+		}
+	}
+	ok := f.do(secRequest{
+		method: "POST", path: "/api/v1/auth/login",
+		body:       map[string]string{"username": "alice", "password": "correct horse battery"},
+		remoteAddr: "10.0.0.1:1234",
+	})
+	if ok.Code != http.StatusOK {
+		t.Fatalf("alice from another network: status = %d, want 200; body = %s", ok.Code, ok.Body.String())
+	}
+}
+
+// Reading a bucket must not create one. retryAfter runs first on every
+// password attempt, throttled ones included, and a throttled attempt costs no
+// bcrypt -- so if it allocated, a stream of cheap refused requests with fresh
+// usernames would grow the map without bound until the sweep.
+func TestAuthGuard_ThrottledAttemptsDoNotGrowTheMap(t *testing.T) {
+	g := newAuthGuard(10)
+	if wait := g.retryAfter(passwordKeys("addr:192.0.2.9", "nobody")...); wait != 0 {
+		t.Fatalf("fresh keys: retryAfter = %v, want 0", wait)
+	}
+	if n := len(g.buckets); n != 0 {
+		t.Fatalf("retryAfter on fresh keys stored %d buckets; want 0", n)
+	}
+
+	f := newSecFixture(t)
+	const addr = "10.0.0.7:1234"
+	for i := 0; i < 40; i++ {
+		f.s.authGuard.penalize("addr:10.0.0.7")
+	}
+	before := len(f.s.authGuard.buckets)
+	for i := 0; i < 200; i++ {
+		r := httptest.NewRequest("GET", "/healthz", bytes.NewReader(nil))
+		r.RemoteAddr = addr
+		r.SetBasicAuth(fmt.Sprintf("spray-%d", i), "wrong")
+		f.s.Handler().ServeHTTP(httptest.NewRecorder(), r)
+
+		login := f.do(secRequest{
+			method: "POST", path: "/api/v1/auth/login",
+			body:       map[string]string{"username": fmt.Sprintf("spray-login-%d", i), "password": "wrong"},
+			remoteAddr: addr,
+		})
+		if login.Code != http.StatusTooManyRequests {
+			t.Fatalf("login %d from a spent address: status = %d, want 429", i, login.Code)
+		}
+	}
+	if after := len(f.s.authGuard.buckets); after != before {
+		t.Fatalf("200 throttled attempts grew the bucket map from %d to %d", before, after)
+	}
+}
+
+// A username longer than any account can have never becomes part of a key:
+// HTTP Basic bounds it only by the 1 MiB header limit, and it used to be
+// stored verbatim in two buckets. It is still a failed attempt, charged to the
+// address, so it cannot be repeated for free either.
+func TestBasicAuth_OverlongUsernameIsChargedToTheAddressOnly(t *testing.T) {
+	// maxUsernameKeyLen is only safe while no valid name is longer.
+	if err := validateName(strings.Repeat("a", maxUsernameKeyLen)); err != nil {
+		t.Fatalf("validateName rejects a %d-character name (%v); maxUsernameKeyLen is out of step", maxUsernameKeyLen, err)
+	}
+	if err := validateName(strings.Repeat("a", maxUsernameKeyLen+1)); err == nil {
+		t.Fatalf("validateName accepts a %d-character name; maxUsernameKeyLen would lock it out", maxUsernameKeyLen+1)
+	}
+
+	f := newSecFixture(t)
+	long := strings.Repeat("x", 64<<10)
+	basic := func() int {
+		r := httptest.NewRequest("GET", "/api/whoami-v2", bytes.NewReader(nil))
+		r.RemoteAddr = "10.0.0.8:1234"
+		r.SetBasicAuth(long, "wrong")
+		rec := httptest.NewRecorder()
+		f.s.Handler().ServeHTTP(rec, r)
+		return rec.Code
+	}
+	if code := basic(); code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", code)
+	}
+	for key := range f.s.authGuard.buckets {
+		if key != "addr:10.0.0.8" {
+			t.Errorf("unexpected bucket %.80q (len %d); an over-long username must only charge the address", key, len(key))
+		}
+	}
+	if wait := f.s.authGuard.retryAfter("addr:10.0.0.8"); wait != 0 {
+		t.Fatalf("one failure already throttles the address (%v)", wait)
+	}
+	for i := 0; i < 9; i++ {
+		basic()
+	}
+	if wait := f.s.authGuard.retryAfter("addr:10.0.0.8"); wait == 0 {
+		t.Fatal("ten over-long-username failures left the address bucket untouched")
+	}
+}
+
 // A personal access token must never enter the password path: it is a single
 // SHA-256, and throttling it would break git and huggingface_hub under load.
 func TestBearerAndTokenBasic_AreNotRateLimited(t *testing.T) {

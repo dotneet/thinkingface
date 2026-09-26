@@ -97,6 +97,12 @@ write-scoped personal access token — the password prompt has echo disabled on 
 is read from stdin via `--password-stdin` when piped. A warning is printed if the resulting
 token's scope turns out to be `read` (`tf up` needs a write-scoped token).
 
+Logging in again against an endpoint you already logged in to revokes the token that
+previous `tf login` minted for it, once the new one is safely saved — `tf` prints a note to
+stderr (`revoked the token saved by the previous tf login (id N)`) when this happens. A
+token you pasted in with `--token` is never revoked this way; only `tf logout` (or you
+yourself) takes it away.
+
 ### `tf logout [ENDPOINT]`
 
 Forgets the saved credentials for a server (default: the configured default endpoint). If the
@@ -316,7 +322,8 @@ recently logged-in endpoint becomes the default used when a command is run witho
 ```
 
 `token_id` is `0` when the saved token was pasted in with `--token` rather than minted by
-`tf login` — `tf logout` uses it to decide whether there's anything to revoke server-side.
+`tf login` — both `tf logout` and a later `tf login` against the same endpoint use it to
+decide whether there's a previously minted token to revoke server-side.
 
 ## Relationship to `hf upload`
 

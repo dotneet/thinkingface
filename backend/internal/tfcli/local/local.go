@@ -449,14 +449,31 @@ func segmentToRegexpSource(seg string) string {
 	return b.String()
 }
 
+// slashRune is '/' as a rune -- the code point a bracket class must never
+// match (see parseBracketClass), kept named since the range-splitting logic
+// below reasons about the code points immediately on either side of it.
+const slashRune = '/'
+
+// neverMatchClass is a regexp character class that cannot match any rune. Go's
+// regexp syntax has no literal "matches nothing" atom and rejects an empty
+// "[]", so this stands in for the degenerate case of a positive bracket class
+// whose only member(s) were '/' -- which a shell/gitignore glob's bracket
+// class can never match, leaving nothing behind to match at all.
+const neverMatchClass = `[^\x{0}-\x{10FFFF}]`
+
 // parseBracketClass reads a shell-style bracket expression starting at
 // runes[i] (which must be '['), following the usual glob conventions: "!" or
 // "^" right after "[" negates the class, and a "]" that would otherwise close
 // an empty class is instead its first literal member (so "[]ab]" matches "]",
-// "a" or "b"). ok is false when there is no matching "]" at all, in which
-// case "[" is not a class and the caller must treat it as a literal
-// character. On success, class is a regexp "[...]" fragment and end is the
-// index of the closing "]" in runes.
+// "a" or "b"). Per shell/gitignore glob semantics, a bracket class -- negated
+// or not -- never matches '/': "*" and "?" are already compiled to exclude it
+// (see segmentToRegexpSource), and a class must follow the same rule, so a
+// negated class always excludes '/' even when it was never listed, and a
+// literal member or range that would otherwise cover '/' has it carved back
+// out. ok is false when there is no matching "]" at all, in which case "[" is
+// not a class and the caller must treat it as a literal character. On
+// success, class is a regexp fragment (a "[...]" class, or neverMatchClass)
+// and end is the index of the closing "]" in runes.
 func parseBracketClass(runes []rune, i int) (class string, end int, ok bool) {
 	n := len(runes)
 	j := i + 1
@@ -477,44 +494,132 @@ func parseBracketClass(runes []rune, i int) (class string, end int, ok bool) {
 	}
 
 	content := runes[start:j]
+	frags := parseClassFragments(content)
+
 	var b strings.Builder
 	b.WriteByte('[')
 	if negate {
 		b.WriteByte('^')
+		for _, f := range frags {
+			writeClassFragment(&b, f, false)
+		}
+		// Always excluded, whether or not it was ever listed: a negated
+		// bracket class must not match '/' either.
+		b.WriteRune(slashRune)
+		b.WriteByte(']')
+		return b.String(), j, true
 	}
-	for k, r := range content {
-		// A "-" strictly between two members denotes a range in both glob
-		// and Go regexp syntax. Keep it as a range only when it is
-		// well-formed (low <= high); a reversed range such as "z-a" is not
-		// rejected by the glob syntax itself, but regexp.MustCompile would
-		// panic on it ("invalid character class range"), so fall back to
-		// treating the "-" as a literal member instead of a range.
-		if r == '-' && k > 0 && k+1 < len(content) {
-			if content[k-1] <= content[k+1] {
-				b.WriteByte('-')
-			} else {
-				b.WriteString(`\-`)
-			}
-			continue
-		}
-		// "^" is only special as the first rune of a Go regexp class
-		// (already spoken for by negate above), so any further one is
-		// escaped to stay literal the way a glob would treat it. "\\" is
-		// escaped so it cannot be read as the start of a regexp escape the
-		// glob syntax never offered. "[" is escaped too: left bare, a
-		// sequence like "[:foo:]" inside the class would be parsed by Go's
-		// regexp engine as an (invalid) POSIX character class and panic,
-		// even though shell globs give "[" and ":" no such meaning here.
-		switch r {
-		case '^', '\\', '[':
-			b.WriteByte('\\')
-			b.WriteRune(r)
-		default:
-			b.WriteRune(r)
-		}
+
+	before := b.Len()
+	for _, f := range frags {
+		writeClassFragment(&b, f, true)
+	}
+	if b.Len() == before {
+		// Every fragment was '/' itself, or a range that collapsed entirely
+		// into it (e.g. the pattern "[/]") -- this class can, correctly,
+		// never match anything.
+		return neverMatchClass, j, true
 	}
 	b.WriteByte(']')
 	return b.String(), j, true
+}
+
+// classFragment is one literal rune or inclusive range as parsed from a
+// bracket expression's content, before any '/' exclusion is applied.
+type classFragment struct {
+	isRange bool
+	r       rune // literal member (isRange == false)
+	lo, hi  rune // inclusive range bounds (isRange == true), lo <= hi
+}
+
+// parseClassFragments splits a bracket expression's content into literal and
+// range members. A "-" strictly between two members denotes a range in both
+// glob and Go regexp syntax; it is folded into one only when the bounds are
+// ascending (low <= high) and the member immediately before it is a plain
+// literal equal to that low bound -- otherwise (a reversed range such as
+// "z-a", or one endpoint already claimed by a neighbouring range, e.g. chained
+// "a-c-f") the "-" is kept as a literal member instead, exactly as
+// regexp.MustCompile would panic on a reversed range ("invalid character
+// class range") if it were emitted as one.
+func parseClassFragments(content []rune) []classFragment {
+	var frags []classFragment
+	for k := 0; k < len(content); k++ {
+		r := content[k]
+		if r == '-' && k > 0 && k+1 < len(content) {
+			lo, hi := content[k-1], content[k+1]
+			if lo <= hi && len(frags) > 0 {
+				if last := frags[len(frags)-1]; !last.isRange && last.r == lo {
+					frags[len(frags)-1] = classFragment{isRange: true, lo: lo, hi: hi}
+					k++ // hi is consumed by the range, not its own fragment
+					continue
+				}
+			}
+			frags = append(frags, classFragment{r: '-'})
+			continue
+		}
+		frags = append(frags, classFragment{r: r})
+	}
+	return frags
+}
+
+// writeClassFragment appends one fragment's regexp source to b. excludeSlash
+// is set for a positive class (a negated one excludes '/' once, after every
+// fragment -- see parseBracketClass): any part of the fragment that is, or
+// spans, '/' is carved out rather than written, by dropping a lone '/'
+// literal outright and by splitting a spanning range into the sub-ranges on
+// either side of it.
+func writeClassFragment(b *strings.Builder, f classFragment, excludeSlash bool) {
+	if !f.isRange {
+		if excludeSlash && f.r == slashRune {
+			return
+		}
+		writeClassRune(b, f.r)
+		return
+	}
+	lo, hi := f.lo, f.hi
+	if excludeSlash && lo <= slashRune && slashRune <= hi {
+		if lo <= slashRune-1 {
+			writeClassRange(b, lo, slashRune-1)
+		}
+		if slashRune+1 <= hi {
+			writeClassRange(b, slashRune+1, hi)
+		}
+		return
+	}
+	writeClassRange(b, lo, hi)
+}
+
+// writeClassRange appends an inclusive range (or, when it has collapsed to a
+// single rune, a literal) as bracket-expression members.
+func writeClassRange(b *strings.Builder, lo, hi rune) {
+	if lo == hi {
+		writeClassRune(b, lo)
+		return
+	}
+	writeClassRune(b, lo)
+	b.WriteByte('-')
+	writeClassRune(b, hi)
+}
+
+// writeClassRune appends one rune as a bracket-expression member, escaping
+// the runes that are still special inside a Go regexp class: "^" (only
+// meaningful as the class's first rune, already spoken for by negate),
+// "\\" (so it cannot be read as the start of a regexp escape the glob syntax
+// never offered), "[" (left bare, a sequence like "[:foo:]" inside the class
+// would be parsed by Go's regexp engine as an (invalid) POSIX character class
+// and panic, even though shell globs give "[" and ":" no such meaning here),
+// and "-" (unambiguous either way, but escaping it means a literal member
+// never has to worry about landing in a position -- first, last, or, via the
+// splitting above, freshly adjacent to another member -- where it would
+// instead be read as a range operator).
+func writeClassRune(b *strings.Builder, r rune) {
+	switch r {
+	case '^', '\\', '[', '-':
+		b.WriteByte('\\')
+		b.WriteRune(r)
+	default:
+		b.WriteRune(r)
+	}
 }
 
 // Kind is the inferred repository type, spelled like hub.Kind.

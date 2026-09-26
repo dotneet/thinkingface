@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-git/go-git/v5/plumbing"
+
 	"github.com/dotneet/thinkingface/backend/internal/config"
 	"github.com/dotneet/thinkingface/backend/internal/gitrepo"
 	"github.com/dotneet/thinkingface/backend/internal/storage"
@@ -292,6 +294,76 @@ func TestCommitThroughWAL_StaleWithoutRetryIsConflictAndRollsBack(t *testing.T) 
 	}
 	if got := headOf(t, git, repo); got != first.String() {
 		t.Fatalf("local head = %s, want rolled back to %s", got, first)
+	}
+}
+
+// Two commits chained on one branch before either reached the WAL, the first
+// of which hits an outage: A advances main X->A, B advances A->B, A's write
+// fails for a non-stale reason (its rollback leaves main alone, since B moved
+// it), and B's write is then stale because the index still says X. The steps
+// below are commitThroughWAL's, one call each, in that interleaving.
+//
+// B's rollback used to land on its parent, A -- a commit the WAL never
+// accepted -- while the index generation stayed put, so every later
+// EnsureLocal was a cache hit and every later commit on main was rejected as
+// stale. It must land on X, and the branch must take the next commit.
+func TestCommitThroughWAL_ChainedCommitsDoNotWedgeTheBranch(t *testing.T) {
+	s, st, repo, git := newWALCommitFixture(t, "authoritative")
+	git.EnableWAL(st, 1<<30)
+	ctx := context.Background()
+
+	x, _, err := s.commitThroughWAL(ctx, repo, commitOps("x"), true)
+	if err != nil {
+		t.Fatalf("seed commit: %v", err)
+	}
+	gitRepo, err := git.Open(repo.StoragePath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	a, aParent, err := gitRepo.Commit(commitOps("a"))
+	if err != nil {
+		t.Fatalf("commit A: %v", err)
+	}
+	b, bParent, err := gitRepo.Commit(commitOps("b"))
+	if err != nil {
+		t.Fatalf("commit B: %v", err)
+	}
+	dir := git.Dir(repo.StoragePath)
+	push := func(newHash, oldHash plumbing.Hash) error {
+		return wal.AuthoritativePush(ctx, st, dir, repo.StoragePath, []wal.RefUpdate{{
+			Ref: "refs/heads/main", Old: oldHash.String(), New: newHash.String(),
+		}})
+	}
+
+	st.failPut = true
+	if err := push(a, aParent); err == nil || errors.Is(err, wal.ErrStaleRef) {
+		t.Fatalf("A's write = %v, want a non-stale failure", err)
+	}
+	st.failPut = false
+	if err := gitRepo.ResetBranch("main", a, aParent); err != nil {
+		t.Fatalf("roll back A: %v", err)
+	}
+	if err := push(b, bParent); !errors.Is(err, wal.ErrStaleRef) {
+		t.Fatalf("B's write = %v, want ErrStaleRef (the index still says X)", err)
+	}
+	if err := gitRepo.ResetBranch("main", b, bParent); err != nil {
+		t.Fatalf("roll back B: %v", err)
+	}
+	if got := headOf(t, git, repo); got != x.String() {
+		t.Fatalf("local head = %s, want the WAL's %s (A, %s, was never accepted)", got, x, a)
+	}
+
+	// retryOnStale=false: a wedged branch fails this on the first stale.
+	c, _, err := s.commitThroughWAL(ctx, repo, commitOps("c"), false)
+	if err != nil {
+		t.Fatalf("commit after the rollbacks: %v (the branch is wedged)", err)
+	}
+	ix, _, err := wal.ReadIndex(ctx, st, repo.StoragePath)
+	if err != nil {
+		t.Fatalf("read index: %v", err)
+	}
+	if ix.Refs["refs/heads/main"] != c.String() {
+		t.Fatalf("index main = %s, want %s", ix.Refs["refs/heads/main"], c)
 	}
 }
 

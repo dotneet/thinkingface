@@ -253,7 +253,7 @@ followed explicitly.
 ```
 1. materialize(repo) → generation G
 2. Repo.Commit(req)  → writes new objects locally, yielding newHash / oldHash
-                       * it's fine to advance the local ref (it gets overwritten from the index later)
+                       * the local ref advances here; any failure after this rolls it back (below)
 3. git pack-objects --revs --stdout   (newHash, --not the existing refs)
 4. PUT to GCS: entries/{G.seq+1}-{ulid}.pack
 5. CAS the index (ifGenerationMatch=G.generation)
@@ -267,6 +267,22 @@ followed explicitly.
 
 If step 5 fails, the local objects written in step 2 remain as orphans, but since the local copy
 is just a cache this is harmless (they disappear on the next materialize / recreate).
+
+The local *ref* is not harmless, and it is not "overwritten from the index later": a failed write
+leaves the index generation where it was, so every later materialize is a cache hit (§4) that never
+re-projects refs. A ref the WAL never accepted would be served to readers and would make every
+later commit on the branch stale, permanently. So every failure after step 2 rolls the local ref
+back (`gitrepo.Repo.ResetBranch`), under two rules:
+
+- only if the ref still points at the commit this request made -- a concurrent local commit that
+  moved it on owns its own rollback;
+- to the WAL's value for the ref as recorded in the local state file (`wal.LocalRefs`), not to the
+  request's parent. Two local commits can chain on a branch before either reaches the index (A:
+  X→A, B: A→B, A's write fails on a GCS 5xx, B's is then stale against X); B's parent A is a
+  commit no index holds, and rolling back to it wedges the branch exactly as above. The recorded
+  value is always one the WAL accepted, and if the index has moved on since, the generation no
+  longer matches and the next materialize re-projects the ref regardless. A WAL-managed copy with
+  no state file has no index yet, so the recorded value is "absent" and the ref is deleted.
 
 ## 8. Clone / Fetch Flow
 

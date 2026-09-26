@@ -311,6 +311,12 @@ func (s *Server) handleHFCreateBranch(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// refParam's check is the one delete shares; creation also refuses a
+	// name Resolve would read as a commit id.
+	if err := gitrepo.ValidateNewRefName(branch); err != nil {
+		badRequest(w, "branch "+strconv.Quote(branch)+" "+err.Error())
+		return
+	}
 	var req struct {
 		StartingPoint string `json:"startingPoint"`
 	}
@@ -420,7 +426,7 @@ func (s *Server) handleHFCreateTag(w http.ResponseWriter, r *http.Request) {
 	if !decodeOptionalJSON(w, r, maxMetaBody, &req, "request body must be JSON with a tag field") {
 		return
 	}
-	if err := gitrepo.ValidateRefName(req.Tag); err != nil {
+	if err := gitrepo.ValidateNewRefName(req.Tag); err != nil {
 		badRequest(w, "tag "+strconv.Quote(req.Tag)+" "+err.Error())
 		return
 	}

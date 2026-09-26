@@ -48,15 +48,28 @@ const (
 	// userCeilingFactor multiplies the per-minute rate to get the global,
 	// all-addresses failure ceiling for one username. It is deliberately far
 	// above the per-(username, address) rate (perMinute/2): at 10x that rate,
-	// emptying the ceiling takes failures from at least ten distinct addresses,
-	// each already spending its own full budget on this one account. One
-	// address therefore can never lock anybody else out, while a distributed
-	// guessing run against a single account is still capped at a fixed number
-	// of attempts per minute. See passwordKeys.
+	// emptying the ceiling takes failures from at least ten distinct addresses
+	// -- ten IPv4 addresses or ten IPv6 /64s, see clientAddrKey -- each
+	// already spending its own full budget on this one account. A single host
+	// or network therefore cannot lock anybody else out. An attacker spread
+	// over enough networks still can empty the ceiling and hold the account
+	// shut for as long as they keep it up; that is the deliberate trade-off,
+	// since the alternative is no bound at all on distributed guessing against
+	// one account. See passwordKeys.
 	userCeilingFactor = 5.0
 	// authBucketIdle is how long an untouched bucket is kept before the
 	// sweeper drops it, bounding the map under a spray of distinct keys.
+	// Dropping one is indistinguishable from keeping it: a bucket goes from
+	// its floor (-capacity) back to full in 2*authBucketBurst minutes, well
+	// inside this, and a missing bucket reads as full (peekLocked).
 	authBucketIdle = 10 * time.Minute
+	// maxUsernameKeyLen is the longest username a failure bucket may name.
+	// It is validateName's limit (nameRe: 1-96 characters of an ASCII set),
+	// which every account created through the API passed, so a longer string
+	// cannot be anybody's username. Without the cap an HTTP Basic username --
+	// bounded only by the 1 MiB header limit -- went verbatim into two map
+	// keys and pinned that memory until the sweep.
+	maxUsernameKeyLen = 96
 )
 
 type tokenBucket struct {
@@ -110,6 +123,13 @@ func (g *authGuard) rateFor(key string) float64 {
 // retryAfter reports how long the caller must wait before another failed
 // attempt would be counted for any of these keys. Zero means "go ahead"; this
 // call never consumes a token, so a correct password is never rate limited.
+//
+// It is read-only, and in particular never creates a bucket: it runs before
+// anything else on every password attempt, throttled ones included, and
+// those cost no bcrypt -- so if reading a key stored it, each cheap refused
+// request with a fresh username or address would leave an entry behind until
+// the sweep. Only penalize, which sits behind a bcrypt slot and a passing
+// retryAfter, allocates.
 func (g *authGuard) retryAfter(keys ...string) time.Duration {
 	if !g.enabled() {
 		return 0
@@ -125,12 +145,12 @@ func (g *authGuard) retryAfter(keys ...string) time.Duration {
 		if rate <= 0 {
 			continue
 		}
-		b := g.refillLocked(key, rate, now)
-		if b.tokens >= 1 {
+		tokens := g.peekLocked(key, rate, now)
+		if tokens >= 1 {
 			continue
 		}
 		// Seconds until the bucket holds one whole token again.
-		need := (1 - b.tokens) / (rate / 60)
+		need := (1 - tokens) / (rate / 60)
 		if d := time.Duration(need * float64(time.Second)); d > worst {
 			worst = d
 		}
@@ -146,6 +166,7 @@ func (g *authGuard) penalize(keys ...string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.now()
+	g.sweepLocked(now)
 	for _, key := range keys {
 		rate := g.rateFor(key)
 		if rate <= 0 {
@@ -175,6 +196,24 @@ func (g *authGuard) reset(keys ...string) {
 	}
 }
 
+// peekLocked is the token count key would have after refilling to now,
+// without storing anything: a key with no bucket reads as a full one, which
+// is exactly what refillLocked would create for it.
+func (g *authGuard) peekLocked(key string, rate float64, now time.Time) float64 {
+	capacity := rate * authBucketBurst
+	b, ok := g.buckets[key]
+	if !ok {
+		return capacity
+	}
+	tokens := b.tokens
+	if elapsed := now.Sub(b.last).Seconds(); elapsed > 0 {
+		tokens += elapsed * (rate / 60)
+	}
+	return min(tokens, capacity)
+}
+
+// refillLocked is peekLocked for a caller about to change the bucket: it
+// creates the bucket if needed and brings it up to date in place.
 func (g *authGuard) refillLocked(key string, rate float64, now time.Time) *tokenBucket {
 	capacity := rate * authBucketBurst
 	b, ok := g.buckets[key]
@@ -342,8 +381,39 @@ func normalizeClientIP(entry string) (string, bool) {
 
 // clientAddrKey is clientIP as a failure-bucket key. The prefix keeps the
 // address space and the username space apart in one map (see rateFor).
+//
+// An IPv6 client is keyed by its /64, not its full address. A /64 is the
+// smallest block routinely handed to one host or one site (SLAAC needs it),
+// and every address in it is the same caller for this purpose: keyed by the
+// full address, a single machine could rotate through 2^64 of its own
+// addresses and get a fresh address bucket -- and a fresh per-(username,
+// address) bucket -- on every request, which made ten "distinct addresses"
+// against userCeilingFactor's ceiling no harder to find than one. IPv4, and
+// IPv4 reached over an IPv4-mapped IPv6 socket, is keyed by the address.
+//
+// Only the key is coarsened. The authentication log keeps clientIP's full
+// address, which is what an operator needs to find the host.
 func (s *Server) clientAddrKey(r *http.Request) string {
-	return "addr:" + s.clientIP(r)
+	return "addr:" + addrBucket(s.clientIP(r))
+}
+
+// addrBucket is the part of clientAddrKey after the prefix. A value that does
+// not parse as an address (RemoteAddr with no port, from a test or an odd
+// listener) is used as it is, as it always was.
+func addrBucket(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	addr = addr.WithZone("").Unmap()
+	if addr.Is4() {
+		return addr.String()
+	}
+	p, err := addr.Prefix(64)
+	if err != nil {
+		return addr.String()
+	}
+	return p.String()
 }
 
 const (
@@ -385,8 +455,22 @@ func normalizeUsernameKey(username string) string {
 // spends their own budget; the ceiling keeps what a distributed run can try
 // against one account bounded, and emptying it takes many addresses, each
 // already throttled on its own (see userCeilingFactor).
+//
+// A username longer than maxUsernameKeyLen cannot be an account, so it gets
+// the address bucket alone: no key ever embeds an over-long string, and there
+// is no account whose buckets it could be charged to. checkPassword answers
+// it as a wrong password against that bucket (impossibleUsername).
 func passwordKeys(addrKey, username string) []string {
+	if impossibleUsername(username) {
+		return []string{addrKey}
+	}
 	return []string{addrKey, userAddrKey(addrKey, username), usernameKey(username)}
+}
+
+// impossibleUsername reports whether username is too long to belong to any
+// account (maxUsernameKeyLen).
+func impossibleUsername(username string) bool {
+	return len(username) > maxUsernameKeyLen
 }
 
 // tooManyAttempts answers a rate-limited authentication attempt. The message

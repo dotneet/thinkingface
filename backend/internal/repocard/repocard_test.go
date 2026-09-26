@@ -351,6 +351,25 @@ func TestParse_ClosingFenceWithTrailingWhitespace(t *testing.T) {
 	}
 }
 
+// The exact-equality regression for the same bug: SplitFrontMatter used to
+// strip only the closing fence's "---" and then a single leading "\n",
+// leaving any trailing whitespace on the fence line itself as the start of
+// body. MergeReadme then carried that stray whitespace-only line straight
+// into the rewritten README, sitting between the front matter and the
+// heading it was supposed to be next to.
+func TestSplitFrontMatter_ClosingFenceTrailingWhitespaceIsNotLeftInBody(t *testing.T) {
+	front, body, ok := SplitFrontMatter("---\nlicense: mit\n---  \n# T")
+	if !ok {
+		t.Fatalf("SplitFrontMatter: ok = false, want true")
+	}
+	if front != "license: mit\n" {
+		t.Errorf("front = %q, want %q", front, "license: mit\n")
+	}
+	if body != "# T" {
+		t.Errorf("body = %q, want %q (no leftover whitespace from the fence line)", body, "# T")
+	}
+}
+
 // The complement: a longer horizontal rule in the body is not a fence, so a
 // README with no front matter keeps all of it as body.
 func TestParse_LongerHorizontalRuleDoesNotCloseTheBlock(t *testing.T) {

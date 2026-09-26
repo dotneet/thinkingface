@@ -261,6 +261,14 @@ func (s *Store) ListWebhookDeliveries(ctx context.Context, webhookID int64, limi
 	return out, total, rows.Err()
 }
 
+// webhookAttemptsExhaustedError is the response_body ClaimWebhookDelivery
+// records on a delivery it parks itself, because attempts already reached
+// the caller's budget without FinishWebhookDelivery ever landing to say why
+// (a worker that crashed mid-delivery, or whose finishing write itself
+// failed). Modeled on syncLeaseExpiredError (jobs.go), which parks a sync job
+// the same way for the same reason: nothing else ever will.
+const webhookAttemptsExhaustedError = "delivery reached its attempt budget without an outcome being recorded (worker crash or storage failure); parked without retrying further"
+
 // ClaimWebhookDelivery atomically takes the next pending, due delivery and
 // joins it with the webhook it targets. The claim itself pushes
 // next_attempt_at forward by leaseDuration: if this process crashes before
@@ -268,15 +276,39 @@ func (s *Store) ListWebhookDeliveries(ctx context.Context, webhookID int64, limi
 // expires, without ever needing a distinct "running" status. It returns nil,
 // nil when nothing is due.
 //
+// Before claiming, it also sweeps every 'pending' delivery whose attempts
+// already reached maxAttempts into 'failed'. Nothing else ever performs that
+// check: FinishWebhookDelivery is the only other place attempts is compared
+// against a budget, and a delivery whose finish never landed -- the worker
+// died before calling it, or the write itself failed -- never reaches it.
+// Left unswept such a row stays 'pending' forever, reclaimed and re-POSTed to
+// the target every lease period without end, since the claim below only ever
+// *advances* attempts. This mirrors RequeueExpiredSyncJobs (jobs.go), which
+// parks a sync job over budget the same way once its lease-expired sweep
+// finds it.
+//
 // The claim and the webhook lookup are two statements in one transaction
 // rather than a writable CTE, which SQLite does not have; on Postgres SKIP
 // LOCKED still lets several workers claim distinct rows concurrently.
-func (s *Store) ClaimWebhookDelivery(ctx context.Context, leaseDuration time.Duration) (*WebhookDeliveryJob, error) {
+func (s *Store) ClaimWebhookDelivery(ctx context.Context, leaseDuration time.Duration, maxAttempts int) (*WebhookDeliveryJob, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// The previous response, if any, is kept after the explanation -- the
+	// same shape RequeueExpiredSyncJobs uses to keep a job's last_error
+	// rather than overwrite it outright.
+	if _, err := tx.Exec(ctx,
+		`UPDATE webhook_deliveries
+		 SET status = 'failed',
+		     response_body = CASE WHEN response_body = '' THEN $1
+		                          ELSE $1 || '; last recorded response: ' || response_body END
+		 WHERE status = 'pending' AND attempts >= $2`,
+		webhookAttemptsExhaustedError, maxAttempts); err != nil {
+		return nil, err
+	}
 
 	j := &WebhookDeliveryJob{}
 	err = tx.QueryRow(ctx,
@@ -286,17 +318,28 @@ func (s *Store) ClaimWebhookDelivery(ctx context.Context, leaseDuration time.Dur
 		 WHERE id = (
 		   -- Deliveries for a webhook that is currently inactive stay
 		   -- pending untouched (no attempts burned) until it is
-		   -- reactivated, rather than being retried into "failed".
+		   -- reactivated, rather than being retried into "failed". The
+		   -- attempts bound below is belt-and-suspenders: the sweep above
+		   -- already parked everything at or past it as 'failed', so
+		   -- nothing 'pending' here can fail it, but a claim should never
+		   -- rely on a sibling statement having run first.
 		   SELECT wd.id FROM webhook_deliveries wd
 		   JOIN webhooks w ON w.id = wd.webhook_id
 		   WHERE wd.status = 'pending' AND wd.next_attempt_at <= now() AND w.active
+		     AND wd.attempts < $2
 		   ORDER BY wd.id`+s.d.forUpdate(" SKIP LOCKED")+` LIMIT 1
 		 )
 		 RETURNING id, webhook_id, event, payload, attempts`,
-		leaseDuration.Seconds(),
+		leaseDuration.Seconds(), maxAttempts,
 	).Scan(&j.DeliveryID, &j.WebhookID, &j.Event, &j.Payload, &j.Attempts)
 	if err != nil {
 		if isNoRows(err) {
+			// Nothing was due to claim, but the sweep above may still have
+			// parked rows into 'failed' -- committing is what makes that
+			// write stick rather than the deferred Rollback undoing it.
+			if cerr := tx.Commit(ctx); cerr != nil {
+				return nil, cerr
+			}
 			return nil, nil
 		}
 		return nil, err
@@ -341,12 +384,15 @@ func (s *Store) ClaimWebhookDelivery(ctx context.Context, leaseDuration time.Dur
 // respBody is whatever the endpoint answered, cut at a byte limit, so it can
 // end inside a multibyte character and can be Latin-1, binary, or carry NUL.
 // PostgreSQL refuses all of those (SQLSTATE 22021), and a refused write here
-// is worse than a lost body: the row stays 'pending' with the claim's lease
-// as its next_attempt_at, so once the lease lapses the delivery is claimed
-// and POSTed again -- every lease period, forever, since no finish ever
-// lands to count it against maxAttempts. The body is only shown in the
-// delivery history, so it is sanitised the way every other free-text column
-// from outside is (text.go).
+// is worse than a lost body: the row would stay 'pending' with the claim's
+// lease as its next_attempt_at, so once the lease lapses the delivery is
+// claimed and POSTed again with nothing to count it against maxAttempts,
+// since no finish ever landed to do the counting. The body is sanitised the
+// way every other free-text column from outside is (text.go) so this write
+// lands like any other; ClaimWebhookDelivery's own sweep is the backstop for
+// every *other* way a finish can fail to land (a worker that crashes before
+// calling this at all, say), parking a delivery over budget even when
+// nothing here ever gets the chance to.
 func (s *Store) FinishWebhookDelivery(ctx context.Context, deliveryID int64, success bool, attempts, maxAttempts int, respStatus *int, respBody string, backoff time.Duration) error {
 	respBody = sanitizeText(respBody)
 	if success {

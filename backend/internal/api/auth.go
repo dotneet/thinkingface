@@ -210,6 +210,16 @@ func (s *Server) checkPassword(ctx context.Context, addrKey, username, password 
 	if s.authGuard.retryAfter(keys...) > 0 {
 		return nil, passwordThrottled
 	}
+	// No account has a name this long (maxUsernameKeyLen), so there is
+	// nothing to look up and nothing to hide: which usernames are too long is
+	// public, and a dummy bcrypt round would only hand an attacker CPU for
+	// free. It is still a failed attempt, charged to the address -- the one
+	// bucket passwordKeys gives it -- so it is no cheaper to repeat than any
+	// other wrong guess.
+	if impossibleUsername(username) {
+		s.authGuard.penalize(keys...)
+		return nil, passwordWrong
+	}
 	if !s.authGuard.acquireBcrypt() {
 		return nil, passwordOverloaded
 	}

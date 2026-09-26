@@ -218,6 +218,18 @@ func TestMatch(t *testing.T) {
 		{"[]a].csv", "].csv", true},
 		{"[]a].csv", "a.csv", true},
 		{"[]a].csv", "b.csv", false},
+		// Regression: shell/gitignore bracket classes never match "/", the
+		// same as "*" and "?" already don't. A negated class must exclude
+		// "/" even though it was never listed among the excluded members.
+		{"a[!b]c", "a/c", false},
+		{"a[!b]c", "abc", false}, // still excludes the listed member too
+		{"a[!b]c", "adc", true},
+		// Regression: a range whose ASCII span happens to cover "/" (here
+		// "+" 0x2B .. "0" 0x30, which passes through "/" 0x2F) must not
+		// match "/" even though "/" numerically falls inside the range.
+		{"x[+-0]y", "x/y", false},
+		{"x[+-0]y", "x.y", true}, // "." (0x2E) is still in range
+		{"x[+-0]y", "x0y", true}, // the upper bound itself still matches
 	}
 	for _, tt := range tests {
 		if got := Match(tt.pattern, tt.repoPath); got != tt.want {

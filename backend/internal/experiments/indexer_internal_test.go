@@ -158,6 +158,27 @@ func TestToTime_MillisecondsEpoch(t *testing.T) {
 	}
 }
 
+func TestToTime_UnsignedSecondsEpoch(t *testing.T) {
+	// The viewer hands back an INT(64,false) column's cells as uint64 (see
+	// toInt's comment); a started_at/timestamp column of that physical type
+	// must parse the same as its int64 counterpart.
+	var epochSeconds uint64 = 1_700_000_000
+	ts, ok := toTime(epochSeconds)
+	if !ok {
+		t.Fatalf("toTime(seconds epoch uint64) ok = false")
+	}
+	want := time.Unix(int64(epochSeconds), 0)
+	if !ts.Equal(want) {
+		t.Errorf("toTime(%d) = %v, want %v", epochSeconds, ts, want)
+	}
+}
+
+func TestToTime_RejectsUint64PastInt64Range(t *testing.T) {
+	if _, ok := toTime(uint64(math.MaxInt64) + 1); ok {
+		t.Errorf("toTime(uint64 past MaxInt64) ok = true, want false")
+	}
+}
+
 func TestToTime_RejectsSmallNumbers(t *testing.T) {
 	// Below the 1e9 heuristic threshold: not treated as a timestamp at all
 	// (e.g. this could be a step count, not a unix time).

@@ -149,3 +149,34 @@ func TestForgedForwardedForCannotSprayBuckets(t *testing.T) {
 		}
 	}
 }
+
+// An IPv6 caller is one failure bucket per /64. Keyed by the full address, a
+// single host could walk its own /64 and take a fresh address bucket -- and a
+// fresh per-(username, address) bucket -- on every request. IPv4, including
+// IPv4 arriving on an IPv4-mapped IPv6 socket, keeps one bucket per address.
+func TestClientAddrKeyBucketsIPv6BySlash64(t *testing.T) {
+	s := serverWithProxy(false, 0)
+	for _, tt := range []struct{ remote, want string }{
+		{"[2001:db8:1:2::1]:443", "addr:2001:db8:1:2::/64"},
+		{"[2001:db8:1:2:ffff:ee:dd:cc]:443", "addr:2001:db8:1:2::/64"},
+		{"[fe80::1%eth0]:443", "addr:fe80::/64"},
+		{"[2001:db8:1:3::1]:443", "addr:2001:db8:1:3::/64"},
+		{"203.0.113.7:1234", "addr:203.0.113.7"},
+		{"[::ffff:203.0.113.7]:1234", "addr:203.0.113.7"},
+		// No port: used as it is, exactly as clientIP returns it.
+		{"not-an-address", "addr:not-an-address"},
+	} {
+		if got := s.clientAddrKey(requestWith(tt.remote)); got != tt.want {
+			t.Errorf("clientAddrKey(%s) = %q; want %q", tt.remote, got, tt.want)
+		}
+	}
+	// The coarsening is the key's alone: the log still names the host.
+	if got := s.clientIP(requestWith("[2001:db8:1:2::1]:443")); got != "2001:db8:1:2::1" {
+		t.Errorf("clientIP = %q; want the full address", got)
+	}
+	// Through a trusted proxy the forwarded address is bucketed the same way.
+	proxied := serverWithProxy(true, 1)
+	if got := proxied.clientAddrKey(requestWith("10.0.0.9:5555", "2001:db8:9:9::42")); got != "addr:2001:db8:9:9::/64" {
+		t.Errorf("clientAddrKey via proxy = %q; want addr:2001:db8:9:9::/64", got)
+	}
+}

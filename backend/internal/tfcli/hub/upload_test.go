@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeHub is a miniature thinkingface server: enough of tree / preupload /
@@ -38,6 +39,18 @@ type fakeHub struct {
 	// serves a request through it exactly once and then forgets it, so a
 	// re-requested action for the same oid works normally. Guarded by mu.
 	rejectOnce map[string]bool
+	// expiresIn, when non-zero, is sent as every upload action's expires_in
+	// so a test can put an action past its TTL without waiting in real
+	// time -- transferActionSafety's margin alone does the rest. Guarded by
+	// mu (set once before Upload runs, read concurrently by batch()).
+	expiresIn int
+
+	// started and release gate every PUT to /lfs/{oid} once armed (see
+	// armPUTGate): a test can then observe exactly how many transfers the
+	// worker pool has in flight at a given moment instead of depending on
+	// real transfer timing.
+	started chan string
+	release chan struct{}
 }
 
 type fakeEntry struct {
@@ -189,8 +202,9 @@ func (h *fakeHub) batch(w http.ResponseWriter, r *http.Request) {
 			}
 			item["actions"] = map[string]any{
 				"upload": map[string]any{
-					"href":   href,
-					"header": map[string]string{"Authorization": fakeProxyToken},
+					"href":       href,
+					"header":     map[string]string{"Authorization": fakeProxyToken},
+					"expires_in": h.expiresIn,
 				},
 				"verify": map[string]any{
 					"href":   h.srv.URL + "/lfs/verify",
@@ -217,6 +231,13 @@ func (h *fakeHub) putExpired(w http.ResponseWriter, r *http.Request) {
 
 func (h *fakeHub) put(w http.ResponseWriter, r *http.Request) {
 	oid := r.PathValue("oid")
+	if h.started != nil {
+		// Report the start before blocking, so a test driving armPUTGate can
+		// tell exactly which -- and how many -- transfers the pool currently
+		// has in flight.
+		h.started <- oid
+		<-h.release
+	}
 	if got := r.Header.Get("Authorization"); got != fakeProxyToken {
 		h.t.Errorf("upload Authorization = %q, want the action header", got)
 	}
@@ -348,6 +369,63 @@ func (h *fakeHub) setRejectOnce(oid string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.rejectOnce[oid] = true
+}
+
+// setExpiresIn arms expiresIn (see its field doc). Call it before starting
+// the upload; batch() reads it under h.mu on every request afterward.
+func (h *fakeHub) setExpiresIn(seconds int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.expiresIn = seconds
+}
+
+// armPUTGate makes every subsequent PUT to /lfs/{oid} report its oid and then
+// block until releaseOne is called once for it. capacity bounds how many
+// starts can be buffered unread; it must be at least the number of PUTs a
+// test expects outstanding (in flight, or reported but not yet consumed by
+// awaitStarted) at any one time -- generously, the total number of objects
+// the upload will transfer.
+func (h *fakeHub) armPUTGate(capacity int) {
+	h.started = make(chan string, capacity)
+	h.release = make(chan struct{})
+}
+
+// awaitStarted blocks until n gated PUTs (see armPUTGate) have reported
+// starting and returns their oids in arrival order.
+func (h *fakeHub) awaitStarted(n int) []string {
+	oids := make([]string, n)
+	for i := range oids {
+		oids[i] = <-h.started
+	}
+	return oids
+}
+
+// releaseOne lets exactly one currently gated PUT (see armPUTGate) proceed.
+func (h *fakeHub) releaseOne() {
+	h.release <- struct{}{}
+}
+
+// waitForBatchCount polls until hub has received n batch requests, for
+// asserting on a state change that happens on another goroutine without a
+// dedicated signal of its own. It fails the test if n is not reached within a
+// generous bound -- this is a correctness assertion, not a timing one: the
+// test arranges for n to become reachable deterministically, so a slow
+// machine should never be the reason this fires.
+func waitForBatchCount(t *testing.T, hub *fakeHub, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if got := hub.batchCount(); got >= n {
+			if got != n {
+				t.Fatalf("batch requests = %d, want exactly %d", got, n)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("batch requests = %d after 5s, want %d", hub.batchCount(), n)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // collector records the events an upload reports.
@@ -663,34 +741,95 @@ func TestUploadDeduplicatesByOID(t *testing.T) {
 	}
 }
 
-// TestUploadLFSBatchesActionsLazilyPerChunk regression-tests the fix for
-// requesting every LFS batch's actions up front: with more objects than fit
-// in one lfsRequestBatch-sized chunk, the actions for the second chunk must
-// come from a second /objects/batch call issued only once the first chunk's
-// transfers are underway, not from one giant request for everything before
-// any transfer starts. That distinction is what keeps a later chunk's signed
-// URLs from expiring while earlier chunks are still transferring (see
-// lfsRequestBatch's doc comment) -- this test only asserts the chunk count
-// and that every object still lands, since simulating a real TTL race
-// belongs to TestUploadLFSRecoversFromRejectedSignedURL below.
+// TestUploadLFSBatchesActionsLazilyPerChunk regression-tests the pipelined
+// transfer: with more objects than fit in one lfsRequestBatch-sized chunk,
+// the second chunk's /objects/batch call must be issued as soon as every one
+// of the first chunk's objects has been handed to the shared worker pool --
+// not, as a per-chunk g.Wait() barrier previously required, only once every
+// one of those transfers has actually *finished*. The old code satisfied a
+// weaker version of this test (same chunk count, same final result) despite
+// having exactly that barrier, so what distinguishes the fix is timing: this
+// drives the fake server's PUT handler through a gate to observe, at the
+// moment the second batch call lands, that fewer than a full chunk's worth of
+// transfers have completed.
+//
+// workers is deliberately smaller than lfsRequestBatch so the pool fills up
+// well before the whole chunk is handed off, making the hand-off (rather than
+// completion) boundary observable: with an unbuffered jobs channel, the
+// producer can only finish sending chunk 1's 100 objects once workers of them
+// have already completed and freed a worker to receive each of the rest, so
+// completions must reach exactly (chunk size - workers) by the time chunk 2's
+// batch fires -- never all the way to chunk size.
 func TestUploadLFSBatchesActionsLazilyPerChunk(t *testing.T) {
 	hub := newFakeHub(t)
 	c := hub.client()
 	ctx := context.Background()
 
-	const numFiles = lfsRequestBatch + 1 // spans two chunks
+	const workers = 4
+	const numFiles = lfsRequestBatch + 1 // spans two chunks: 100 + 1
 	files := make([]LocalFile, numFiles)
 	wantPaths := make([]string, numFiles)
 	for i := range numFiles {
-		path := fmt.Sprintf("data/f%03d.bin", i)
-		files[i] = localFile(path, fmt.Appendf(nil, "payload-%d", i))
-		wantPaths[i] = path
+		p := fmt.Sprintf("data/f%03d.bin", i)
+		files[i] = localFile(p, fmt.Appendf(nil, "payload-%d", i))
+		wantPaths[i] = p
+	}
+	hub.armPUTGate(numFiles)
+
+	type outcome struct {
+		res *Result
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := Upload(ctx, c, Plan{Ref: testRef(), Rev: "main", Files: files, Workers: workers}, nil)
+		done <- outcome{res, err}
+	}()
+
+	// The pool fills up with its first `workers` transfers; the producer's
+	// hand-off of chunk 1's 5th object necessarily blocks from here until one
+	// of these is released. At this point not even one transfer has
+	// completed, so the old, non-pipelined code would look identical -- what
+	// it did next is where the fix diverges.
+	hub.awaitStarted(workers)
+	if got := hub.batchCount(); got != 1 {
+		t.Fatalf("batch requests = %d, want 1 before any transfer has completed", got)
 	}
 
-	res, err := Upload(ctx, c, Plan{Ref: testRef(), Rev: "main", Files: files, Workers: 8}, nil)
-	if err != nil {
-		t.Fatalf("Upload: %v", err)
+	// Release chunk 1's transfers one at a time, each one freeing exactly one
+	// worker to pick up the next queued object -- until the producer has
+	// handed off all 100 chunk-1 objects (the initial `workers` plus these
+	// lfsRequestBatch-workers more).
+	for range lfsRequestBatch - workers {
+		hub.releaseOne()
+		hub.awaitStarted(1)
 	}
+
+	// All of chunk 1 has now been handed to the pool, so the producer moves
+	// on to request chunk 2's batch -- polled for, since which of the two
+	// concurrent HTTP calls this races against (the last hand-off's PUT vs.
+	// the next chunk's batch request) is not itself what this test cares
+	// about.
+	waitForBatchCount(t, hub, 2)
+
+	// The decisive assertion: chunk 1 has exactly `workers` objects still
+	// in flight (held by the gate, never released above), so strictly fewer
+	// than all 100 of its objects have completed. The pre-fix code could not
+	// reach a second batch call until all 100 had.
+	if puts, _ := hub.counts(); puts != lfsRequestBatch-workers {
+		t.Errorf("puts = %d at the second batch request, want exactly %d (chunk 1 must not need to finish first)", puts, lfsRequestBatch-workers)
+	}
+
+	// Let everything else through: the `workers` objects still held from
+	// chunk 1, plus chunk 2's single object once a worker frees up for it.
+	for range workers + 1 {
+		hub.releaseOne()
+	}
+	out := <-done
+	if out.err != nil {
+		t.Fatalf("Upload: %v", out.err)
+	}
+
 	wantBatches := (numFiles + lfsRequestBatch - 1) / lfsRequestBatch
 	if got := hub.batchCount(); got != wantBatches {
 		t.Errorf("batch requests = %d, want %d (one per %d-object chunk)", got, wantBatches, lfsRequestBatch)
@@ -699,8 +838,43 @@ func TestUploadLFSBatchesActionsLazilyPerChunk(t *testing.T) {
 		t.Errorf("puts = %d, want %d", puts, numFiles)
 	}
 	sort.Strings(wantPaths)
-	if !equalStrings(res.LFSUploaded, wantPaths) {
-		t.Errorf("LFSUploaded has %d entries, want %d", len(res.LFSUploaded), len(wantPaths))
+	if !equalStrings(out.res.LFSUploaded, wantPaths) {
+		t.Errorf("LFSUploaded has %d entries, want %d", len(out.res.LFSUploaded), len(wantPaths))
+	}
+}
+
+// TestUploadLFSProactivelyRefreshesExpiringAction regression-tests
+// actionExpired's proactive path: an action whose ExpiresIn (padded by
+// transferActionSafety's 5s margin) has already elapsed by the time
+// transferOne is about to use it must be re-requested before the PUT is even
+// attempted -- not only reactively, after a 403
+// (TestUploadLFSRecoversFromRejectedSignedURL covers that path). ExpiresIn 1s
+// is comfortably inside the 5s safety margin regardless of real elapsed time,
+// so actionExpired's very first check already sees the deadline as passed:
+// no clock seam is needed to observe this deterministically.
+func TestUploadLFSProactivelyRefreshesExpiringAction(t *testing.T) {
+	hub := newFakeHub(t)
+	c := hub.client()
+	ctx := context.Background()
+	hub.setExpiresIn(1)
+
+	content := bytes.Repeat([]byte("w"), 2048)
+	files := []LocalFile{localFile("model.bin", content)}
+	res, err := Upload(ctx, c, Plan{Ref: testRef(), Rev: "main", Files: files}, nil)
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if !equalStrings(res.LFSUploaded, []string{"model.bin"}) {
+		t.Errorf("LFSUploaded = %v", res.LFSUploaded)
+	}
+	// rejectOnce is never armed in this test, so the fake server never
+	// answers a PUT with 403: a second batch call here can only be
+	// actionExpired's proactive refresh, not transferOne's reactive retry.
+	if hub.batchCount() != 2 {
+		t.Errorf("batch requests = %d, want 2 (initial + one proactive refresh)", hub.batchCount())
+	}
+	if puts, _ := hub.counts(); puts != 1 {
+		t.Errorf("puts = %d; the object must travel exactly once", puts)
 	}
 }
 

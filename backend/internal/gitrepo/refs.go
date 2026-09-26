@@ -80,6 +80,27 @@ func ValidateRefName(short string) error {
 	return nil
 }
 
+// ValidateNewRefName is ValidateRefName for a name about to be created, and
+// additionally refuses one that is a full 40-hex object id in either case.
+//
+// git allows such a name, but on this server it can only ever be a trap:
+// Resolve puts a full commit id ahead of every ref (a pin to a commit must not
+// be redirectable by whoever can create a branch), so a branch or tag named
+// after a commit could never be read by that name, and one named after a
+// commit that does not exist yet would be silently shadowed the moment it
+// did. It is a separate function rather than a rule in ValidateRefName so
+// that deleting such a ref -- git push can still create one -- stays
+// possible through the API.
+func ValidateNewRefName(short string) error {
+	if err := ValidateRefName(short); err != nil {
+		return err
+	}
+	if len(short) == 2*len(plumbing.ZeroHash) && isHex(short) {
+		return fmt.Errorf("%w: it is 40 hex digits, which reads as a commit id", ErrInvalidRefName)
+	}
+	return nil
+}
+
 // refExists reports whether the exact ref is present. Callers hold r.mu.
 func (r *Repo) refExists(name plumbing.ReferenceName) (plumbing.Hash, bool, error) {
 	ref, err := r.repo.Storer.Reference(name)

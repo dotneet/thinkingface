@@ -6,6 +6,7 @@
 package api
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/dotneet/thinkingface/backend/internal/apitypes"
@@ -37,6 +38,80 @@ func TestUIRefs_AnnotatedTagTargetIsTheCommit(t *testing.T) {
 	}
 	if body.Tags[0].TargetOID != head {
 		t.Fatalf("v1 target_oid = %s, want the tagged commit %s", body.Tags[0].TargetOID, head)
+	}
+}
+
+// git allows tagging a tree (or a blob), and a push can carry such a tag. It
+// does not peel to a commit, so both listings fall back to the raw object the
+// ref names -- dropping Resolve's error used to list it as forty zeros, which
+// names no object at all.
+func TestRefs_TagOfATreeListsTheTree(t *testing.T) {
+	f := newRefsFixture(t)
+	r := f.repo("alice", "foo", "dataset")
+	tok := f.token(f.alice, "write")
+	gitRepo, err := f.git.Open(r.StoragePath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	head, err := gitRepo.Resolve("main")
+	if err != nil {
+		t.Fatalf("resolve main: %v", err)
+	}
+	commit, err := gitRepo.CommitObject(head)
+	if err != nil {
+		t.Fatalf("commit object: %v", err)
+	}
+	tree := commit.TreeHash.String()
+	if err := gitRepo.CreateRef(gitrepo.TagRef("tree-tag"), commit.TreeHash); err != nil {
+		t.Fatalf("create tag of a tree: %v", err)
+	}
+
+	if _, tags := f.refs("dataset", "alice", "foo"); tags["tree-tag"] != tree {
+		t.Errorf("HF refs tree-tag targetCommit = %q, want the tree %s", tags["tree-tag"], tree)
+	}
+
+	resp := f.do("GET", "/api/v1/repos/dataset/alice/foo/refs", tok, nil)
+	if resp.status() != 200 {
+		t.Fatalf("status = %d, body = %s", resp.status(), resp.rec.Body.String())
+	}
+	var body apitypes.RefsResponseUI
+	resp.json(t, &body)
+	if len(body.Tags) != 1 || body.Tags[0].TargetOID != tree {
+		t.Errorf("UI refs tags = %+v, want tree-tag -> %s", body.Tags, tree)
+	}
+}
+
+// A branch or tag named like a full commit id could never be read by that
+// name (Resolve puts a full id ahead of every ref), so creating one is a 400
+// on every API path that creates a ref. Deleting one -- git push can still
+// make it -- stays possible.
+func TestRefs_CreatingAFullHexNameIsRefused(t *testing.T) {
+	f := newRefsFixture(t)
+	r := f.repo("alice", "foo", "dataset")
+	tok := f.token(f.alice, "write")
+	branches, _ := f.refs("dataset", "alice", "foo")
+	hexName := strings.ToUpper(branches["main"])
+
+	for what, resp := range map[string]response{
+		"branch": f.do("POST", "/api/datasets/alice/foo/branch/"+hexName, tok, nil),
+		"tag":    f.do("POST", "/api/datasets/alice/foo/tag/main", tok, map[string]any{"tag": hexName}),
+	} {
+		if resp.status() != 400 || !strings.Contains(resp.rec.Body.String(), "40 hex digits") {
+			t.Errorf("create %s %s = %d %s, want 400 naming the 40-hex rule",
+				what, hexName, resp.status(), resp.rec.Body.String())
+		}
+	}
+
+	gitRepo, err := f.git.Open(r.StoragePath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	head, _ := gitRepo.Resolve("main")
+	if err := gitRepo.CreateRef(gitrepo.BranchRef(hexName), head); err != nil {
+		t.Fatalf("seed a hex-named branch the way a push would: %v", err)
+	}
+	if got := f.do("DELETE", "/api/datasets/alice/foo/branch/"+hexName, tok, nil).status(); got != 200 {
+		t.Errorf("delete branch %s status = %d, want 200", hexName, got)
 	}
 }
 

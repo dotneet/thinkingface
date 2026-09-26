@@ -24,12 +24,13 @@ Typical usage::
         repo_type="dataset",
     )
 
-Call :func:`login` *before* importing anything from ``huggingface_hub``.
-``huggingface_hub`` resolves its default endpoint once, the first time its
-``constants`` / ``hf_api`` submodules are imported, so importing it first and
-calling :func:`login` afterwards can leave it talking to huggingface.co with
-your thinkingface token. See :func:`login` for what happens (and how it is
-guarded against) when that order is not followed.
+Call :func:`login` *before* importing anything from ``huggingface_hub`` or
+``datasets``. Both resolve their default endpoint once, the first time their
+own internals are imported (``huggingface_hub``'s ``constants`` / ``hf_api``
+submodules; ``datasets``'s ``config`` submodule), so importing either first
+and calling :func:`login` afterwards can leave it talking to huggingface.co
+with your thinkingface token. See :func:`login` for what happens (and how it
+is guarded against) when that order is not followed.
 """
 
 from __future__ import annotations
@@ -116,6 +117,79 @@ def _retarget_imported_hf_hub(endpoint: str) -> bool:
     return True
 
 
+def _retarget_imported_datasets(endpoint: str) -> bool:
+    """Best-effort: if ``datasets`` internals were already built against the
+    old endpoint, retarget them at ``endpoint``.
+
+    ``datasets`` freezes its own copy of the endpoint independently of
+    ``huggingface_hub``: ``datasets/config.py`` reads ``HF_ENDPOINT`` once, at
+    import time, into ``datasets.config.HF_ENDPOINT``, and derives
+    ``HUB_DATASETS_URL`` from it in that same statement
+    (``HUB_DATASETS_URL = HF_ENDPOINT + "/datasets/{repo_id}/resolve/{revision}/{path}"``).
+    Every call site across the package -- ``load_dataset`` (``load.py``),
+    ``hub.py``, ``data_files.py``, ``arrow_dataset.py``, ``dataset_dict.py``,
+    the ``features/*`` modules, ``utils/file_utils.py``, ... -- builds its own
+    ``HfApi(endpoint=config.HF_ENDPOINT, token=...)`` /
+    ``HfFileSystem(endpoint=config.HF_ENDPOINT, ...)`` per call rather than
+    caching one, so retargeting ``config.HF_ENDPOINT`` (and the derived
+    ``HUB_DATASETS_URL``) covers them without needing a singleton fixup like
+    ``huggingface_hub.hf_api.api``. Left unpatched, ``import datasets`` before
+    ``thinkingface.login(url, token=...)`` would make a later
+    ``load_dataset("me/ds")`` send the thinkingface token to huggingface.co.
+    (``HUB_DATASETS_HFFS_URL`` is a fixed ``hf://datasets/...`` URI template
+    that does not depend on ``HF_ENDPOINT``, so there is nothing to patch
+    there.)
+
+    Also retargets any other loaded ``datasets.*`` submodule holding its own
+    string ``HF_ENDPOINT`` copy (``from ... import HF_ENDPOINT`` style),
+    mirroring ``_retarget_imported_hf_hub``'s handling of
+    ``huggingface_hub.utils._git_credential`` -- none exist in the currently
+    installed version, but nothing here should rely on that staying true.
+
+    Returns:
+        True if ``datasets`` was never imported, or if it was and every piece
+        found now agrees on ``endpoint``; False if it could not be verified,
+        in which case the caller must not do anything that sends the
+        thinkingface token to whatever endpoint ``datasets`` still has
+        cached.
+    """
+    config = sys.modules.get("datasets.config")
+    copies = [
+        mod
+        for name, mod in list(sys.modules.items())
+        if (name == "datasets" or name.startswith("datasets."))
+        and name != "datasets.config"
+        and mod is not None
+        and isinstance(getattr(mod, "HF_ENDPOINT", None), str)
+    ]
+    if config is None and not copies:
+        return True  # nothing built yet against the old endpoint
+
+    try:
+        for mod in copies:
+            mod.HF_ENDPOINT = endpoint
+        if config is not None:
+            config.HF_ENDPOINT = endpoint
+            if hasattr(config, "HUB_DATASETS_URL"):
+                # Rebuilt from HF_ENDPOINT the same way datasets/config.py
+                # itself derives it at import time.
+                config.HUB_DATASETS_URL = endpoint + "/datasets/{repo_id}/resolve/{revision}/{path}"
+    except Exception:  # unknown internal shape on this datasets version
+        return False
+
+    if config is not None and getattr(config, "HF_ENDPOINT", None) != endpoint:
+        return False
+    if (
+        config is not None
+        and hasattr(config, "HUB_DATASETS_URL")
+        and not str(getattr(config, "HUB_DATASETS_URL", "")).startswith(endpoint)
+    ):
+        return False
+    if any(getattr(mod, "HF_ENDPOINT", None) != endpoint for mod in copies):
+        return False
+    return True
+
+
 def login(
     endpoint: str,
     token: str | None = None,
@@ -129,15 +203,18 @@ def login(
     ``huggingface_hub``, ``datasets`` and the ``hf`` CLI all transparently
     talk to ``endpoint`` instead of huggingface.co.
 
-    Call this **before** importing anything from ``huggingface_hub``.
-    ``huggingface_hub`` resolves its default endpoint once, at import time
-    (into ``huggingface_hub.constants.ENDPOINT`` and the module-level
-    ``HfApi`` singleton that backs its top-level ``login`` / ``whoami`` /
-    ``create_repo`` / ``upload_file`` / ... functions), and setting
+    Call this **before** importing anything from ``huggingface_hub`` or
+    ``datasets``. Both resolve their default endpoint once, at import time
+    (``huggingface_hub`` into ``huggingface_hub.constants.ENDPOINT`` and the
+    module-level ``HfApi`` singleton that backs its top-level ``login`` /
+    ``whoami`` / ``create_repo`` / ``upload_file`` / ... functions;
+    ``datasets`` into ``datasets.config.HF_ENDPOINT`` and the
+    ``HUB_DATASETS_URL`` template derived from it, read by ``load_dataset``
+    and every ``push_to_hub`` / ``save_to_disk`` counterpart), and setting
     ``HF_ENDPOINT`` afterwards does not change anything already built. If
-    ``huggingface_hub`` turns out to already be imported, this makes a
-    best-effort attempt to retarget those already-built internals at
-    ``endpoint``; if that cannot be verified, it skips calling
+    either turns out to already be imported, this makes a best-effort
+    attempt to retarget those already-built internals at ``endpoint``; if
+    that cannot be verified for either one, it skips calling
     ``huggingface_hub.login()`` rather than risk sending ``token`` to
     whatever endpoint (e.g. huggingface.co) is still actually in effect, and
     raises so the mistake is caught immediately rather than silently leaking
@@ -154,10 +231,13 @@ def login(
         add_to_git_credential: Forwarded to ``huggingface_hub.login()``.
 
     Raises:
-        RuntimeError: ``token`` was given, but ``huggingface_hub`` was
-            already imported and its endpoint could not be safely
-            retargeted, so calling ``huggingface_hub.login()`` would risk
-            sending ``token`` to the wrong server.
+        RuntimeError: ``token`` was given, but ``huggingface_hub`` and/or
+            ``datasets`` were already imported and their endpoint could not
+            be safely retargeted, so calling ``huggingface_hub.login()``
+            would risk sending ``token`` to the wrong server. ``HF_TOKEN`` is
+            deliberately left unset in this case (only ``HF_ENDPOINT`` is
+            set), so no later call can pick up the token and send it to the
+            wrong endpoint.
     """
     endpoint = endpoint.rstrip("/")
     os.environ["HF_ENDPOINT"] = endpoint
@@ -171,23 +251,34 @@ def login(
     # has cached (possibly a thinkingface one from an earlier login) to the
     # old endpoint. Only the raise depends on the token, since that is the
     # case where this call itself would be the one to leak it.
-    endpoint_effective = _retarget_imported_hf_hub(endpoint)
+    endpoint_effective = _retarget_imported_hf_hub(endpoint) and _retarget_imported_datasets(
+        endpoint
+    )
     if token:
-        os.environ["HF_TOKEN"] = token
         if not endpoint_effective:
+            # Deliberately raised *before* os.environ["HF_TOKEN"] is set: this
+            # process may keep running after the exception (a notebook kernel
+            # catching it and retrying some other call), and get_token() reads
+            # HF_TOKEN on every call. Setting it here would leak the token to
+            # whatever endpoint (huggingface.co, by default) huggingface_hub
+            # or datasets are still actually pointed at, on the very first
+            # later call that doesn't go through this function.
             raise RuntimeError(
-                "thinkingface.login: huggingface_hub was already imported before "
-                "this call, and its endpoint could not be safely retargeted. "
-                "Calling huggingface_hub.login() now would risk sending your "
-                "thinkingface token to the wrong server (huggingface.co by "
-                "default), so it was skipped. Call thinkingface.login(...) "
-                "before importing anything from huggingface_hub (see this "
-                "module's docstring), or set HF_ENDPOINT in the environment "
-                "before your process starts. HF_ENDPOINT/HF_TOKEN are still "
-                "set for this process, but any code that already holds a "
-                "huggingface_hub object built before this call may still be "
-                "pointed at the old endpoint."
+                "thinkingface.login: huggingface_hub and/or datasets were "
+                "already imported before this call, and their endpoint could "
+                "not be safely retargeted. Calling huggingface_hub.login() "
+                "now would risk sending your thinkingface token to the wrong "
+                "server (huggingface.co by default), so it was skipped. Call "
+                "thinkingface.login(...) before importing anything from "
+                "huggingface_hub or datasets (see this module's docstring), "
+                "or set HF_ENDPOINT in the environment before your process "
+                "starts. HF_ENDPOINT is still set for this process, but "
+                "HF_TOKEN was deliberately left unset -- setting it would let "
+                "a later call send the thinkingface token to whatever "
+                "endpoint the already-built huggingface_hub/datasets objects "
+                "are still pointed at."
             )
+        os.environ["HF_TOKEN"] = token
         try:
             from huggingface_hub import login as _hf_login
 

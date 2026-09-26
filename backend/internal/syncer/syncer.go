@@ -198,7 +198,11 @@ func (s *Syncer) sweepLoop(ctx context.Context) {
 		if n > 0 {
 			// Worth a log line: every row here is a job whose worker
 			// vanished, which is the visible symptom of a crash elsewhere.
-			slog.Warn("requeued expired sync jobs", "count", n)
+			// The count is not all requeues: RequeueExpiredSyncJobs parks a
+			// job that has spent its retry budget as 'failed' instead, so
+			// some of these rows went to ListFailedSyncJobs, not back to
+			// 'pending'.
+			slog.Warn("recovered expired sync jobs (requeued, or parked as failed if their retry budget was spent)", "count", n)
 			s.nudge()
 		}
 	}
@@ -709,7 +713,21 @@ func (s *Syncer) indexParquet(ctx context.Context, repo *store.Repo, gitRepo *gi
 		// and what ListParquetFiles below returns (store.SanitizeIndexPath).
 		// Comparing a raw git path against a folded stored one would call
 		// every non-UTF-8 name stale and delete the row just written.
-		seen[store.SanitizeIndexPath(f.Path)] = true
+		path := store.SanitizeIndexPath(f.Path)
+		if seen[path] {
+			// ReplaceRepoFiles (files.go) keeps only the first of several raw
+			// paths that fold to this same sanitized name and skips the
+			// rest, so that is the file repo_files says lives here. Indexing
+			// every one of them here too used to let whichever raw path came
+			// last win the ON CONFLICT upsert in UpsertParquetFile -- which
+			// sanitizes the very same way -- so parquet_files could describe
+			// a completely different file's schema and row count than the
+			// one repo_files, and the tree the Web UI shows, actually list
+			// at this path. Skipping the rest here keeps the two tables
+			// talking about the same file.
+			continue
+		}
+		seen[path] = true
 
 		var key string
 		if f.LFSOID != nil {

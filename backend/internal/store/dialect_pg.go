@@ -138,6 +138,8 @@ func (pgDialect) searchPredicate(bind func(any) string, text string) string {
 
 func (pgDialect) forUpdate(suffix string) string { return ` FOR UPDATE` + suffix }
 
+func (pgDialect) forShare() string { return ` FOR SHARE` }
+
 func (pgDialect) advisoryXactLock(ctx context.Context, ex executor, name string, id int64) error {
 	// hashtextextended keeps the lock in the bigint key space without
 	// colliding with a bare id used elsewhere as an advisory key.

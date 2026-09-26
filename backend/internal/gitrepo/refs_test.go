@@ -77,6 +77,28 @@ func TestValidateRefName_RejectsPathEscape(t *testing.T) {
 	}
 }
 
+// A name Resolve would read as a commit id is refused for creation only:
+// deleting one that a git push made must stay possible.
+func TestValidateNewRefName_RefusesFullHexIDs(t *testing.T) {
+	hexID := strings.Repeat("ab", 20)
+	for _, name := range []string{hexID, strings.ToUpper(hexID)} {
+		if err := ValidateNewRefName(name); !errors.Is(err, ErrInvalidRefName) {
+			t.Errorf("ValidateNewRefName(%q) = %v, want ErrInvalidRefName", name, err)
+		}
+		if err := ValidateRefName(name); err != nil {
+			t.Errorf("ValidateRefName(%q) = %v, want nil (deletion must still reach it)", name, err)
+		}
+	}
+	for _, name := range []string{hexID[:39], hexID + "0", "release/" + hexID, "main"} {
+		if err := ValidateNewRefName(name); err != nil {
+			t.Errorf("ValidateNewRefName(%q) = %v, want nil", name, err)
+		}
+	}
+	if err := ValidateNewRefName("a..b"); !errors.Is(err, ErrInvalidRefName) {
+		t.Errorf("ValidateNewRefName must keep every ValidateRefName rule, got %v", err)
+	}
+}
+
 // ------------------------------------------------------- Create / Delete
 
 func TestCreateRef_PointsAtTargetAndRefusesDuplicates(t *testing.T) {

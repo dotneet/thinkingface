@@ -36,11 +36,14 @@ var errWALConflict = errors.New("api: branch moved concurrently, retry")
 // concurrent change that validation exists to catch. Those callers get
 // errWALConflict on the first stale and surface it as 409.
 //
-// Every failure path after Commit rolls the local ref back to oldHash. Commit
-// advances the on-disk ref before the CAS runs, and a ref the WAL never
-// accepted must not survive: it would be served to readers, and — because the
-// index generation did not change — no materialisation would ever repair it,
-// leaving the branch permanently rejecting commits as stale.
+// Every failure path after Commit rolls the local ref back. Commit advances
+// the on-disk ref before the CAS runs, and a ref the WAL never accepted must
+// not survive: it would be served to readers, and — because the index
+// generation did not change — no materialisation would ever repair it,
+// leaving the branch permanently rejecting commits as stale. The rollback
+// target is the WAL's recorded value for the branch rather than oldHash (see
+// gitrepo.Repo.ResetBranch): with two local commits chained on the branch,
+// oldHash can itself be a commit the WAL never accepted.
 //
 // It (re-)opens the repository itself: in authoritative mode EnsureLocal may
 // rebuild the directory, which invalidates any *gitrepo.Repo opened earlier.
