@@ -238,3 +238,34 @@ func TestIntegrationExpProjectGoals(t *testing.T) {
 		}
 	})
 }
+
+// The repository page's overview reads only what it summarises.
+func TestIntegrationListExpRunOverviews(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		exp := f.repo(t, "alice", "exp", "dataset", nil)
+		pid, err := s.UpsertExpProject(f.ctx, exp.ID, "p")
+		if err != nil {
+			t.Fatalf("UpsertExpProject: %v", err)
+		}
+		if _, err := s.UpsertExpRunWith(f.ctx, pid, ExpRunUpsert{
+			Name: "r", Status: "running", Config: map[string]any{"lr": 0.1},
+			SummaryMin: map[string]any{"loss": 0.4}, SummaryMax: map[string]any{"loss": 2.0},
+			HeartbeatSecs: 30, Touch: true,
+		}); err != nil {
+			t.Fatalf("UpsertExpRunWith: %v", err)
+		}
+		runs, err := s.ListExpRunOverviews(f.ctx, pid)
+		if err != nil || len(runs) != 1 {
+			t.Fatalf("ListExpRunOverviews = %v, %v; want one run", runs, err)
+		}
+		r := runs[0]
+		if r.Name != "r" || r.Status != "running" || r.HeartbeatSecs != 30 || r.UpdatedAt.IsZero() ||
+			r.SummaryMin["loss"] != 0.4 || r.SummaryMax["loss"] != 2.0 {
+			t.Fatalf("overview = %+v", r)
+		}
+		if r.Config != nil {
+			t.Fatalf("config = %v; the overview must not read it", r.Config)
+		}
+	})
+}

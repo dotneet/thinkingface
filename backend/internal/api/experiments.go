@@ -85,11 +85,11 @@ func (s *Server) handleExperimentRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := toExpProjects(projects)
-	// A repository holds a handful of projects, so one run listing each is
-	// cheap, and it is what lets the page answer "is anything running, and
-	// how good is the best run" without opening every project.
+	// One narrow run listing per project (no config, summary or metric keys:
+	// ListExpRunOverviews) is what lets the page answer "is anything running,
+	// and how good is the best run" without opening every project.
 	for i := range out {
-		runs, err := s.store.ListExpRuns(r.Context(), projects[i].ID)
+		runs, err := s.store.ListExpRunOverviews(r.Context(), projects[i].ID)
 		if err != nil {
 			internalError(w, "list experiment runs", err)
 			return

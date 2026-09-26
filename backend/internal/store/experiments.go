@@ -933,3 +933,34 @@ func (s *Store) ListBlockedFlushProjects(ctx context.Context) ([]BlockedFlushPro
 	}
 	return out, rows.Err()
 }
+
+// ListExpRunOverviews reads just what a project overview needs from each run
+// -- name, stored status, liveness, archived, and the min/max summaries --
+// and none of the config, summary or metric-key columns ListExpRuns decodes.
+// The repository page summarises every project on each load, and a run's
+// config is the widest column it has.
+//
+// The returned ExpRun values have only those fields set.
+func (s *Store) ListExpRunOverviews(ctx context.Context, projectID int64) ([]ExpRun, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT name, status, updated_at, heartbeat_secs, archived, summary_min, summary_max
+		 FROM exp_runs WHERE project_id = $1 ORDER BY started_at NULLS LAST, name`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ExpRun{}
+	for rows.Next() {
+		var r ExpRun
+		var minRaw, maxRaw []byte
+		if err := rows.Scan(&r.Name, &r.Status, &r.UpdatedAt, &r.HeartbeatSecs, &r.Archived, &minRaw, &maxRaw); err != nil {
+			return nil, err
+		}
+		r.SummaryMin = map[string]any{}
+		r.SummaryMax = map[string]any{}
+		_ = json.Unmarshal(minRaw, &r.SummaryMin)
+		_ = json.Unmarshal(maxRaw, &r.SummaryMax)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

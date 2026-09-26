@@ -145,3 +145,37 @@ func sortedInt64s(v []int64) []int64 {
 	slices.Sort(out)
 	return out
 }
+
+// LookupToken reports whether a restriction exists in the statement that finds
+// the token, which is what lets authentication skip the list query for the
+// common unrestricted token without ever mistaking a restricted one for it.
+func TestIntegrationLookupTokenReportsRestriction(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		f := newFixture(t, s)
+		exp := f.repo(t, "alice", "exp", "dataset", nil)
+		if _, err := s.CreateToken(f.ctx, f.alice.ID, "plain", "write", "hash-plain-2", nil); err != nil {
+			t.Fatalf("create plain token: %v", err)
+		}
+		if _, err := s.CreateTokenWithRepos(f.ctx, f.alice.ID, "agent", "write", "hash-agent-2", nil, []TokenRepo{
+			{RepoID: exp.ID, Kind: exp.Kind, Namespace: exp.Namespace, Name: exp.Name},
+		}); err != nil {
+			t.Fatalf("create restricted token: %v", err)
+		}
+		_, plain, err := s.LookupToken(f.ctx, "hash-plain-2")
+		if err != nil || plain.Restricted {
+			t.Fatalf("plain token: restricted=%v err=%v; want unrestricted", plain != nil && plain.Restricted, err)
+		}
+		_, agent, err := s.LookupToken(f.ctx, "hash-agent-2")
+		if err != nil || !agent.Restricted {
+			t.Fatalf("agent token: restricted=%v err=%v; want restricted", agent != nil && agent.Restricted, err)
+		}
+		// Still restricted once the repository it names is gone: the row
+		// stays (repo_id set to NULL), so the flag cannot fall back to false.
+		if err := s.DeleteRepo(f.ctx, exp.ID); err != nil {
+			t.Fatalf("DeleteRepo: %v", err)
+		}
+		if _, agent, err = s.LookupToken(f.ctx, "hash-agent-2"); err != nil || !agent.Restricted {
+			t.Fatalf("after deleting the repo: restricted=%v err=%v; want still restricted", agent != nil && agent.Restricted, err)
+		}
+	})
+}

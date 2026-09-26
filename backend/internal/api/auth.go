@@ -284,14 +284,19 @@ func (s *Server) userForToken(ctx context.Context, token string) (*store.User, s
 	if err != nil {
 		return nil, "", nil
 	}
-	restriction, err := s.store.LookupTokenRestriction(ctx, tok.ID)
-	if err != nil {
-		slog.Error("load access token restriction; treating the request as anonymous",
-			"token_id", tok.ID, "username", user.Username, "error", err)
-		return nil, "", nil
-	}
-	ident := &tokenIdentity{id: tok.ID, name: tok.Name, restricted: restriction.Restricted}
-	if restriction.Restricted {
+	ident := &tokenIdentity{id: tok.ID, name: tok.Name}
+	// LookupToken already said whether a restriction exists, in the same
+	// statement that found the token -- so an unrestricted token (the common
+	// case, on every git / LFS / ingest request) costs no second query, and
+	// the "restricted" answer still cannot be lost to a failed separate read.
+	if tok.Restricted {
+		restriction, err := s.store.LookupTokenRestriction(ctx, tok.ID)
+		if err != nil {
+			slog.Error("load access token restriction; treating the request as anonymous",
+				"token_id", tok.ID, "username", user.Username, "error", err)
+			return nil, "", nil
+		}
+		ident.restricted = true
 		ident.repoIDs = make(map[int64]struct{}, len(restriction.RepoIDs))
 		for _, id := range restriction.RepoIDs {
 			ident.repoIDs[id] = struct{}{}

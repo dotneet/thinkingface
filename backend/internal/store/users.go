@@ -109,6 +109,13 @@ type AccessToken struct {
 	// LookupToken leaves it empty -- authentication reads the restriction
 	// through LookupTokenRestriction instead.
 	Repos []TokenRepo `json:"-"`
+	// Restricted reports that the token carries a repository restriction.
+	// LookupToken fills it in the same statement that finds the token, so the
+	// common unrestricted token costs no second query on the authentication
+	// path; only a restricted one has its list read (LookupTokenRestriction).
+	// A restriction is written in the transaction that mints the token and
+	// never added later, so this cannot go stale between the two reads.
+	Restricted bool `json:"-"`
 }
 
 // CreateUser inserts the user and their personal namespace in one transaction,
@@ -553,13 +560,14 @@ func (s *Store) LookupToken(ctx context.Context, tokenHash string) (*User, *Acce
 	t := &AccessToken{}
 	row := s.db.QueryRow(ctx,
 		`SELECT t.id, t.user_id, t.name, t.scope, t.last_used_at, t.created_at,
+		        EXISTS (SELECT 1 FROM access_token_repos atr WHERE atr.token_id = t.id),
 		        `+userColumnsOn("u")+`
 		 FROM access_tokens t JOIN users u ON u.id = t.user_id
 		 WHERE t.token_hash = $1 AND (t.expires_at IS NULL OR t.expires_at > now())
 		   AND u.disabled_at IS NULL AND u.approval_pending_at IS NULL`,
 		tokenHash)
 	err := scanUserAfter(row, u,
-		&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.CreatedAt)
+		&t.ID, &t.UserID, &t.Name, &t.Scope, &t.LastUsedAt, &t.CreatedAt, &t.Restricted)
 	if err != nil {
 		return nil, nil, norm(err)
 	}

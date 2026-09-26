@@ -5,7 +5,7 @@
 // connection peer names the web tier and never the browser. The password rate
 // limiter keys on that address, and with one address for everybody a single
 // visitor failing to sign in over and over made every browser sign-in answer
-// 429. The web tier's custom server (frontend/server.mjs) knows the socket peer
+// 429. The web tier's custom server (frontend/server.ts) knows the socket peer
 // and sends it in X-TF-Client-Addr; this file decides whether to believe it.
 //
 // It is believed only from a caller that proves it *is* the web tier -- by
