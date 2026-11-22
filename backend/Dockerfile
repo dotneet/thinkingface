@@ -55,7 +55,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
 # (https://github.com/benbjohnson/litestream/releases/tag/v0.5.16); bump
 # LITESTREAM_VERSION and both LITESTREAM_SHA256_* args together after
 # checking the new release's checksums.txt.
-FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS litestream
+FROM alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab AS litestream
 
 ARG LITESTREAM_VERSION=0.5.16
 ARG LITESTREAM_SHA256_AMD64=9e29112380a942e4a62ee07773684396cb8b308dc4d67e130bef41f75e937f0a
@@ -75,7 +75,7 @@ RUN apk add --no-cache curl && \
     rm /tmp/litestream.tar.gz
 
 # ---- runtime -------------------------------------------------------------
-FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS runtime
+FROM alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab AS runtime
 
 # git + git-lfs are required at runtime: the server execs `git` for the
 # smart HTTP endpoints (upload-pack / receive-pack) and `git-lfs` filters
